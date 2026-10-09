@@ -45,7 +45,7 @@ def restore() -> tuple[Path, int]:
     count = 0
     for name, value in variables.items():
         if isinstance(name, str) and isinstance(value, str) and not name.startswith("RAILWAY_"):
-            if name not in os.environ:
+            if not os.environ.get(name):
                 os.environ[name] = value
                 count += 1
     sys.path.insert(0, str(folder))
