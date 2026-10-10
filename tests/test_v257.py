@@ -58,6 +58,22 @@ class FeatureTests(unittest.TestCase):
                 self.assertEqual((await c.get('/api/v257/dashboard?inn=123')).status_code,400)
                 self.assertEqual((await c.post('/api/v257/manual/32610000003')).status_code,409)
         asyncio.run(task())
+    def test_new_manual_request_appears_without_restart(self):
+        # A manual check submitted through the older homepage is NOT in the
+        # V257 registry yet. It must nevertheless be visible immediately.
+        with sqlite3.connect(self.db_file) as c:
+            c.execute("INSERT INTO requests_v233 VALUES('32610000001','manual','pending','2026-10-11')")
+        async def task():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url="http://test") as cl:
+                r=await cl.get('/api/v257/manual')
+                self.assertEqual(r.status_code,200,r.text)
+                self.assertEqual(r.json()['total'],2)
+                self.assertIn('32610000001',[p['reg_number'] for p in r.json()['items']])
+                a=await cl.get('/api/v257/dashboard')
+                self.assertEqual(a.status_code,200,a.text)
+                self.assertEqual(a.json()['stats']['purchases'],0)
+        asyncio.run(task())
+
     def test_html_upgrade_is_safe_and_idempotent(self):
         html='<html><body><script>'+features.OLD_FILTER+';'+features.OLD_DASHBOARD+'</script></body></html>'
         updated=features._html_patch(html)
