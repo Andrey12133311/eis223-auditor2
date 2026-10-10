@@ -37,6 +37,13 @@ NEW_FILTER = "$('forms').querySelectorAll('input:checked').forEach(x=>p.append('
 OLD_DASHBOARD = "api('/api/v204/dashboard?'+filters())"
 NEW_DASHBOARD = "api('/api/v257/dashboard?'+filters())"
 
+MANUAL_SOURCE_SQL = """SELECT reg,MAX(requested_at) requested_at FROM (
+ SELECT reg,requested_at FROM v257_manual_registry
+ UNION ALL SELECT reg,COALESCE(requested_at,CURRENT_TIMESTAMP) FROM requests_v233 WHERE lane='manual'
+ UNION ALL SELECT reg,COALESCE(requested_at,CURRENT_TIMESTAMP) FROM document_priorities_v233 WHERE lane='manual'
+ UNION ALL SELECT reg_number AS reg,COALESCE(last_seen,CURRENT_TIMESTAMP) FROM purchases WHERE source='manual'
+) GROUP BY reg"""
+
 def _html_patch(body: str) -> str:
     if OLD_DASHBOARD in body: body=body.replace(OLD_DASHBOARD,NEW_DASHBOARD,1)
     if OLD_FILTER in body: body=body.replace(OLD_FILTER,NEW_FILTER,1)
@@ -80,7 +87,7 @@ def install(ns:dict)->None:
         verified=ns['_verified_set235']()
         if not verified:return {'stats':{'purchases':0,'violations':0,'risks':0,'documents_found':0,'documents_checked':0},'purchases':[],'offset':0,'limit':100}
         conditions=['p.reg_number IN ('+','.join('?' for _ in verified)+')',
-                    'p.reg_number NOT IN (SELECT reg FROM v257_manual_registry)']
+                    'p.reg_number NOT IN (SELECT reg FROM ('+MANUAL_SOURCE_SQL+'))']
         args=list(verified)
         forms=params.getlist('org_form')
         if forms:
@@ -121,10 +128,10 @@ def install(ns:dict)->None:
     def manual_list(offset:int=0,limit:int=80):
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
         with db() as c:
-            total=c.execute('SELECT COUNT(*) FROM v257_manual_registry').fetchone()[0]
+            total=c.execute('SELECT COUNT(*) FROM ('+MANUAL_SOURCE_SQL+')').fetchone()[0]
             records=c.execute("""SELECT r.reg AS reg_number,r.requested_at,p.customer,p.title,p.documents_found,
              p.documents_checked,p.violations,p.risks,COALESCE(j.status,'В очереди') manual_status
-             FROM v257_manual_registry r LEFT JOIN purchases p ON p.reg_number=r.reg
+             FROM ("""+MANUAL_SOURCE_SQL+""") r LEFT JOIN purchases p ON p.reg_number=r.reg
              LEFT JOIN requests_v233 j ON j.reg=r.reg AND j.lane='manual'
              ORDER BY r.requested_at DESC,r.reg DESC LIMIT ? OFFSET ?""",(limit,offset)).fetchall()
         return {'total':total,'items':[dict(r) for r in records]}
@@ -151,7 +158,7 @@ def install(ns:dict)->None:
     class UI(BaseHTTPMiddleware):
         async def dispatch(self,request,call_next):
             response=await call_next(request)
-            if request.method!='GET' or request.url.path not in ('/','/documents') or 'text/html' not in response.headers.get('content-type',''):
+            if request.method!='GET' or request.url.path not in ('/','/documents','/manual-documents') or 'text/html' not in response.headers.get('content-type',''):
                 return response
             try:
                 raw=b''.join([x async for x in response.body_iterator])
