@@ -13,3 +13,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s tests -p 'test_railway_recovery.py' -v
+
+      - name: Check recovery Docker image builds
+        run: docker build -f Dockerfile -t eis223-recovery:test .
