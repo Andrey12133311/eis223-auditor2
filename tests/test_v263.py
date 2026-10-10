@@ -31,7 +31,7 @@ class Tests(unittest.TestCase):
         self.assertIn('seen.add(reg)',FEED_NEW)
         for text in [BLOCK_NEW,FEED_NEW]:
             self.assertNotIn('DELETE FROM',text)
-            self.assertNotIn('status=\\'checked\\'',text)
+            self.assertNotIn("status=\'checked\'",text)
             self.assertNotIn('stats.purchases',text)
             self.assertNotIn('UPDATE purchases',text)
     def test_parallelism_limited_and_faster_than_serial_simulation(self):
