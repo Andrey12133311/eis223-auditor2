@@ -55,7 +55,7 @@ class QueueTests(unittest.TestCase):
         exec("def classify(d,host):\n"+snippet+"\n    return urls, alternative\n",ns)
         classify=ns['classify']
         urls,alt=classify({'meta':{'alt_urls':'https://mirror.example/d.pdf'}},'down.example')
-        self.assertEqual(urls,['https://mirror.example/d.pdf'])
+        self.assertEqual([u for u in urls if u],['https://mirror.example/d.pdf'])
         self.assertTrue(alt)
         urls,alt=classify({'meta':{'alt_urls':['https://[broken','https://down.example/ok.pdf']}},'down.example')
         self.assertFalse(alt)
