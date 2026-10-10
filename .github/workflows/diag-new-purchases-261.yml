@@ -31,5 +31,5 @@ jobs:
                   u=d.get('url') or ''
                   try:parsed=urlparse(u);host=parsed.hostname;ext=(parsed.path.rsplit('.',1)[-1][:7] if '.' in parsed.path else '')
                   except Exception:host=None;ext=''
-                  print('DOCUMENT',{'host':host,'extension':ext,'status':d.get('status'),'job_status':d.get('job_status'),'attempts':d.get('attempts'),'available':d.get('available'),'chars':d.get('text_chars'),'error':str(d.get('error') or '')[:145]})
+                  print('DOCUMENT',{'host':host,'path':(parsed.path[:180] if host else ''),'extension':ext,'status':d.get('status'),'job_status':d.get('job_status'),'attempts':d.get('attempts'),'available':d.get('available'),'chars':d.get('text_chars'),'error':str(d.get('error') or '')[:145]})
           PY
