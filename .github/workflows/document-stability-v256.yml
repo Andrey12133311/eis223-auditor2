@@ -1,0 +1,29 @@
+name: Document transport patch V256
+on:
+  push:
+    branches: [document-transport-reliability-20261010]
+    paths:
+      - 'scripts/patch_v256.py'
+      - 'scripts/railway_start_v256.py'
+      - 'tests/test_patch_v256.py'
+      - '.github/workflows/document-stability-v256.yml'
+  pull_request:
+    paths:
+      - 'scripts/patch_v256.py'
+      - 'scripts/railway_start_v256.py'
+      - 'tests/test_patch_v256.py'
+  workflow_dispatch:
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile the patch and startup entry point
+        run: python -m py_compile scripts/patch_v256.py scripts/railway_start_v256.py
+      - name: Patch safety tests
+        run: python -m unittest discover -s tests -p 'test_patch_v256.py' -v
