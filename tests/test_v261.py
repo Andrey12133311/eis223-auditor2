@@ -74,7 +74,12 @@ class QueueFairnessTests(unittest.TestCase):
 
     def test_only_validated_alternative_hosts_get_priority(self):
         ns={'urlparse':urlparse,'ns':{'safe_host':lambda u:u.startswith('https://roseltorg.ru/')}}
-        exec('def classify(urls,host):\n    alternative=False\n    for u in urls:\n        if not isinstance(u,str) or not u.startswith((\\'https://\\',\\'http://\\')):continue\n'+ALTERNATIVE_NEW+'\n    return alternative\n',ns)
+        program=("def classify(urls,host):\n"
+                 "                alternative=False\n"
+                 "                for u in urls:\n"
+                 "                    if not isinstance(u,str) or not u.startswith(('https://','http://')):continue\n"
+                 +ALTERNATIVE_NEW+"\n                return alternative\n")
+        exec(program,ns)
         check=ns['classify']
         self.assertTrue(check(['https://roseltorg.ru/document.pdf'],'zakupki.gov.ru'))
         self.assertFalse(check(['https://unsafe.example.org/document.pdf'],'zakupki.gov.ru'))
