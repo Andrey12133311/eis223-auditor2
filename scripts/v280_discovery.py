@@ -36,6 +36,7 @@ async def pull():
                     if isinstance(v,list) and v and isinstance(v[0],dict):
                         return v
             return []
+        if isinstance(body,dict):print("V283 DAMIA_SCHEMA", sorted(str(k)[:30] for k in body.keys())[:12],flush=True)
         output=[];seen=set()
         for item in records(body)[:100]:
             if not isinstance(item,dict):continue
