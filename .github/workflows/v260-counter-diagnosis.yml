@@ -18,8 +18,8 @@ jobs:
           def get(p):
               req=urllib.request.Request(B+p,headers={'User-Agent':'EIS223-readonly-counter-diagnostic','Cache-Control':'no-cache'})
               with urllib.request.urlopen(req,timeout=45) as r:
-                  return r.status,r.read(2_000_000)
-          for path in ['/', '/api/v257/dashboard?offset=0&limit=200','/api/v257/dashboard?offset=200&limit=200','/api/v204/dashboard?offset=0&limit=100','/api/v235/publication-status','/api/v244/progress']:
+                  return r.status,r.read(24_000_000)
+          for path in ['/', '/api/v257/dashboard?offset=0&limit=1','/api/v257/dashboard?offset=1&limit=1','/api/v257/dashboard?offset=695&limit=1','/api/v204/dashboard?offset=0&limit=100','/api/v235/publication-status','/api/v244/progress']:
               try:
                   status,body=get(path)
                   print('PATH',path,'HTTP',status,'bytes',len(body))
