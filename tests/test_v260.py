@@ -35,8 +35,8 @@ class RecoveryTests(unittest.TestCase):
                 with conn() as con:
                     return [dict(x) for x in con.execute("SELECT d.id,d.reg_number,d.name,d.url,d.doc_type,d.metadata_json,d.local_path,COALESCE(r.tries,0) tries FROM docs d LEFT JOIN retry_docs_v234 r ON r.doc_id=d.id WHERE d.reg_number='verified'")]
             env={'conn':conn,'_prev_pending236':previous,'_verified_set235':lambda:{'verified'},'_allowed234':lambda u:u.startswith('https://zakupki.gov.ru/'),'_t234':time,'_j234':json,'_P234':Path}
-            exec('def build():\n'+NEW.replace('\n','\n    ')+'\n    return _pending234\n',env)
-            rows=env['build']()(12)
+            exec('def _pending234'+NEW.split('def _pending234',1)[1],env)
+            rows=env['_pending234'](12)
             regs={x['reg_number'] for x in rows}
             self.assertTrue({'verified','fresh','mirror'}<=regs,regs)
             self.assertFalse({'bad','future','exhausted'}&regs,regs)
