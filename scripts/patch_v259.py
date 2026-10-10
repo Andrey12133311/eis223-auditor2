@@ -17,7 +17,7 @@ RULES = (
     ),
     (
         "    if not available:\n        print('V239 SAVE_REJECTED_UNREAD reg='+reg,flush=True)\n        return None\n    return _old_save239(p,docs,finds,checks,card_payload)",
-        "    if not available:\n        # Stage only link-backed attachment metadata; hide until a real original is verified.\n        if any(_source_candidate259(d) for d in (docs or [])):\n            print('V259 STAGED_PENDING_ORIGINAL reg='+reg+' docs='+str(len(docs)),flush=True)\n            return _old_save239(p,docs,[],[],card_payload)\n        print('V239 SAVE_REJECTED_UNREAD reg='+reg,flush=True)\n        return None\n    return _old_save239(p,docs,finds,checks,card_payload)",
+        "    if not available:\n        # Stage only link-backed attachment metadata; hide until a real original is verified.\n        if not _registered239(reg) and any(_source_candidate259(d) for d in (docs or [])):\n            print('V259 STAGED_PENDING_ORIGINAL reg='+reg+' docs='+str(len(docs)),flush=True)\n            return _old_save239(p,docs,[],[],card_payload)\n        print('V239 SAVE_REJECTED_UNREAD reg='+reg,flush=True)\n        return None\n    return _old_save239(p,docs,finds,checks,card_payload)",
     ),
 )
 
