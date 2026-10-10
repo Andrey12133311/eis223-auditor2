@@ -1,0 +1,57 @@
+name: V262 live counter and EIS file reachability (read-only)
+on:
+  push:
+    branches: [diag-purchase-32616411351-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Compare filtered list count to page bounds, source GET
+        run: |
+          python - <<'PY'
+          import json,urllib.request,urllib.error,time
+          from urllib.parse import urlparse
+          base='https://web-production-1c2ea.up.railway.app'
+          def get_json(path):
+              req=urllib.request.Request(base+path,headers={'Cache-Control':'no-cache','User-Agent':'EIS223-live-readonly-diagnostic'})
+              with urllib.request.urlopen(req,timeout=30) as r:return json.loads(r.read(8_000_000))
+          try:
+              dash=get_json('/api/v257/dashboard?limit=1&offset=0')
+              count=dash['stats']['purchases']
+              print('DASHBOARD_COUNT',count,'FIRST',len(dash.get('purchases',[])))
+              for offset in [max(count-1,0),count]:
+                  page=get_json('/api/v257/dashboard?limit=1&offset='+str(offset))
+                  print('PAGE_BOUNDARY',offset,'n',len(page.get('purchases',[])),'count',page['stats']['purchases'])
+              status=get_json('/api/v204/status')
+              queue=status.get('queue',{})
+              print('QUEUE',queue,'LANES',status.get('lanes',{}))
+              p=get_json('/api/v204/purchases/32616448242')
+              docs=p.get('documents') or []
+              checked=sum(1 for d in docs if d.get('status')=='checked')
+              print('NEW_ITEM_FILES',len(docs),'CHECKED',checked)
+              if docs:
+                  link=docs[0].get('url') or ''
+                  parsed=urlparse(link)
+                  print('EIS_FILE_TARGET',parsed.hostname,parsed.path,'HAS_QUERY',bool(parsed.query))
+                  if parsed.hostname!='zakupki.gov.ru' or not parsed.path.startswith('/223/filestore/public/'):
+                      print('SKIP_NOT_EXPECTED_OFFICIAL_EIS_ENDPOINT')
+                  else:
+                      t=time.monotonic()
+                      req=urllib.request.Request(link,headers={'User-Agent':'Mozilla/5.0','Range':'bytes=0-127','Accept':'*/*'})
+                      try:
+                          with urllib.request.urlopen(req,timeout=9) as resp:
+                              data=resp.read(96)
+                              print('EIS_DIRECT_GET',resp.status,'mime',resp.headers.get('Content-Type','')[:75],
+                                'length_header',resp.headers.get('Content-Length'),'sample_magic',data[:12].hex(),
+                                'elapsed_sec',round(time.monotonic()-t,1))
+                      except Exception as err:
+                          print('EIS_DIRECT_GET_FAILED',type(err).__name__,str(err)[:150],
+                            'elapsed_sec',round(time.monotonic()-t,1))
+          except Exception as err:
+              print('LIVE_CHECK_FAILED',type(err).__name__,str(err)[:250])
+              raise
+          PY
