@@ -1,0 +1,49 @@
+name: Read-only diagnosis purchase 32616411351
+on:
+  push:
+    branches: [diag-purchase-32616411351-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Read one procurement and its document state
+        run: |
+          python - <<'PY'
+          import json,urllib.request,urllib.error
+          base='https://web-production-1c2ea.up.railway.app'
+          reg='32616411351'
+          def read(path,max_bytes=12_000_000):
+              try:
+                  req=urllib.request.Request(base+path,headers={'User-Agent':'EIS223-Target-Diagnostic/1.0','Cache-Control':'no-cache'},method='GET')
+                  with urllib.request.urlopen(req,timeout=35) as resp:
+                      raw=resp.read(max_bytes)
+                      return json.loads(raw)
+              except Exception as ex:
+                  print('READ_FAILED',path,type(ex).__name__,str(ex)[:120])
+                  return {}
+          d=read('/api/v257/dashboard?q='+reg+'&limit=10')
+          print('DASHBOARD_COUNT',d.get('stats',{}).get('purchases'),'MATCHED',len(d.get('purchases',[])))
+          for x in d.get('purchases',[]):
+              if str(x.get('reg_number'))!=reg:continue
+              print('PURCHASE',{k:x.get(k) for k in ('reg_number','source','method','customer_inn','documents_found','documents_checked','violations','risks','last_seen','card_source_status','published_at') if k in x})
+              print('PURCHASE_KEYS',sorted(x.keys()))
+          extra=read('/api/v257/purchase-extra/'+reg)
+          print('EXTRA',{k:extra.get(k) for k in ('reg_number','source','last_seen','documents_found','documents_checked','clarifications','protocols','cancellations','card_source_status')})
+          audit=read('/api/v218/audit/'+reg)
+          print('AUDIT_KEYS',sorted(audit.keys()))
+          for k in ('docs','documents','attachments','findings','checks','assessment','purchase','summary'):
+              val=audit.get(k)
+              if isinstance(val,list):
+                  print('AUDIT_LIST',k,'items',len(val))
+                  for item in val[:8]:
+                      if isinstance(item,dict):
+                          print('AUDIT_ITEM',k,{k2:(v[:130] if isinstance(v,str) else v) for k2,v in item.items() if k2 in ('name','status','file_name','filename','text_chars','chars','id','result','source_status','error','content_available','category','type')})
+              elif isinstance(val,dict):
+                  print('AUDIT_OBJECT',k,'keys',sorted(val.keys())[:30])
+          openapi=read('/openapi.json',max_bytes=8_000_000)
+          print('DOCUMENT_ENDPOINTS',[p for p in openapi.get('paths',{}) if ('document' in p.lower() or '/docs/' in p or '/v204/' in p or 'purchase' in p.lower()) and ('{reg' in p or '{id' in p)][:80])
+          PY
