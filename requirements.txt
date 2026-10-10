@@ -13,3 +13,4 @@ striprtf>=0.0.29
 curl_cffi>=0.13
 py7zr>=1.0
 rarfile>=4.2
+odfpy>=1.4.1
