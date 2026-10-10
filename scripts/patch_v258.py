@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V258 source patch: ETP direct links and cached-original-first document queue.
+"""V258 source patch: skip temporarily unavailable hosts, process cached originals first.
 
 Only changes the V257 ephemeral entry.py, never /data snapshots or SQLite.
 V256 already verifies original snapshot SHA256; V257 and V258 are fail-closed.
@@ -7,16 +7,6 @@ V256 already verifies original snapshot SHA256; V257 and V258 are fail-closed.
 from __future__ import annotations
 import hashlib
 from pathlib import Path
-
-SOURCE_ALLOW_OLD = "  return p.scheme in ('http','https') and any(h==x or h.endswith('.'+x) for x in ('zakupki.gov.ru','gosplan.info','roskazna.gov.ru'))"
-SOURCE_ALLOW_NEW = """  trusted=('zakupki.gov.ru','gosplan.info','roskazna.gov.ru',
-        'roseltorg.ru','tektorg.ru','rts-tender.ru','etp-ets.ru',
-        'b2b-center.ru','sberbank-ast.ru','fabrikant.ru','otc.ru',
-        'etpgpb.ru','gpb.ru','lot-online.ru','zakazrf.ru','eetp.ru',
-        'tenderguru.ru')
-  return (p.scheme in ('http','https') and not p.username and not p.password
-            and p.port in (None,80,443)
-            and any(h==x or h.endswith('.'+x) for x in trusted))"""
 
 CLAIM_OLD = """    def claim(lane='auto'):
         with db() as c:
@@ -52,7 +42,6 @@ ENQUEUE_NEW = """                meta=d.get('meta') if isinstance(d.get('meta'),
                 urls=[d.get('final_url'),meta.get('mirror_url')]+list(alts)
                 alternative=any(isinstance(u,str) and urlparse(u).hostname and (urlparse(u).hostname or '').lower()!=host for u in urls)"""
 RULES = (
-    (SOURCE_ALLOW_OLD, SOURCE_ALLOW_NEW),
     (CLAIM_OLD, CLAIM_NEW),
     (ENQUEUE_OLD, ENQUEUE_NEW),
 )
