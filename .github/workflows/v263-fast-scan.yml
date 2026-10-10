@@ -1,0 +1,25 @@
+name: V263 bounded parallel scan tests
+on:
+  push:
+    branches: [v263-bounded-parallel-scan-20261010]
+  pull_request:
+    paths:
+      - scripts/patch_v263.py
+      - scripts/railway_start_v263.py
+      - tests/test_v263.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  concurrency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and validate startup
+        run: python -m py_compile scripts/patch_v263.py scripts/railway_start_v263.py
+      - name: Test bounded parallelism and safe patches
+        run: python -m unittest discover -s tests -p 'test_v263.py' -v
