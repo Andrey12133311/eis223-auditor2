@@ -39,7 +39,7 @@ ENQUEUE_NEW = """                meta=d.get('meta') if isinstance(d.get('meta'),
                 alts=meta.get('alt_urls') or []
                 if isinstance(alts,str):alts=[alts]
                 if not isinstance(alts,(list,tuple)):alts=[]
-                urls=[d.get('final_url'),meta.get('mirror_url')]+list(alts)
+                urls=[u for u in [d.get('final_url'),meta.get('mirror_url')]+list(alts) if isinstance(u,str) and u.startswith(('https://','http://'))]
                 alternative=False
                 for u in urls:
                     if not isinstance(u,str) or not u.startswith(('https://','http://')):continue
