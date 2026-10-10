@@ -1,0 +1,35 @@
+name: Read-only new procurement source audit
+on:
+  push:
+    branches: [diag-purchase-32616411351-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect newly discovered procurement source health
+        run: |
+          python - <<'PY'
+          import urllib.request,json
+          from urllib.parse import urlparse
+          base='https://web-production-1c2ea.up.railway.app'
+          def get(path):
+              try:
+                  req=urllib.request.Request(base+path,headers={'User-Agent':'EIS223-readonly-source-investigation','Cache-Control':'no-cache'})
+                  with urllib.request.urlopen(req,timeout=30) as r:return json.loads(r.read(8_000_000))
+              except Exception as exc:
+                  print('FAILED',path,type(exc).__name__,str(exc)[:130]);return {}
+          for reg in ['32616448242','32616448134','32616448201','32616448213']:
+              detail=get('/api/v204/purchases/'+reg)
+              p=detail.get('purchase') or {}
+              docs=detail.get('documents') or []
+              print('PURCHASE',reg,{'source':p.get('source'),'card':p.get('card_source_status'),'found':p.get('documents_found'),'checked':p.get('documents_checked')},'DOCS',len(docs))
+              for d in docs[:8]:
+                  u=d.get('url') or ''
+                  try:parsed=urlparse(u);host=parsed.hostname;ext=(parsed.path.rsplit('.',1)[-1][:7] if '.' in parsed.path else '')
+                  except Exception:host=None;ext=''
+                  print('DOCUMENT',{'host':host,'extension':ext,'status':d.get('status'),'job_status':d.get('job_status'),'attempts':d.get('attempts'),'available':d.get('available'),'chars':d.get('text_chars'),'error':str(d.get('error') or '')[:145]})
+          PY
