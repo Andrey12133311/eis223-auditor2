@@ -1,0 +1,21 @@
+name: V259 recovery of new purchases
+on:
+  push:
+    branches: [v259-purchase-counter-recovery-20261010]
+  pull_request:
+    paths: ['scripts/patch_v259.py','scripts/railway_start_v259.py','tests/test_v259.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile safe recovery code
+        run: python -m py_compile scripts/patch_v259.py scripts/railway_start_v259.py
+      - name: Synthetic queue and no new counters tests
+        run: python -m unittest discover -s tests -p test_v259.py -v
