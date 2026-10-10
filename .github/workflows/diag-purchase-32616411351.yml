@@ -33,6 +33,13 @@ jobs:
               print('PURCHASE_KEYS',sorted(x.keys()))
           extra=read('/api/v257/purchase-extra/'+reg)
           print('EXTRA',{k:extra.get(k) for k in ('reg_number','source','last_seen','documents_found','documents_checked','clarifications','protocols','cancellations','card_source_status')})
+          vd=read('/api/v204/purchases/'+reg)
+          print('V204_STATUS',vd.get('summary',{}))
+          print('V204_DOCS_TOTAL',len(vd.get('documents',[])))
+          for doc in vd.get('documents',[])[:25]:
+              print('V204_DOC',{k:(str(doc.get(k,''))[:160] if k=='error' else doc.get(k)) for k in ('name','status','job_status','text_chars','attempts','available','error')})
+          vs=read('/api/v204/status')
+          print('V204_QUEUE',vs.get('queue',{}),'LANES',vs.get('lanes',{}),'SOURCES',vs.get('sources',[])[:4])
           audit=read('/api/v218/audit/'+reg)
           print('AUDIT_KEYS',sorted(audit.keys()))
           for k in ('docs','documents','attachments','findings','checks','assessment','purchase','summary'):
