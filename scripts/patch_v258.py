@@ -63,6 +63,9 @@ def patch_text(source: str) -> str:
         if count != 1:
             raise RuntimeError("V258 unexpected source: patch anchor found " + str(count) + ": " + before[:90])
         source = source.replace(before, after, 1)
+    if "_v258_features.install(globals())" in source:
+        raise RuntimeError("V258 already applied")
+    source += "\n# V258: accurate progress and source-recovery diagnostics\nimport v258_features as _v258_features\n_v258_features.install(globals())\n"
     compile(source, "entry.py", "exec")
     return source
 
