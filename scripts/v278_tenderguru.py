@@ -12,6 +12,7 @@ import httpx
 _URL="https://www.tenderguru.ru/api2.3/export"
 _cache={}
 _lock=asyncio.Lock()
+_request_times=[]
 
 def install(ns):
     app=ns["app"]
@@ -20,6 +21,10 @@ def install(ns):
     async def tenderguru_card(reg: str):
         if not re.fullmatch(r"[0-9]{10,20}",reg):
             raise HTTPException(400,"Неверный номер закупки")
+        # Restrict lookups to purchases already registered in the local database.
+        with ns['conn']() as db:
+            known=db.execute('SELECT 1 FROM purchases WHERE reg_number=? LIMIT 1',(reg,)).fetchone()
+        if not known:raise HTTPException(404,'Закупка отсутствует в базе')
         key=os.environ.get("TENDERGURU_API_CODE","")
         if not key:
             raise HTTPException(503,"Ключ TenderGuru не настроен")
@@ -32,6 +37,11 @@ def install(ns):
             hit=_cache.get(reg)
             if hit and now-hit[0]<1800:
                 return hit[1]
+            # Bound use of the account quota even with many dashboard visitors.
+            global _request_times
+            _request_times[:]=[t for t in _request_times if now-t<60]
+            if len(_request_times)>=3:raise HTTPException(429,'Лимит запросов TenderGuru: повторите позже')
+            _request_times.append(now)
             try:
                 async with httpx.AsyncClient(timeout=12.0,follow_redirects=False) as client:
                     response=await client.get(_URL,params={
