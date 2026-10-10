@@ -11,9 +11,9 @@ from pathlib import Path
 START = "                    for _ in range(min(6,max(2,int(os.environ.get('EIS223_FRESH_PER_CYCLE','4'))))):"
 END = "                            print('V217 PURCHASE_WAIT reg='+reg+' error='+error,flush=True)"
 BLOCK_HASH = 'd377ffd5364754308ed959645bbb990db567a24e8bc5316717d92810033d5ba3'
-FEED_START = '                        # Backfill older EIS pages without starving the latest feed.'
+FEED_START = '                        # Rotate through older pages; preserve the current first page every time.'
 FEED_END = "                        progress['feed_error'] = None"
-FEED_HASH = '425a5219c0268a3578e29e5994588ddac882e0f67b5fcb676261a3ca9896de0b'
+FEED_HASH = '0d02150b6bcc553a191541769938aec54ef1e4a0dd45ca7e2cde53ea18636436'
 
 BLOCK_NEW = """                    # I/O overlaps in a bounded batch. Download jobs and legal
                     # evidence still follow the existing independent pipeline.
