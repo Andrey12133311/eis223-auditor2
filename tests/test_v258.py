@@ -50,7 +50,9 @@ class QueueTests(unittest.TestCase):
 
     def test_malformed_metadata_and_string_alternative(self):
         ns={'urlparse':urlparse}
-        exec("def classify(d,host):\n"+ENQUEUE_NEW+"\n    return urls, alternative\n",ns)
+        from textwrap import dedent, indent
+        snippet=indent(dedent(ENQUEUE_NEW),"    ")
+        exec("def classify(d,host):\n"+snippet+"\n    return urls, alternative\n",ns)
         classify=ns['classify']
         urls,alt=classify({'meta':{'alt_urls':'https://mirror.example/d.pdf'}},'down.example')
         self.assertEqual(urls,['https://mirror.example/d.pdf'])
