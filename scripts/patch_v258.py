@@ -40,7 +40,14 @@ ENQUEUE_NEW = """                meta=d.get('meta') if isinstance(d.get('meta'),
                 if isinstance(alts,str):alts=[alts]
                 if not isinstance(alts,(list,tuple)):alts=[]
                 urls=[d.get('final_url'),meta.get('mirror_url')]+list(alts)
-                alternative=any(isinstance(u,str) and urlparse(u).hostname and (urlparse(u).hostname or '').lower()!=host for u in urls)"""
+                alternative=False
+                for u in urls:
+                    if not isinstance(u,str) or not u.startswith(('https://','http://')):continue
+                    try: alt_host=(urlparse(u).hostname or '').lower()
+                    except ValueError: continue
+                    if alt_host and alt_host!=host:
+                        alternative=True
+                        break"""
 RULES = (
     (CLAIM_OLD, CLAIM_NEW),
     (ENQUEUE_OLD, ENQUEUE_NEW),
