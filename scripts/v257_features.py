@@ -45,6 +45,8 @@ MANUAL_SOURCE_SQL = """SELECT reg,MAX(requested_at) requested_at FROM (
 ) GROUP BY reg"""
 
 def _html_patch(body: str) -> str:
+    # This is the existing procurement total across all pages, not a new metric.
+    body=body.replace('<small>Закупок по фильтру</small>','<small>Закупки</small>')
     if OLD_DASHBOARD in body: body=body.replace(OLD_DASHBOARD,NEW_DASHBOARD,1)
     if OLD_FILTER in body: body=body.replace(OLD_FILTER,NEW_FILTER,1)
     if 'id="v257-ui"' not in body:body=body.replace('</body>',SCRIPT+'</body>',1) if '</body>' in body else body+SCRIPT
