@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from patch_v258 import CLAIM_NEW, ENQUEUE_NEW, RULES, patch, patch_text
+from patch_v258 import CLAIM_NEW, ENQUEUE_NEW, RULES, SOURCE_ALLOW_NEW, patch, patch_text
 
 class QueueTests(unittest.TestCase):
     def test_cache_and_alternate_sources_precede_blocked_primary(self):
@@ -62,8 +62,22 @@ class QueueTests(unittest.TestCase):
         urls,alt=classify({'meta':None},'down.example')
         self.assertFalse(alt)
 
+    def test_only_approved_etp_hosts(self):
+        scope={'urlparse':urlparse}
+        source="def safe_host(url):\n try:\n  p=urlparse(url);h=(p.hostname or '').lower()\n"+SOURCE_ALLOW_NEW+"\n except Exception:return False\n"
+        exec(source,scope)
+        allow=scope['safe_host']
+        for host in ['https://www.roseltorg.ru/file.pdf','https://rts-tender.ru/document',
+                     'https://tenderguru.ru/archive.zip','https://zakupki.gov.ru/file']:
+            self.assertTrue(allow(host),host)
+        for host in ['http://localhost/file','https://127.0.0.1/file',
+                     'https://roseltorg.ru.attacker.example/file',
+                     'https://evil.com@localhost/file','ftp://roseltorg.ru/file',
+                     'https://roseltorg.ru:9999/file']:
+            self.assertFalse(allow(host),host)
+
     def test_no_new_ui_or_indicators(self):
-        self.assertEqual(len(RULES),2)
+        self.assertEqual(len(RULES),3)
         for before,after in RULES:
             self.assertNotIn('v258_features',after)
             self.assertNotIn('progress',after)
