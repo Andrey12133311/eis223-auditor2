@@ -30,7 +30,9 @@ def fetch_readonly(path: str) -> tuple[int, bytes, str]:
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=15) as response:
-        data = response.read(1024 * 1024)
+        data = response.read(16 * 1024 * 1024 + 1)
+        if len(data) > 16 * 1024 * 1024:
+            raise ValueError("API response exceeds 16 MiB smoke-check limit")
         return response.status, data, response.headers.get("Content-Type", "")
 
 def check() -> int:
