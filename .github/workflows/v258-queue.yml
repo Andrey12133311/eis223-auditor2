@@ -1,0 +1,24 @@
+name: V258 document queue safety
+on:
+  push:
+    branches: [v258-document-queue-source-fallback-20261010]
+  pull_request:
+    paths:
+      - 'scripts/patch_v258.py'
+      - 'scripts/railway_start_v258.py'
+      - 'tests/test_v258.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile startup and queue changes
+        run: python -m py_compile scripts/patch_v258.py scripts/railway_start_v258.py
+      - name: Queue ordering, host backoff, metadata and UI invariance
+        run: python -m unittest discover -s tests -p 'test_v258.py' -v
