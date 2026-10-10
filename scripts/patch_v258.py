@@ -8,6 +8,18 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+SOURCE_ALLOW_OLD = "  return p.scheme in ('http','https') and any(h==x or h.endswith('.'+x) for x in ('zakupki.gov.ru','gosplan.info','roskazna.gov.ru'))"
+SOURCE_ALLOW_NEW = """  approved=('zakupki.gov.ru','gosplan.info','roskazna.gov.ru',
+    'roseltorg.ru','fabrikant.ru','rts-tender.ru','rts-tender.com',
+    'tektorg.ru','etp-ets.ru','etp-ets.com','b2b-center.ru',
+    'sberbank-ast.ru','etpgpb.ru','gpb.ru','lot-online.ru',
+    'zakazrf.ru','otc.ru','otc-tender.ru','eetp.ru','etp-energo.ru',
+    'etp-region.ru','etp.comita.ru','etprf.ru','uetp.ru',
+    'tenderguru.ru')
+  return (p.scheme in ('https','http') and not p.username and not p.password
+          and p.port in (None,80,443) and bool(h)
+          and any(h==domain or h.endswith('.'+domain) for domain in approved))"""
+
 CLAIM_OLD = """    def claim(lane='auto'):
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -49,6 +61,7 @@ ENQUEUE_NEW = """                meta=d.get('meta') if isinstance(d.get('meta'),
                         alternative=True
                         break"""
 RULES = (
+    (SOURCE_ALLOW_OLD, SOURCE_ALLOW_NEW),
     (CLAIM_OLD, CLAIM_NEW),
     (ENQUEUE_OLD, ENQUEUE_NEW),
 )
