@@ -71,9 +71,9 @@ class V262Tests(unittest.TestCase):
 
     def test_no_delete_mark_checked_or_change_existing_stats(self):
         s=CLAIM_NEW+RECOVERY_NEW
-        for forbidden in ('DELETE FROM','status=\\'checked\\'','UPDATE purchases','result[\\'purchases\\']'):
+        for forbidden in ("DELETE FROM", "status='checked'", "UPDATE purchases", "result['purchases']"):
             self.assertNotIn(forbidden,s)
-        self.assertIn('if lane==\\'auto\\':',s)
+        self.assertIn("if lane=='auto':",s)
         self.assertIn('if not force:',s)
 
 if __name__=='__main__':unittest.main()
