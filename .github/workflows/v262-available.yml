@@ -1,0 +1,22 @@
+name: V262 available-originals and exact list count
+on:
+  push:
+    branches: [v262-skip-unavailable-focus-accessible-20261010]
+  pull_request:
+    paths: ['scripts/patch_v262.py','scripts/railway_start_v262.py','tests/test_v262.py','scripts/v257_features.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile patch
+        run: python -m py_compile scripts/patch_v262.py scripts/railway_start_v262.py scripts/v257_features.py
+      - name: Test retry caps, manual queue and list counter
+        run: python -m unittest discover -s tests -p 'test_v262.py' -v
