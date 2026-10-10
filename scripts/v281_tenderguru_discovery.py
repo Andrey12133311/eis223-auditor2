@@ -33,6 +33,7 @@ async def pull():
                 for k in ("Items","Item","items","data","results","result","tenders"):
                     if k in obj:return records(obj[k],depth+1)
             return []
+        if isinstance(data,dict):print("V283 TENDERGURU_SCHEMA",sorted(str(k)[:30] for k in data.keys())[:12],flush=True)
         result=[]
         seen=set()
         for item in records(data)[:120]:
