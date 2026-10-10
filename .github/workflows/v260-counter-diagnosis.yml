@@ -1,0 +1,41 @@
+name: Diagnose existing purchases counter versus visible rows (read-only)
+on:
+  push:
+    branches: [v260-diagnostics-no-deploy-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  examine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Compare public dashboard JSON and homepage rendering
+        run: |
+          python - <<'PY'
+          import json,urllib.request,re
+          B="https://web-production-1c2ea.up.railway.app"
+          def get(p):
+              req=urllib.request.Request(B+p,headers={'User-Agent':'EIS223-readonly-counter-diagnostic','Cache-Control':'no-cache'})
+              with urllib.request.urlopen(req,timeout=45) as r:
+                  return r.status,r.read(24_000_000)
+          for path in ['/', '/api/v257/dashboard?offset=0&limit=1','/api/v257/dashboard?offset=1&limit=1','/api/v257/dashboard?offset=695&limit=1','/api/v204/dashboard?offset=0&limit=100','/api/v235/publication-status','/api/v244/progress']:
+              try:
+                  status,body=get(path)
+                  print('PATH',path,'HTTP',status,'bytes',len(body))
+                  if path=='/':
+                      page=body.decode('utf-8','replace')
+                      print('HTML v257_dashboard=',"api('/api/v257/dashboard?'+filters())" in page,'v204_dashboard=',"api('/api/v204/dashboard?'+filters())" in page,'counter_element=',bool(re.search(r'id="purchases"',page)))
+                  else:
+                      data=json.loads(body)
+                      if path.startswith('/api/v257/dashboard') or path.startswith('/api/v204/dashboard'):
+                          st=data.get('stats',{})
+                          rows=data.get('purchases',[])
+                          print('STATS',json.dumps({k:st.get(k) for k in ('purchases','checked','checked_purchases','total','documents_checked','documents_found')},ensure_ascii=False))
+                          print('ROWS',len(rows),'unique',len({str(x.get('reg_number')) for x in rows}),'first_3', [x.get('reg_number') for x in rows[:3]],'last_3',[x.get('reg_number') for x in rows[-3:]])
+                          print('PAGING',data.get('offset'),data.get('limit'),data.get('total'))
+                      else:
+                          print('HEALTH_KEYS',list(data)[:15],'PUBLIC_COUNT',data.get('published_purchases'),'PROGRESS_COUNT',data.get('purchases'))
+              except Exception as exc:
+                  print('FAILED',path,type(exc).__name__,str(exc)[:180])
+          PY
