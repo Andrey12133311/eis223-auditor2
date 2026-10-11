@@ -2,19 +2,19 @@
 from pathlib import Path
 import hashlib
 OLD="                                    await asyncio.to_thread(finish,job,result)"
-NEW="""                                    await asyncio.to_thread(finish,job,result)
-                                    if reg:
+NEW="""                                    if reg:
                                         try:
                                             await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=12)
                                         except (asyncio.TimeoutError,Exception) as bridge_error:
-                                            print('V290 ROSELTORG_QUEUE_WAIT '+type(bridge_error).__name__,flush=True)"""
+                                            print('V290 ROSELTORG_QUEUE_WAIT '+type(bridge_error).__name__,flush=True)
+                                    await asyncio.to_thread(finish,job,result)"""
 OLD_FAILURE="                                    await asyncio.to_thread(finish,job,error=error)"
-NEW_FAILURE="""                                    await asyncio.to_thread(finish,job,error=error)
-                                    if reg:
+NEW_FAILURE="""                                    if reg:
                                       try:
                                         await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=6)
                                       except Exception as alt_error:
-                                        print('V290 ROSELTORG_ALT_WAIT '+type(alt_error).__name__,flush=True)"""
+                                        print('V290 ROSELTORG_ALT_WAIT '+type(alt_error).__name__,flush=True)
+                                    await asyncio.to_thread(finish,job,error=error)"""
 def patch(path):
     path=Path(path).resolve(strict=True)
     if str(path).startswith('/data/') or '/_eis223_runtime_recovery/' in str(path):
