@@ -10,9 +10,10 @@ NEW="""                                    await asyncio.to_thread(finish,job,re
                                             print('V290 ROSELTORG_QUEUE_WAIT '+type(bridge_error).__name__,flush=True)"""
 OLD_FAILURE="                                    await asyncio.to_thread(finish,job,error=error)"
 NEW_FAILURE="""                                    await asyncio.to_thread(finish,job,error=error)
-                                    try:
-                                        await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=12)
-                                    except Exception as alt_error:
+                                    if int(job.get('id') or 0)%12==0:
+                                      try:
+                                        await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=6)
+                                      except Exception as alt_error:
                                         print('V290 ROSELTORG_ALT_WAIT '+type(alt_error).__name__,flush=True)"""
 def patch(path):
     path=Path(path).resolve(strict=True)
