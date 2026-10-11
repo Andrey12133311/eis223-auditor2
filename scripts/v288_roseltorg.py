@@ -52,7 +52,7 @@ class _Links(HTMLParser):
             url=urljoin("https://www.roseltorg.ru",self.href)
             parsed=urlsplit(url)
             if parsed.scheme=="https" and parsed.hostname in ("www.roseltorg.ru","roseltorg.ru") and (
-                re.search(r"\\.(?:pdf|docx?|xlsx?|odt|ods|zip|rar|7z)(?:$|[?#])",parsed.path,re.I)
+                re.search(r"\.(?:pdf|docx?|xlsx?|odt|ods|zip|rar|7z)$",parsed.path,re.I)
                 or any(token in parsed.path.lower() for token in ("/download/","/file/","/attachment/","/webdav/"))
             ):
                 self.links.append({"name":label,"url":url})
@@ -107,7 +107,7 @@ def install_queue_bridge(ns):
     last={}
     async def attach(reg):
         if not re.fullmatch(r"[0-9]{10,20}",reg):return 0
-        if time.monotonic()-last.get(reg,0)<3600:return 0
+        if time.monotonic()-last.get(reg,0)<900:return 0
         async with lock:
             if time.monotonic()-last.get(reg,0)<3600:return 0
             last[reg]=time.monotonic()
@@ -130,7 +130,7 @@ def install_queue_bridge(ns):
                             if not isinstance(meta,dict):continue
                             existing=meta.get("alt_urls") or []
                             if not isinstance(existing,list):existing=[]
-                            merged=list(dict.fromkeys([u for u in existing if isinstance(u,str)]+links))[:50]
+                            merged=list(dict.fromkeys(links+[u for u in existing if isinstance(u,str)]))[:50]
                             if merged==existing:continue
                             meta["alt_urls"]=merged
                             db.execute("UPDATE documents SET metadata_json=? WHERE id=?",(json.dumps(meta,ensure_ascii=False),row["id"]))
