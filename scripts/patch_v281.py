@@ -5,18 +5,18 @@ OLD="""                                    fresh.append(row)
                         except Exception as exc:
                             print('V280 FEED_BRIDGE_ERROR '+type(exc).__name__,flush=True)"""
 NEW="""                                    fresh.append(row)
-                            # Independent TenderGuru feed; preserve DaMIA results and deduplicate.
-                            try:
-                                tg_rows=await _v281_tenderguru_discovery.pull()
-                                for tg in tg_rows:
-                                    reg=str(tg.get('regNumber') or '')
-                                    if reg and reg not in known:
-                                        known.add(reg)
-                                        fresh.append(tg)
-                            except Exception as tg_exc:
-                                print('V281 TENDERGURU_BRIDGE_ERROR '+type(tg_exc).__name__,flush=True)
                         except Exception as exc:
-                            print('V280 FEED_BRIDGE_ERROR '+type(exc).__name__,flush=True)"""
+                            print('V280 FEED_BRIDGE_ERROR '+type(exc).__name__,flush=True)
+                        # TenderGuru is the first-priority feed; failure of DaMIA must not suppress it.
+                        try:
+                            tg_rows=await _v281_tenderguru_discovery.pull()
+                            tg_numbers={str(tg.get('regNumber') or '') for tg in tg_rows}
+                            known={str(ns['regnum'](x) or '') for x in fresh}
+                            tg_fresh=[tg for tg in tg_rows if str(tg.get('regNumber') or '') and str(tg.get('regNumber') or '') not in known]
+                            fresh=tg_fresh+fresh
+                            print('V281 TENDERGURU_PRIMARY',len(tg_fresh),flush=True)
+                        except Exception as tg_exc:
+                            print('V281 TENDERGURU_BRIDGE_ERROR '+type(tg_exc).__name__,flush=True)"""
 def patch(path):
     path=Path(path).resolve(strict=True)
     if str(path).startswith('/data/') or '/_eis223_runtime_recovery/' in str(path):raise RuntimeError('Protected')
