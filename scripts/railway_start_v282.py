@@ -32,6 +32,7 @@ import v288_roseltorg
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
 from patch_v290 import patch as patch_v290
+from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
     path=Path(tempfile.gettempdir())/'eis223_v282_private'/'entry.py'
@@ -47,6 +48,7 @@ def main():
     digest=patch_v280(path)
     digest=patch_v281(path)
     digest=patch_v290(path)
+    digest=patch_v291(path)
     sys.path.insert(0,str(path.parent))
     import importlib
     entry=importlib.import_module('entry')
