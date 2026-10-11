@@ -59,6 +59,8 @@ async def pull():
         result=[]
         seen=set()
         detail_attempts=0
+        unresolved=0
+        rejected_law=0
         async def resolve_id(item):
             nonlocal detail_attempts
             ident=str(item.get("ID") or "").strip()
@@ -82,6 +84,10 @@ async def pull():
             return None
         for item in raw_rows[:250]:
             if not isinstance(item,dict):continue
+            law=str(item.get("Fz") or item.get("fz") or "223")
+            if not re.search(r"(?<![0-9])223(?![0-9])",law):
+                rejected_law+=1
+                continue
             reg=str(item.get("TenderNumber") or item.get("TenderNum") or
                     item.get("tend_num") or item.get("PurchaseNumber") or
                     item.get("RegNumber") or item.get("regNumber") or
@@ -95,14 +101,14 @@ async def pull():
                         if match:break
             if not match:
                 reg=await resolve_id(item)
-                if not reg:continue
+                if not reg:
+                    unresolved+=1
+                    continue
             else:
                 reg=match.group()
             if reg in seen:continue
-            law=str(item.get("Fz") or item.get("fz") or "223")
-            if not re.search(r"(?<![0-9])223(?![0-9])",law):continue
             seen.add(reg)
             result.append({"regNumber":reg,"reg_number":reg,"purchaseNumber":reg,
                            "source":"tenderguru_discovery"})
-        print("V281 TENDERGURU_DISCOVERY",len(result),"page",page,flush=True)
+        print("V281 TENDERGURU_DISCOVERY",len(result),"page",page,"raw",len(raw_rows),"details",detail_attempts,"unresolved",unresolved,"other_law",rejected_law,flush=True)
         return result
