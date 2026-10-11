@@ -18,7 +18,6 @@ async def pull():
         if time.monotonic()-_last<900:return []
         _last=time.monotonic()
         page=_page
-        _page=(_page+1)%5
         try:
             async with httpx.AsyncClient(timeout=12,follow_redirects=False) as client:
                 r=await client.get("https://www.tenderguru.ru/api2.3/export",params={
@@ -27,6 +26,7 @@ async def pull():
                     "api_code":key})
             r.raise_for_status()
             data=r.json()
+            _page=(_page+1)%5
         except (httpx.HTTPError,ValueError,TypeError):
             print("V281 TENDERGURU_FEED_UNAVAILABLE",flush=True)
             return []
