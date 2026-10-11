@@ -51,6 +51,9 @@ async def pull():
             print("V283 DAMIA_SCHEMA", sorted(str(k)[:30] for k in body.keys())[:12],flush=True)
         output=[];seen=set()
         rows=records(body)
+        if not rows and isinstance(body,dict):
+            section=body.get("223")
+            print("V285 DAMIA_223_SHAPE",type(section).__name__,sorted(str(k)[:30] for k in section.keys())[:15] if isinstance(section,dict) else len(section) if isinstance(section,list) else "empty",flush=True)
         if rows:
             print("V284 DAMIA_ROW_KEYS",sorted(str(k)[:35] for k in rows[0].keys())[:30],flush=True)
         for item in rows[:100]:
