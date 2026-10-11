@@ -61,7 +61,7 @@ async def pull():
                         "НомерЗакупки","Номер закупки","Номер извещения","regnum","regn","eis"):
                 value=item.get(key)
                 if isinstance(value,(str,int)):
-                    match=re.search(r"(?<!\\d)\\d{10,20}(?!\\d)",str(value))
+                    match=re.search(r"(?<!\d)\d{10,20}(?!\d)",str(value))
                     if match:
                         reg=match.group()
                         break
