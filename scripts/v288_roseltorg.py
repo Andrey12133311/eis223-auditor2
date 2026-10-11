@@ -10,7 +10,7 @@ async def lookup(number):
     if number in _CACHE and now-_CACHE[number][0]<900:return _CACHE[number][1]
     try:
         async with httpx.AsyncClient(timeout=12,follow_redirects=False,headers={"User-Agent":"EIS223-Auditor/1.0 (public metadata lookup)"}) as client:
-            response=await client.get("https://www.roseltorg.ru/procedures/search",params={"query":number})
+            response=await client.get("https://www.roseltorg.ru/procedures/search",params={"query_field":number})
         if response.status_code!=200:
             raise HTTPException(502,"Росэлторг: поиск недоступен")
         page=response.text[:1000000]
