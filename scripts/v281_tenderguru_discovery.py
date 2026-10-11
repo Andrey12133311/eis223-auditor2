@@ -19,7 +19,7 @@ async def pull():
         try:
             async with httpx.AsyncClient(timeout=12,follow_redirects=False) as client:
                 r=await client.get("https://www.tenderguru.ru/api2.3/export",params={
-                    "fz":223,"dtype":"json","page":0,
+                    "f":"223","dtype":"json","page":1,
                     "date_start":(datetime.date.today()-datetime.timedelta(days=21)).isoformat(),
                     "api_code":key})
             r.raise_for_status()
@@ -40,7 +40,8 @@ async def pull():
             if not isinstance(item,dict):continue
             reg=str(item.get("TenderNumber") or item.get("TenderNum") or
                     item.get("tend_num") or item.get("PurchaseNumber") or
-                    item.get("RegNumber") or item.get("regNumber") or "").strip()
+                    item.get("RegNumber") or item.get("regNumber") or
+                    item.get("TenderNumOuter") or "").strip()
             if not re.fullmatch(r"[0-9]{10,20}",reg) or reg in seen:continue
             law=str(item.get("Fz") or item.get("fz") or "223")
             if law not in ("223","223-ФЗ"):continue
