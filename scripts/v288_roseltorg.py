@@ -95,3 +95,53 @@ def install_documents(ns):
             return Response(response.content,media_type=typ,headers={"Content-Disposition":'attachment; filename="roseltorg-original"'})
         except httpx.HTTPError:
             raise HTTPException(502,"Ошибка загрузки оригинала")
+
+def install_queue_bridge(ns):
+    """Attach verified public Roseltorg file links to existing document metadata.
+    Existing document recovery and legal validation remain authoritative."""
+    import json
+    import asyncio
+    import os
+    import sqlite3
+    lock=asyncio.Lock()
+    last={}
+    async def attach(reg):
+        if not re.fullmatch(r"[0-9]{10,20}",reg):return 0
+        if time.monotonic()-last.get(reg,0)<3600:return 0
+        async with lock:
+            if time.monotonic()-last.get(reg,0)<3600:return 0
+            last[reg]=time.monotonic()
+        try:
+            found=await lookup(reg)
+            count=0
+            for procedure in found.get("procedures",[])[:3]:
+                try:
+                    listing=await document_links(procedure["id"])
+                except Exception:continue
+                links=[x["url"] for x in listing.get("files",[]) if x.get("url")]
+                if not links:continue
+                def store():
+                    db=ns["conn"]()
+                    try:
+                        rows=db.execute("SELECT id,metadata_json FROM documents WHERE reg_number=? LIMIT 30",(reg,)).fetchall()
+                        changed=0
+                        for row in rows:
+                            meta=json.loads(row["metadata_json"] or "{}")
+                            if not isinstance(meta,dict):continue
+                            existing=meta.get("alt_urls") or []
+                            if not isinstance(existing,list):existing=[]
+                            merged=list(dict.fromkeys([u for u in existing if isinstance(u,str)]+links))[:50]
+                            if merged==existing:continue
+                            meta["alt_urls"]=merged
+                            db.execute("UPDATE documents SET metadata_json=? WHERE id=?",(json.dumps(meta,ensure_ascii=False),row["id"]))
+                            changed+=1
+                        if changed:db.commit()
+                        return changed
+                    finally:db.close()
+                count+=await asyncio.to_thread(store)
+            if count:print("V290 ROSELTORG_ALT_URLS reg="+reg+" documents="+str(count),flush=True)
+            return count
+        except Exception as exc:
+            print("V290 ROSELTORG_BRIDGE_ERROR "+type(exc).__name__,flush=True)
+            return 0
+    ns["_v290_roseltorg_attach"]=attach
