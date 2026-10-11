@@ -48,6 +48,10 @@ async def pull():
             return []
         if isinstance(data,dict):print("V283 TENDERGURU_SCHEMA",sorted(str(k)[:30] for k in data.keys())[:12],flush=True)
         raw_rows=records(data)
+        if isinstance(data,dict):
+            for key_name in ("data","result","results","items","tenders","Tenders","Items"):
+                if key_name in data:
+                    print("V281 TENDERGURU_SECTION",key_name,type(data[key_name]).__name__,flush=True)
         if raw_rows:
             print("V286 TENDERGURU_ROW_KEYS",sorted(str(k)[:35] for k in raw_rows[0].keys())[:30],flush=True)
         elif isinstance(data,dict):
