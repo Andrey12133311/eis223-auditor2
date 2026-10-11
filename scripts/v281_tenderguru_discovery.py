@@ -38,7 +38,7 @@ async def pull():
                     output.extend(records(entry,depth+1))
                 return output
             if isinstance(obj,dict):
-                if any(k in obj for k in ("TenderNumber","TenderNum","tend_num","PurchaseNumber","RegNumber","regNumber","TenderNumOuter")):
+                if any(k in obj for k in ("ID","TenderNumber","TenderNum","tend_num","PurchaseNumber","RegNumber","regNumber","TenderNumOuter")):
                     return [obj]
                 output=[]
                 for v in obj.values():
@@ -58,6 +58,28 @@ async def pull():
             print("V287 TENDERGURU_EMPTY_STRUCTURE",[(str(k)[:30],type(v).__name__) for k,v in list(data.items())[:12]],flush=True)
         result=[]
         seen=set()
+        detail_attempts=0
+        async def resolve_id(item):
+            nonlocal detail_attempts
+            ident=str(item.get("ID") or "").strip()
+            if not ident.isdecimal() or detail_attempts>=12:return None
+            detail_attempts+=1
+            try:
+                async with httpx.AsyncClient(timeout=6,follow_redirects=False) as client:
+                    response=await client.get("https://www.tenderguru.ru/api2.3/export",params={"id":ident,"dtype":"json","api_code":key})
+                response.raise_for_status()
+                payload=response.json()
+                candidates=records(payload)
+                if isinstance(payload,dict):candidates.insert(0,payload)
+                for record in candidates:
+                    for field in ("TenderNumOuter","RegNumber","regNumber","PurchaseNumber","TenderLinkInner","TenderLink"):
+                        value=record.get(field)
+                        if isinstance(value,(str,int)):
+                            found=re.search(r"(?<![0-9])[0-9]{10,20}(?![0-9])",str(value))
+                            if found:return found.group()
+            except (httpx.HTTPError,ValueError,TypeError):
+                pass
+            return None
         for item in raw_rows[:250]:
             if not isinstance(item,dict):continue
             reg=str(item.get("TenderNumber") or item.get("TenderNum") or
@@ -71,8 +93,11 @@ async def pull():
                     if isinstance(value,str):
                         match=re.search(r"(?<![0-9])[0-9]{10,20}(?![0-9])",value)
                         if match:break
-            if not match:continue
-            reg=match.group()
+            if not match:
+                reg=await resolve_id(item)
+                if not reg:continue
+            else:
+                reg=match.group()
             if reg in seen:continue
             law=str(item.get("Fz") or item.get("fz") or "223")
             if not re.search(r"(?<![0-9])223(?![0-9])",law):continue
