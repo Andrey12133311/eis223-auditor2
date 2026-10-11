@@ -3,7 +3,7 @@ from pathlib import Path
 import hashlib
 OLD="                                    await asyncio.to_thread(finish,job,result)"
 NEW="""                                    await asyncio.to_thread(finish,job,result)
-                                    if stats.get('checked',0)%8==0:
+                                    if int(job.get('id') or 0)%8==0:
                                         try:
                                             await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=12)
                                         except (asyncio.TimeoutError,Exception) as bridge_error:
