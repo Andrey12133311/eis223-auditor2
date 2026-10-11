@@ -28,15 +28,27 @@ async def pull():
             print("V281 TENDERGURU_FEED_UNAVAILABLE",flush=True)
             return []
         def records(obj,depth=0):
-            if isinstance(obj,list):return obj
-            if isinstance(obj,dict) and depth<4:
-                for k in ("Items","Item","items","data","results","result","tenders"):
-                    if k in obj:return records(obj[k],depth+1)
+            if depth>8:return []
+            if isinstance(obj,list):
+                output=[]
+                for entry in obj[:250]:
+                    output.extend(records(entry,depth+1))
+                return output
+            if isinstance(obj,dict):
+                if any(k in obj for k in ("TenderNumber","TenderNum","tend_num","PurchaseNumber","RegNumber","regNumber","TenderNumOuter")):
+                    return [obj]
+                output=[]
+                for v in obj.values():
+                    if isinstance(v,(dict,list)):
+                        output.extend(records(v,depth+1))
+                return output
             return []
         if isinstance(data,dict):print("V283 TENDERGURU_SCHEMA",sorted(str(k)[:30] for k in data.keys())[:12],flush=True)
         raw_rows=records(data)
-        if raw_rows and isinstance(raw_rows[0],dict):
+        if raw_rows:
             print("V286 TENDERGURU_ROW_KEYS",sorted(str(k)[:35] for k in raw_rows[0].keys())[:30],flush=True)
+        elif isinstance(data,dict):
+            print("V287 TENDERGURU_EMPTY_STRUCTURE",[(str(k)[:30],type(v).__name__) for k,v in list(data.items())[:12]],flush=True)
         result=[]
         seen=set()
         for item in raw_rows[:120]:
