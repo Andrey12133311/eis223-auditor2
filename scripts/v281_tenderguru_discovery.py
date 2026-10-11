@@ -7,20 +7,23 @@ import time
 import httpx
 
 _last=0.0
+_page=0
 _lock=asyncio.Lock()
 
 async def pull():
-    global _last
+    global _last,_page
     key=os.environ.get("TENDERGURU_API_CODE")
     if not key or time.monotonic()-_last<900:return []
     async with _lock:
         if time.monotonic()-_last<900:return []
         _last=time.monotonic()
+        page=_page
+        _page=(_page+1)%5
         try:
             async with httpx.AsyncClient(timeout=12,follow_redirects=False) as client:
                 r=await client.get("https://www.tenderguru.ru/api2.3/export",params={
-                    "fz":223,"dtype":"json","page":0,
-                    "date_start":(datetime.date.today()-datetime.timedelta(days=21)).isoformat(),
+                    "fz":223,"dtype":"json","page":page,
+                    "date_start":(datetime.date.today()-datetime.timedelta(days=45)).isoformat(),
                     "api_code":key})
             r.raise_for_status()
             data=r.json()
@@ -51,7 +54,7 @@ async def pull():
             print("V287 TENDERGURU_EMPTY_STRUCTURE",[(str(k)[:30],type(v).__name__) for k,v in list(data.items())[:12]],flush=True)
         result=[]
         seen=set()
-        for item in raw_rows[:120]:
+        for item in raw_rows[:250]:
             if not isinstance(item,dict):continue
             reg=str(item.get("TenderNumber") or item.get("TenderNum") or
                     item.get("tend_num") or item.get("PurchaseNumber") or
@@ -63,5 +66,5 @@ async def pull():
             seen.add(reg)
             result.append({"regNumber":reg,"reg_number":reg,"purchaseNumber":reg,
                            "source":"tenderguru_discovery"})
-        print("V281 TENDERGURU_DISCOVERY",len(result),flush=True)
+        print("V281 TENDERGURU_DISCOVERY",len(result),"page",page,flush=True)
         return result
