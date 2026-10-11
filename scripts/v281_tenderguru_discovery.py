@@ -64,9 +64,18 @@ async def pull():
                     item.get("tend_num") or item.get("PurchaseNumber") or
                     item.get("RegNumber") or item.get("regNumber") or
                     item.get("TenderNumOuter") or "").strip()
-            if not re.fullmatch(r"[0-9]{10,20}",reg) or reg in seen:continue
+            match=re.search(r"(?<![0-9])[0-9]{10,20}(?![0-9])",reg)
+            if not match:
+                for field in ("TenderLink","TenderLinkInner","searchFragmentXML","ApiTenderInfo"):
+                    value=item.get(field)
+                    if isinstance(value,str):
+                        match=re.search(r"(?<![0-9])[0-9]{10,20}(?![0-9])",value)
+                        if match:break
+            if not match:continue
+            reg=match.group()
+            if reg in seen:continue
             law=str(item.get("Fz") or item.get("fz") or "223")
-            if law not in ("223","223-ФЗ"):continue
+            if not re.search(r"(?<![0-9])223(?![0-9])",law):continue
             seen.add(reg)
             result.append({"regNumber":reg,"reg_number":reg,"purchaseNumber":reg,
                            "source":"tenderguru_discovery"})
