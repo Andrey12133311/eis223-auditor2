@@ -21,7 +21,7 @@ async def pull():
         try:
             async with httpx.AsyncClient(timeout=12,follow_redirects=False) as client:
                 r=await client.get("https://www.tenderguru.ru/api2.3/export",params={
-                    "fz":fz223,"dtype":"json","page":page,
+                    "f": 223,"dtype":"json","page":page,
                     "date_start":(datetime.date.today()-datetime.timedelta(days=45)).isoformat(),
                     "api_code":key})
             r.raise_for_status()
