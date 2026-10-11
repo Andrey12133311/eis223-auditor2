@@ -28,6 +28,7 @@ from patch_v277 import patch as patch_v277
 import v278_tenderguru
 import v279_damia
 import v282_rostender
+import v288_roseltorg
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
 def main():
@@ -55,6 +56,7 @@ def main():
     v278_tenderguru.install(vars(entry))
     v279_damia.install(vars(entry))
     v282_rostender.install(vars(entry))
+    v288_roseltorg.install(vars(entry))
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
     import uvicorn
