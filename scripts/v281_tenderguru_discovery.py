@@ -34,9 +34,12 @@ async def pull():
                     if k in obj:return records(obj[k],depth+1)
             return []
         if isinstance(data,dict):print("V283 TENDERGURU_SCHEMA",sorted(str(k)[:30] for k in data.keys())[:12],flush=True)
+        raw_rows=records(data)
+        if raw_rows and isinstance(raw_rows[0],dict):
+            print("V286 TENDERGURU_ROW_KEYS",sorted(str(k)[:35] for k in raw_rows[0].keys())[:30],flush=True)
         result=[]
         seen=set()
-        for item in records(data)[:120]:
+        for item in raw_rows[:120]:
             if not isinstance(item,dict):continue
             reg=str(item.get("TenderNumber") or item.get("TenderNum") or
                     item.get("tend_num") or item.get("PurchaseNumber") or
