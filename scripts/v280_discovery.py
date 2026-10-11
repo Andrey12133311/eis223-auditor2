@@ -17,7 +17,7 @@ async def pull():
         now=time.monotonic()
         if now-_LAST<300:return []
         _LAST=now
-        since=(datetime.date.today()-datetime.timedelta(days=3)).isoformat()
+        since=(datetime.date.today()-datetime.timedelta(days=21)).isoformat()
         try:
             async with httpx.AsyncClient(timeout=12,follow_redirects=False) as client:
                 response=await client.get("https://api.damia.ru/zakupki/zsearch",params={
