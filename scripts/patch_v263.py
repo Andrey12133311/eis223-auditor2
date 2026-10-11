@@ -34,7 +34,7 @@ BLOCK_NEW = """                    # I/O overlaps in a bounded batch. Download j
                                 state['current_reg']=stats['last_reg']=progress['last_reg']=reg
                                 try:
                                     result=await asyncio.wait_for(
-                                        ns['process_purchase'](client,reg,json.loads(job['payload']) if job['payload'] else None),timeout=35)
+                                        ns['process_purchase'](client,reg,json.loads(job['payload']) if job['payload'] else None),timeout=60)
                                     await asyncio.to_thread(finish,job,result)
                                     completed.add(reg)
                                     results.append(result)
