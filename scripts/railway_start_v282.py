@@ -31,6 +31,7 @@ import v282_rostender
 import v288_roseltorg
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
+from patch_v290 import patch as patch_v290
 def main():
     folder,count=restore()
     path=Path(tempfile.gettempdir())/'eis223_v282_private'/'entry.py'
@@ -45,6 +46,7 @@ def main():
     digest=patch_v277(path)
     digest=patch_v280(path)
     digest=patch_v281(path)
+    digest=patch_v290(path)
     sys.path.insert(0,str(path.parent))
     import importlib
     entry=importlib.import_module('entry')
@@ -58,6 +60,7 @@ def main():
     v282_rostender.install(vars(entry))
     v288_roseltorg.install(vars(entry))
     v288_roseltorg.install_documents(vars(entry))
+    v288_roseltorg.install_queue_bridge(vars(entry))
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
     import uvicorn
