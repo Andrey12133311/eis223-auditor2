@@ -21,7 +21,7 @@ def _v290_schedule_roseltorg(reg):
     async def run():
         async with _v290_background_sem:
             try:
-                await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=9)
+                await asyncio.wait_for(_v290_roseltorg_attach(reg),timeout=9)
             except Exception as exc:
                 print('V290 ROSELTORG_BACKGROUND '+type(exc).__name__,flush=True)
     task=asyncio.create_task(run())
