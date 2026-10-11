@@ -3,14 +3,14 @@ from pathlib import Path
 import hashlib
 OLD="                                    await asyncio.to_thread(finish,job,result)"
 NEW="""                                    await asyncio.to_thread(finish,job,result)
-                                    if int(job.get('id') or 0)%8==0:
+                                    if reg:
                                         try:
                                             await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=12)
                                         except (asyncio.TimeoutError,Exception) as bridge_error:
                                             print('V290 ROSELTORG_QUEUE_WAIT '+type(bridge_error).__name__,flush=True)"""
 OLD_FAILURE="                                    await asyncio.to_thread(finish,job,error=error)"
 NEW_FAILURE="""                                    await asyncio.to_thread(finish,job,error=error)
-                                    if int(job.get('id') or 0)%12==0:
+                                    if reg:
                                       try:
                                         await asyncio.wait_for(ns['_v290_roseltorg_attach'](reg),timeout=6)
                                       except Exception as alt_error:
