@@ -29,6 +29,7 @@ import v278_tenderguru
 import v279_damia
 import v282_rostender
 import v288_roseltorg
+import v292_eis_soap_probe
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
 from patch_v290 import patch as patch_v290
@@ -65,6 +66,7 @@ def main():
     v288_roseltorg.install_queue_bridge(vars(entry))
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
+    v292_eis_soap_probe.start()
     import uvicorn
     uvicorn.run(entry.app,host='0.0.0.0',port=int(os.environ.get('PORT','8080')))
 if __name__=='__main__':main()
