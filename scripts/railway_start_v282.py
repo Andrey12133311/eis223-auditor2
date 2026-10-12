@@ -30,6 +30,7 @@ import v279_damia
 import v282_rostender
 import v288_roseltorg
 import v292_eis_soap_probe
+import v293_hide_obsolete_controls
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
 from patch_v290 import patch as patch_v290
@@ -57,6 +58,7 @@ def main():
     v267_card_ui.install(vars(entry))
     v269_inline_card.install(vars(entry))
     v270_count_display.install(vars(entry))
+    v293_hide_obsolete_controls.install(vars(entry))
     v271_reconcile.install(vars(entry))
     v278_tenderguru.install(vars(entry))
     v279_damia.install(vars(entry))
