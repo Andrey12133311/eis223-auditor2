@@ -164,43 +164,66 @@
     }
     return null;
   }
-  function safeFilename(node){
+  function safeFilename(node) {
+    // EIS displays many attachments as "Приложение №1 — ТЕХНИЧЕСКИЕ
+    // ТРЕБОВАНИЯ" (no .pdf/.docx in the visible title).
     const values=[];
-    let cur=node;
-    for(let i=0;cur&&i<4;i++,cur=cur.parentElement){
-      const attrs=["download","title","aria-label","data-file-name","data-filename"];
-      for(const a of attrs){const v=cur.getAttribute?.(a);if(v)values.push(v);}
-      if(cur.textContent&&cur.textContent.length<2400)values.push(cur.textContent);
-      if(cur.matches?.("tr,li,.file,.attachment,.document-item,.file-item"))break;
+    let current=node;
+    for(let depth=0;current&&depth<5;depth++,current=current.parentElement){
+      for(const key of ["download","title","aria-label","data-file-name",
+                        "data-filename","data-title","data-name"]){
+        const value=current.getAttribute?.(key);
+        if(value)values.push(String(value));
+      }
+      const txt=(current.textContent||"").replace(/\s+/g," ").trim();
+      if(txt.length>2&&txt.length<900)values.push(txt);
+      if(current.matches?.("tr,li,.file,.attachment,.document-item,.file-item,.file-download"))break;
     }
-    for(let v of values){
-      const found=String(v).replace(/\u00a0/g," ").match(EXT_NAME);
-      if(!found)continue;
-      const name=found[1].replace(/^\s*(?:скачать|файл|документ|загрузить|открыть)\s*[:–-]*\s*/ig,"")
-        .replace(/^.*[\\/]/,"").replace(/[<>:"|?*]/g,"").trim().slice(0,190);
-      if(EXT.test(name)&&name.length>4)return name;
+    const clean=value=>String(value||"").replace(/[\u0000-\u001f<>:"|?*\\/]/g," ")
+      .replace(/(?:^|\s)(?:скачать|просмотреть|открыть|загрузить)(?:\s+файл)?(?=\s|$)/ig," ")
+      .replace(/\s+/g," ").trim().slice(0,190);
+    for(const text of values){
+      const match=text.replace(/\u00a0/g," ").match(EXT_NAME);
+      if(match){
+        const name=clean(match[1]);
+        if(EXT.test(name)&&name.length>4)return name;
+      }
+    }
+    // Keep a real attachment label even when EIS omits the extension.
+    // The extension will be derived from the official downloaded bytes,
+    // never invented from the text or added to a counter prematurely.
+    for(const text of values){
+      const name=clean(text);
+      if(name.length>=5&&!/^(?:файл|скачать|документ|загрузка|протоколы|прикрепленные файлы)$/i.test(name))
+        return name;
     }
     return "";
   }
   function discoverDocs(doc,reg) {
     const documents=[],seen=new Set();
-    const elements=doc.querySelectorAll("a,button,[onclick],[data-href],[data-url],[data-file-uid]");
-    for(const a of elements) {
-      const fields=["href","onclick","data-href","data-url","data-download-url"];
+    const elements=doc.querySelectorAll(
+      "a,button,[onclick],[data-href],[data-url],[data-file-uid],[data-download-url]");
+    for(const element of elements){
       let uid=null;
-      for(const field of fields){
-        uid=maybeFileUid(a.getAttribute?.(field));
+      for(const key of ["href","onclick","data-href","data-url",
+                        "data-download-url","data-file-url"]){
+        uid=maybeFileUid(element.getAttribute?.(key));
         if(uid)break;
       }
-      // Some official pages put only UID in data-file-uid, with a true
-      // fz223 download-path in the containing row. Never trust bare UIDs.
-      if(!uid)continue;
-      if(seen.has(uid))continue;
-      const name=safeFilename(a);
+      // Some EIS components store the download URL on a wrapper.
+      let wrapper=element.parentElement;
+      for(let j=0;!uid&&wrapper&&j<3;j++,wrapper=wrapper.parentElement){
+        for(const key of ["href","onclick","data-href","data-url","data-download-url"]){
+          uid=maybeFileUid(wrapper.getAttribute?.(key));
+          if(uid)break;
+        }
+      }
+      if(!uid||seen.has(uid))continue;
+      const name=safeFilename(element);
       if(!name)continue;
       seen.add(uid);
-      documents.push({name,url:SITE+FILE_PATH+"?uid="+uid});
-      if(documents.length>=70)break;
+      documents.push({name,url:SITE+FILE_PATH+"?uid="+uid,uid});
+      if(documents.length>=100)break;
     }
     return documents;
   }
@@ -278,61 +301,167 @@
     return (await api(path)).items || {};
   }
 
-  async function fetchAndUploadOriginal(reg,item) {
-    if (!active)return false;
-    const u = new URL(item.url);
-    if (u.origin !== SITE ||
-        u.pathname !== "/223/filestore/public/1.0/download/fz223/file.html")
-      return false;
-    const uid=(u.searchParams.get("uid") || "").toUpperCase();
-    if (!/^[0-9A-F]{32}$/.test(uid))return false;
+  function downloadUid(item) {
+    const u=new URL(item.url,SITE);
+    if(u.origin!==SITE||u.pathname!==FILE_PATH)
+      throw new Error("Файл не принадлежит официальному хранилищу ЕИС");
+    const uid=(u.searchParams.get("uid")||"").toUpperCase();
+    if(!/^[0-9A-F]{32}$/.test(uid))throw new Error("Неверный UID файла ЕИС");
+    return uid;
+  }
+
+  function sniffFileExtension(buffer,headers){
+    const bytes=new Uint8Array(buffer);
+    const mime=(headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
+    if(bytes.length<8)throw new Error("ЕИС вернула пустой файл");
+    const prefix=new TextDecoder("latin1").decode(bytes.subarray(0,Math.min(80,bytes.length)));
+    if(/^\s*<!doctype html|^\s*<html\b/i.test(prefix)||mime==="text/html")
+      throw new Error("Вместо оригинала ЕИС вернула HTML");
+    if(prefix.startsWith("%PDF"))return ".pdf";
+    if(prefix.startsWith("{\\rtf"))return ".rtf";
+    const header=new DataView(buffer,0,Math.min(8,buffer.byteLength));
+    const ole=bytes.length>=8&&
+      [0xD0,0xCF,0x11,0xE0,0xA1,0xB1,0x1A,0xE1].every((x,i)=>bytes[i]===x);
+    if(ole){
+      return mime.includes("excel")||mime.includes("spreadsheet")?".xls":".doc";
+    }
+    if(bytes[0]===0x50&&bytes[1]===0x4B){
+      // ZIP central directory contains uncompressed filename entries even
+      // when XML contents are compressed. Distinguish OOXML from .zip.
+      const index=new TextDecoder("latin1").decode(
+        bytes.subarray(Math.max(0,bytes.length-160000)));
+      if(index.includes("word/document.xml"))return ".docx";
+      if(index.includes("xl/workbook.xml"))return ".xlsx";
+      if(index.includes("content.xml")&&
+         (index.includes("mimetype")||mime.includes("opendocument")))
+        return mime.includes("spreadsheet")?".ods":".odt";
+      if(mime.includes("wordprocessingml"))return ".docx";
+      if(mime.includes("spreadsheetml"))return ".xlsx";
+      return ".zip";
+    }
+    if(/^\s*<\?xml|^\s*<[A-Za-z][\w:-]+[\s>]/.test(prefix)&&
+       (mime.includes("xml")||prefix.trimStart().startsWith("<?xml")))
+      return ".xml";
+    throw new Error("Не удалось безопасно определить формат оригинала ЕИС");
+  }
+
+  function filenameFromHeader(headers){
+    const disposition=headers.get("content-disposition")||"";
+    const nameUtf=disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+    const standard=disposition.match(/filename\s*=\s*"?([^";]+)"?/i);
+    let filename="";
+    try{
+      filename=nameUtf?decodeURIComponent(nameUtf[1].trim()):(standard?.[1]||"");
+    }catch(e){filename=standard?.[1]||"";}
+    filename=filename.replace(/[\\/]/g," ").replace(/[<>:"|?*\u0000-\u001f]/g,"").trim();
+    return filename.slice(0,190);
+  }
+
+  async function downloadOfficialFile(item){
+    downloadUid(item);
     await wait(PAUSE_MS);
-    const r=await request(u.href,{credentials:"same-origin",cache:"no-store"},60000);
-    if (isRateLimited(r)) {
-      throw Object.assign(new Error("ЕИС ограничила скачивание: "+r.status),
+    const r=await request(item.url,{credentials:"same-origin",cache:"no-store"},60000);
+    if(isRateLimited(r)){
+      throw Object.assign(new Error("ЕИС ограничила скачивание: HTTP "+r.status),
         {backoff:true});
     }
-    if (!r.ok)throw new Error("Скачивание ЕИС HTTP "+r.status);
-    const size=Number(r.headers.get("content-length") || "0");
-    if (size>25*1024*1024)throw new Error("Оригинал превышает 25 МБ");
+    if(!r.ok)throw new Error("Скачивание ЕИС HTTP "+r.status);
+    const size=Number(r.headers.get("content-length")||"0");
+    if(size>25*1024*1024)throw new Error("Оригинал ЕИС превышает 25 МБ");
     const buffer=await r.arrayBuffer();
-    if (buffer.byteLength<8 || buffer.byteLength>25*1024*1024)
-      throw new Error("Недопустимый размер оригинала");
+    if(buffer.byteLength<8||buffer.byteLength>25*1024*1024)
+      throw new Error("Недопустимый размер оригинала ЕИС");
+    const extension=sniffFileExtension(buffer,r.headers);
+    return {buffer,extension,downloadName:filenameFromHeader(r.headers)};
+  }
+
+  async function uploadOriginalData(reg,item,buffer){
+    const uid=downloadUid(item);
     const response=await api("/api/v295/eis223/original/"+reg+"/"+uid,"POST",buffer);
-    if (!response.accepted)throw new Error("Railway не подтвердил файл");
+    if(!response.accepted)throw new Error("Railway не подтвердил файл");
     uploaded++;
-    log(reg, item.name, "оригинал принят", buffer.byteLength,
-        "байт; текст", response.extracted_chars);
+    log(reg,item.name,"оригинал принят",buffer.byteLength,
+        "байт; текст",response.extracted_chars);
     return true;
   }
 
+  function preparedFileName(item,downloaded){
+    const declared=String(item.name||"").trim();
+    const fromHeader=downloaded.downloadName;
+    const headerExt=fromHeader.match(EXT)?.[0]?.toLowerCase()||"";
+    const detected=downloaded.extension;
+    // Actual file signatures take precedence. A mislabeled ZIP cannot be
+    // passed off as an audited DOCX/PDF.
+    if(headerExt&&headerExt===detected)return fromHeader;
+    let base=declared.replace(/\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml)$/i,"")
+      .replace(/[<>:"|?*\\/]/g," ").replace(/\s+/g," ").trim().slice(0,175);
+    if(!base)base="Документ ЕИС "+downloadUid(item).slice(0,10);
+    return base+detected;
+  }
   async function handleRegistry(reg,searchDoc) {
     const {docs,source,landing}=await discoverFromOfficialCard(reg);
-    log(reg,"найдены официальные ссылки на документы:",docs.length,
-        "страница:",source.split("?")[0]);
-    await api("/api/v299/eis223/public-manifest","POST",{
+    const manifestBase={
       reg_number:reg,source_page:source,landing_page:SITE+landing,
-      title:searchTitle(searchDoc,reg),customer:"",documents:docs
-    });
-    const list=await api("/api/v295/eis223/manifest/"+reg);
-    let read=0;
-    for(const item of list.documents || []) {
-      if (!active || read>=MAX_FILES)break;
-      if (item.received)continue;
+      title:searchTitle(searchDoc,reg),customer:"",
+      declared_attachment_count:docs.length
+    };
+    const knownExt=docs.filter(d=>EXT.test(d.name));
+    const missingExt=docs.filter(d=>!EXT.test(d.name));
+    log(reg,"ссылок на оригиналы:",docs.length,
+        "из них без расширения в названии:",missingExt.length,
+        "страница:",source.split("?")[0]);
+    // Register all filenames known from the official HTML upfront.
+    if(knownExt.length){
+      await api("/api/v299/eis223/public-manifest","POST",{
+        ...manifestBase,documents:knownExt.map(d=>({name:d.name,url:d.url}))
+      });
+    }
+    const registered=await api("/api/v295/eis223/manifest/"+reg);
+    const knownUid=new Map((registered.documents||[]).map(d=>[d.uid,d]));
+    let uploadedNow=0,attempted=0,unresolved=0;
+
+    for(const item of docs){
+      if(!active||attempted>=MAX_FILES)break;
+      const previous=knownUid.get(item.uid);
+      if(previous?.received)continue;
+      attempted++;
       try{
-        if(await fetchAndUploadOriginal(reg,item))read++;
+        const downloaded=await downloadOfficialFile(item);
+        const detectedName=preparedFileName(item,downloaded);
+        if(previous?.ext&&previous.ext!==downloaded.extension){
+          throw new Error("Тип файла отличается от ранее зарегистрированного: "+
+            previous.ext+" / "+downloaded.extension);
+        }
+        // Old EIS filenames often omit ".docx", ".pdf", etc. Register the
+        // actual format only AFTER inspecting the official response bytes.
+        if(!previous){
+          await api("/api/v299/eis223/public-manifest","POST",{
+            ...manifestBase,
+            documents:[{name:detectedName,url:item.url}]
+          });
+        }
+        if(await uploadOriginalData(reg,{...item,name:detectedName},downloaded.buffer))
+          uploadedNow++;
       }catch(e){
         if(e.backoff)throw e;
-        log(reg,item.name,"пропущен:",String(e.message).slice(0,130));
+        unresolved++;
+        log(reg,item.name,"невозможно получить оригинал:",String(e.message).slice(0,170));
       }
     }
-    if(read>0)admitted++;
-    log(reg,"официальных ссылок:",docs.length,"оригиналов передано:",read,
-      "; юридическая проверка запускается только при получении всех доступных файлов");
-    if(!read)throw new Error("Документы обнаружены, но ни один оригинал не загружен");
-    return true;
+    const state=(await getKnown([reg]))[reg]||{};
+    const complete=state.manifest_documents>=docs.length&&
+      state.originals_received>=docs.length&&
+      state.checked_documents>=docs.length;
+    log(reg,"вложений на странице:",docs.length,
+      "оригиналов на сервере:",state.originals_received||0,
+      "новых оригиналов:",uploadedNow,
+      "неудачных попыток:",unresolved,
+      "полностью проверено:",complete);
+    if(uploadedNow===0&&!complete)
+      throw new Error("Новых оригиналов 0 из "+docs.length+
+        "; неудачных попыток "+unresolved+". Проверка остаётся неполной.");
+    return {discovered:docs.length,uploaded:uploadedNow,complete};
   }
-
   async function heartbeat(status,newPurchases,newOriginals,error="") {
     try {
       await api("/api/v299/eis223/heartbeat","POST",{
@@ -369,7 +498,7 @@
         }
         for(const n of picks){
           if(!active)break;
-          try{if(await handleRegistry(n,search))added++;}
+          try{const result=await handleRegistry(n,search);if(result.uploaded>0)added++;}
           catch(e){
             if(e.backoff)throw e;
             failures++;
@@ -414,10 +543,11 @@
           report={status:"done",detail:"Оригиналы уже сохранены; юридическая перепроверка поставлена в очередь",accepted:0,found:1};
         } else {
           const before=uploaded;
-          const accepted=await handleRegistry(job.target,null);
+          const outcome=await handleRegistry(job.target,null);
+          const accepted=outcome.uploaded>0;
           const updated=(await getKnown([job.target]))[job.target]||{};
-          const fullyReceived=updated.manifest_documents>0 &&
-            updated.originals_received>=updated.manifest_documents;
+          const fullyReceived=outcome.complete &&
+            updated.manifest_documents>=outcome.discovered;
           report={
             status:fullyReceived?"done":"partial",
             detail:fullyReceived?
