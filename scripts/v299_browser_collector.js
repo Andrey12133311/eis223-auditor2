@@ -261,9 +261,9 @@
     if(entries.length!==1 || !/^[0-9]{1,15}$/.test(entries[0].value))return null;
     return entries[0];
   }
-  function officialCardUrl(raw,reg,validPaths,associatedNoticeId=false){
+  function officialCardUrl(raw,reg,validPaths,associatedNoticeId=false,base=SITE){
     try{
-      const u=new URL(String(raw||"").replace(/&amp;/gi,"&"),SITE);
+      const u=new URL(String(raw||"").replace(/&amp;/gi,"&"),base);
       if(u.origin!==SITE||u.username||u.password||u.hash||!validPaths.has(u.pathname))
         return null;
       const regNums=[...u.searchParams.getAll("regNumber"),
@@ -281,6 +281,7 @@
     const output=[],seen=new Set();
     if(!doc)return output;
     const exact=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)");
+    const docBase=doc.__eis223_source_url||location.href;
     for(const element of doc.querySelectorAll("a[href],[onclick],[data-href],[data-url]")){
       const block=element.closest?.(
         ".search-registry-entry-block,.registry-entry,article,tr,.registry-entry__form");
@@ -289,10 +290,10 @@
       for(const key of ["href","onclick","data-href","data-url"]){
         const raw=element.getAttribute(key)||"";
         let found=null;
-        if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES,correlated);
+        if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES,correlated,docBase);
         if(!found){
           const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/common-?info\.html\?[^"'<>\s)]+/i);
-          if(match)found=officialCardUrl(match[0],reg,INFO_PAGES,correlated);
+          if(match)found=officialCardUrl(match[0],reg,INFO_PAGES,correlated,docBase);
         }
         if(found&&!seen.has(found.href)){seen.add(found.href);output.push(found.href);}
       }
@@ -429,6 +430,14 @@
     let liveUrl=officialCardUrl(location.href,reg,new Set([...INFO_PAGES,...DOC_PAGES]),
       new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(document.body?.textContent||""));
     let liveLanding=liveUrl?.href||"";
+    if(liveUrl&&DOC_PAGES.has(liveUrl.pathname)&&officialNoticeId(liveUrl)){
+      // A visible EIS documents tab is trusted when its page itself names
+      // this exact procurement. The provenance landing is its sibling
+      // common-info card with the SAME verified noticeId, not a docs page.
+      const common=new URL("common-info.html",liveUrl.href);
+      common.search=liveUrl.search;
+      liveLanding=common.href;
+    }
     if(!liveUrl&&actualUrl.origin===SITE&&DOC_PAGES.has(actualUrl.pathname)&&
         officialNoticeId(actualUrl)&&
         new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(document.body?.textContent||"")){
