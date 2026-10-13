@@ -53,6 +53,18 @@ def _name(value):
     if not 6<=len(value)<=400 or not re.search(r"[А-Яа-яЁёA-Za-z]",value):return ""
     if re.search(r"^(?:уточняем заказчика|заказчик уточняется|уточняется|не указан|нет данных|организация|заказчик|unknown)\b",value,re.I):return ""
     if re.fullmatch(r"[\d\W]+",value):return ""
+    # EIS sometimes provides entire legal names in uppercase; preserve legal
+    # entity abbreviations while rendering a normally cased company name.
+    alpha=[c for c in value if c.isalpha()]
+    if alpha and sum(c.isupper() for c in alpha)>=int(.85*len(alpha)):
+        abbreviations=("ООО","ПАО","АО","ОАО","ЗАО","ФГУП","ФГБУ",
+                       "ФБУЗ","ГБУ","МБУ","МУП","АНО","ФГБОУ")
+        safe=value.lower()
+        safe=safe[0].upper()+safe[1:]
+        safe=re.sub(r"«([а-яё])",lambda m:"«"+m[1].upper(),safe)
+        safe=re.sub(r"(?<![\w-])(?:"+ "|".join(x.lower() for x in abbreviations)+r")(?![\w-])",
+                    lambda m:m[0].upper(),safe)
+        value=safe
     return value
 
 def _db(ns):
@@ -107,6 +119,9 @@ def _initialize(ns):
                 WHERE b.reg=v301_inn_purchases.reg AND b.inn<>''
                       AND v301_inn_purchases.inn<>b.inn)
             """)
+            db.executemany("""INSERT OR IGNORE INTO v301_inn_purchases(inn,reg,found_at)
+                              VALUES (?,?,?)""",[(x["inn"],reg,stamp)
+                                                  for reg,x in CONFIRMED.items()])
         db.commit()
         print("V311 CUSTOMER_VERIFIED_INIT named="+str(len(CONFIRMED)),flush=True)
     finally:db.close()
@@ -154,6 +169,13 @@ def _apply(ns,reg,name,inn,source):
             customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
           WHERE reg_number=?
         """,(name,inn,inn,reg))
+        if inn:
+            has=db.execute("""SELECT 1 FROM sqlite_master
+                               WHERE type='table' AND name='v301_inn_purchases'""").fetchone()
+            if has:
+                db.execute("DELETE FROM v301_inn_purchases WHERE reg=? AND inn<>?",(reg,inn))
+                db.execute("""INSERT OR IGNORE INTO v301_inn_purchases(inn,reg,found_at)
+                              VALUES(?,?,?)""",(inn,reg,datetime.now(timezone.utc).isoformat()))
         db.commit()
         print(f"V311 VERIFIED_CUSTOMER reg={reg} inn_present={bool(inn)} "
               f"purchase_updated={result.rowcount>0}",flush=True)
@@ -193,8 +215,8 @@ def install(ns):
         if inn and not INN.fullmatch(inn):
             raise HTTPException(422,"Неверный ИНН заказчика")
         updated=await asyncio.to_thread(_apply,ns,reg,name,inn,source)
-        return {"accepted":True,"customer":name,"updated":updated,
-                "metadata_source":"official_eis_card"}
+        return {"accepted":True,"customer_verified":True,"customer":name,
+                "updated":updated,"metadata_source":"official_eis_card"}
 
     @app.get("/api/v311/customer/{reg}")
     async def verified_status(reg:str):
