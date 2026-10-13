@@ -146,7 +146,14 @@ def _official_source(raw,reg):
             u.fragment or u.path not in CARD_PATHS):
             return False
         q=parse_qs(u.query)
-        return (q.get("regNumber")==[reg] or q.get("purchaseNoticeNumber")==[reg])
+        if q.get("regNumber")==[reg] or q.get("purchaseNoticeNumber")==[reg]:
+            return True
+        # The EIS search index may link to a verified noticeInfoId instead
+        # of a regNumber URL. Only authorized browser-origin card metadata is
+        # accepted, never an arbitrary external website or procurement query.
+        ids=q.get("noticeInfoId",[])
+        return (not q.get("regNumber") and not q.get("purchaseNoticeNumber") and
+                len(ids)==1 and bool(re.fullmatch(r"[0-9]{1,15}",ids[0])))
     except (TypeError,ValueError):
         return False
 
