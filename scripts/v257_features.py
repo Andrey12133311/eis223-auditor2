@@ -86,10 +86,23 @@ def install(ns:dict)->None:
     @app.get('/api/v257/dashboard',include_in_schema=False)
     def dashboard(request:Request):
         params=request.query_params
-        verified=ns['_verified_set235']()
+        inn=(params.get('inn') or '').strip()
+        verified=set(ns['_verified_set235']())
+        if inn and re.fullmatch(r'\d{10}|\d{12}',inn):
+            # Explicit customer search includes independently checked purchases;
+            # do not imply they passed the ordinary automated audit queue.
+            with db() as c:
+                extra=c.execute(
+                    "SELECT DISTINCT p.reg_number FROM purchases p "
+                    "LEFT JOIN v301_inn_purchases bp ON bp.reg=p.reg_number "
+                    "WHERE p.documents_checked>0 AND (p.customer_inn=? OR bp.inn=?)",
+                    (inn,inn)).fetchall()
+                verified.update(str(row[0]) for row in extra)
+        verified=sorted(verified)
         if not verified:return {'stats':{'purchases':0,'violations':0,'risks':0,'documents_found':0,'documents_checked':0},'purchases':[],'offset':0,'limit':100}
-        conditions=['p.reg_number IN ('+','.join('?' for _ in verified)+')',
-                    'p.reg_number NOT IN (SELECT reg FROM ('+MANUAL_SOURCE_SQL+'))']
+        conditions=['p.reg_number IN ('+','.join('?' for _ in verified)+')']
+        if not inn:
+            conditions.append('p.reg_number NOT IN (SELECT reg FROM ('+MANUAL_SOURCE_SQL+'))')
         args=list(verified)
         forms=params.getlist('org_form')
         if forms:
