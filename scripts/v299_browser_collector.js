@@ -385,7 +385,12 @@
       if(nums.length && (nums.length!==1||nums[0]!==reg))return;
       const claim=officialNoticeId(url);
       const trusted=verifiedCard&&officialNoticeId(verifiedCard);
-      if(claim && (!trusted||claim.key!==trusted.key||claim.value!==trusted.value))return;
+      if(trusted){
+        // A validated noticeId/noticeInfoId must be preserved across tabs.
+        // Even if EIS renders an older regNumber-only documents link, do not
+        // follow it: it caused repeated false 404s.
+        if(!claim||claim.key!==trusted.key||claim.value!==trusted.value)return;
+      }else if(claim)return;
       if(!nums.length&&!claim)return;
       seen.add(url.href);candidates.push(url.href);
     }
