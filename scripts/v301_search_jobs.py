@@ -145,9 +145,9 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         for reg in (regs if isinstance(regs,list) else [])[:40]:
             if isinstance(reg,str) and REG.fullmatch(reg) and reg not in valid:valid.append(reg)
         if row["kind"]=="inn" and valid:
-            db.executemany(
-                "INSERT OR IGNORE INTO v301_inn_purchases(inn,reg,found_at) VALUES(?,?,?)",
-                [(row["target"],r,_utc()) for r in valid])
+            # Search filters in EIS may be ignored or not returned in
+            # the HTML. Discovery by itself does NOT prove buyer INN.
+            # v311 independently records the buyer from the official card.
             try:
                 db.executemany(
                     "INSERT OR IGNORE INTO v257_manual_registry(reg) VALUES(?)",
