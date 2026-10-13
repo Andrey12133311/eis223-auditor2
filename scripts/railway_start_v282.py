@@ -33,12 +33,14 @@ import v292_eis_soap_probe
 import v293_hide_obsolete_controls
 import v294_eis_bridge
 import v295_eis_originals
+import v298_eis_only
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
 from patch_v290 import patch as patch_v290
 from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
+    os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_BROWSER_ONLY"
     path=Path(tempfile.gettempdir())/'eis223_v282_private'/'entry.py'
     patch_file(folder/'entry.py',path)
     for fn in (patch_v257,patch_v258,patch_v259,patch_v260,patch_v261,patch_v262,patch_v263,patch_v264,patch_v265,patch_v266):
@@ -49,9 +51,8 @@ def main():
     digest=patch_v275(path)
     digest=patch_v276(path)
     digest=patch_v277(path)
-    digest=patch_v280(path)
-    digest=patch_v281(path)
-    digest=patch_v290(path)
+    # Disabled: DaMIA/TenderGuru discovery feed patches and Roseltorg retry scheduler.
+    # Only browser-origin EIS ZIP and original document intake remains active.
     digest=patch_v291(path)
     sys.path.insert(0,str(path.parent))
     import importlib
@@ -62,17 +63,13 @@ def main():
     v270_count_display.install(vars(entry))
     v293_hide_obsolete_controls.install(vars(entry))
     v271_reconcile.install(vars(entry))
-    v278_tenderguru.install(vars(entry))
-    v279_damia.install(vars(entry))
-    v282_rostender.install(vars(entry))
-    v288_roseltorg.install(vars(entry))
-    v288_roseltorg.install_documents(vars(entry))
-    v288_roseltorg.install_queue_bridge(vars(entry))
+    # No legacy API connectors or Roseltorg / ETP discovery.
     v294_eis_bridge.install(vars(entry))
     v295_eis_originals.install(vars(entry))
+    v298_eis_only.install(vars(entry))
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
-    v292_eis_soap_probe.start()
+    # Railway cannot reach EIS SOAP; do not launch repeated network probes.
     import uvicorn
     uvicorn.run(entry.app,host='0.0.0.0',port=int(os.environ.get('PORT','8080')))
 if __name__=='__main__':main()
