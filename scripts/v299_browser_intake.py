@@ -144,6 +144,17 @@ def _apply_customer(ns,value):
     try:
         db.execute("BEGIN IMMEDIATE")
         reg=value["reg_number"]
+        subject=" ".join(str(value.get("title") or "").split())[:800]
+        if subject and len(subject)>=10 and subject.lower() not in (
+                "подача заявок","приём заявок","начало подачи заявок"):
+            db.execute("""UPDATE purchases SET title=?
+                WHERE reg_number=? AND (title IS NULL OR LENGTH(TRIM(title))<10
+                    OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок')
+                    OR LOWER(title) LIKE 'закупка №%')""",(subject,reg))
+        if inn:
+            db.execute("""UPDATE purchases SET customer_inn=?
+                WHERE reg_number=? AND (customer_inn IS NULL OR TRIM(customer_inn)='')""",
+                (inn,reg))
         if name:
             db.execute(
               """UPDATE purchases SET customer=?,
