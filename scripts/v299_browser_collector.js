@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "310"; // authoritative modern notice223 documents
+  const COLLECTOR_VERSION = "311"; // authoritative modern notice223 documents
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -302,29 +302,24 @@
   function customerFromDocument(doc,reg){
     if(!doc)return {name:"",inn:""};
     let name="",inn="";
-    const sections=[...doc.querySelectorAll("section,.common-text,.row,.blockInfo__section")];
-    for(const section of sections){
+    // EIS sometimes shows the auction ORGANIZER separately from the BUYER.
+    // Use ONLY the labelled buyer section, never the company whose caption
+    // says "Организация, осуществляющая размещение".
+    for(const section of doc.querySelectorAll("section,.common-text,.row,.blockInfo__section")){
       const caption=(section.querySelector(".common-text__caption,.blockInfo__title")?.textContent||"")
         .replace(/\s+/g," ").trim();
-      if(!/сведения о заказчике|организация, осуществляющая размещение/i.test(caption))continue;
-      name=valueByLabel(section,[/^наименование организации/i,/^полное наименование/i,
-                                 /^заказчик$/i,/^наименование заказчика/i])||name;
-      inn=valueByLabel(section,[/^инн$/i,/^инн заказчика/i])||inn;
+      if(!/сведения о заказчике|информация о заказчике|^заказчик$/i.test(caption))continue;
+      const value=valueByLabel(section,[/^наименование организации/i,
+         /^полное наименование/i,/^заказчик$/i,/^наименование заказчика/i]);
+      const tax=valueByLabel(section,[/^инн$/i,/^инн заказчика/i]);
+      if(value)name=value;
+      if(tax)inn=tax;
       if(name&&inn)break;
     }
-    if(!name){
-      name=valueByLabel(doc,[/^наименование заказчика/i,/^заказчик$/i,
-                             /^наименование организации$/i]);
-    }
-    if(!inn){
-      inn=valueByLabel(doc,[/^инн заказчика/i,/^инн$/i]);
-    }
-    if(!name){
-      for(const a of doc.querySelectorAll("a[href*='/organization/'],a[href*='/organization-card/']")){
-        const txt=(a.textContent||"").replace(/\s+/g," ").trim();
-        if(txt.length>10&&!/^\d+$/.test(txt)){name=txt;break;}
-      }
-    }
+    if(!name)name=valueByLabel(doc,[/^наименование заказчика/i,/^заказчик$/i]);
+    if(!inn)inn=valueByLabel(doc,[/^инн заказчика/i]);
+    // Do not use general organization links: many are trading platforms,
+    // procurement organizers, rather than the 223-FZ buyer.
     name=name.replace(/\s+/g," ").trim().slice(0,400);
     if(/^(?:уточняем|заказчик уточняется|не указан|не найден|сведения отсутствуют)/i.test(name))
       name="";
