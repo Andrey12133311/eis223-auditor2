@@ -21,8 +21,13 @@
     return;
   }
   if (window.__eis223_five_minutes) {
-    console.log("[ЕИС-5мин] Загрузчик уже запущен. Чтобы остановить: __eis223_five_minutes.stop()");
-    return;
+    const previous=window.__eis223_five_minutes;
+    if(previous.version===COLLECTOR_VERSION && previous.status()?.active) {
+      console.log("[ЕИС-5мин] Актуальная версия v"+COLLECTOR_VERSION+" уже работает.");
+      return;
+    }
+    try{previous.stop();}catch(e){console.warn("[ЕИС-5мин] Ошибка остановки старой версии:",e);}
+    console.log("[ЕИС-5мин] Старая версия отключена, загружается v"+COLLECTOR_VERSION);
   }
 
   let key = prompt("Ключ EIS223_UPLOAD_TOKEN из Railway (токен ЕИС здесь не нужен):");
@@ -39,6 +44,7 @@
   const controller = new AbortController();
 
   window.__eis223_five_minutes = {
+    version:COLLECTOR_VERSION,
     stop() {
       active = false;
       clearTimeout(timer);
