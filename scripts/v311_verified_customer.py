@@ -151,7 +151,7 @@ def _official_source(raw,reg):
         # The EIS search index may link to a verified noticeInfoId instead
         # of a regNumber URL. Only authorized browser-origin card metadata is
         # accepted, never an arbitrary external website or procurement query.
-        ids=q.get("noticeInfoId",[])
+        ids=q.get("noticeInfoId",[])+q.get("noticeId",[])
         return (not q.get("regNumber") and not q.get("purchaseNoticeNumber") and
                 len(ids)==1 and bool(re.fullmatch(r"[0-9]{1,15}",ids[0])))
     except (TypeError,ValueError):
@@ -217,7 +217,7 @@ def install(ns):
             raise HTTPException(403,"Нужна открытая официальная страница ЕИС")
         try:version=int(request.headers.get("x-eis223-collector-version") or 0)
         except ValueError:version=0
-        if version<312:raise HTTPException(426,"Требуется мост ЕИС v312")
+        if version<313:raise HTTPException(426,"Требуется мост ЕИС v313")
         raw=await request.body()
         if len(raw)>2200:raise HTTPException(413,"Слишком большой ответ")
         try:
