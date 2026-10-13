@@ -332,10 +332,11 @@
     return true;
   }
 
-  async function heartbeat(status,newPurchases,newOriginals) {
+  async function heartbeat(status,newPurchases,newOriginals,error="") {
     try {
       await api("/api/v299/eis223/heartbeat","POST",{
-        status,new_purchases:newPurchases,originals_uploaded:newOriginals
+        status,new_purchases:newPurchases,originals_uploaded:newOriginals,
+        error:String(error||"").slice(0,230)
       });
     } catch(e) {log("Отчёт о цикле не отправлен:",e.message);}
   }
@@ -346,7 +347,7 @@
       return;
     }
     busy=true;
-    let status="ok",added=0,downloadedStart=uploaded,delay=INTERVAL;
+    let status="ok",added=0,failures=0,lastError="",downloadedStart=uploaded,delay=INTERVAL;
     cycles++;
     try {
       log("Цикл",cycles,": получаю первую страницу последних закупок 223-ФЗ");
@@ -370,18 +371,22 @@
           try{if(await handleRegistry(n,search))added++;}
           catch(e){
             if(e.backoff)throw e;
-            log(n,"не удалось обработать:",String(e.message).slice(0,150));
+            failures++;
+            lastError=String(e.message).slice(0,230);
+            log(n,"не удалось обработать:",lastError);
           }
         }
       }
+      if(added===0&&failures>0)status="no_downloadable_originals";
     } catch(e) {
       status=e.backoff?"rate_limited":"fetch_error";
+      lastError=String(e.message).slice(0,230);
       if(e.backoff)delay=BACKOFF;
-      log("Ошибка цикла:",String(e.message).slice(0,170));
+      log("Ошибка цикла:",lastError);
     } finally {
       busy=false;
       if(active){
-        await heartbeat(status,added,uploaded-downloadedStart);
+        await heartbeat(status,added,uploaded-downloadedStart,lastError);
         log("Цикл окончен. Новых карточек:",added,"оригиналов:",
           uploaded-downloadedStart,"Следующий запрос через",
           Math.round(delay/60000),"мин.");
