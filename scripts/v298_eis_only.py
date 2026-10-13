@@ -85,18 +85,31 @@ async def offline_audit(ns,reg):
     allowed=allowed_documents(reg)
     if not allowed:raise ValueError("Verified EIS XML has no documents")
     notice=await asyncio.to_thread(official_notice,reg)
-    if notice is None:raise ValueError("Verified EIS XML is not available locally")
+    public={}
+    if notice is None:
+        # Public search and the document page are visited by the user's browser;
+        # no cross-origin requests from Railway are made here.
+        try:
+            path=data_root()/"eis223_public_browser_intake"/reg/"manifest.json"
+            public=json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(public,dict) or
+                public.get("source")!="public_eis_223_browser" or
+                public.get("reg_number")!=reg or
+                not public.get("documents")):
+                raise ValueError("Invalid official-browser manifest")
+        except (OSError,ValueError,TypeError) as exc:
+            raise ValueError("Neither EIS SOAP XML nor public EIS manifest available") from exc
 
     previous=await asyncio.to_thread(stored_purchase,ns,reg)
     lot=direct(direct(notice,"lots"),"lot")
     lot_data=direct(lot,"lotData")
     cust=direct(direct(notice,"customer"),"mainInfo")
-    reg_name=field(notice,"name") or previous.get("title") or ""
-    customer=field(cust,"fullName") or field(cust,"shortName") or previous.get("customer") or ""
-    start=field(notice,"applSubmisionStartDate")[:10]
-    end=field(notice,"submissionCloseDateTime")[:10]
-    published=field(notice,"publicationDateTime")
-    price=field(lot_data,"initialSum") or str(previous.get("price") or "")
+    reg_name=field(notice,"name") or public.get("title") or previous.get("title") or ("Закупка № "+reg)
+    customer=field(cust,"fullName") or field(cust,"shortName") or public.get("customer") or previous.get("customer") or ""
+    start=field(notice,"applSubmisionStartDate")[:10] or public.get("submission_start","")[:10]
+    end=field(notice,"submissionCloseDateTime")[:10] or public.get("submission_end","")[:10]
+    published=field(notice,"publicationDateTime") or public.get("published","")
+    price=field(lot_data,"initialSum") or public.get("price") or str(previous.get("price") or "")
     num=ns.get("price_num",lambda x:None)(price)
     p={"reg":reg,
        "title":reg_name,
@@ -172,15 +185,20 @@ async def offline_audit(ns,reg):
     if not all(callable(x) for x in (analyze,build_checks,save)):
         raise RuntimeError("Existing 223-FZ legal analysis functions are unavailable")
     findings=await asyncio.to_thread(analyze,p,docs)
+    # Only substantiated violations enter the NEW incoming audit results.
+    # Weak heuristic "risk" matches do not become violations and are not
+    # presented as a performance indicator. Historical data are retained.
+    findings=[f for f in findings if isinstance(f,dict) and f.get("kind")=="violation"]
     checks=await asyncio.to_thread(build_checks,p,detail,card,docs)
+    checks=[c for c in checks if isinstance(c,dict) and c.get("status")!="risk"]
     annotate=ns.get("annotate")
     if callable(annotate):
         await asyncio.to_thread(annotate,reg,docs,findings,checks)
     payload={
        **card,
        "status":"partial",
-       "origin":"official_eis_getDocsIP",
-       "source_diagnostic":"EIS browser-origin archive and verified original bytes",
+       "origin":"official_eis_getDocsIP" if notice is not None else "public_eis_223_browser",
+       "source_diagnostic":"Official EIS browser intake and verified original bytes",
        "source_document_count":len(allowed),
        "attached_originals":len(docs),
        "api_fields":list(detail.items()),
@@ -190,7 +208,8 @@ async def offline_audit(ns,reg):
     print(f"V298 OFFLINE_AUDIT reg={reg} documents={len(docs)} checked={checked} findings={len(findings)} checks={len(checks)} remote_requests=0",flush=True)
     return {"reg":reg,"documents":len(docs),"checked_documents":checked,
             "findings":len(findings),"checks":len(checks),
-            "source":"official_eis_getDocsIP","remote_requests":0}
+            "source":"official_eis_getDocsIP" if notice is not None else "public_eis_223_browser",
+            "remote_requests":0}
 
 
 def install(ns):
