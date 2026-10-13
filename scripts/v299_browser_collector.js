@@ -210,7 +210,8 @@
     const candidates=[],seen=new Set();
     function add(raw) {
       try{
-        const u=new URL(String(raw).replace(/&amp;/gi,"&"),SITE);
+        const u=new URL(String(raw).replace(/&amp;/gi,"&"),
+          SITE+"/epz/order/notice/notice223/common-info.html");
         if(u.origin!==SITE||!allowed.has(u.pathname))return;
         const number=u.searchParams.get("regNumber")||u.searchParams.get("purchaseNoticeNumber");
         if(number&&number!==reg)return;
@@ -223,8 +224,8 @@
       for(const el of landing.querySelectorAll("a[href],a[onclick],[data-href],[data-url]")){
         for(const field of ["href","onclick","data-href","data-url"]) {
           const raw=el.getAttribute(field)||"";
-          if(raw.includes("/notice223/documents.html")){
-            const m=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/epz\/order\/notice\/notice223\/documents\.html\?[^"'\\\s<>)]*/i);
+          if(raw.includes("documents.html?")){
+            const m=raw.match(/(?:(?:https?:\/\/zakupki\.gov\.ru)?\/epz\/order\/notice\/notice223\/)?documents\.html\?[^"'\\\s<>)]*/i);
             if(m)add(m[0]);
           }
         }
