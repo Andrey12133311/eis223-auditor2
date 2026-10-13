@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "312"; // authoritative modern notice223 documents
+  const COLLECTOR_VERSION = "313"; // authoritative modern notice223 documents
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -255,30 +255,38 @@
     "/223/purchase/public/purchase/info/documents.html",
     "/epz/order/notice/notice223/documents.html"
   ]);
+  const NOTICE_KEYS=["noticeId","noticeInfoId"];
+  function officialNoticeId(url) {
+    const entries=NOTICE_KEYS.flatMap(k=>url.searchParams.getAll(k).map(value=>({key:k,value})));
+    if(entries.length!==1 || !/^[0-9]{1,15}$/.test(entries[0].value))return null;
+    return entries[0];
+  }
   function officialCardUrl(raw,reg,validPaths,associatedNoticeId=false){
     try{
       const u=new URL(String(raw||"").replace(/&amp;/gi,"&"),SITE);
-      if(u.origin!==SITE||!validPaths.has(u.pathname))return null;
-      const regNum=u.searchParams.get("regNumber")||
-                   u.searchParams.get("purchaseNoticeNumber");
-      if(regNum===reg)return u;
-      // Many live EIS 223 cards are addressed by noticeInfoId, not regNumber.
-      // Associate this identifier ONLY with a search result visibly containing
-      // the exact registry number; do not guess random notice identifiers.
-      const noticeId=u.searchParams.get("noticeInfoId");
-      if(associatedNoticeId&&!regNum&&/^[0-9]{1,15}$/.test(noticeId||""))return u;
+      if(u.origin!==SITE||u.username||u.password||u.hash||!validPaths.has(u.pathname))
+        return null;
+      const regNums=[...u.searchParams.getAll("regNumber"),
+                     ...u.searchParams.getAll("purchaseNoticeNumber")];
+      if(regNums.length && (regNums.length!==1 || regNums[0]!==reg))return null;
+      if(regNums.length===1)return u;
+      // Real 223-FZ notice cards commonly use noticeId, not regNumber.
+      // Numeric IDs are accepted only when the EIS search result / opened
+      // card visibly contains the exact procurement registry number.
+      if(associatedNoticeId&&officialNoticeId(u))return u;
       return null;
     }catch(e){return null}
   }
   function actualCardLinks(doc,reg){
     const output=[],seen=new Set();
     if(!doc)return output;
-    for(const element of doc.querySelectorAll("a[href],[onclick],[data-href]")){
+    const exact=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)");
+    for(const element of doc.querySelectorAll("a[href],[onclick],[data-href],[data-url]")){
       const block=element.closest?.(
         ".search-registry-entry-block,.registry-entry,article,tr,.registry-entry__form");
       const context=String(block?.textContent||element.textContent||"");
-      const correlated=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(context);
-      for(const key of ["href","onclick","data-href"]){
+      const correlated=exact.test(context);
+      for(const key of ["href","onclick","data-href","data-url"]){
         const raw=element.getAttribute(key)||"";
         let found=null;
         if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES,correlated);
@@ -359,29 +367,42 @@
     return "";
   }
   function documentPageCandidates(reg,landing){
-    // Trust actual hyperlinks from the EIS purchase page, NEVER fabricate
-    // documents.html?regNumber=... which returned HTTP 404 repeatedly.
+    // Use real links and numeric notice identifiers from an EIS card.
+    // Never fabricate documents.html?regNumber=... for 223-FZ.
     const candidates=[],seen=new Set();
     if(!landing)return candidates;
+    const origin=landing.__eis223_source_url||"";
+    const verifiedCard=officialCardUrl(origin,reg,INFO_PAGES,true);
+    function add(raw){
+      let url;
+      try{url=new URL(String(raw).replace(/&amp;/gi,"&"),origin||SITE)}
+      catch(e){return}
+      if(url.origin!==SITE||url.username||url.password||url.hash ||
+         !DOC_PAGES.has(url.pathname)||seen.has(url.href))return;
+      const nums=[...url.searchParams.getAll("regNumber"),
+                  ...url.searchParams.getAll("purchaseNoticeNumber")];
+      if(nums.length && (nums.length!==1||nums[0]!==reg))return;
+      const claim=officialNoticeId(url);
+      const trusted=verifiedCard&&officialNoticeId(verifiedCard);
+      if(claim && (!trusted||claim.key!==trusted.key||claim.value!==trusted.value))return;
+      if(!nums.length&&!claim)return;
+      seen.add(url.href);candidates.push(url.href);
+    }
     for(const el of landing.querySelectorAll("a[href],a[onclick],[data-href],[data-url]")){
       for(const field of ["href","onclick","data-href","data-url"]){
         const raw=el.getAttribute(field)||"";
         if(!raw.includes("documents.html"))continue;
         const m=raw.match(/(?:(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/)?documents\.html\?[^"'<>\s)]+/i);
-        if(!m)continue;
-        // Official 223-FZ navigation may provide only a relative link
-        // 'documents.html?noticeInfoId=...'. Resolve relative to the
-        // actual fetched common-info URL, never invent a regNumber route.
-        const base=landing.__eis223_source_url||
-          SITE+"/223/purchase/public/purchase/info/common-info.html?regNumber="+reg;
-        const url=new URL(m[0].replace(/&amp;/gi,"&"),base);
-        if(url.origin!==SITE||!DOC_PAGES.has(url.pathname))continue;
-        const regNum=url.searchParams.get("regNumber")||url.searchParams.get("purchaseNoticeNumber");
-        if(regNum&&regNum!==reg)continue;
-        const noticeId=url.searchParams.get("noticeInfoId");
-        if(!regNum&&!(/^[0-9]{1,15}$/.test(noticeId||"")))continue;
-        if(!seen.has(url.href)){seen.add(url.href);candidates.push(url.href);}
+        if(m)add(m[0]);
       }
+    }
+    // Navigation links are sometimes absent from EIS server-side HTML,
+    // but the validated common-info noticeId is sufficient to identify
+    // the corresponding official documents tab.
+    if(verifiedCard&&officialNoticeId(verifiedCard)){
+      const sibling=new URL("documents.html",verifiedCard.href);
+      sibling.search=verifiedCard.search;
+      add(sibling.href);
     }
     return candidates;
   }
@@ -405,11 +426,12 @@
     const problems=[];
     const searchCustomer=verifiedSearchCustomer(searchDoc,reg);
     const actualUrl=new URL(location.href);
-    let liveUrl=officialCardUrl(location.href,reg,new Set([...INFO_PAGES,...DOC_PAGES]));
+    let liveUrl=officialCardUrl(location.href,reg,new Set([...INFO_PAGES,...DOC_PAGES]),
+      new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(document.body?.textContent||""));
     let liveLanding=liveUrl?.href||"";
     if(!liveUrl&&actualUrl.origin===SITE&&DOC_PAGES.has(actualUrl.pathname)&&
-        /^[0-9]{1,15}$/.test(actualUrl.searchParams.get("noticeInfoId")||"")&&
-        (document.body?.textContent||"").includes(reg)){
+        officialNoticeId(actualUrl)&&
+        new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(document.body?.textContent||"")){
       const actualLinks=actualCardLinks(document,reg);
       if(actualLinks.length){
         liveUrl=actualUrl;
@@ -431,15 +453,35 @@
     // Prefer the actual common-info link from the search result. A 223-FZ
     // notice is NOT a 44-FZ notice223 page merely because the search screen
     // displays it; dynamically read the official card route instead.
-    const validatedSearchLinks=new Set(actualCardLinks(searchDoc,reg));
-    const urls=[...validatedSearchLinks];
-    urls.push(SITE+"/223/purchase/public/purchase/info/common-info.html?regNumber="+reg);
-    urls.push(SITE+"/223/purchase/public/purchase/info/commoninfo.html?regNumber="+reg);
-    urls.push(SITE+"/epz/order/notice/notice223/common-info.html?regNumber="+reg);
+    let verifiedSearchDoc=searchDoc;
+    let validatedSearchLinks=actualCardLinks(verifiedSearchDoc,reg);
+    if(!validatedSearchLinks.length){
+      // Manual jobs have no search-result page. Obtain an actual noticeId
+      // by searching the EIS registry number, rather than guessing URLs.
+      const targeted="/epz/order/extendedsearch/results.html?"+
+        new URLSearchParams({searchString:reg,morphology:"off",fz223:"on",
+          sortBy:"UPDATE_DATE",sortDirection:"false",
+          pageNumber:"1",recordsPerPage:"_20",af:"on"});
+      try{
+        verifiedSearchDoc=await eisHtml(targeted);
+        validatedSearchLinks=actualCardLinks(verifiedSearchDoc,reg);
+        if(validatedSearchLinks.length)
+          log(reg,"найдена действительная ссылка карточки ЕИС");
+      }catch(e){
+        if(e.backoff)throw e;
+        problems.push("поиск ЕИС: "+String(e.message).slice(0,80));
+      }
+    }
+    if(!validatedSearchLinks.length){
+      throw new Error("Не найдена реальная ссылка на карточку ЕИС по "+reg+
+        ". Ошибочный маршрут documents.html?regNumber не используется.");
+    }
+    const verifiedLinkSet=new Set(validatedSearchLinks);
+    const urls=validatedSearchLinks;
     const seen=new Set();
     for(const raw of urls){
       if(seen.has(raw))continue;seen.add(raw);
-      const url=officialCardUrl(raw,reg,INFO_PAGES,validatedSearchLinks.has(raw));
+      const url=officialCardUrl(raw,reg,INFO_PAGES,verifiedLinkSet.has(raw));
       if(!url)continue;
       let landing;
       try{landing=await eisHtml(url.pathname+url.search)}
