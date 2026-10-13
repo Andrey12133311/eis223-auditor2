@@ -163,14 +163,18 @@ def _scan_status():
     except (ValueError,OSError,TypeError):
         info={}
     at=info.get("last_scan")
+    try:version=int(info.get("collector_version") or 0)
+    except (ValueError,TypeError):version=0
     active=False
     if isinstance(at,str):
         try:
             date=datetime.fromisoformat(at)
-            active=(datetime.now(timezone.utc)-date)<timedelta(minutes=12)
+            active=(version>=309 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
         except (ValueError,TypeError):pass
     return {
         "browser_collector_active":active,
+        "collector_version":version,
+        "upgrade_required":version<309,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),
         "last_error":info.get("error",""),
@@ -220,6 +224,10 @@ def install(ns):
         auth(request)
         if request.headers.get("origin")!="https://zakupki.gov.ru":
             raise HTTPException(403,"Expected EIS browser origin")
+        try:version=int(request.headers.get("x-eis223-collector-version") or "0")
+        except ValueError:version=0
+        if version<309:
+            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v309")
         raw=await request.body()
         if len(raw)>1500:raise HTTPException(413,"Heartbeat too large")
         try:
@@ -236,7 +244,7 @@ def install(ns):
             status="fetch_error"
         error=_safe_string(body.get("error"),240).replace("\n"," ")
         record={"last_scan":datetime.now(timezone.utc).isoformat(),
-                "status":status,"error":error,**vals}
+                "status":status,"error":error,"collector_version":version,**vals}
         path=root()/"eis223_public_browser_intake"/"_monitor_status.json"
         await asyncio.to_thread(save_atomic,path,json.dumps(record).encode())
         return {"received":True,**_scan_status()}
