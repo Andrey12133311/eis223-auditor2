@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from fastapi import HTTPException,Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from v295_eis_originals import root as storage, save_atomic, auth
 
@@ -401,7 +401,12 @@ def install(ns):
                 body=json.loads(raw)
             except (ValueError,TypeError):
                 body={}
-            return await build_memo(m[1],body.get("fields") if isinstance(body,dict) else {})
+            try:
+                return await build_memo(m[1],body.get("fields") if isinstance(body,dict) else {})
+            except HTTPException as exc:
+                # Middleware executes outside FastAPI's exception handler.
+                # Return an actionable 4xx, not an unhandled 500/stack trace.
+                return JSONResponse({"detail":exc.detail},status_code=exc.status_code)
         return await call_next(request)
 
     print("V304 OFFICIAL_MEMO_ODT_READY template_installed="+str(template_path().is_file()),flush=True)
