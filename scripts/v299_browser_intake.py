@@ -221,12 +221,12 @@ def _scan_status():
     if isinstance(at,str):
         try:
             date=datetime.fromisoformat(at)
-            active=(version>=309 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
+            active=(version>=310 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
         except (ValueError,TypeError):pass
     return {
         "browser_collector_active":active,
         "collector_version":version,
-        "upgrade_required":version<309,
+        "upgrade_required":version<310,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),
         "last_error":info.get("error",""),
@@ -279,8 +279,8 @@ def install(ns):
             raise HTTPException(403,"Expected EIS browser origin")
         try:version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:version=0
-        if version<309:
-            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v309")
+        if version<310:
+            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v310")
         raw=await request.body()
         if len(raw)>1500:raise HTTPException(413,"Heartbeat too large")
         try:
