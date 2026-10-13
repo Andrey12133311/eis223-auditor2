@@ -37,7 +37,6 @@ import v303_dashboard_fixes
 import v304_official_memo_odt
 import v305_memo_card
 import v303_mobile_fixes
-import v304_memo_odt
 from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
@@ -76,7 +75,6 @@ def main():
     v304_official_memo_odt.install(vars(entry))
     v305_memo_card.install(vars(entry))
     v303_mobile_fixes.install(vars(entry))
-    v304_memo_odt.install(vars(entry))
     print('V305 BOOT_UI_FIXED memo_format=odt-only filters=canonical card_nav=working',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
