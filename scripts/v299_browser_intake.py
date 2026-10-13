@@ -168,6 +168,14 @@ def _apply_customer(ns,value):
         raise
     finally:db.close()
 
+def _save_official_card(value):
+    """One verified EIS card per procurement, persisted for later offline audit."""
+    path=root()/"eis223_public_browser_intake"/value["reg_number"]/"buyer.json"
+    save_atomic(path,json.dumps({
+      **value,"source":"public_eis_223_browser_card",
+      "captured_at":datetime.now(timezone.utc).isoformat()
+    },ensure_ascii=False).encode("utf-8"))
+
 def _known(ns,regs):
     db=ns["conn"]()
     try:
@@ -261,6 +269,48 @@ def install(ns):
         return {"accepted":True,"reg_number":value["reg_number"],
                 "documents_discovered":qty,"source":"ЕИС",
                 "originals_verified_increment":0}
+
+    @app.post("/api/v311/eis223/customer")
+    async def customer_from_official_card(request:Request):
+        """Save EIS-provided buyer fields immediately, even when docs return 404."""
+        auth(request)
+        if request.headers.get("origin")!="https://zakupki.gov.ru":
+            raise HTTPException(403,"Требуется открытая официальная карточка ЕИС")
+        raw=await request.body()
+        if len(raw)>2800:raise HTTPException(413,"Слишком много сведений")
+        try:
+            values=json.loads(raw)
+            reg=_safe_string(values.get("reg_number"),20)
+            source=_safe_string(values.get("source_page"),1100)
+            page=urlsplit(source)
+            params=parse_qs(page.query)
+            allowed_paths=(
+                "/223/purchase/public/purchase/info/common-info.html",
+                "/223/purchase/public/purchase/info/documents.html",
+                "/epz/order/notice/notice223/common-info.html",
+                "/epz/order/notice/notice223/documents.html")
+            if (not REG.fullmatch(reg) or len(reg)!=11 or
+                page.scheme!="https" or page.hostname!="zakupki.gov.ru" or
+                page.port is not None or page.username or page.password or
+                page.path not in allowed_paths or
+                params.get("regNumber")!=[reg]):
+                raise ValueError("Неверная карточка официальной закупки")
+            name=_real_customer(_safe_string(values.get("customer"),400))
+            inn=_safe_string(values.get("customer_inn"),12)
+            if not re.fullmatch(r"(?:[0-9]{10}|[0-9]{12})",inn):inn=""
+            title=_safe_string(values.get("title"),800)
+            if title.strip().lower() in ("подача заявок","извещение"):title=""
+            if not (name or inn or title):raise ValueError("Нет подтверждённых сведений")
+            verified={"reg_number":reg,"customer":name,"customer_inn":inn,
+                      "title":title,"source_page":source}
+        except (ValueError,TypeError,AttributeError) as exc:
+            raise HTTPException(422,"Некорректные реквизиты ЕИС") from exc
+        await asyncio.to_thread(_save_official_card,verified)
+        await asyncio.to_thread(_apply_customer,ns,verified)
+        print(f"V311 BUYER_EIS_CAPTURED reg={reg} name={bool(name)} inn={bool(inn)}",
+              flush=True)
+        return {"accepted":True,"reg_number":reg,"customer_verified":bool(name),
+                "inn_verified":bool(inn)}
 
     @app.get("/api/v299/eis223/known")
     async def known(request:Request,regs:str=""):
