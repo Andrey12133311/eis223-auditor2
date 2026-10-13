@@ -409,9 +409,18 @@
         } else {
           const before=uploaded;
           const accepted=await handleRegistry(job.target,null);
-          report={status:accepted?"done":"partial",
-                  detail:accepted?"Оригиналы переданы на юридическую проверку":"ЕИС не предоставила доступные оригиналы",
-                  accepted:uploaded-before,found:accepted?1:0};
+          const updated=(await getKnown([job.target]))[job.target]||{};
+          const fullyReceived=updated.manifest_documents>0 &&
+            updated.originals_received>=updated.manifest_documents;
+          report={
+            status:fullyReceived?"done":"partial",
+            detail:fullyReceived?
+              "Все официальные оригиналы получены; юридическая проверка запускается":
+              ("Получено "+(updated.originals_received||0)+" из "+
+                 (updated.manifest_documents||0)+
+                 " оригиналов; недостающие файлы остаются в приоритетной очереди"),
+            accepted:uploaded-before,found:accepted?1:0
+          };
         }
       } else if(job.kind==="inn") {
         const q="/epz/order/extendedsearch/results.html?"+
