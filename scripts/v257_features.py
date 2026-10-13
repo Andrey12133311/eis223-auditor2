@@ -106,8 +106,8 @@ def install(ns:dict)->None:
         inn=(params.get('inn') or '').strip()
         if inn:
             if not re.fullmatch(r'\d{10}|\d{12}',inn):raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
-            conditions.append('''(p.customer_inn=? OR EXISTS(SELECT 1 FROM customer_purchases_v233 cp WHERE cp.reg=p.reg_number AND cp.inn=?))''')
-            args.extend((inn,inn))
+            conditions.append('''(p.customer_inn=? OR EXISTS(SELECT 1 FROM customer_purchases_v233 cp WHERE cp.reg=p.reg_number AND cp.inn=?) OR EXISTS(SELECT 1 FROM v301_inn_purchases bp WHERE bp.reg=p.reg_number AND bp.inn=?))''')
+            args.extend((inn,inn,inn))
         q=(params.get('q') or '').strip()
         if q:
             conditions.append('(p.reg_number LIKE ? OR p.title LIKE ? OR p.customer LIKE ?)')
