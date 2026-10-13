@@ -137,6 +137,12 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
             db.executemany(
                 "INSERT OR IGNORE INTO v301_inn_purchases(inn,reg,found_at) VALUES(?,?,?)",
                 [(row["target"],r,_utc()) for r in valid])
+            try:
+                db.executemany(
+                    "INSERT OR IGNORE INTO v257_manual_registry(reg) VALUES(?)",
+                    [(r,) for r in valid])
+            except sqlite3.OperationalError:
+                pass
         now=_utc()
         nb=int(time.time())+min(1800,max(60,defer)) if status=="deferred" else 0
         effective="queued" if status=="deferred" else status
