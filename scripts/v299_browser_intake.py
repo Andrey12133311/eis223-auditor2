@@ -261,6 +261,48 @@ def _scan_status():
 def install(ns):
     app=ns["app"]
 
+    @app.post("/api/v310/eis223/card-metadata")
+    async def verified_eis_card_metadata(request:Request):
+        auth(request)
+        if request.headers.get("origin")!="https://zakupki.gov.ru":
+            raise HTTPException(403,"Только официальная вкладка ЕИС")
+        try:version=int(request.headers.get("x-eis223-collector-version") or "0")
+        except ValueError:version=0
+        if version<310:raise HTTPException(426,"Обновите мост ЕИС до v310")
+        raw=await request.body()
+        if len(raw)>2500:raise HTTPException(413,"Слишком большой запрос")
+        try:
+            data=json.loads(raw)
+            reg=_safe_string(data.get("reg_number"),20)
+            u=urlsplit(_safe_string(data.get("source_page"),1000))
+            q=parse_qs(u.query)
+            if (not re.fullmatch(r"3[0-9]{10}",reg) or
+                u.scheme!="https" or u.hostname!="zakupki.gov.ru" or
+                u.port is not None or u.username or u.password or u.fragment or
+                u.path not in (
+                    "/223/purchase/public/purchase/info/common-info.html",
+                    "/223/purchase/public/purchase/info/commoninfo.html",
+                    "/epz/order/notice/notice223/common-info.html") or
+                q.get("regNumber")!=[reg]):
+                raise ValueError("Недопустимое подтверждение источника ЕИС")
+            value={"reg_number":reg,
+                   "customer":_safe_string(data.get("customer"),400),
+                   "customer_inn":_safe_string(data.get("customer_inn"),12),
+                   "title":_safe_string(data.get("title"),800)}
+            if not (_real_customer(value["customer"]) or
+                    re.fullmatch(r"(?:[0-9]{10}|[0-9]{12})",value["customer_inn"]) or
+                    len(value["title"])>12):
+                raise ValueError("В карточке нет новых подтверждённых сведений")
+        except (AttributeError,ValueError,TypeError) as exc:
+            raise HTTPException(422,str(exc)) from exc
+        await asyncio.to_thread(_apply_customer,ns,value)
+        print(f"V310 CARD_METADATA reg={reg} customer_confirmed={bool(_real_customer(value['customer']))} "
+              f"inn_confirmed={bool(re.fullmatch(r'(?:[0-9]{10}|[0-9]{12})',value['customer_inn']))}",
+              flush=True)
+        return {"accepted":True,"reg_number":reg,
+                "customer_stored":bool(_real_customer(value["customer"])),
+                "independent_of_document_download":True}
+
     @app.post("/api/v299/eis223/public-manifest")
     async def public_manifest(request:Request):
         auth(request)
