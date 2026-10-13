@@ -59,7 +59,18 @@ def _init(ns):
                 last_action TEXT NOT NULL DEFAULT ''
             );
         """)
+        # Repair the backlog produced by the obsolete /223/purchase/... URL.
+        # These jobs are NOT regarded as successful checks. They wait for the
+        # upgraded browser bridge to retrieve real original-file bytes.
+        repaired=db.execute(
+            "UPDATE v301_search_jobs SET status='queued',attempts=0,not_before=0,"
+            "lease_until=0,updated_at=? "
+            "WHERE status='partial' AND kind='reg' "
+            "AND detail LIKE 'ЕИС HTTP 404 /223/purchase/%'",
+            (_utc(),)).rowcount
         db.commit()
+        if repaired:
+            print(f"V308 RETRY_OLD_404_BACKLOG jobs={repaired}",flush=True)
     finally:db.close()
 
 def _utc():return datetime.now(timezone.utc).isoformat()
@@ -146,6 +157,12 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         now=_utc()
         nb=int(time.time())+min(1800,max(60,defer)) if status=="deferred" else 0
         effective="queued" if status=="deferred" else status
+        if row["kind"]=="reg" and status=="partial" and int(row["attempts"])<3:
+            # A temporary 404, timeout or empty original-file page must not be
+            # treated as a completed procurement audit. Retry at most 3 times
+            # with a 15-minute cooldown; never create synthetic verified rows.
+            effective="queued"
+            nb=int(time.time())+900
         db.execute(
             "UPDATE v301_search_jobs SET status=?,detail=?,found=?,accepted=?,"
             "not_before=?,lease_until=0,updated_at=? WHERE id=?",
@@ -296,6 +313,15 @@ def install(ns):
         auth(request)
         if request.headers.get("origin")!="https://zakupki.gov.ru":
             raise HTTPException(403,"Доступно только официальной вкладке ЕИС")
+        # Old browser code always requests /223/purchase/... (HTTP 404) and
+        # would immediately exhaust the repaired queue. Require hot restart
+        # with version 308 before handing out any new work.
+        try:
+            version=int(request.headers.get("x-eis223-collector-version") or "0")
+        except ValueError:
+            version=0
+        if version<308:
+            raise HTTPException(426,"Обновлён загрузчик ЕИС. Перезапустите код моста (v308) в браузере.")
         job=await asyncio.to_thread(_claim,ns)
         return {"job":{k:job[k] for k in ("id","kind","target","page","attempts")} if job else None,
                 "poll_seconds":8}
@@ -321,4 +347,4 @@ def install(ns):
         job=await asyncio.to_thread(_finish,ns,job_id,status,detail,found,accepted,defer,regs,more)
         return {"received":True,"status":job["status"],"id":job["id"]}
 
-    print("V301 MANUAL_EIS_QUEUE_READY kinds=reg,inn priority=0 bridge_poll=8",flush=True)
+    print("V308 QUEUE_READY modern_notice223=True stale_bridge_requires_reload=True",flush=True)
