@@ -153,7 +153,7 @@ def install(ns):
     app.add_middleware(CORSMiddleware,
         allow_origins=["https://zakupki.gov.ru","https://int.zakupki.gov.ru"],
         allow_methods=["GET","POST","OPTIONS"],
-        allow_headers=["content-type","x-eis223-upload-token"],
+        allow_headers=["content-type","x-eis223-upload-token","x-eis223-collector-version"],
         allow_credentials=False,
         max_age=600)
     discovery=ns.get("discover_eis_documents")
