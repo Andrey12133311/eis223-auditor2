@@ -375,6 +375,22 @@
     }
     return candidates;
   }
+  async function reportOfficialBuyer(reg,source,customer,title){
+    // Buyer's verified official card metadata must not depend on document
+    // availability. This call is intentionally separate from original upload.
+    if(!customer?.name&&!customer?.inn&&!title)return;
+    try{
+      const result=await api("/api/v311/eis223/customer","POST",{
+        reg_number:reg,source_page:source,
+        customer:customer?.name||"",customer_inn:customer?.inn||"",
+        title:title||""
+      });
+      if(result.customer_verified)
+        log(reg,"заказчик установлен из ЕИС:",(customer.name||"").slice(0,95));
+    }catch(e){
+      log(reg,"сведения о заказчике пока не сохранены:",String(e.message).slice(0,100));
+    }
+  }
   async function discoverFromOfficialCard(reg,searchDoc){
     const problems=[];
     const searchCustomer=verifiedSearchCustomer(searchDoc,reg);
@@ -395,9 +411,11 @@
       if(docs.length){
         log(reg,"найдено на открытой официальной странице ЕИС:",docs.length);
         const meta=customerFromDocument(document,reg);
+        const customer=meta.name?meta:searchCustomer;
+        const title=titleFromDocument(document,reg)||searchTitle(searchDoc,reg);
+        await reportOfficialBuyer(reg,liveLanding||liveUrl.href,customer,title);
         return {docs,source:liveUrl.href,landing:liveLanding||liveUrl.href,
-                customer:meta.name?meta:searchCustomer,
-                title:titleFromDocument(document,reg)||searchTitle(searchDoc,reg)};
+                customer,title};
       }
     }
     // Prefer the actual common-info link from the search result. A 223-FZ
@@ -422,6 +440,8 @@
       let customer=customerFromDocument(landing,reg);
       if(!customer.name)customer=searchCustomer;
       const title=titleFromDocument(landing,reg)||searchTitle(searchDoc,reg);
+      // Save the buyer NOW even if every document tab below returns HTTP 404.
+      await reportOfficialBuyer(reg,url.href,customer,title);
       const onCard=discoverDocs(landing,reg);
       if(onCard.length)return {docs:onCard,source:url.href,landing:url.href,customer,title};
       for(const target of documentPageCandidates(reg,landing)){
