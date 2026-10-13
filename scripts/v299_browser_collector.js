@@ -31,7 +31,7 @@
   }
   key = key.trim();
   let active = true, timer = null, busy = false;
-  let cycles = 0, uploaded = 0, admitted = 0;
+  let cycles = 0, uploaded = 0, admitted = 0, rotatingIndex = 0;
   const log = (...args) => console.log("[ЕИС-5мин]", ...args);
   const wait = ms => new Promise(ok => setTimeout(ok, ms));
   const controller = new AbortController();
@@ -121,6 +121,16 @@
     }
     return [...numbers].filter(x => NUMBER.test(x)).slice(0,30);
   }
+  function searchTitle(doc,reg) {
+    for(const a of doc.querySelectorAll("a[href]")) {
+      if(!(a.getAttribute("href")||"").includes("regNumber="+reg))continue;
+      const block=a.closest(".search-registry-entry-block,.registry-entry,article,tr");
+      const node=block?.querySelector(".registry-entry__body-title,.registry-entry__header-mid__title,.registry-entry__body-value,h2,h3");
+      const value=(node?.textContent||"").replace(/\\s+/g," ").trim();
+      if(value && value.length>12 && value.length<=800 && !/^\\d+$/.test(value))return value;
+    }
+    return "";
+  }
   function discoverDocs(doc,reg) {
     const documents = [];
     const seen = new Set();
@@ -187,7 +197,7 @@
     return true;
   }
 
-  async function handleRegistry(reg) {
+  async function handleRegistry(reg,searchDoc) {
     const source="/223/purchase/public/purchase/info/documents.html?regNumber="+reg;
     const page=await eisHtml(source);
     const docs=discoverDocs(page,reg);
@@ -197,7 +207,7 @@
     }
     await api("/api/v299/eis223/public-manifest","POST",{
       reg_number:reg,source_page:SITE+source,
-      title:"",customer:"",documents:docs
+      title:searchTitle(searchDoc,reg),customer:"",documents:docs
     });
     const list=await api("/api/v295/eis223/manifest/"+reg);
     let read=0;
@@ -240,9 +250,15 @@
         const known=await getKnown(numbers);
         const fresh=numbers.filter(n=>!known[n]?.complete);
         log("В выдаче",numbers.length,"номеров; ещё требуют загрузки",fresh.length);
-        for(const n of fresh.slice(0,MAX_BUYS)){
+        const picks=[];
+        if(fresh.length) {
+          for(let i=0;i<Math.min(MAX_BUYS,fresh.length);i++)
+            picks.push(fresh[(rotatingIndex+i)%fresh.length]);
+          rotatingIndex=(rotatingIndex+MAX_BUYS)%fresh.length;
+        }
+        for(const n of picks){
           if(!active)break;
-          try{if(await handleRegistry(n))added++;}
+          try{if(await handleRegistry(n,search))added++;}
           catch(e){
             if(e.backoff)throw e;
             log(n,"не удалось обработать:",String(e.message).slice(0,150));
