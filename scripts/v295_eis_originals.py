@@ -186,7 +186,20 @@ def install(ns):
 
     def review_counts(reg):
         allowed=allowed_documents(reg)
-        return len(allowed),sum(bool(saved_document(reg,uid)) for uid in allowed)
+        received=sum(bool(saved_document(reg,uid)) for uid in allowed)
+        expected=len(allowed)
+        # The public ЕИС page can list attachments without filename suffixes.
+        # Do not launch legal audit while such official links remain
+        # unresolved, even if every already-registered file was received.
+        manifest=root()/"eis223_public_browser_intake"/reg/"manifest.json"
+        try:
+            stored=json.loads(manifest.read_text(encoding="utf-8"))
+            if stored.get("reg_number")==reg and stored.get("source")=="public_eis_223_browser":
+                declared=int(stored.get("declared_attachment_count") or 0)
+                if 0<declared<=100:expected=max(expected,declared)
+        except (OSError,ValueError,TypeError,AttributeError):
+            pass
+        return expected,received
 
     def reconcile_document_rows(reg):
         """Safely remove repeated *rows*, never delete original files or legal findings."""
