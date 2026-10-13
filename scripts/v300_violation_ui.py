@@ -96,7 +96,7 @@ def install(ns):
                 html=raw.decode('utf-8')
             except UnicodeError:
                 return HTMLResponse(raw.decode('utf-8',errors='replace'),status_code=response.status_code)
-            html=re.sub(r'<div\s+class="stat">\s*<small>\s*Риски\s*</small>\s*<b\s+id="risks">[^<]*</b>\\s*</div>',
+            html=re.sub(r'<div\s+class="stat">\s*<small>\s*Риски\s*</small>\s*<b\s+id="risks">[^<]*</b>\s*</div>',
                         '',html,flags=re.I)
             html=re.sub(r'<option\s+value="risks">[^<]*</option>','',html,flags=re.I)
             html=html.replace('Нарушения и риски','Нарушения')
