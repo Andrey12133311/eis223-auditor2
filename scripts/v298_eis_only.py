@@ -126,6 +126,7 @@ async def offline_audit(ns,reg):
     extractor=ns.get("extract_text")
     if extractor is None:raise RuntimeError("Existing original-document text extractor unavailable")
     docs=[]
+    dedup_by_sha={}
     for uid,item in allowed.items():
         stored=saved_document(reg,uid)
         if stored is None:continue
@@ -133,9 +134,15 @@ async def offline_audit(ns,reg):
         with path.open("rb") as f:
             sha=hashlib.file_digest(f,"sha256").hexdigest()
         if sha!=receipt["sha256"]:continue
+        if sha in dedup_by_sha:
+            existing=docs[dedup_by_sha[sha]]
+            existing.setdefault("meta",{}).setdefault("identical_sources",[]).append(
+                {"url":item["url"],"name":item["name"],"uid":uid})
+            continue
         text=await asyncio.wait_for(asyncio.to_thread(extractor,path),timeout=45)
         text=str(text or "")
         valid=len(text.strip())>=3
+        dedup_by_sha[sha]=len(docs)
         docs.append({
             "name":item["name"],
             "url":item["url"],
