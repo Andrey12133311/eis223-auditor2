@@ -33,6 +33,8 @@ import v299_browser_intake
 import v300_violation_ui
 import v301_search_jobs
 import v302_eis_modern_ui
+import v303_mobile_fixes
+import v304_memo_odt
 from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
@@ -67,6 +69,8 @@ def main():
     v300_violation_ui.install(vars(entry))
     v301_search_jobs.install(vars(entry))
     v302_eis_modern_ui.install(vars(entry))
+    v303_mobile_fixes.install(vars(entry))
+    v304_memo_odt.install(vars(entry))
     print('V302 BOOT_EIS_ONLY instant_manual_reg_and_inn=True modern_ui=True browser_bridge_required=True',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
