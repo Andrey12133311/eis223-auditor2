@@ -68,6 +68,38 @@ def _init(ns):
             "WHERE status='partial' AND kind='reg' "
             "AND detail LIKE 'ЕИС HTTP 404 /223/purchase/%'",
             (_utc(),)).rowcount
+        # One-time migration: prior bad URL construction caused some jobs to
+        # be labeled done after retrieving only one of many EIS attachments.
+        # Requeue known affected procurements without inventing new findings.
+        db.execute("""CREATE TABLE IF NOT EXISTS v313_migrations(
+                     marker TEXT PRIMARY KEY, migrated_at TEXT NOT NULL)""")
+        applied=db.execute(
+            "SELECT 1 FROM v313_migrations WHERE marker='repair_404_noticeId'"
+        ).fetchone()
+        if not applied:
+            queued_rechecks=0
+            for target in ("32616280442","32616461370","32616417059","32616467038"):
+                existing=db.execute(
+                    "SELECT 1 FROM v301_search_jobs "
+                    "WHERE kind='reg' AND target=? "
+                    "AND status IN ('queued','leased','deferred') LIMIT 1",
+                    (target,)).fetchone()
+                if existing:continue
+                active=db.execute(
+                    "SELECT COUNT(*) FROM v301_search_jobs "
+                    "WHERE status IN ('queued','leased','deferred')"
+                ).fetchone()[0]
+                if active>=MAX_QUEUE:break
+                db.execute(
+                    "INSERT INTO v301_search_jobs "
+                    "(id,kind,target,page,status,priority,created_at,updated_at) "
+                    "VALUES (?,'reg',?,1,'queued',2,?,?)",
+                    (secrets.token_hex(12),target,_utc(),_utc()))
+                queued_rechecks+=1
+            db.execute(
+                "INSERT OR IGNORE INTO v313_migrations(marker,migrated_at)"
+                " VALUES ('repair_404_noticeId',?)",(_utc(),))
+            print(f"V313 NOTICE_ID_RECHECK_QUEUED count={queued_rechecks}",flush=True)
         db.commit()
         if repaired:
             print(f"V308 RETRY_OLD_404_BACKLOG jobs={repaired}",flush=True)
