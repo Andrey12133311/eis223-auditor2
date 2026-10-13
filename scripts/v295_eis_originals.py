@@ -1,0 +1,294 @@
+"""Verified original-document bridge for official EIS 223-FZ notice archives.
+
+The SOAP archive holds XML metadata, not the five binary originals.
+Files enter the existing legal review ONLY after authenticated upload, exact
+EIS UID cross-reference, format checks, and persistence on /data.
+"""
+from __future__ import annotations
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+import re
+import tempfile
+import zipfile
+from pathlib import Path
+from urllib.parse import urlsplit,parse_qs
+from fastapi import HTTPException,Request
+from fastapi.responses import HTMLResponse,JSONResponse
+
+REG = re.compile(r"[0-9]{11,20}$")
+UID = re.compile(r"[0-9A-F]{32}$")
+EXT = frozenset((".docx",".doc",".xlsx",".xls",".pdf",".rtf",".odt",".ods",".zip",".xml"))
+MAX_BYTES = 25*1024*1024
+MAX_EXPANDED = 80*1024*1024
+
+def root():
+    return Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
+
+def auth(request):
+    expected=os.getenv("EIS223_UPLOAD_TOKEN","").strip()
+    provided=request.headers.get("x-eis223-upload-token","")
+    if not expected:raise HTTPException(503,"Upload key is not configured")
+    if not provided or not hmac.compare_digest(expected,provided):
+        raise HTTPException(401,"Unauthorized")
+
+def uid_from_url(url):
+    try:
+        p=urlsplit(url)
+        if p.scheme!="https" or p.hostname!="zakupki.gov.ru" or p.username or p.password:
+            return None
+        if p.path!="/223/filestore/public/1.0/download/fz223/file.html":
+            return None
+        values=parse_qs(p.query).get("uid",[])
+        value=values[0].upper() if len(values)==1 else ""
+        return value if UID.fullmatch(value) else None
+    except (ValueError,AttributeError,TypeError):
+        return None
+
+def allowed_documents(reg):
+    if not REG.fullmatch(reg):raise HTTPException(400,"Invalid registry number")
+    folder=root()/"eis223_official_archive_inbox"/reg
+    found={}
+    if not folder.is_dir():return found
+    for path in sorted(folder.glob("*.json"))[:100]:
+        try:
+            record=json.loads(path.read_text(encoding="utf-8"))
+            if record.get("reg_number")!=reg or record.get("source")!="official_eis_soap_archive":
+                continue
+            for notice in record.get("notices",[]):
+                if notice.get("reg_number")!=reg:continue
+                for item in notice.get("documents",[]):
+                    url=item.get("url","")
+                    uid=uid_from_url(url)
+                    if not uid or uid in found:continue
+                    name=Path(item.get("name") or "").name
+                    if not name or len(name)>255 or Path(name).suffix.lower() not in EXT:continue
+                    found[uid]={"uid":uid,"name":name,"url":url,"ext":Path(name).suffix.lower()}
+        except (OSError,ValueError,TypeError,KeyError):
+            continue
+    return found
+
+def saved_document(reg,uid):
+    folder=root()/"eis223_official_originals"/reg/uid
+    receipt=folder/"receipt.json"
+    try:
+        value=json.loads(receipt.read_text(encoding="utf-8"))
+        if value.get("reg_number")!=reg or value.get("uid")!=uid:
+            return None
+        ext=value["extension"]
+        digest=value["sha256"]
+        if ext not in EXT or not re.fullmatch(r"[0-9a-f]{64}",digest):return None
+        path=folder/(digest+ext)
+        if not path.is_file() or path.stat().st_size!=value["bytes"]:return None
+        return (path,value)
+    except (OSError,ValueError,KeyError,TypeError):
+        return None
+
+def assert_format(data,ext):
+    if len(data)<8 or len(data)>MAX_BYTES:raise ValueError("Invalid original file size")
+    prefix=data[:512].lstrip().lower()
+    if prefix.startswith((b"<html",b"<!doctype html",b"<?xml",b"<soap")):
+        raise ValueError("Source returned HTML/XML instead of requested original")
+    ole=data[:8]==bytes.fromhex("d0cf11e0a1b11ae1")
+    is_zip=data[:4]==b"PK\\x03\\x04"
+    if ext in (".doc",".xls") and not ole:raise ValueError("Not a binary Office original")
+    if ext==".pdf" and not data.startswith(b"%PDF"):raise ValueError("Not a PDF original")
+    if ext==".rtf" and not data.startswith(b"{\\\\rtf"):raise ValueError("Not an RTF original")
+    if ext==".xml" and not data.lstrip().startswith(b"<"):raise ValueError("Not an XML original")
+    if ext in (".docx",".xlsx",".odt",".ods",".zip"):
+        if not is_zip:raise ValueError("Not a ZIP-based Office/archive original")
+        try:
+            import io
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                infos=z.infolist()
+                if len(infos)>2000 or sum(i.file_size for i in infos)>MAX_EXPANDED:
+                    raise ValueError("Unsafe compressed original")
+                entries=set(z.namelist())
+                if ext==".docx" and "word/document.xml" not in entries:
+                    raise ValueError("Not a DOCX document")
+                if ext==".xlsx" and "xl/workbook.xml" not in entries:
+                    raise ValueError("Not an XLSX document")
+                if ext in (".odt",".ods") and "mimetype" not in entries:
+                    raise ValueError("Not an OpenDocument")
+                if z.testzip() is not None:raise ValueError("Damaged ZIP")
+        except zipfile.BadZipFile as e:
+            raise ValueError("Damaged ZIP original") from e
+
+def save_atomic(path,data):
+    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    handle,tmp=tempfile.mkstemp(prefix=".incoming-",dir=path.parent)
+    try:
+        with os.fdopen(handle,"wb") as f:
+            f.write(data);f.flush();os.fsync(f.fileno())
+        os.chmod(tmp,0o600)
+        os.replace(tmp,path)
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
+
+def install(ns):
+    app=ns["app"]
+    discovery=ns.get("discover_eis_documents")
+    downloader=ns.get("download_doc")
+    extractor=ns.get("extract_text")
+    doc_type=ns.get("doc_type",lambda name,desc="":"other")
+
+    if discovery is not None:
+        async def enriched_discovery(client,reg,card=None):
+            from_source=await discovery(client,reg,card)
+            present={x.get("url") for x in from_source if isinstance(x,dict)}
+            for uid,item in allowed_documents(reg).items():
+                if item["url"] in present:continue
+                present.add(item["url"])
+                from_source.append({"name":item["name"],"desc":"Официальный XML ЕИС (RI223)",
+                    "url":item["url"],"type":doc_type(item["name"]),
+                    "published":"","meta":{"source":"official_eis_getDocsIP","uid":uid},
+                    "text":"","local":None,"annotated":None,"status":"metadata",
+                    "error":None,"final_url":None})
+            return from_source
+        ns["discover_eis_documents"]=enriched_discovery
+
+    if downloader is not None and extractor is not None:
+        async def downloaded_from_local(client,reg,d,cache=None):
+            uid=uid_from_url(d.get("url",""))
+            if uid and uid in allowed_documents(reg):
+                item=saved_document(reg,uid)
+                if item:
+                    path,receipt=item
+                    txt=await asyncio.to_thread(extractor,path)
+                    text=str(txt or "")
+                    chars=len(text.strip())
+                    d["local"]=str(path)
+                    d["text"]=text
+                    d["final_url"]=d["url"]
+                    d["status"]="checked" if chars>=3 else "downloaded_no_text"
+                    d["error"]=None if chars>=3 else "Файл получен, но текст не извлечён"
+                    d.setdefault("meta",{})["source"]="official_eis_getDocsIP"
+                    d["meta"]["sha256"]=receipt["sha256"]
+                    print(f"V295 LOCAL_EIS_ORIGINAL reg={reg} uid={uid} chars={chars} status={d['status']}",flush=True)
+                    return
+            return await downloader(client,reg,d,cache)
+        ns["download_doc"]=downloaded_from_local
+
+    @app.post("/api/v295/eis223/original/{reg}/{uid}")
+    async def upload_original(reg:str,uid:str,request:Request):
+        auth(request)
+        if not REG.fullmatch(reg) or not UID.fullmatch(uid):
+            raise HTTPException(400,"Invalid original identifier")
+        allowed=allowed_documents(reg)
+        if uid not in allowed:raise HTTPException(404,"Upload official XML first")
+        if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_BYTES:
+            raise HTTPException(413,"Original exceeds 25 MiB")
+        raw=[];size=0
+        async for part in request.stream():
+            size+=len(part)
+            if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 25 MiB")
+            raw.append(part)
+        data=b"".join(raw)
+        entry=allowed[uid]
+        try:assert_format(data,entry["ext"])
+        except ValueError as exc:raise HTTPException(422,str(exc)) from exc
+        sha=hashlib.sha256(data).hexdigest()
+        folder=root()/"eis223_official_originals"/reg/uid
+        file=folder/(sha+entry["ext"])
+        if not file.exists():await asyncio.to_thread(save_atomic,file,data)
+        # Text extraction is diagnostic only. Existing procurement recheck remains authoritative.
+        chars=0
+        if extractor is not None:
+            try:
+                txt=await asyncio.wait_for(asyncio.to_thread(extractor,file),timeout=45)
+                chars=len(str(txt or "").strip())
+            except Exception as e:
+                print("V295 EXTRACTION_ERROR "+type(e).__name__,flush=True)
+        receipt={"reg_number":reg,"uid":uid,"sha256":sha,"bytes":size,
+            "extension":entry["ext"],"source_url":entry["url"],
+            "extracted_chars":chars,"state":"ready_for_legal_review" if chars>=3 else "downloaded_no_text"}
+        await asyncio.to_thread(save_atomic,folder/"receipt.json",
+                                json.dumps(receipt,ensure_ascii=False).encode())
+        print(f"V295 ORIGINAL_IMPORTED reg={reg} uid={uid} size={size} chars={chars}",flush=True)
+        return {"accepted":True,"reg_number":reg,"uid":uid,"bytes":size,
+            "extracted_chars":chars,"status":receipt["state"],
+            "audited_documents_increment":0}
+
+    @app.get("/api/v295/eis223/manifest/{reg}")
+    async def manifest(reg:str,request:Request):
+        auth(request)
+        items=[]
+        for uid,d in allowed_documents(reg).items():
+            receipt=saved_document(reg,uid)
+            items.append({**d,"received":receipt is not None,
+                          "extracted_chars":receipt[1].get("extracted_chars",0) if receipt else 0})
+        return {"reg_number":reg,"metadata_received":bool(items),"documents":items,
+                "counted_as_audited":False}
+
+    @app.get("/api/v295/eis223/documents",response_class=HTMLResponse)
+    async def page():
+        return HTMLResponse('''<!doctype html><html lang="ru"><meta charset="utf-8">
+<title>Загрузка оригиналов ЕИС</title>
+<style>body{font:16px system-ui;max-width:820px;margin:2rem auto;padding:1rem;line-height:1.5}
+input,button{font:inherit;padding:.65rem;margin:.5rem 0}input[type=password]{width:95%}
+li{padding:.5rem 0;border-bottom:1px solid #ddd}small{display:block;color:#555}
+button{cursor:pointer}pre{white-space:pre-wrap;background:#eee;padding:1rem}</style>
+<h2>ЕИС 223-ФЗ — загрузка оригиналов</h2>
+<p>Сначала передайте скачанный ZIP-архив XML, затем настоящие файлы DOC, DOCX, XLSX,
+которые перечислены в нём. Наличие ссылки не считается проверкой.</p>
+<label>Ключ EIS223_UPLOAD_TOKEN из Railway<input id="key" type="password" autocomplete="off"></label>
+<label>ZIP ЕИС: <input id="zip" type="file" accept=".zip"></label>
+<button id="zipbtn">1. Загрузить XML-архив</button>
+<label>Номер ЕИС: <input id="reg" value="32616440427" pattern="[0-9]{11,20}"></label>
+<button id="list">2. Показать документы</button>
+<div id="docs"></div><pre id="result"></pre>
+<script>
+const el=n=>document.getElementById(n);
+const status=t=>el('result').textContent=t;
+const token=()=>el('key').value.trim();
+async function api(url,opts={}) {
+if(!token())throw Error('Введите ключ EIS223_UPLOAD_TOKEN');
+const r=await fetch(url,{...opts,headers:{...(opts.headers||{}),
+'x-eis223-upload-token':token()}});
+let j=await r.json();if(!r.ok)throw Error('HTTP '+r.status+': '+(j.detail||'Ошибка'));return j;
+}
+el('zipbtn').onclick=async()=>{
+const file=el('zip').files[0];if(!file)return status('Выберите ZIP');
+try {let r=await api('/api/v294/eis223/archive',{method:'POST',
+headers:{'Content-Type':'application/zip'},body:file});
+el('reg').value=r.reg_number;status('XML принят. Ссылок на документы: '+r.document_links);
+el('list').click();}catch(e){status(e.message);}
+};
+el('list').onclick=async()=>{
+try{
+const reg=el('reg').value.trim();
+const info=await api('/api/v295/eis223/manifest/'+reg);
+el('docs').replaceChildren();
+for(const d of info.documents) {
+const li=document.createElement('li');
+const a=document.createElement('a');
+a.href=d.url;a.target='_blank';a.rel='noopener noreferrer';
+a.textContent='Скачать с ЕИС: '+d.name;
+const input=document.createElement('input');input.type='file';
+input.accept=d.ext;
+const b=document.createElement('button');b.textContent='Передать оригинал';
+const small=document.createElement('small');
+small.textContent=d.received?'Файл уже получен; извлечено символов: '+d.extracted_chars:
+'Оригинал ещё не загружен';
+b.onclick=async()=>{
+if(!input.files[0])return status('Выберите скачанный файл: '+d.name);
+if(input.files[0].name.split('.').at(-1).toLowerCase()!==d.ext.slice(1))
+return status('Выбран файл с неправильным расширением');
+b.disabled=true;try{
+let r=await api('/api/v295/eis223/original/'+reg+'/'+d.uid,{method:'POST',
+headers:{'Content-Type':'application/octet-stream'},body:input.files[0]});
+small.textContent='Получен оригинал, извлечено символов: '+r.extracted_chars+
+'. Для включения в общую проверку требуется перепроверка закупки.';
+status('Сохранено '+d.name+', байт: '+r.bytes);
+}catch(e){status(e.message);}finally{b.disabled=false;}}
+li.append(a,document.createElement('br'),input,b,small);
+el('docs').append(li);
+}
+if(!info.documents.length)status('XML для этой закупки ещё не загружен');
+else status('Найдено '+info.documents.length+' ссылок ЕИС. Скачайте файлы и передайте их сюда.');
+}catch(e){status(e.message);}
+};
+</script></html>''')
+    print("V295 BRIDGE_READY discovery="+str(discovery is not None)+" download="+str(downloader is not None),flush=True)
