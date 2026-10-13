@@ -143,6 +143,85 @@ def install(ns):
     extractor=ns.get("extract_text")
     doc_type=ns.get("doc_type",lambda name,desc="":"other")
 
+    review_jobs={}
+    review_states={}
+
+    def review_state_path(reg):
+        return root()/"eis223_official_review_jobs"/(reg+".json")
+
+    def review_state(reg):
+        if reg in review_states:return dict(review_states[reg])
+        try:
+            data=json.loads(review_state_path(reg).read_text(encoding="utf-8"))
+            if isinstance(data,dict) and data.get("reg_number")==reg:return data
+        except (OSError,ValueError,TypeError):pass
+        return {"reg_number":reg,"status":"not_queued"}
+
+    def update_review(reg,status,**fields):
+        from datetime import datetime,timezone
+        data={"reg_number":reg,"status":status,
+              "updated_at":datetime.now(timezone.utc).isoformat(),**fields}
+        review_states[reg]=data
+        save_atomic(review_state_path(reg),json.dumps(data,ensure_ascii=False).encode("utf-8"))
+        print(f"V296 EIS_REVIEW reg={reg} status={status} originals={fields.get('originals_received',0)}",flush=True)
+        return data
+
+    def review_counts(reg):
+        allowed=allowed_documents(reg)
+        return len(allowed),sum(bool(saved_document(reg,uid)) for uid in allowed)
+
+    async def review_worker(reg):
+        total,received=review_counts(reg)
+        lock=ns.get("lock")
+        process=ns.get("process_purchase")
+        if lock is None or process is None:
+            update_review(reg,"failed",originals_received=received,reason="Audit pipeline unavailable")
+            return
+        try:
+            # FIFO lock guarantees this job runs after the current background scan.
+            async with lock:
+                update_review(reg,"running",originals_received=received)
+                import httpx
+                async with httpx.AsyncClient(timeout=httpx.Timeout(20,connect=6),
+                                            follow_redirects=True) as client:
+                    result=await asyncio.wait_for(process(client,reg,None),timeout=240)
+                checked=int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0
+                update_review(reg,"completed" if checked>=received else "partial",
+                              originals_received=received,checked_documents=checked,
+                              findings=result.get("findings") if isinstance(result,dict) else None)
+        except asyncio.CancelledError:
+            update_review(reg,"queued",originals_received=received,reason="Interrupted; will resume")
+            raise
+        except Exception as exc:
+            update_review(reg,"failed",originals_received=received,reason=type(exc).__name__)
+
+    def enqueue_review(reg,force=False):
+        expected,received=review_counts(reg)
+        if not expected or received<expected:
+            return {"reg_number":reg,"status":"waiting_for_originals",
+                    "originals_received":received,"originals_expected":expected}
+        task=review_jobs.get(reg)
+        if task and not task.done():
+            return {**review_state(reg),"originals_expected":expected}
+        previous=review_state(reg)
+        if (not force and previous.get("status")=="completed"
+            and previous.get("originals_received")==received):
+            return {**previous,"originals_expected":expected}
+        data=update_review(reg,"queued",originals_received=received,
+                           originals_expected=expected)
+        review_jobs[reg]=asyncio.create_task(review_worker(reg))
+        return data
+
+    @app.on_event("startup")
+    async def resume_official_uploads():
+        inbox=root()/"eis223_official_archive_inbox"
+        if inbox.is_dir():
+            for folder in sorted(inbox.iterdir())[:500]:
+                if folder.is_dir() and REG.fullmatch(folder.name):
+                    try:enqueue_review(folder.name)
+                    except Exception as exc:
+                        print("V296 REQUEUE_ERROR "+type(exc).__name__,flush=True)
+
     if discovery is not None:
         async def enriched_discovery(client,reg,card=None):
             from_source=await discovery(client,reg,card)
@@ -216,9 +295,10 @@ def install(ns):
         await asyncio.to_thread(save_atomic,folder/"receipt.json",
                                 json.dumps(receipt,ensure_ascii=False).encode())
         print(f"V295 ORIGINAL_IMPORTED reg={reg} uid={uid} size={size} chars={chars}",flush=True)
+        review=enqueue_review(reg)
         return {"accepted":True,"reg_number":reg,"uid":uid,"bytes":size,
             "extracted_chars":chars,"status":receipt["state"],
-            "audited_documents_increment":0}
+            "review_status":review["status"],"audited_documents_increment":0}
 
     @app.get("/api/v295/eis223/manifest/{reg}")
     async def manifest(reg:str,request:Request):
@@ -234,26 +314,19 @@ def install(ns):
     @app.post("/api/v295/eis223/recheck/{reg}")
     async def recheck_official(reg:str,request:Request):
         auth(request)
-        allowed=allowed_documents(reg)
-        received=sum(bool(saved_document(reg,uid)) for uid in allowed)
-        if not received:raise HTTPException(422,"No original documents received yet")
-        process=ns.get("process_purchase")
-        lock=ns.get("lock")
-        if process is None or lock is None:raise HTTPException(503,"Legal check pipeline unavailable")
-        if lock.locked():raise HTTPException(409,"A background check is in progress; retry shortly")
-        async with lock:
-            try:
-                import httpx
-                async with httpx.AsyncClient(timeout=httpx.Timeout(20.0,connect=6.0),
-                    follow_redirects=True) as client:
-                    result=await asyncio.wait_for(process(client,reg,None),timeout=170)
-                return {"completed":True,"reg_number":reg,"originals_uploaded":received,
-                        "review_result":result}
-            except asyncio.TimeoutError as exc:
-                raise HTTPException(504,"Existing legal audit timed out") from exc
-            except Exception as exc:
-                print("V295 RECHECK_ERROR "+type(exc).__name__,flush=True)
-                raise HTTPException(502,"Existing legal audit failed") from exc
+        if not REG.fullmatch(reg):raise HTTPException(400,"Invalid registry number")
+        info=enqueue_review(reg,force=True)
+        if info["status"]=="waiting_for_originals":
+            raise HTTPException(422,"Original documents are not all received")
+        return JSONResponse({"reg_number":reg,**info,"queued":info["status"] in ("queued","running")},
+                            status_code=202 if info["status"] in ("queued","running") else 200)
+
+    @app.get("/api/v295/eis223/recheck-status/{reg}")
+    async def recheck_status(reg:str,request:Request):
+        auth(request)
+        if not REG.fullmatch(reg):raise HTTPException(400,"Invalid registry number")
+        total,received=review_counts(reg)
+        return {**review_state(reg),"originals_received":received,"originals_expected":total}
 
     @app.get("/api/v295/eis223/documents",response_class=HTMLResponse)
     async def page():
