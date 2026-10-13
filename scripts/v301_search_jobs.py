@@ -325,8 +325,8 @@ def install(ns):
             version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:
             version=0
-        if version<308:
-            raise HTTPException(426,"Обновлён загрузчик ЕИС. Перезапустите код моста (v308) в браузере.")
+        if version<309:
+            raise HTTPException(426,"Обновлён загрузчик ЕИС. Перезапустите код моста (v309) в браузере.")
         job=await asyncio.to_thread(_claim,ns)
         return {"job":{k:job[k] for k in ("id","kind","target","page","attempts")} if job else None,
                 "poll_seconds":8}
