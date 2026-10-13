@@ -157,17 +157,21 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         now=_utc()
         nb=int(time.time())+min(1800,max(60,defer)) if status=="deferred" else 0
         effective="queued" if status=="deferred" else status
-        if row["kind"]=="reg" and status=="partial" and int(row["attempts"])<3:
-            # A temporary 404, timeout or empty original-file page must not be
-            # treated as a completed procurement audit. Retry at most 3 times
-            # with a 15-minute cooldown; never create synthetic verified rows.
-            effective="queued"
-            nb=int(time.time())+900
+        attempts=int(row["attempts"])
+        if row["kind"]=="reg" and status=="partial":
+            # Retry without overloading EIS. Every genuinely imported original
+            # is progress and renews the bounded retry budget. A procurement
+            # with permanently inaccessible originals stops after 3 failures.
+            if accepted>0:
+                attempts=0
+            if attempts<3:
+                effective="queued"
+                nb=int(time.time())+900
         db.execute(
             "UPDATE v301_search_jobs SET status=?,detail=?,found=?,accepted=?,"
-            "not_before=?,lease_until=0,updated_at=? WHERE id=?",
+            "not_before=?,lease_until=0,updated_at=?,attempts=? WHERE id=?",
             (effective,str(detail)[:300],max(0,min(1000,found)),max(0,min(1000,accepted)),
-             nb,now,job_id))
+             nb,now,attempts,job_id))
         if row["kind"]=="inn":
             # Add actual official-search results to a bounded priority queue.
             for reg in valid[:30]:
