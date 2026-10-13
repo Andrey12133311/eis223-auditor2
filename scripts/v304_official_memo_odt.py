@@ -163,15 +163,20 @@ async def _rusprofile_company(inn):
             return None
         if inn not in r.text:return None
         soup=BeautifulSoup(r.text[:400000],"html.parser")
-        title=soup.select_one('meta[property="og:title"]')
-        candidate=(title.get("content") if title else "") or ""
-        if not candidate:
-            candidate=(soup.select_one("h1").get_text(" ",strip=True)
-                       if soup.select_one("h1") else "")
-        candidate=_plain_company(candidate)
-        if not candidate or len(candidate)>300 or re.search(r"поиск|Результат|404|не найден",candidate,re.I):
-            return None
-        return candidate
+        # Accept only a Rusprofile result card with the exact INN in the
+        # SAME card. A search page heading is not a verified company name.
+        for selector in (".company-item",".company-card",
+                         ".search-results__item",".company-search-item","article"):
+            for card in soup.select(selector)[:40]:
+                if not re.search(r"(?<![0-9])"+re.escape(inn)+r"(?![0-9])",
+                                 card.get_text(" ",strip=True)):
+                    continue
+                node=card.select_one("h2,h3,.company-name,.company-item__title,a[href*='/id/']")
+                candidate=_plain_company(node.get_text(" ",strip=True) if node else "")
+                if 5<=len(candidate)<=300 and not re.search(
+                    r"поиск|результат|404|не найден",candidate,re.I):
+                    return candidate
+        return None
     except Exception as exc:
         print("V304 RUSPROFILE_UNAVAILABLE "+type(exc).__name__,flush=True)
         return None
