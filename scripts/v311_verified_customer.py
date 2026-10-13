@@ -217,7 +217,7 @@ def install(ns):
             raise HTTPException(403,"Нужна открытая официальная страница ЕИС")
         try:version=int(request.headers.get("x-eis223-collector-version") or 0)
         except ValueError:version=0
-        if version<311:raise HTTPException(426,"Требуется мост ЕИС v311")
+        if version<312:raise HTTPException(426,"Требуется мост ЕИС v312")
         raw=await request.body()
         if len(raw)>2200:raise HTTPException(413,"Слишком большой ответ")
         try:
