@@ -126,8 +126,8 @@
       if(!(a.getAttribute("href")||"").includes("regNumber="+reg))continue;
       const block=a.closest(".search-registry-entry-block,.registry-entry,article,tr");
       const node=block?.querySelector(".registry-entry__body-title,.registry-entry__header-mid__title,.registry-entry__body-value,h2,h3");
-      const value=(node?.textContent||"").replace(/\\s+/g," ").trim();
-      if(value && value.length>12 && value.length<=800 && !/^\\d+$/.test(value))return value;
+      const value=(node?.textContent||"").split(/\s+/).join(" ").trim();
+      if(value && value.length>12 && value.length<=800 && !/^[0-9]+$/.test(value))return value;
     }
     return "";
   }
