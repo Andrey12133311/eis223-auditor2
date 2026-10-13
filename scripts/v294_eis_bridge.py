@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 MAX_UPLOAD = 15*1024*1024
 MAX_UNCOMPRESSED = 50*1024*1024
 MAX_XML = 15*1024*1024
-ALLOWED_ORIGIN = "https://int.zakupki.gov.ru"
+ALLOWED_ORIGINS = frozenset(("https://int.zakupki.gov.ru","https://zakupki.gov.ru"))
 REG = re.compile(r"[0-9]{11,20}$")
 
 def _name(tag):
@@ -90,17 +90,17 @@ def _atomic(path, data):
         if os.path.exists(tmp):os.unlink(tmp)
 
 def _cors(origin):
-    return {"Access-Control-Allow-Origin":ALLOWED_ORIGIN,"Vary":"Origin"} if origin==ALLOWED_ORIGIN else {}
+    return {"Access-Control-Allow-Origin":origin,"Vary":"Origin"} if origin in ALLOWED_ORIGINS else {}
 
 def install(ns):
     app=ns["app"]
 
     @app.options("/api/v294/eis223/archive")
     async def preflight(request:Request):
-        if request.headers.get("origin")!=ALLOWED_ORIGIN:
+        if request.headers.get("origin") not in ALLOWED_ORIGINS:
             return Response(status_code=403)
         return Response(status_code=204,headers={
-            **_cors(ALLOWED_ORIGIN),
+            **_cors(request.headers.get("origin")),
             "Access-Control-Allow-Methods":"POST, OPTIONS",
             "Access-Control-Allow-Headers":"content-type, x-eis223-upload-token",
             "Access-Control-Max-Age":"600"
@@ -109,7 +109,7 @@ def install(ns):
     @app.post("/api/v294/eis223/archive")
     async def receive(request:Request):
         origin=request.headers.get("origin")
-        if origin and origin!=ALLOWED_ORIGIN:
+        if origin and origin not in ALLOWED_ORIGINS:
             raise HTTPException(403,"Forbidden origin")
         _authorize(request)
         if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_UPLOAD:
