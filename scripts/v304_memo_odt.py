@@ -218,7 +218,8 @@ def _modify_memo(template,reg,purchase,findings,organization,org_source):
         # Supplement long statements by adding same-styled paragraphs before
         # conclusion rather than silently dropping any finding.
         if len(paragraphs)>len(analysis_slots):
-            parent=ps[29].getparent()
+            parent=next((el for el in tree.iter() if ps[29] in el),None)
+            if parent is None:raise ValueError("Повреждена структура ODT")
             for para in paragraphs[len(analysis_slots):]:
                 el=ET.Element(TEXT+"p",ps[28].attrib)
                 el.text=_nonbreaking(para)
@@ -230,7 +231,8 @@ def _modify_memo(template,reg,purchase,findings,organization,org_source):
         # Exactly ONE blank line between final paragraph and signature table,
         # instead of the two blank paragraphs in the uploaded example.
         if _plain(ps[30])=="" and _plain(ps[31])=="":
-            ps[30].getparent().remove(ps[30])
+            parent=next((el for el in tree.iter() if ps[30] in el),None)
+            if parent is not None:parent.remove(ps[30])
         # Keep original headings, addressee, signature, contact information,
         # logo, page layout, font sizes, and full body of static 223-FZ law.
         # Replace normal spaces after short prepositions to eliminate dangling
