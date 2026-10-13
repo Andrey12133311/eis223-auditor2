@@ -57,9 +57,9 @@ def run():
         assert len(members)==1,(members,warnings)
         assert_format(gz.read_bytes(),".gz")
         for ext,content in (
-            (".rar",bytes.fromhex("526172211a07")+"not-a-full-rar"),
-            (".7z",bytes.fromhex("377abcaf271c")+"not-a-full-7z"),
-            (".cab",b"MSCF"+"not-a-full-cab"),
+            (".rar",bytes.fromhex("526172211a07")+b"not-a-full-rar"),
+            (".7z",bytes.fromhex("377abcaf271c")+b"not-a-full-7z"),
+            (".cab",b"MSCF"+b"not-a-full-cab"),
         ):
             assert_format(content,ext)
         print("V310 ARCHIVE_SELFTEST_OK zip_members=3 nested=1 tar_gz=1 gzip=1 unsafe_path_rejected=1",flush=True)
