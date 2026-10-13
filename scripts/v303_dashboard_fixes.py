@@ -144,6 +144,12 @@ def install(ns):
    raw=b''.join([piece async for piece in response.body_iterator])
    try:html=raw.decode('utf-8')
    except UnicodeError:return response
+   # Old V234 capture listener explicitly sent "Карточка проверки" to the
+   # documents-only page. Fix that navigation at its SOURCE as well as with
+   # the newer capture listener, so mobile links still work if JS order varies.
+   html=html.replace(
+       "window.location.href='/documents?reg='+encodeURIComponent(reg);",
+       "window.location.href='/check-new/'+encodeURIComponent(reg);")
    if 'id="v303-main-clean"' not in html:
     html=html.replace('</head>',CSS+'</head>',1) if '</head>' in html else CSS+html
    if 'id="v303-functional-filters"' not in html:
