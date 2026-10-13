@@ -302,29 +302,30 @@
   function customerFromDocument(doc,reg){
     if(!doc)return {name:"",inn:""};
     let name="",inn="";
-    // EIS sometimes shows the auction ORGANIZER separately from the BUYER.
-    // Use ONLY the labelled buyer section, never the company whose caption
-    // says "Организация, осуществляющая размещение".
-    for(const section of doc.querySelectorAll("section,.common-text,.row,.blockInfo__section")){
+    // EIS pages may show BOTH buyer and procurement organiser. The organiser
+    // is not necessarily the buyer (notably procurement 32616280442).
+    for(const section of doc.querySelectorAll(
+      "section,.common-text,.row,.blockInfo__section")){
       const caption=(section.querySelector(".common-text__caption,.blockInfo__title")?.textContent||"")
-        .replace(/\s+/g," ").trim();
-      if(!/сведения о заказчике|информация о заказчике|^заказчик$/i.test(caption))continue;
-      const value=valueByLabel(section,[/^наименование организации/i,
-         /^полное наименование/i,/^заказчик$/i,/^наименование заказчика/i]);
-      const tax=valueByLabel(section,[/^инн$/i,/^инн заказчика/i]);
-      if(value)name=value;
-      if(tax)inn=tax;
+        .replace(/\s+/g," ").trim().toLowerCase();
+      if(!/(?:сведения о заказчике|^заказчик$|заказчики по лоту)/i.test(caption))
+        continue;
+      name=valueByLabel(section,[/^наименование организации/i,/^полное наименование/i,
+             /^заказчик$/i,/^наименование заказчика/i])||name;
+      inn=valueByLabel(section,[/^инн$/i,/^инн заказчика/i])||inn;
       if(name&&inn)break;
     }
-    if(!name)name=valueByLabel(doc,[/^наименование заказчика/i,/^заказчик$/i]);
-    if(!inn)inn=valueByLabel(doc,[/^инн заказчика/i]);
-    // Do not use general organization links: many are trading platforms,
-    // procurement organizers, rather than the 223-FZ buyer.
+    if(!name){
+      name=valueByLabel(doc,[/^наименование заказчика/i,/^заказчик$/i]);
+    }
+    if(!inn){
+      inn=valueByLabel(doc,[/^инн заказчика/i]);
+    }
     name=name.replace(/\s+/g," ").trim().slice(0,400);
     if(/^(?:уточняем|заказчик уточняется|не указан|не найден|сведения отсутствуют)/i.test(name))
       name="";
-    const m=String(inn).replace(/[^0-9]/g,"").match(/^(?:[0-9]{10}|[0-9]{12})$/);
-    return {name,inn:m?m[0]:""};
+    const match=String(inn).replace(/[^0-9]/g,"").match(/^(?:[0-9]{10}|[0-9]{12})$/);
+    return {name,inn:match?match[0]:""};
   }
   function searchResultCard(doc,reg){
     if(!doc)return null;
