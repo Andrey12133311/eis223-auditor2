@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import io
 import os
+import subprocess
 import tarfile
 import tempfile
 import zipfile
@@ -56,6 +57,21 @@ def run():
         members,warnings=extract_members(gz,"32616280442","C"*32,folder,text_reader)
         assert len(members)==1,(members,warnings)
         assert_format(gz.read_bytes(),".gz")
+        # Exercise libarchive 7z read path with a real 7z written by bsdtar.
+        fixture=folder/"seven-file.pdf"
+        fixture.write_bytes(b"%PDF-1.7 7z archive inner content")
+        seven_zip=folder/"seven.7z"
+        zipped=subprocess.run(["bsdtar","-c","-a","-f",str(seven_zip),
+                               "-C",str(folder),fixture.name],
+                              capture_output=True,timeout=15)
+        if zipped.returncode==0:
+            members,warnings=extract_members(
+                seven_zip,"32616280442","D"*32,folder,text_reader)
+            assert len(members)==1,(members,warnings)
+            assert_format(seven_zip.read_bytes(),".7z")
+            print("V310 ARCHIVE_7Z_SELFTEST_OK members=1",flush=True)
+        else:
+            print("V310 ARCHIVE_7Z_WRITER_UNAVAILABLE (reading still supported)",flush=True)
         for ext,content in (
             (".rar",bytes.fromhex("526172211a07")+b"not-a-full-rar"),
             (".7z",bytes.fromhex("377abcaf271c")+b"not-a-full-7z"),
