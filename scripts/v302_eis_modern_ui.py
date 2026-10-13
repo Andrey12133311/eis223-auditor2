@@ -200,9 +200,22 @@ SCRIPT='''<script id="v302-modern-js">
       '<div id="v302-search-result" role="status" aria-live="polite"></div>',
       '<div class="v302-links"><span>Официальный источник: только ЕИС, без ЭТП и агрегаторов</span>',
       '<a href="https://zakupki.gov.ru/epz/main/public/home.html" target="_blank" rel="noopener noreferrer">Открыть ЕИС ↗</a>',
-      '<a href="/api/v299/eis223/collector.js" target="_blank" rel="noopener noreferrer">Код подключения браузера</a></div>'
+      '<a href="/api/v299/eis223/collector.js" target="_blank" rel="noopener noreferrer">Открыть код подключения</a>',
+      '<a href="#" id="v302-copy-bridge">Скопировать код</a></div>'
     ].join('');
     host.insertBefore(node,host.firstChild);
+    by('v302-copy-bridge').addEventListener('click',async e=>{
+      e.preventDefault();
+      try{
+        const r=await fetch('/api/v299/eis223/collector.js',{cache:'no-store'});
+        if(!r.ok)throw Error('HTTP '+r.status);
+        const code=await r.text();
+        await navigator.clipboard.writeText(code);
+        notice('Код скопирован. Откройте <a target="_blank" rel="noopener noreferrer" href="https://zakupki.gov.ru/epz/main/public/home.html">ЕИС</a>, нажмите F12 → Консоль, вставьте код и введите ключ Railway. Оставьте вкладку открытой.','ok');
+      }catch(err){
+        notice('Не удалось скопировать автоматически. Откройте ссылку «Открыть код подключения» и скопируйте его вручную.','error');
+      }
+    });
     by('v302-reg-form').addEventListener('submit',e=>{e.preventDefault();submit('reg',by('v302-reg').value)});
     by('v302-inn-form').addEventListener('submit',e=>{e.preventDefault();submit('inn',by('v302-inn').value)});
     const inn=by('inn');if(inn&&/^[0-9]{10}([0-9]{2})?$/.test(inn.value))by('v302-inn').value=inn.value;
@@ -250,6 +263,9 @@ def install(ns):
             data=b''.join([part async for part in response.body_iterator])
             try:html=data.decode('utf8')
             except UnicodeError:return response
+            # Remove the stale risk metric from the legacy manual-check
+            # JavaScript template as well as from the dashboard widgets.
+            html=html.replace("+' · рисков: '+Number(p.risks||0)","")
             if 'id="v302-modern-css"' not in html:
                 html=html.replace('</head>',STYLE+'</head>',1) if '</head>' in html else STYLE+html
             if 'id="v302-modern-js"' not in html:
