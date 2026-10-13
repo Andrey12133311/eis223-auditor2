@@ -59,7 +59,18 @@ def _parse_manifest(payload):
                  "/223/purchase/public/purchase/info/common-info.html",
                  "/223/purchase/public/purchase/info/commoninfo.html")
              and lq.get("regNumber")==[reg])
-        if not source_ok or not (has_reg or (has_notice_id and landing_ok)):
+        landing_by_notice_id=(
+            has_notice_id and landing.scheme=="https" and
+            landing.hostname=="zakupki.gov.ru" and
+            landing.port is None and not landing.username and not landing.password and
+            landing.path in (
+                "/epz/order/notice/notice223/common-info.html",
+                "/223/purchase/public/purchase/info/common-info.html",
+                "/223/purchase/public/purchase/info/commoninfo.html")
+            and lq.get("noticeInfoId")==q.get("noticeInfoId")
+            and not lq.get("regNumber"))
+        if not source_ok or not (has_reg or (has_notice_id and
+                                          (landing_ok or landing_by_notice_id))):
             raise ValueError("Invalid official EIS notice223 provenance")
     except ValueError as exc:
         raise ValueError("Invalid official EIS document-page provenance") from exc
