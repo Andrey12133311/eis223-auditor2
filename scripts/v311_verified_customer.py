@@ -154,6 +154,17 @@ def _apply(ns,reg,name,inn,source):
     db=_db(ns)
     try:
         db.execute("BEGIN IMMEDIATE")
+        prior=db.execute(
+            "SELECT name,inn FROM v311_verified_buyers WHERE reg=?",(reg,)
+        ).fetchone()
+        if prior:
+            prior_inn=str(prior["inn"] or "").strip()
+            if prior_inn and inn and inn!=prior_inn:
+                raise ValueError("ИНН не совпадает с ранее проверенным заказчиком")
+            if prior_inn and not inn:
+                normalized=lambda x:re.sub(r"[^а-яёa-z0-9]","",str(x or "").casefold())
+                if normalized(prior["name"])!=normalized(name):
+                    raise ValueError("Без ИНН нельзя заменять ранее подтверждённое имя заказчика")
         db.execute("""
           INSERT INTO v311_verified_buyers(reg,name,inn,evidence_page,evidence_source,captured_at)
           VALUES(?,?,?,?,?,?)
@@ -214,7 +225,10 @@ def install(ns):
             raise HTTPException(422,"Нет проверенного имени заказчика из карточки ЕИС")
         if inn and not INN.fullmatch(inn):
             raise HTTPException(422,"Неверный ИНН заказчика")
-        updated=await asyncio.to_thread(_apply,ns,reg,name,inn,source)
+        try:
+            updated=await asyncio.to_thread(_apply,ns,reg,name,inn,source)
+        except ValueError as exc:
+            raise HTTPException(409,str(exc)) from exc
         return {"accepted":True,"customer_verified":True,"customer":name,
                 "updated":updated,"metadata_source":"official_eis_card"}
 
