@@ -36,16 +36,30 @@ def auth(request):
         raise HTTPException(401,"Unauthorized")
 
 def uid_from_url(url):
+    """Stable internal attachment reference from one of TWO official EIS URLs.
+
+    The legacy numeric id maps to an internal 32-hex reference prefixed F1;
+    this is NOT represented to users as an original 32-hex EIS filestore UID.
+    Every manifest retains the real source URL and authentic uploaded bytes.
+    """
     try:
         p=urlsplit(url)
-        if p.scheme!="https" or p.hostname!="zakupki.gov.ru" or p.username or p.password:
+        if (p.scheme!="https" or p.hostname!="zakupki.gov.ru"
+                or p.port not in (None,443) or p.username or p.password or p.fragment):
             return None
-        if p.path!="/223/filestore/public/1.0/download/fz223/file.html":
-            return None
-        values=parse_qs(p.query).get("uid",[])
-        value=values[0].upper() if len(values)==1 else ""
-        return value if UID.fullmatch(value) else None
-    except (ValueError,AttributeError,TypeError):
+        params=parse_qs(p.query,keep_blank_values=True)
+        if p.path=="/223/filestore/public/1.0/download/fz223/file.html":
+            values=params.get("uid",[])
+            value=values[0].upper() if len(values)==1 else ""
+            return value if UID.fullmatch(value) else None
+        if p.path=="/223/purchase/public/download/download.html":
+            values=params.get("id",[])
+            if len(params)!=1 or len(values)!=1 or not re.fullmatch(r"[0-9]{1,15}",values[0]):
+                return None
+            number=int(values[0])
+            return ("F1"+format(number,"030X")) if number>0 else None
+        return None
+    except (ValueError,AttributeError,TypeError,OverflowError):
         return None
 
 def allowed_documents(reg):
