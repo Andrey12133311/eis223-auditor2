@@ -41,7 +41,9 @@ def _parse_manifest(payload):
             and source.port is None and not source.username and not source.password
             and source.path in (
                 "/epz/order/notice/notice223/documents.html",
-                "/223/purchase/public/purchase/info/documents.html"))
+                "/223/purchase/public/purchase/info/documents.html",
+                "/epz/order/notice/notice223/common-info.html",
+                "/223/purchase/public/purchase/info/common-info.html"))
         supplied=q.get("regNumber",[])+q.get("purchaseNoticeNumber",[])
         if supplied and (len(supplied)!=1 or supplied[0]!=reg):source_ok=False
         has_reg=bool(supplied and supplied[0]==reg)
@@ -51,7 +53,9 @@ def _parse_manifest(payload):
         lq=parse_qs(landing.query)
         landing_ok=(landing.scheme=="https" and landing.hostname=="zakupki.gov.ru"
              and landing.port is None and not landing.username and not landing.password
-             and landing.path=="/epz/order/notice/notice223/common-info.html"
+             and landing.path in (
+                 "/epz/order/notice/notice223/common-info.html",
+                 "/223/purchase/public/purchase/info/common-info.html")
              and lq.get("regNumber")==[reg])
         if not source_ok or not (has_reg or (has_notice_id and landing_ok)):
             raise ValueError("Invalid official EIS notice223 provenance")
@@ -85,6 +89,7 @@ def _parse_manifest(payload):
         "landing_page":landing_page,
         "title":_safe_string(payload.get("title"),800),
         "customer":_safe_string(payload.get("customer"),400),
+        "customer_inn":_safe_string(payload.get("customer_inn"),12),
         "published":_safe_string(payload.get("published"),40),
         "submission_start":_safe_string(payload.get("submission_start"),40),
         "submission_end":_safe_string(payload.get("submission_end"),40),
@@ -113,13 +118,53 @@ def _save_manifest(value):
                 value["declared_attachment_count"]=max(
                     int(previous.get("declared_attachment_count") or 0),
                     value["declared_attachment_count"],len(value["documents"]))
-                for key in ("title","customer","published","submission_start","submission_end","price"):
+                for key in ("title","customer","customer_inn","published","submission_start","submission_end","price"):
                     if not value.get(key):value[key]=previous.get(key,"")
         except (OSError,ValueError,KeyError,TypeError):
             pass
     value["received_at"]=datetime.now(timezone.utc).isoformat()
     save_atomic(path,json.dumps(value,ensure_ascii=False).encode("utf-8"))
     return len(value["documents"])
+
+def _real_customer(value):
+    name=str(value or "").strip()
+    if len(name)<5 or len(name)>400:return ""
+    if re.search(r"^(?:уточняем заказчика|заказчик уточняется|уточняется|не указан|нет данных)$",
+                 name,re.I):return ""
+    if name.isdigit() or re.fullmatch(r"[0-9\\s-]+",name):return ""
+    return name
+
+def _apply_customer(ns,value):
+    name=_real_customer(value.get("customer"))
+    inn=str(value.get("customer_inn") or "").strip()
+    if not re.fullmatch(r"(?:[0-9]{10}|[0-9]{12})",inn):inn=""
+    db=ns["conn"]()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        reg=value["reg_number"]
+        if name:
+            db.execute(
+              """UPDATE purchases SET customer=?,
+                 customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
+                 WHERE reg_number=? AND (customer IS NULL OR TRIM(customer)=''
+                     OR LOWER(customer) LIKE 'уточняем%' OR LOWER(customer) LIKE '%уточняется%')""",
+              (name,inn,inn,reg))
+        if inn and not name:
+            row=db.execute(
+                """SELECT customer FROM purchases WHERE customer_inn=?
+                   AND customer IS NOT NULL AND LENGTH(TRIM(customer))>7
+                   AND LOWER(customer) NOT LIKE '%уточня%'
+                   ORDER BY last_seen DESC LIMIT 1""",(inn,)).fetchone()
+            if row and _real_customer(row[0]):
+                db.execute("""UPDATE purchases SET customer=?,customer_inn=?
+                    WHERE reg_number=? AND (customer IS NULL OR TRIM(customer)=''
+                    OR LOWER(customer) LIKE '%уточня%')""",
+                    (row[0],inn,reg))
+        db.commit()
+    except Exception:
+        if db.in_transaction:db.rollback()
+        raise
+    finally:db.close()
 
 def _known(ns,regs):
     db=ns["conn"]()
@@ -128,9 +173,13 @@ def _known(ns,regs):
         if regs:
             pmarks=",".join("?" for _ in regs)
             rows=db.execute(
-                "SELECT reg_number,documents_checked FROM purchases WHERE reg_number IN ("+pmarks+")",
+                "SELECT reg_number,documents_checked,customer,title FROM purchases WHERE reg_number IN ("+pmarks+")",
                 regs).fetchall()
-            existing={r[0]:int(r[1] or 0) for r in rows}
+            existing={r[0]:{"checked":int(r[1] or 0),
+                            "needs_metadata":not _real_customer(r[2])
+                                or not str(r[3] or "").strip()
+                                or str(r[3] or "").lower().strip()=="подача заявок"}
+                      for r in rows}
         result={}
         for reg in regs:
             refs=allowed_documents(reg)
@@ -148,9 +197,10 @@ def _known(ns,regs):
                 "visible_attachments":declared,
                 "unresolved_attachments":max(0,declared-expected),
                 "originals_received":saved,
-                "checked_documents":existing.get(reg,0),
+                "checked_documents":existing.get(reg,{}).get("checked",0),
+                "needs_metadata":existing.get(reg,{}).get("needs_metadata",True),
                 "complete":bool(expected and saved==expected and expected>=declared
-                                and existing.get(reg,0)>=expected),
+                                and existing.get(reg,{}).get("checked",0)>=expected),
             }
         return result
     finally:db.close()
@@ -204,6 +254,7 @@ def install(ns):
         except (ValueError,TypeError,UnicodeDecodeError) as exc:
             raise HTTPException(422,str(exc)) from exc
         qty=await asyncio.to_thread(_save_manifest,value)
+        await asyncio.to_thread(_apply_customer,ns,value)
         print(f"V299 PUBLIC_MANIFEST reg={value['reg_number']} docs={qty} status=metadata_only",flush=True)
         return {"accepted":True,"reg_number":value["reg_number"],
                 "documents_discovered":qty,"source":"ЕИС",
