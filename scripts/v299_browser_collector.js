@@ -6,6 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
+  const COLLECTOR_VERSION = "308"; // authoritative modern notice223 documents
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -66,7 +67,8 @@
     }
   }
   async function api(path, method, data) {
-    const headers = {"x-eis223-upload-token":key};
+    const headers = {"x-eis223-upload-token":key,
+      "x-eis223-collector-version":COLLECTOR_VERSION};
     if (data !== undefined) headers["content-type"] =
       data instanceof ArrayBuffer ? "application/octet-stream" : "application/json";
     const r = await request(RAIL + path,
@@ -97,7 +99,10 @@
     if (html.length > 6000000) throw new Error("Слишком большая HTML-страница");
     if (/captcha|робот|доступ временно ограничен/i.test(html.slice(0,2000)))
       throw Object.assign(new Error("ЕИС просит проверку браузера"),{backoff:true});
-    return new DOMParser().parseFromString(html,"text/html");
+    const parsed=new DOMParser().parseFromString(html,"text/html");
+    // Keep the URL actually returned after official EIS redirects.
+    parsed.__eis223_source_url=r.url;
+    return parsed;
   }
   const SEARCH = "/epz/order/extendedsearch/results.html?" +
     new URLSearchParams({
@@ -134,38 +139,132 @@
     }
     return "";
   }
+  // Only certified public EIS file references are accepted. Reconstruct a
+  // canonical URL from the exact 32-hex UID found in the official HTML.
+  const FILE_PATH="/223/filestore/public/1.0/download/fz223/file.html";
+  const EXT_NAME=/([^\\/:<>?"|*\r\n]{2,180}\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml))(?=$|[\s,'"<>;)]|$)/i;
+  const EIS_FILE_LINK=/(?:https?:\/\/zakupki\.gov\.ru)?\/223\/filestore\/public\/1\.0\/download\/fz223\/file\.html\?[^"'<>\\\s)]{0,420}/gi;
+  function maybeFileUid(text) {
+    if(!text)return null;
+    const raw=String(text).replace(/&amp;/gi,"&").replace(/\\u0026/gi,"&");
+    const matches=raw.match(EIS_FILE_LINK)||[];
+    for(const href of matches) {
+      try {
+        const u=new URL(href,SITE);
+        const uid=(u.searchParams.get("uid")||"").toUpperCase();
+        if(u.origin===SITE&&u.pathname===FILE_PATH&&/^[0-9A-F]{32}$/.test(uid))
+          return uid;
+      }catch(e){}
+    }
+    return null;
+  }
+  function safeFilename(node){
+    const values=[];
+    let cur=node;
+    for(let i=0;cur&&i<4;i++,cur=cur.parentElement){
+      const attrs=["download","title","aria-label","data-file-name","data-filename"];
+      for(const a of attrs){const v=cur.getAttribute?.(a);if(v)values.push(v);}
+      if(cur.textContent&&cur.textContent.length<2400)values.push(cur.textContent);
+      if(cur.matches?.("tr,li,.file,.attachment,.document-item,.file-item"))break;
+    }
+    for(let v of values){
+      const found=String(v).replace(/\u00a0/g," ").match(EXT_NAME);
+      if(!found)continue;
+      const name=found[1].replace(/^\s*(?:скачать|файл|документ|загрузить|открыть)\s*[:–-]*\s*/ig,"")
+        .replace(/^.*[\\/]/,"").replace(/[<>:"|?*]/g,"").trim().slice(0,190);
+      if(EXT.test(name)&&name.length>4)return name;
+    }
+    return "";
+  }
   function discoverDocs(doc,reg) {
-    const documents = [];
-    const seen = new Set();
-    for (const a of doc.querySelectorAll("a[href]")) {
-      let u;
-      try {u = new URL(a.getAttribute("href"),SITE);} catch {continue;}
-      if (u.origin !== SITE ||
-          u.pathname !== "/223/filestore/public/1.0/download/fz223/file.html")
-        continue;
-      const uid = (u.searchParams.get("uid") || "").toUpperCase();
-      if (!/^[0-9A-F]{32}$/.test(uid) || seen.has(uid))continue;
-      let text = [
-        a.getAttribute("download"),
-        a.getAttribute("title"),
-        a.textContent,
-        a.closest("tr,li,.file")?.textContent
-      ].filter(Boolean).map(s => String(s).replace(/\s+/g," ").trim());
-      let name = "";
-      for (const value of text) {
-        let candidates = value.match(/[^\\/<>:"|?*]{1,220}\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml)\b/ig) || [];
-        if (candidates.length) {
-          name = candidates[0].replace(/^(?:скачать|файл|открыть)[ :–-]*/i,"").trim();
-          break;
-        }
+    const documents=[],seen=new Set();
+    const elements=doc.querySelectorAll("a,button,[onclick],[data-href],[data-url],[data-file-uid]");
+    for(const a of elements) {
+      const fields=["href","onclick","data-href","data-url","data-download-url"];
+      let uid=null;
+      for(const field of fields){
+        uid=maybeFileUid(a.getAttribute?.(field));
+        if(uid)break;
       }
-      if (!EXT.test(name))continue;
-      name = name.replace(/^.*[\\/]/,"").slice(0,200);
+      // Some official pages put only UID in data-file-uid, with a true
+      // fz223 download-path in the containing row. Never trust bare UIDs.
+      if(!uid)continue;
+      if(seen.has(uid))continue;
+      const name=safeFilename(a);
+      if(!name)continue;
       seen.add(uid);
-      documents.push({name,url:u.href});
-      if (documents.length >= 70)break;
+      documents.push({name,url:SITE+FILE_PATH+"?uid="+uid});
+      if(documents.length>=70)break;
     }
     return documents;
+  }
+  function documentPageCandidates(reg,landing){
+    const modern="/epz/order/notice/notice223/documents.html";
+    const allowed=new Set([modern,"/223/purchase/public/purchase/info/documents.html"]);
+    const candidates=[],seen=new Set();
+    function add(raw) {
+      try{
+        const u=new URL(String(raw).replace(/&amp;/gi,"&"),SITE);
+        if(u.origin!==SITE||!allowed.has(u.pathname))return;
+        const number=u.searchParams.get("regNumber")||u.searchParams.get("purchaseNoticeNumber");
+        if(number&&number!==reg)return;
+        if(!number&&!/^[0-9]{1,15}$/.test(u.searchParams.get("noticeInfoId")||""))return;
+        const out=u.pathname+u.search;
+        if(!seen.has(out)){seen.add(out);candidates.push(out);}
+      }catch(e){}
+    }
+    if(landing) {
+      for(const el of landing.querySelectorAll("a[href],a[onclick],[data-href],[data-url]")){
+        for(const field of ["href","onclick","data-href","data-url"]) {
+          const raw=el.getAttribute(field)||"";
+          if(raw.includes("/notice223/documents.html")){
+            const m=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/epz\/order\/notice\/notice223\/documents\.html\?[^"'\\\s<>)]*/i);
+            if(m)add(m[0]);
+          }
+        }
+      }
+    }
+    add(modern+"?regNumber="+reg);
+    // Newer cards sometimes route by notice number rather than regNumber.
+    add(modern+"?purchaseNoticeNumber="+reg);
+    add("/223/purchase/public/purchase/info/documents.html?regNumber="+reg);
+    return candidates;
+  }
+  async function discoverFromOfficialCard(reg) {
+    // New EIS cards reside under notice223; the old /223/purchase/... link
+    // returns 404 for recently published notices.
+    const landingPath="/epz/order/notice/notice223/common-info.html?regNumber="+reg;
+    let landing=null;
+    const problems=[];
+    try{landing=await eisHtml(landingPath);}
+    catch(e){
+      if(e.backoff)throw e;
+      problems.push("карточка "+String(e.message).slice(0,75));
+    }
+    const candidates=documentPageCandidates(reg,landing);
+    for(const path of candidates){
+      try{
+        const page=await eisHtml(path);
+        const docs=discoverDocs(page,reg);
+        if(docs.length) {
+          const actual=page.__eis223_source_url||SITE+path;
+          const uri=new URL(actual,SITE);
+          if(uri.origin!==SITE)throw Error("ЕИС перенаправила на другой домен");
+          // Only actual official attachment pages, not an HTML error page.
+          if(!["/epz/order/notice/notice223/documents.html",
+                "/223/purchase/public/purchase/info/documents.html"].includes(uri.pathname))
+            throw Error("ЕИС вернула не страницу документов");
+          return {docs,source:uri.href,landing:landingPath};
+        }
+        problems.push(path.split("?")[0]+" — файлов 0");
+      }catch(e){
+        if(e.backoff)throw e;
+        problems.push(String(e.message).slice(0,95));
+      }
+    }
+    const reason="ЕИС: ссылки на оригиналы не найдены; "+
+      problems.slice(0,5).join(" | ");
+    throw new Error(reason.slice(0,260));
   }
   async function getKnown(numbers) {
     const path="/api/v299/eis223/known?regs="+encodeURIComponent(numbers.join(","));
@@ -201,15 +300,11 @@
   }
 
   async function handleRegistry(reg,searchDoc) {
-    const source="/223/purchase/public/purchase/info/documents.html?regNumber="+reg;
-    const page=await eisHtml(source);
-    const docs=discoverDocs(page,reg);
-    if (!docs.length) {
-      log(reg,"на странице ЕИС не обнаружены ссылки на оригиналы. Не засчитываю.");
-      return false;
-    }
+    const {docs,source,landing}=await discoverFromOfficialCard(reg);
+    log(reg,"найдены официальные ссылки на документы:",docs.length,
+        "страница:",source.split("?")[0]);
     await api("/api/v299/eis223/public-manifest","POST",{
-      reg_number:reg,source_page:SITE+source,
+      reg_number:reg,source_page:source,landing_page:SITE+landing,
       title:searchTitle(searchDoc,reg),customer:"",documents:docs
     });
     const list=await api("/api/v295/eis223/manifest/"+reg);
@@ -224,9 +319,10 @@
         log(reg,item.name,"пропущен:",String(e.message).slice(0,130));
       }
     }
-    admitted++;
-    log(reg,"метаданные приняты, новых оригиналов в цикле:",read,
-      "; общая очередь юридической проверки запускается после получения всех доступных файлов");
+    if(read>0)admitted++;
+    log(reg,"официальных ссылок:",docs.length,"оригиналов передано:",read,
+      "; юридическая проверка запускается только при получении всех доступных файлов");
+    if(!read)throw new Error("Документы обнаружены, но ни один оригинал не загружен");
     return true;
   }
 
