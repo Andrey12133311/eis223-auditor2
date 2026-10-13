@@ -243,17 +243,27 @@ def install(ns):
             if not INN.fullmatch(value):raise HTTPException(422,"ИНН должен содержать 10 или 12 цифр")
         else:raise HTTPException(422,"Выберите поиск по номеру или ИНН")
         prior=await asyncio.to_thread(_local_results,ns,kind,value)
-        if kind=="reg" and prior and prior[0]["documents_checked"]>0:
+        local_recheck=False
+        if kind=="reg" and prior and int(prior[0].get("documents_checked") or 0)>0:
             try:
-                fn=ns.get("_v295_enqueue_review")
-                if callable(fn):
-                    ret=fn(value,force=True)
-                    print(f"V301 LOCAL_RECHECK reg={value} status={ret.get('status')}",flush=True)
+                originals=allowed_documents(value)
+                complete=bool(originals and all(saved_document(value,uid) for uid in originals))
+                if complete:
+                    fn=ns.get("_v295_enqueue_review")
+                    if callable(fn):
+                        ret=fn(value,force=True)
+                        local_recheck=ret.get("status") in ("queued","running","completed")
+                        print(f"V301 LOCAL_RECHECK reg={value} status={ret.get('status')}",flush=True)
             except Exception as exc:
                 print(f"V301 RECHECK_FALLBACK reg={value} {type(exc).__name__}",flush=True)
         job,created=await asyncio.to_thread(_enqueue,ns,kind,value,1,0)
+        if local_recheck:
+            job=await asyncio.to_thread(
+                _finish,ns,job["id"],"done",
+                "Все подтверждённые оригиналы уже получены. Запущена локальная правовая перепроверка.",1,0)
         return {"id":job["id"],"status":job["status"],"kind":kind,
                 "target":value,"new_request":created,
+                "local_recheck":local_recheck,
                 "existing":prior[:50],"bridge":await asyncio.to_thread(_bridge,ns)}
 
     @app.get("/api/v301/job/{job_id}")
