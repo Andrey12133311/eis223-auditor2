@@ -29,6 +29,8 @@ import v293_hide_obsolete_controls
 import v294_eis_bridge
 import v295_eis_originals
 import v298_eis_only
+import v299_browser_intake
+import v300_violation_ui
 from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
@@ -58,8 +60,10 @@ def main():
     # No legacy API connectors or Roseltorg / ETP discovery.
     v294_eis_bridge.install(vars(entry))
     v295_eis_originals.install(vars(entry))
+    v299_browser_intake.install(vars(entry))
     v298_eis_only.install(vars(entry))
-    print('V298 EIS_ONLY_BOOT_SOURCE=getDocsIP_browser originals=local legacy_sources=disabled legacy_queue=paused',flush=True)
+    v300_violation_ui.install(vars(entry))
+    print('V300 BOOT_EIS_ONLY browser_collector_interval=300 violations_only=True original_documents_only=True',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
     # Railway cannot reach EIS SOAP; do not launch repeated network probes.
