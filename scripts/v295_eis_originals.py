@@ -21,7 +21,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 REG = re.compile(r"[0-9]{11,20}$")
 UID = re.compile(r"[0-9A-F]{32}$")
-EXT = frozenset((".docx",".doc",".xlsx",".xls",".pdf",".rtf",".odt",".ods",".zip",".xml"))
+EXT = frozenset((".docx",".doc",".xlsx",".xls",".pdf",".rtf",".odt",".ods",".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab",".xml"))
 MAX_BYTES = 25*1024*1024
 MAX_EXPANDED = 80*1024*1024
 
@@ -122,10 +122,27 @@ def saved_document(reg,uid):
 def assert_format(data,ext):
     if len(data)<8 or len(data)>MAX_BYTES:raise ValueError("Invalid original file size")
     prefix=data[:512].lstrip().lower()
-    if prefix.startswith((b"<html",b"<!doctype html",b"<?xml",b"<soap")):
-        raise ValueError("Source returned HTML/XML instead of requested original")
+    if prefix.startswith((b"<html",b"<!doctype html",b"<soap")):
+        raise ValueError("ЕИС вернула HTML вместо оригинального файла")
+    # XML is permitted only when explicitly supplied as an XML original.
+    if prefix.startswith(b"<?xml") and ext!=".xml":
+        raise ValueError("ЕИС вернула XML вместо запрошенного документа")
     ole=data[:8]==bytes.fromhex("d0cf11e0a1b11ae1")
     is_zip=data[:4]==bytes.fromhex("504b0304")
+    rar=data.startswith(b"Rar!\\x1a\\x07".decode("unicode_escape").encode("latin1"))
+    seven=data.startswith(bytes.fromhex("377abcaf271c"))
+    gzip_data=data.startswith(bytes.fromhex("1f8b"))
+    bz2_data=data.startswith(b"BZh")
+    xz_data=data.startswith(bytes.fromhex("fd377a585a00"))
+    tar_data=len(data)>=262 and data[257:262]==b"ustar"
+    cab_data=data.startswith(b"MSCF")
+    if ext==".rar" and not rar:raise ValueError("Не является архивом RAR")
+    if ext==".7z" and not seven:raise ValueError("Не является архивом 7z")
+    if ext in (".gz",".tgz") and not gzip_data:raise ValueError("Не является GZIP")
+    if ext in (".bz2",".tbz2") and not bz2_data:raise ValueError("Не является BZIP2")
+    if ext in (".xz",".txz") and not xz_data:raise ValueError("Не является XZ")
+    if ext==".tar" and not tar_data:raise ValueError("Не является TAR")
+    if ext==".cab" and not cab_data:raise ValueError("Не является CAB")
     if ext in (".doc",".xls") and not ole:raise ValueError("Not a binary Office original")
     if ext==".pdf" and not data.startswith(b"%PDF"):raise ValueError("Not a PDF original")
     if ext==".rtf" and not data.startswith(bytes.fromhex("7b5c727466")):raise ValueError("Not an RTF original")
