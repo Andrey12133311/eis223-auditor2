@@ -201,8 +201,9 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
                         (secrets.token_hex(12),"inn",row["target"],next_page,12,
                          now,now,int(time.time())+75,row["id"]))
         db.commit()
-        print(f"V301 SEARCH_REPORT kind={row['kind']} target={row['target']} status={status} "
-              f"found={len(valid)} imported={accepted}",flush=True)
+        print(f"V308 SEARCH_REPORT kind={row['kind']} target={row['target']} status={status} "
+              f"next_state={effective} found={len(valid)} imported={accepted} "
+              f"reason={str(detail)[:180]}",flush=True)
         return dict(db.execute("SELECT * FROM v301_search_jobs WHERE id=?",(job_id,)).fetchone())
     except:
         if db.in_transaction:db.rollback()
