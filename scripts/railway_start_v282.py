@@ -39,6 +39,7 @@ import v305_memo_card
 import v303_mobile_fixes
 import v311_verified_customer
 import v311_customer_backfill
+import v312_archive_selftest
 from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
@@ -79,6 +80,10 @@ def main():
     v303_mobile_fixes.install(vars(entry))
     v311_verified_customer.install(vars(entry))
     v311_customer_backfill.install(vars(entry))
+    try:
+        v312_archive_selftest.run()
+    except Exception as exc:
+        print("V312 ARCHIVE_SELFTEST_FAIL "+type(exc).__name__+": "+str(exc)[:180],flush=True)
     print('V305 BOOT_UI_FIXED memo_format=odt-only filters=canonical card_nav=working',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
