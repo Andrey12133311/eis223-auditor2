@@ -92,10 +92,10 @@ def assert_format(data,ext):
     if prefix.startswith((b"<html",b"<!doctype html",b"<?xml",b"<soap")):
         raise ValueError("Source returned HTML/XML instead of requested original")
     ole=data[:8]==bytes.fromhex("d0cf11e0a1b11ae1")
-    is_zip=data[:4]==b"PK\\x03\\x04"
+    is_zip=data[:4]==bytes.fromhex("504b0304")
     if ext in (".doc",".xls") and not ole:raise ValueError("Not a binary Office original")
     if ext==".pdf" and not data.startswith(b"%PDF"):raise ValueError("Not a PDF original")
-    if ext==".rtf" and not data.startswith(b"{\\\\rtf"):raise ValueError("Not an RTF original")
+    if ext==".rtf" and not data.startswith(bytes.fromhex("7b5c727466")):raise ValueError("Not an RTF original")
     if ext==".xml" and not data.lstrip().startswith(b"<"):raise ValueError("Not an XML original")
     if ext in (".docx",".xlsx",".odt",".ods",".zip"):
         if not is_zip:raise ValueError("Not a ZIP-based Office/archive original")
@@ -222,6 +222,30 @@ def install(ns):
         return {"reg_number":reg,"metadata_received":bool(items),"documents":items,
                 "counted_as_audited":False}
 
+    @app.post("/api/v295/eis223/recheck/{reg}")
+    async def recheck_official(reg:str,request:Request):
+        auth(request)
+        allowed=allowed_documents(reg)
+        received=sum(bool(saved_document(reg,uid)) for uid in allowed)
+        if not received:raise HTTPException(422,"No original documents received yet")
+        process=ns.get("process_purchase")
+        lock=ns.get("lock")
+        if process is None or lock is None:raise HTTPException(503,"Legal check pipeline unavailable")
+        if lock.locked():raise HTTPException(409,"A background check is in progress; retry shortly")
+        async with lock:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=httpx.Timeout(20.0,connect=6.0),
+                    follow_redirects=True) as client:
+                    result=await asyncio.wait_for(process(client,reg,None),timeout=170)
+                return {"completed":True,"reg_number":reg,"originals_uploaded":received,
+                        "review_result":result}
+            except asyncio.TimeoutError as exc:
+                raise HTTPException(504,"Existing legal audit timed out") from exc
+            except Exception as exc:
+                print("V295 RECHECK_ERROR "+type(exc).__name__,flush=True)
+                raise HTTPException(502,"Existing legal audit failed") from exc
+
     @app.get("/api/v295/eis223/documents",response_class=HTMLResponse)
     async def page():
         return HTMLResponse('''<!doctype html><html lang="ru"><meta charset="utf-8">
@@ -238,7 +262,7 @@ button{cursor:pointer}pre{white-space:pre-wrap;background:#eee;padding:1rem}</st
 <button id="zipbtn">1. Загрузить XML-архив</button>
 <label>Номер ЕИС: <input id="reg" value="32616440427" pattern="[0-9]{11,20}"></label>
 <button id="list">2. Показать документы</button>
-<div id="docs"></div><pre id="result"></pre>
+<div id="docs"></div><button id="recheck">3. Провести юридическую проверку загруженных оригиналов</button><pre id="result"></pre>
 <script>
 const el=n=>document.getElementById(n);
 const status=t=>el('result').textContent=t;
@@ -255,6 +279,16 @@ try {let r=await api('/api/v294/eis223/archive',{method:'POST',
 headers:{'Content-Type':'application/zip'},body:file});
 el('reg').value=r.reg_number;status('XML принят. Ссылок на документы: '+r.document_links);
 el('list').click();}catch(e){status(e.message);}
+};
+el('recheck').onclick=async()=>{
+try{
+ const reg=el('reg').value.trim();
+ status('Выполняется юридическая проверка, это может занять до трёх минут...');
+ const r=await api('/api/v295/eis223/recheck/'+reg,{method:'POST'});
+ status('Проверка завершена. Проверенных документов по закупке: '+
+ (r.review_result?.checked_documents??'нет данных')+
+ '. Откройте карточку проверки на главной странице.');
+}catch(e){status(e.message);}
 };
 el('list').onclick=async()=>{
 try{
