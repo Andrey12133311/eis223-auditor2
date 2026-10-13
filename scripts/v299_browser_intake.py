@@ -48,8 +48,9 @@ def _parse_manifest(payload):
         supplied=q.get("regNumber",[])+q.get("purchaseNoticeNumber",[])
         if supplied and (len(supplied)!=1 or supplied[0]!=reg):source_ok=False
         has_reg=bool(supplied and supplied[0]==reg)
-        has_notice_id=bool(len(q.get("noticeInfoId",[]))==1
-            and re.fullmatch(r"[0-9]{1,15}",q["noticeInfoId"][0]))
+        ids=[(name,value) for name in ("noticeId","noticeInfoId")
+             for value in q.get(name,[])]
+        has_notice_id=(len(ids)==1 and bool(re.fullmatch(r"[0-9]{1,15}",ids[0][1])))
         landing=urlsplit(landing_page)
         lq=parse_qs(landing.query)
         landing_ok=(landing.scheme=="https" and landing.hostname=="zakupki.gov.ru"
@@ -67,7 +68,7 @@ def _parse_manifest(payload):
                 "/epz/order/notice/notice223/common-info.html",
                 "/223/purchase/public/purchase/info/common-info.html",
                 "/223/purchase/public/purchase/info/commoninfo.html")
-            and lq.get("noticeInfoId")==q.get("noticeInfoId")
+            and lq.get(ids[0][0])==[ids[0][1]]
             and not lq.get("regNumber"))
         if not source_ok or not (has_reg or (has_notice_id and
                                           (landing_ok or landing_by_notice_id))):
@@ -242,12 +243,12 @@ def _scan_status():
     if isinstance(at,str):
         try:
             date=datetime.fromisoformat(at)
-            active=(version>=312 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
+            active=(version>=313 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
         except (ValueError,TypeError):pass
     return {
         "browser_collector_active":active,
         "collector_version":version,
-        "upgrade_required":version<312,
+        "upgrade_required":version<313,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),
         "last_error":info.get("error",""),
@@ -270,7 +271,7 @@ def install(ns):
             raise HTTPException(403,"Только официальная вкладка ЕИС")
         try:version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:version=0
-        if version<312:raise HTTPException(426,"Обновите мост ЕИС до v312")
+        if version<313:raise HTTPException(426,"Обновите мост ЕИС до v313")
         raw=await request.body()
         if len(raw)>2500:raise HTTPException(413,"Слишком большой запрос")
         try:
@@ -342,8 +343,8 @@ def install(ns):
             raise HTTPException(403,"Expected EIS browser origin")
         try:version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:version=0
-        if version<312:
-            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v312")
+        if version<313:
+            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v313")
         raw=await request.body()
         if len(raw)>1500:raise HTTPException(413,"Heartbeat too large")
         try:
