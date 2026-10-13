@@ -237,6 +237,51 @@ def install(ns):
             return from_source
         ns["discover_eis_documents"]=enriched_discovery
 
+    original_batch_download=ns.get("download_all_documents")
+    if original_batch_download is not None:
+        async def deduplicated_batch(client,reg,docs):
+            await original_batch_download(client,reg,docs)
+            if not allowed_documents(reg):return
+            original_count=len(docs)
+            unique=[]
+            fingerprints={}
+            for d in docs:
+                local=d.get("local") if isinstance(d,dict) else None
+                if d.get("status")!="checked" or not local or not Path(local).is_file():
+                    unique.append(d)
+                    continue
+                try:
+                    p=Path(local)
+                    if p.stat().st_size>MAX_BYTES:
+                        unique.append(d)
+                        continue
+                    with p.open("rb") as f:
+                        sha=hashlib.file_digest(f,"sha256").hexdigest()
+                except OSError:
+                    unique.append(d)
+                    continue
+                if sha not in fingerprints:
+                    fingerprints[sha]=len(unique)
+                    unique.append(d)
+                    continue
+                idx=fingerprints[sha]
+                primary=unique[idx]
+                if not isinstance(primary.get("meta"),dict):primary["meta"]={}
+                if not isinstance(d.get("meta"),dict):d["meta"]={}
+                alternatives=list(primary["meta"].get("identical_sources") or [])
+                alternatives.append({"name":d.get("name") or "",
+                                     "url":d.get("url") or ""})
+                prefer_official=(d["meta"].get("source")=="official_eis_getDocsIP" and
+                                 primary["meta"].get("source")!="official_eis_getDocsIP")
+                if prefer_official:
+                    d["meta"]["identical_sources"]=alternatives
+                    unique[idx]=d
+                else:
+                    primary["meta"]["identical_sources"]=alternatives
+            docs[:]=unique
+            print(f"V296 ORIGINAL_DEDUP reg={reg} before={original_count} after={len(unique)}",flush=True)
+        ns["download_all_documents"]=deduplicated_batch
+
     if downloader is not None and extractor is not None:
         async def downloaded_from_local(client,reg,d,cache=None):
             uid=uid_from_url(d.get("url",""))
@@ -367,9 +412,8 @@ try{
  const reg=el('reg').value.trim();
  status('Выполняется юридическая проверка, это может занять до трёх минут...');
  const r=await api('/api/v295/eis223/recheck/'+reg,{method:'POST'});
- status('Проверка завершена. Проверенных документов по закупке: '+
- (r.review_result?.checked_documents??'нет данных')+
- '. Откройте карточку проверки на главной странице.');
+ status(r.queued?'Оригиналы в приоритетной очереди. Проверка начнётся после текущей.':
+ 'Статус проверки: '+(r.status||'—')+', проверенных документов: '+(r.checked_documents??'—'));
 }catch(e){status(e.message);}
 };
 el('list').onclick=async()=>{
@@ -396,7 +440,7 @@ b.disabled=true;try{
 let r=await api('/api/v295/eis223/original/'+reg+'/'+d.uid,{method:'POST',
 headers:{'Content-Type':'application/octet-stream'},body:input.files[0]});
 small.textContent='Получен оригинал, извлечено символов: '+r.extracted_chars+
-'. Для включения в общую проверку требуется перепроверка закупки.';
+'. Проверка: '+(r.review_status||'ожидание')+'.';
 status('Сохранено '+d.name+', байт: '+r.bytes);
 }catch(e){status(e.message);}finally{b.disabled=false;}}
 li.append(a,document.createElement('br'),input,b,small);
