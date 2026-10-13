@@ -170,6 +170,77 @@ def install(ns):
         allowed=allowed_documents(reg)
         return len(allowed),sum(bool(saved_document(reg,uid)) for uid in allowed)
 
+    def reconcile_document_rows(reg):
+        """Safely remove repeated *rows*, never delete original files or legal findings."""
+        official=allowed_documents(reg)
+        connector=ns.get("conn")
+        if not official or connector is None:return None
+        db=connector()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            rows=[dict(r) for r in db.execute(
+                "SELECT id,name,url,local_path,status,text_chars,metadata_json FROM docs WHERE reg_number=?",
+                (reg,)).fetchall()]
+            groups={}
+            for row in rows:
+                local=row.get("local_path")
+                if row.get("status")!="checked" or not local:continue
+                try:
+                    file=Path(local)
+                    if not file.is_file() or file.stat().st_size>MAX_BYTES:continue
+                    with file.open("rb") as content:
+                        digest=hashlib.file_digest(content,"sha256").hexdigest()
+                except OSError:
+                    continue
+                groups.setdefault(digest,[]).append(row)
+            removed=0
+            for digest,group in groups.items():
+                if len(group)<2:continue
+                chosen=max(group,key=lambda r:int(uid_from_url(r.get("url","")) in official))
+                try:
+                    meta=json.loads(chosen.get("metadata_json") or "{}")
+                    if not isinstance(meta,dict):meta={}
+                except (ValueError,TypeError):meta={}
+                alternatives=list(meta.get("identical_sources") or [])
+                for row in group:
+                    if row["id"]==chosen["id"]:continue
+                    alternatives.append({"name":row.get("name") or "",
+                                         "url":row.get("url") or "",
+                                         "sha256":digest})
+                    db.execute("DELETE FROM docs WHERE id=? AND reg_number=?",
+                               (row["id"],reg))
+                    removed+=1
+                meta["identical_sources"]=alternatives
+                meta["sha256"]=digest
+                db.execute("UPDATE docs SET metadata_json=? WHERE id=? AND reg_number=?",
+                           (json.dumps(meta,ensure_ascii=False),chosen["id"],reg))
+            counts=db.execute(
+                "SELECT COUNT(*) total, SUM(CASE WHEN status='checked' THEN 1 ELSE 0 END) verified "
+                "FROM docs WHERE reg_number=?",(reg,)).fetchone()
+            total=int(counts[0] or 0)
+            verified=int(counts[1] or 0)
+            db.execute(
+                "UPDATE purchases SET documents_found=?, documents_checked=? WHERE reg_number=?",
+                (total,verified,reg))
+            db.commit()
+            print(f"V297 DB_DEDUP reg={reg} removed={removed} remaining={total} checked={verified}",flush=True)
+            return {"remaining":total,"checked":verified,"removed":removed}
+        except Exception as exc:
+            db.rollback()
+            print(f"V297 DB_DEDUP_FAILED reg={reg} type={type(exc).__name__}",flush=True)
+            raise
+        finally:
+            db.close()
+
+    async def reconcile_rows_after_lock(reg):
+        lock=ns.get("lock")
+        if lock is None:return
+        try:
+            async with lock:
+                await asyncio.to_thread(reconcile_document_rows,reg)
+        except Exception as exc:
+            print("V297 RECONCILE_ERROR "+type(exc).__name__,flush=True)
+
     async def review_worker(reg):
         total,received=review_counts(reg)
         lock=ns.get("lock")
@@ -185,10 +256,13 @@ def install(ns):
                 async with httpx.AsyncClient(timeout=httpx.Timeout(20,connect=6),
                                             follow_redirects=True) as client:
                     result=await asyncio.wait_for(process(client,reg,None),timeout=240)
-                checked=int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0
+                verified=await asyncio.to_thread(reconcile_document_rows,reg)
+                checked=(int(verified["checked"]) if verified is not None
+                         else int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0)
                 update_review(reg,"completed" if checked>=received else "partial",
                               originals_received=received,checked_documents=checked,
-                              findings=result.get("findings") if isinstance(result,dict) else None)
+                              findings=result.get("findings") if isinstance(result,dict) else None,
+                              deduplicated=bool(verified is not None))
         except asyncio.CancelledError:
             update_review(reg,"queued",originals_received=received,reason="Interrupted; will resume")
             raise
@@ -218,9 +292,21 @@ def install(ns):
         if inbox.is_dir():
             for folder in sorted(inbox.iterdir())[:500]:
                 if folder.is_dir() and REG.fullmatch(folder.name):
-                    try:enqueue_review(folder.name)
+                    try:
+                        state=enqueue_review(folder.name)
+                        if state.get("status")=="completed":
+                            asyncio.create_task(reconcile_rows_after_lock(folder.name))
                     except Exception as exc:
                         print("V296 REQUEUE_ERROR "+type(exc).__name__,flush=True)
+        async def periodic_unique_reconciliation():
+            await asyncio.sleep(600)
+            while True:
+                if inbox.is_dir():
+                    for folder in sorted(inbox.iterdir())[:500]:
+                        if folder.is_dir() and REG.fullmatch(folder.name):
+                            await reconcile_rows_after_lock(folder.name)
+                await asyncio.sleep(600)
+        asyncio.create_task(periodic_unique_reconciliation())
 
     if discovery is not None:
         async def enriched_discovery(client,reg,card=None):
