@@ -22,6 +22,11 @@ align-items:center;justify-content:center;flex-shrink:0}
 min-height:42px;background:#2466a3;border-radius:9px;padding:10px 14px;
 color:white!important;text-decoration:none!important;font-weight:650}
 #rows a.v303-card-link:hover{background:#154a7f}
+#v303-memo-panel{margin:16px 0;padding:15px;background:#f2f7ff;
+ border:1px solid #d2e4f7;border-radius:12px}
+#v303-memo-panel a{display:inline-flex;color:white!important;background:#245f9a;
+ padding:10px 16px;border-radius:9px;text-decoration:none;font-weight:650}
+#v303-memo-panel small{display:block;color:#576e88;margin-top:8px}
 @media(max-width:650px){
 #filters{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
 gap:9px!important;min-width:0!important}
@@ -80,8 +85,31 @@ JS = r'''<script id="v303-mobile-fixes-script">
     form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
   },true);
  }
+ function ensureMemoButton(){
+  const match=location.pathname.match(/^\/check-new\/([0-9]{11,20})/);
+  if(!match||document.getElementById('v303-memo-panel')||window.__v303MemoPending)return;
+  window.__v303MemoPending=true;
+  fetch('/api/v267/findings/'+match[1],{cache:'no-store'})
+   .then(r=>r.ok?r.json():null).then(x=>{
+     if(!x||!x.total||document.getElementById('v303-memo-panel'))return;
+     const box=document.createElement('section');
+     box.id='v303-memo-panel';
+     const link=document.createElement('a');
+     link.href='/api/purchases/'+encodeURIComponent(match[1])+'/service-memo.odt';
+     link.textContent='Служебная записка — скачать ODT';
+     const hint=document.createElement('small');
+     hint.textContent='Формируется по утверждённому ODT-шаблону; только документально подтверждённые нарушения.';
+     box.append(link,hint);
+     (document.querySelector('main')||document.body).prepend(box);
+   }).catch(()=>{}).finally(()=>{window.__v303MemoPending=false});
+ }
  function fix(){
   clean();enableReset();
+  // Only produce the memo action on a card containing real violations.
+  if(!window.__v303MemoProbeDone){
+    window.__v303MemoProbeDone=true;
+    ensureMemoButton();
+  }
   const types=$('v257-violation-type');
   if(types){
     // Legacy clients may have appended duplicate options. Keep one per
