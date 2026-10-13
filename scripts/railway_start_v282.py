@@ -25,18 +25,10 @@ from patch_v274 import patch as patch_v274
 from patch_v275 import patch as patch_v275
 from patch_v276 import patch as patch_v276
 from patch_v277 import patch as patch_v277
-import v278_tenderguru
-import v279_damia
-import v282_rostender
-import v288_roseltorg
-import v292_eis_soap_probe
 import v293_hide_obsolete_controls
 import v294_eis_bridge
 import v295_eis_originals
 import v298_eis_only
-from patch_v280 import patch as patch_v280
-from patch_v281 import patch as patch_v281
-from patch_v290 import patch as patch_v290
 from patch_v291 import patch as patch_v291
 def main():
     folder,count=restore()
@@ -67,6 +59,7 @@ def main():
     v294_eis_bridge.install(vars(entry))
     v295_eis_originals.install(vars(entry))
     v298_eis_only.install(vars(entry))
+    print('V298 EIS_ONLY_BOOT_SOURCE=getDocsIP_browser originals=local legacy_sources=disabled legacy_queue=paused',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
     # Railway cannot reach EIS SOAP; do not launch repeated network probes.
