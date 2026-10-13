@@ -79,10 +79,16 @@ def install(ns:dict)->None:
     @app.get('/api/v257/violation-types',include_in_schema=False)
     def types():
         with db() as c:
-            rows=c.execute("""SELECT COALESCE(code,'') code,MAX(title) title,COUNT(DISTINCT reg_number) purchases
-             FROM findings WHERE kind='violation' AND COALESCE(code,'')<>''
-             GROUP BY code ORDER BY purchases DESC,code LIMIT 150""").fetchall()
-        return {'items':[dict(r) for r in rows]}
+            # One legal violation type may have hundreds of instance-specific
+            # finding codes. Group by its actual description, not by code.
+            rows=c.execute("""SELECT TRIM(title) title,
+                   COUNT(DISTINCT reg_number) purchases
+              FROM findings
+              WHERE kind='violation' AND TRIM(COALESCE(title,''))<>''
+              GROUP BY TRIM(title)
+              ORDER BY purchases DESC,title LIMIT 150""").fetchall()
+        return {'items':[{'code':'title:'+r['title'], 'title':r['title'],
+                          'purchases':int(r['purchases'])} for r in rows]}
     @app.get('/api/v257/dashboard',include_in_schema=False)
     def dashboard(request:Request):
         params=request.query_params
@@ -114,8 +120,17 @@ def install(ns:dict)->None:
         code=(params.get('violation_type') or '').strip()
         if code:
             if len(code)>160:raise HTTPException(400,'Недопустимый вид нарушения')
-            conditions.append("EXISTS (SELECT 1 FROM findings f WHERE f.reg_number=p.reg_number AND f.kind='violation' AND f.code=?)")
-            args.append(code)
+            if code.startswith('title:'):
+                # UI groups equal descriptions, retaining ALL original codes.
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM findings f WHERE f.reg_number=p.reg_number "
+                    "AND f.kind='violation' AND TRIM(f.title)=?)")
+                args.append(code[6:])
+            else:
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM findings f WHERE f.reg_number=p.reg_number "
+                    "AND f.kind='violation' AND f.code=?)")
+                args.append(code)
         inn=(params.get('inn') or '').strip()
         if inn:
             if not re.fullmatch(r'\d{10}|\d{12}',inn):raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
