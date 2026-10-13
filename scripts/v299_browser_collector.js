@@ -6,15 +6,15 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "309"; // authoritative modern notice223 documents
+  const COLLECTOR_VERSION = "310"; // authoritative modern notice223 documents
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
   const MAX_BUYS = 2;
-  const MAX_FILES = 12;
+  const MAX_FILES = 20;
   const PAUSE_MS = 2500;
   const NUMBER = /^3[0-9]{10}$/;
-  const EXT = /\.(docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml)$/i;
+  const EXT = /\.(docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml)$/i;
 
   if (location.origin !== SITE) {
     console.log("[ЕИС-5мин] Открой zakupki.gov.ru перед запуском.");
@@ -149,7 +149,7 @@
   // canonical URL from the exact 32-hex UID found in the official HTML.
   const FILE_PATH="/223/filestore/public/1.0/download/fz223/file.html";
   const LEGACY_PATH="/223/purchase/public/download/download.html";
-  const EXT_NAME=/([^\\/:<>?"|*\r\n]{2,180}\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml))(?=$|[\s,'"<>;)]|$)/i;
+  const EXT_NAME=/([^\\/:<>?"|*\r\n]{2,180}\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml))(?=$|[\s,'"<>;)]|$)/i;
   // Public 223-FZ EIS supports two verified attachment link schemes.
   // Other URLs, signatures and untrusted domains are never downloaded.
   const EIS_FILE_LINK=/(?:https?:\/\/zakupki\.gov\.ru)?\/223\/(?:filestore\/public\/1\.0\/download\/fz223\/file\.html|purchase\/public\/download\/download\.html)\?[^"'<>\\\s)]{1,420}/gi;
@@ -242,74 +242,176 @@
     }
     return documents;
   }
-  function documentPageCandidates(reg,landing){
-    const modern="/epz/order/notice/notice223/documents.html";
-    const allowed=new Set([modern,"/223/purchase/public/purchase/info/documents.html"]);
-    const candidates=[],seen=new Set();
-    function add(raw) {
-      try{
-        const u=new URL(String(raw).replace(/&amp;/gi,"&"),
-          SITE+"/epz/order/notice/notice223/common-info.html");
-        if(u.origin!==SITE||!allowed.has(u.pathname))return;
-        const number=u.searchParams.get("regNumber")||u.searchParams.get("purchaseNoticeNumber");
-        if(number&&number!==reg)return;
-        if(!number&&!/^[0-9]{1,15}$/.test(u.searchParams.get("noticeInfoId")||""))return;
-        const out=u.pathname+u.search;
-        if(!seen.has(out)){seen.add(out);candidates.push(out);}
-      }catch(e){}
-    }
-    if(landing) {
-      for(const el of landing.querySelectorAll("a[href],a[onclick],[data-href],[data-url]")){
-        for(const field of ["href","onclick","data-href","data-url"]) {
-          const raw=el.getAttribute(field)||"";
-          if(raw.includes("documents.html?")){
-            const m=raw.match(/(?:(?:https?:\/\/zakupki\.gov\.ru)?\/epz\/order\/notice\/notice223\/)?documents\.html\?[^"'\\\s<>)]*/i);
-            if(m)add(m[0]);
-          }
+  const INFO_PAGES=new Set([
+    "/223/purchase/public/purchase/info/common-info.html",
+    "/epz/order/notice/notice223/common-info.html"
+  ]);
+  const DOC_PAGES=new Set([
+    "/223/purchase/public/purchase/info/documents.html",
+    "/epz/order/notice/notice223/documents.html"
+  ]);
+  function officialCardUrl(raw,reg,validPaths){
+    try{
+      const u=new URL(String(raw||"").replace(/&amp;/gi,"&"),SITE);
+      if(u.origin!==SITE||!validPaths.has(u.pathname))return null;
+      const regNum=u.searchParams.get("regNumber")||
+                   u.searchParams.get("purchaseNoticeNumber");
+      if(regNum!==reg)return null;
+      return u;
+    }catch(e){return null}
+  }
+  function actualCardLinks(doc,reg){
+    const output=[],seen=new Set();
+    if(!doc)return output;
+    for(const element of doc.querySelectorAll("a[href],[onclick],[data-href]")){
+      for(const key of ["href","onclick","data-href"]){
+        const raw=element.getAttribute(key)||"";
+        let found=null;
+        if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES);
+        if(!found){
+          const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/common-info\.html\?[^"'<>\s)]+/i);
+          if(match)found=officialCardUrl(match[0],reg,INFO_PAGES);
         }
+        if(found&&!seen.has(found.href)){seen.add(found.href);output.push(found.href);}
       }
     }
-    add(modern+"?regNumber="+reg);
-    // Newer cards sometimes route by notice number rather than regNumber.
-    add(modern+"?purchaseNoticeNumber="+reg);
-    add("/223/purchase/public/purchase/info/documents.html?regNumber="+reg);
+    return output;
+  }
+  function valueByLabel(root,patterns){
+    if(!root)return "";
+    const labeled=root.querySelectorAll(".common-text__title,.section__title,"+
+      ".registry-entry__body-title,.registry-entry__body-item-title,dt,label,th,"+
+      ".section__attrib,.attachment__text");
+    for(const label of labeled){
+      const title=(label.textContent||"").replace(/\s+/g," ").trim().toLowerCase();
+      if(!patterns.some(p=>p.test(title)))continue;
+      let value=label.parentElement?.querySelector(
+          ".common-text__value,.section__info,.registry-entry__body-value,"+
+          ".registry-entry__body-item-value,dd,td,.section__value");
+      if(!value)value=label.nextElementSibling;
+      const name=(value?.textContent||"").replace(/\s+/g," ").trim();
+      if(name&&name.toLowerCase()!==title&&name.length<500)return name;
+    }
+    return "";
+  }
+  function customerFromDocument(doc,reg){
+    if(!doc)return {name:"",inn:""};
+    let name="",inn="";
+    const sections=[...doc.querySelectorAll("section,.common-text,.row,.blockInfo__section")];
+    for(const section of sections){
+      const caption=(section.querySelector(".common-text__caption,.blockInfo__title")?.textContent||"")
+        .replace(/\s+/g," ").trim();
+      if(!/сведения о заказчике|организация, осуществляющая размещение/i.test(caption))continue;
+      name=valueByLabel(section,[/^наименование организации/i,/^полное наименование/i,
+                                 /^заказчик$/i,/^наименование заказчика/i])||name;
+      inn=valueByLabel(section,[/^инн$/i,/^инн заказчика/i])||inn;
+      if(name&&inn)break;
+    }
+    if(!name){
+      name=valueByLabel(doc,[/^наименование заказчика/i,/^заказчик$/i,
+                             /^наименование организации$/i]);
+    }
+    if(!inn){
+      inn=valueByLabel(doc,[/^инн заказчика/i,/^инн$/i]);
+    }
+    if(!name){
+      for(const a of doc.querySelectorAll("a[href*='/organization/'],a[href*='/organization-card/']")){
+        const txt=(a.textContent||"").replace(/\s+/g," ").trim();
+        if(txt.length>10&&!/^\d+$/.test(txt)){name=txt;break;}
+      }
+    }
+    name=name.replace(/\s+/g," ").trim().slice(0,400);
+    if(/^(?:уточняем|заказчик уточняется|не указан|не найден|сведения отсутствуют)/i.test(name))
+      name="";
+    const m=String(inn).replace(/[^0-9]/g,"").match(/^(?:[0-9]{10}|[0-9]{12})$/);
+    return {name,inn:m?m[0]:""};
+  }
+  function titleFromDocument(doc,reg){
+    if(!doc)return "";
+    const title=valueByLabel(doc,[/^наименование закупки$/i,/^предмет закупки$/i,
+                                  /^объект закупки$/i]);
+    if(title&&title.length>9&&!/^(?:подача заявок|извещение)/i.test(title))
+      return title.slice(0,800);
+    return "";
+  }
+  function documentPageCandidates(reg,landing){
+    // Trust actual hyperlinks from the EIS purchase page, NEVER fabricate
+    // documents.html?regNumber=... which returned HTTP 404 repeatedly.
+    const candidates=[],seen=new Set();
+    if(!landing)return candidates;
+    for(const el of landing.querySelectorAll("a[href],a[onclick],[data-href],[data-url]")){
+      for(const field of ["href","onclick","data-href","data-url"]){
+        const raw=el.getAttribute(field)||"";
+        if(!raw.includes("documents.html"))continue;
+        const m=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/documents\.html\?[^"'<>\s)]+/i);
+        if(!m)continue;
+        const url=new URL(m[0].replace(/&amp;/gi,"&"),SITE);
+        if(url.origin!==SITE||!DOC_PAGES.has(url.pathname))continue;
+        const regNum=url.searchParams.get("regNumber")||url.searchParams.get("purchaseNoticeNumber");
+        if(regNum&&regNum!==reg)continue;
+        const noticeId=url.searchParams.get("noticeInfoId");
+        if(!regNum&&!(/^[0-9]{1,15}$/.test(noticeId||"")))continue;
+        if(!seen.has(url.href)){seen.add(url.href);candidates.push(url.href);}
+      }
+    }
     return candidates;
   }
-  async function discoverFromOfficialCard(reg) {
-    // New EIS cards reside under notice223; the old /223/purchase/... link
-    // returns 404 for recently published notices.
-    const landingPath="/epz/order/notice/notice223/common-info.html?regNumber="+reg;
-    let landing=null;
+  async function discoverFromOfficialCard(reg,searchDoc){
     const problems=[];
-    try{landing=await eisHtml(landingPath);}
-    catch(e){
-      if(e.backoff)throw e;
-      problems.push("карточка "+String(e.message).slice(0,75));
-    }
-    const candidates=documentPageCandidates(reg,landing);
-    for(const path of candidates){
-      try{
-        const page=await eisHtml(path);
-        const docs=discoverDocs(page,reg);
-        if(docs.length) {
-          const actual=page.__eis223_source_url||SITE+path;
-          const uri=new URL(actual,SITE);
-          if(uri.origin!==SITE)throw Error("ЕИС перенаправила на другой домен");
-          // Only actual official attachment pages, not an HTML error page.
-          if(!["/epz/order/notice/notice223/documents.html",
-                "/223/purchase/public/purchase/info/documents.html"].includes(uri.pathname))
-            throw Error("ЕИС вернула не страницу документов");
-          return {docs,source:uri.href,landing:landingPath};
-        }
-        problems.push(path.split("?")[0]+" — файлов 0");
-      }catch(e){
-        if(e.backoff)throw e;
-        problems.push(String(e.message).slice(0,95));
+    const liveUrl=officialCardUrl(location.href,reg,new Set([...INFO_PAGES,...DOC_PAGES]));
+    if(liveUrl){
+      const docs=discoverDocs(document,reg);
+      if(docs.length){
+        log(reg,"найдено на открытой официальной странице ЕИС:",docs.length);
+        return {docs,source:liveUrl.href,landing:liveUrl.href,
+                customer:customerFromDocument(document,reg),
+                title:titleFromDocument(document,reg)||searchTitle(searchDoc,reg)};
       }
     }
-    const reason="ЕИС: ссылки на оригиналы не найдены; "+
-      problems.slice(0,5).join(" | ");
-    throw new Error(reason.slice(0,260));
+    // Prefer the actual common-info link from the search result. A 223-FZ
+    // notice is NOT a 44-FZ notice223 page merely because the search screen
+    // displays it; dynamically read the official card route instead.
+    const urls=actualCardLinks(searchDoc,reg);
+    urls.push(SITE+"/223/purchase/public/purchase/info/common-info.html?regNumber="+reg);
+    urls.push(SITE+"/epz/order/notice/notice223/common-info.html?regNumber="+reg);
+    const seen=new Set();
+    for(const raw of urls){
+      if(seen.has(raw))continue;seen.add(raw);
+      const url=officialCardUrl(raw,reg,INFO_PAGES);
+      if(!url)continue;
+      let landing;
+      try{landing=await eisHtml(url.pathname+url.search)}
+      catch(e){
+        if(e.backoff)throw e;
+        problems.push(url.pathname+": "+String(e.message).slice(0,75));
+        continue;
+      }
+      let customer=customerFromDocument(landing,reg);
+      const title=titleFromDocument(landing,reg)||searchTitle(searchDoc,reg);
+      const onCard=discoverDocs(landing,reg);
+      if(onCard.length)return {docs:onCard,source:url.href,landing:url.href,customer,title};
+      for(const target of documentPageCandidates(reg,landing)){
+        try{
+          const u=new URL(target);
+          const page=await eisHtml(u.pathname+u.search);
+          const docs=discoverDocs(page,reg);
+          if(docs.length){
+            const redirected=new URL(page.__eis223_source_url||target,SITE);
+            if(redirected.origin!==SITE||!DOC_PAGES.has(redirected.pathname))
+              throw Error("ЕИС вернула не страницу документов");
+            const details=customerFromDocument(page,reg);
+            if(!customer.name)customer=details;
+            return {docs,source:redirected.href,landing:url.href,customer,title};
+          }
+          problems.push(u.pathname+" — на странице отсутствуют файлы");
+        }catch(e){
+          if(e.backoff)throw e;
+          problems.push("ссылка вкладки ЕИС: "+String(e.message).slice(0,85));
+        }
+      }
+    }
+    throw new Error("ЕИС не предоставила страницу с оригиналами ("+
+      problems.slice(0,3).join(" | ").slice(0,220)+")");
   }
   async function getKnown(numbers) {
     const path="/api/v299/eis223/known?regs="+encodeURIComponent(numbers.join(","));
@@ -406,16 +508,18 @@
     // Actual file signatures take precedence. A mislabeled ZIP cannot be
     // passed off as an audited DOCX/PDF.
     if(headerExt&&headerExt===detected)return fromHeader;
-    let base=declared.replace(/\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml)$/i,"")
+    let base=declared.replace(/\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml)$/i,"")
       .replace(/[<>:"|?*\\/]/g," ").replace(/\s+/g," ").trim().slice(0,175);
     if(!base)base="Документ ЕИС "+downloadUid(item).slice(0,10);
     return base+detected;
   }
   async function handleRegistry(reg,searchDoc) {
-    const {docs,source,landing}=await discoverFromOfficialCard(reg);
+    const {docs,source,landing,customer,title}=await discoverFromOfficialCard(reg,searchDoc);
     const manifestBase={
-      reg_number:reg,source_page:source,landing_page:SITE+landing,
-      title:searchTitle(searchDoc,reg),customer:"",
+      reg_number:reg,source_page:source,landing_page:landing,
+      title:title||searchTitle(searchDoc,reg),
+      customer:customer.name||"",
+      customer_inn:customer.inn||"",
       declared_attachment_count:docs.length
     };
     const knownExt=docs.filter(d=>EXT.test(d.name));
@@ -501,7 +605,7 @@
         status="empty";
       } else {
         const known=await getKnown(numbers);
-        const fresh=numbers.filter(n=>!known[n]?.complete);
+        const fresh=numbers.filter(n=>!known[n]?.complete||known[n]?.needs_metadata);
         log("В выдаче",numbers.length,"номеров; ещё требуют загрузки",fresh.length);
         const picks=[];
         if(fresh.length) {
