@@ -242,12 +242,12 @@ def _scan_status():
     if isinstance(at,str):
         try:
             date=datetime.fromisoformat(at)
-            active=(version>=311 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
+            active=(version>=312 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
         except (ValueError,TypeError):pass
     return {
         "browser_collector_active":active,
         "collector_version":version,
-        "upgrade_required":version<311,
+        "upgrade_required":version<312,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),
         "last_error":info.get("error",""),
@@ -270,7 +270,7 @@ def install(ns):
             raise HTTPException(403,"Только официальная вкладка ЕИС")
         try:version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:version=0
-        if version<311:raise HTTPException(426,"Обновите мост ЕИС до v311")
+        if version<312:raise HTTPException(426,"Обновите мост ЕИС до v312")
         raw=await request.body()
         if len(raw)>2500:raise HTTPException(413,"Слишком большой запрос")
         try:
@@ -342,8 +342,8 @@ def install(ns):
             raise HTTPException(403,"Expected EIS browser origin")
         try:version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:version=0
-        if version<311:
-            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v311")
+        if version<312:
+            raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v312")
         raw=await request.body()
         if len(raw)>1500:raise HTTPException(413,"Heartbeat too large")
         try:
