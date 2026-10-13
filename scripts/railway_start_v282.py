@@ -32,6 +32,7 @@ import v288_roseltorg
 import v292_eis_soap_probe
 import v293_hide_obsolete_controls
 import v294_eis_bridge
+import v295_eis_originals
 from patch_v280 import patch as patch_v280
 from patch_v281 import patch as patch_v281
 from patch_v290 import patch as patch_v290
@@ -68,6 +69,7 @@ def main():
     v288_roseltorg.install_documents(vars(entry))
     v288_roseltorg.install_queue_bridge(vars(entry))
     v294_eis_bridge.install(vars(entry))
+    v295_eis_originals.install(vars(entry))
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if '--verify-only' in sys.argv:return
     v292_eis_soap_probe.start()
