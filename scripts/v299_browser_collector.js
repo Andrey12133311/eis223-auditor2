@@ -373,14 +373,14 @@
   async function reportOfficialBuyer(reg,source,customer,title){
     // Buyer's verified official card metadata must not depend on document
     // availability. This call is intentionally separate from original upload.
-    if(!customer?.name&&!customer?.inn&&!title)return;
+    if(!customer?.name)return;
     try{
       const result=await api("/api/v311/eis223/customer","POST",{
         reg_number:reg,source_page:source,
         customer:customer?.name||"",customer_inn:customer?.inn||"",
         title:title||""
       });
-      if(result.customer_verified)
+      if(result.accepted)
         log(reg,"заказчик установлен из ЕИС:",(customer.name||"").slice(0,95));
     }catch(e){
       log(reg,"сведения о заказчике пока не сохранены:",String(e.message).slice(0,100));
