@@ -364,20 +364,39 @@ def install(ns):
         print("V304 OFFICIAL_MEMO_TEMPLATE_SAVED bytes="+str(len(safe)),flush=True)
         return {"installed":True,"format":"ODT","macros_removed":True,"bytes":len(safe)}
 
-    @app.get("/api/v304/memo/{reg}.odt")
-    async def memo_file(reg:str):
+    async def build_memo(reg,fields=None):
         if not REG.fullmatch(reg):raise HTTPException(422,"Неверный номер закупки")
         pfile=template_path()
         if not pfile.is_file():
             raise HTTPException(409,"Шаблон ODT ещё не установлен. Откройте /api/v304/memo-template/upload")
         p,findings=await asyncio.to_thread(_read_purchase,ns,reg)
         org,source=await company_name(p)
-        if not org:raise HTTPException(409,"Отсутствует проверенное наименование заказчика")
-        odt=await asyncio.to_thread(_render_odt,pfile.read_bytes(),p,findings,org,{})
+        if not org:raise HTTPException(409,"Отсутствует наименование заказчика")
+        fields=fields if isinstance(fields,dict) else {}
+        odt=await asyncio.to_thread(_render_odt,pfile.read_bytes(),p,findings,org,fields)
         print(f"V304 MEMO_GENERATED reg={reg} verified_findings={len(findings)} format=odt name_source={source}",flush=True)
         return Response(odt,media_type="application/vnd.oasis.opendocument.text",
             headers={"Content-Disposition":f'attachment; filename="sluzhebnaya_zapiska_{reg}.odt"',
                      "X-Company-Name-Source":source,
                      "Cache-Control":"no-store"})
+
+    @app.get("/api/v304/memo/{reg}.odt")
+    async def memo_file(reg:str):
+        return await build_memo(reg)
+
+    # Existing memo download button POSTs to the v218 route. Intercept here
+    # rather than ship the obsolete memo text and layout.
+    @app.middleware("http")
+    async def odt_only_existing_memo(request,call_next):
+        m=re.fullmatch(r"/api/v218/memo/(3[0-9]{10})",request.url.path)
+        if request.method=="POST" and m:
+            try:
+                raw=await request.body()
+                if len(raw)>20000:raise HTTPException(413,"Слишком много реквизитов")
+                body=json.loads(raw)
+            except (ValueError,TypeError):
+                body={}
+            return await build_memo(m[1],body.get("fields") if isinstance(body,dict) else {})
+        return await call_next(request)
 
     print("V304 OFFICIAL_MEMO_ODT_READY template_installed="+str(template_path().is_file()),flush=True)
