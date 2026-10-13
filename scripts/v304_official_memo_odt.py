@@ -1,0 +1,383 @@
+"""ODT-only memo using the uploaded (macro-stripped) official layout and unchanged boilerplate.
+
+Memo is a DRAFT, never invent violations, recipient, document reference or company.
+The FAS ODT attachment is uploaded once to the private Railway /data volume.
+"""
+from __future__ import annotations
+import asyncio
+import io
+import json
+import re
+import tempfile
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
+from fastapi import HTTPException,Request
+from fastapi.responses import HTMLResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+from v295_eis_originals import root as storage, save_atomic, auth
+
+OO="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+TX="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+DR="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+XL="http://www.w3.org/1999/xlink"
+SC="urn:oasis:names:tc:opendocument:xmlns:script:1.0"
+EV="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+for prefix,value in (("office",OO),("text",TX),("draw",DR),("xlink",XL)):
+    ET.register_namespace(prefix,value)
+REG=re.compile(r"^3[0-9]{10}$")
+INN=re.compile(r"^[0-9]{10}(?:[0-9]{2})?$")
+ORG_ABBR=frozenset(("ООО","АО","ПАО","НАО","ОАО","ЗАО","ИП","ГУП","ФГУП","МУП",
+                     "ФГБОУ","ФГБУ","ФКУ","ГБУ","МАУ","АНО","НКО","ФГАУ","ФКП"))
+TEMPLATE_DIR="eis223_official_memo_template"
+MAX_TEMPLATE_BYTES=2*1024*1024
+MAX_ARCHIVE_UNPACKED=16*1024*1024
+MAX_FINDINGS=4
+
+def template_path():
+    return storage()/TEMPLATE_DIR/"memo_template.odt"
+
+def status():
+    p=template_path()
+    return {"template_installed":p.is_file(),
+            "template":"ODT ФАС — служебная записка (двухстраничный образец)",
+            "format":"odt","requires_verified_violation":True,
+            "name_source":"Rusprofile при доступности; иначе ЕИС (отмечается как резерв)"}
+
+def _safe_odt(binary):
+    """No embedded ODF scripts, event handlers, external resources or unsafe ZIP members."""
+    if not isinstance(binary,bytes) or not 3000<len(binary)<=MAX_TEMPLATE_BYTES:
+        raise ValueError("Ожидается ODT-файл шаблона, до 2 МБ")
+    result={}
+    try:
+        with zipfile.ZipFile(io.BytesIO(binary)) as archive:
+            entries=archive.infolist()
+            if len(entries)>150 or sum(e.file_size for e in entries)>MAX_ARCHIVE_UNPACKED:
+                raise ValueError("Превышен безопасный размер шаблона")
+            media=archive.read("mimetype").decode("ascii")
+            if media.strip()!="application/vnd.oasis.opendocument.text":
+                raise ValueError("Файл не является документом LibreOffice ODT")
+            for entry in entries:
+                name=entry.filename
+                if name in ("content.xml","styles.xml","mimetype","META-INF/manifest.xml") \
+                   or (name.startswith("Pictures/") and name.lower().endswith((".png",".jpg",".jpeg"))):
+                    if ".." in Path(name).parts:continue
+                    raw=archive.read(entry)
+                    if entry.file_size!=len(raw):raise ValueError("Повреждён ODT")
+                    result[name]=raw
+    except (zipfile.BadZipFile,KeyError,UnicodeDecodeError) as exc:
+        raise ValueError("Файл ODT повреждён или содержит неверную структуру") from exc
+    if "content.xml" not in result or "styles.xml" not in result:
+        raise ValueError("Отсутствуют страницы шаблона")
+    for name in ("content.xml","styles.xml"):
+        data=result[name]
+        if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
+            raise ValueError("Небезопасная структура XML")
+        node=ET.fromstring(data)
+        for parent in node.iter():
+            for child in list(parent):
+                if child.tag in ("{"+OO+"}scripts","{"+OO+"}event-listeners") or \
+                   child.tag.startswith("{"+SC+"}"):
+                    parent.remove(child)
+            for k in list(parent.attrib.keys()):
+                if k.startswith("{"+SC+"}") or k.startswith("{"+EV+"}event"):
+                    del parent.attrib[k]
+        result[name]=ET.tostring(node,encoding="utf-8",xml_declaration=True)
+    if not _compatible_template(result["content.xml"]):
+        raise ValueError("Загружен другой шаблон. Нужна служебная записка с двумя страницами из приложения.")
+    return _zip_content(result)
+
+def _compatible_template(xml):
+    try:
+        node=ET.fromstring(xml)
+        pars=list(node.iter("{"+TX+"}p"))
+        corpus=" ".join("".join(x.itertext()) for x in pars)
+        return (len(pars)>35 and "СЛУЖЕБНАЯ ЗАПИСКА" in corpus
+          and "С учетом вышеизложенного" in corpus
+          and "Заместитель начальника Управления" in corpus
+          and "223-ФЗ" in corpus)
+    except ET.ParseError:return False
+
+def _zip_content(items):
+    mem=io.BytesIO()
+    with zipfile.ZipFile(mem,"w") as z:
+        for name,binary in items.items():
+            z.writestr(name,binary,compress_type=zipfile.ZIP_STORED if name=="mimetype" else zipfile.ZIP_DEFLATED)
+    return mem.getvalue()
+
+def _read_purchase(ns,reg):
+    c=ns["conn"]()
+    try:
+        c.row_factory=None
+        cur=c.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,))
+        names=[d[0] for d in cur.description]
+        row=cur.fetchone()
+        if not row:raise HTTPException(404,"Закупка не найдена в базе")
+        p=dict(zip(names,row))
+        cur=c.execute(
+            "SELECT * FROM findings WHERE reg_number=? AND kind='violation' "
+            "ORDER BY id DESC LIMIT 30",(reg,))
+        names=[d[0] for d in cur.description]
+        findings=[dict(zip(names,x)) for x in cur.fetchall()]
+        # A weak potential issue must never be promoted to established wrongdoing.
+        accepted=[]
+        seen=set()
+        for finding in findings:
+            title=str(finding.get("title") or "").strip()
+            evidence=str(finding.get("evidence") or "").strip()
+            if not title or not evidence or re.search(r"риск|требует проверки|не найдена информация",title,re.I):
+                continue
+            key=(title.casefold(),evidence[:160])
+            if key in seen:continue
+            seen.add(key);accepted.append(finding)
+            if len(accepted)>=MAX_FINDINGS:break
+        if not accepted:
+            raise HTTPException(409,"Служебная записка не формируется: нет нарушения с документальными основаниями")
+        return p,accepted
+    finally:c.close()
+
+def _plain_company(text):
+    text=re.sub(r"\s+"," ",str(text or "")).strip().strip(".")
+    if not text:return ""
+    letters=[c for c in text if c.isalpha()]
+    if letters and sum(c.isupper() for c in letters)/len(letters)>.78:
+        words=re.split(r"(\s+)",text.lower())
+        text="".join(w.upper() if w.upper() in ORG_ABBR else
+                     w[:1].upper()+w[1:] if w.strip() else w for w in words)
+        text=re.sub(r'\b(Российской|Российская)\b',lambda m:m.group(0),text)
+    return text
+
+async def _rusprofile_company(inn):
+    """Best effort direct Rusprofile lookup, not an unofficial API or fabricated match."""
+    if not INN.fullmatch(inn or ""):return None
+    try:
+        import httpx
+        from bs4 import BeautifulSoup
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0,connect=3.5),
+                                      follow_redirects=True) as client:
+            r=await client.get(
+                "https://www.rusprofile.ru/search",
+                params={"query":inn,"type":"ul"},
+                headers={"User-Agent":"Mozilla/5.0","Accept":"text/html"})
+        if r.status_code!=200 or not r.url.host.endswith("rusprofile.ru"):
+            return None
+        if inn not in r.text:return None
+        soup=BeautifulSoup(r.text[:400000],"html.parser")
+        title=soup.select_one('meta[property="og:title"]')
+        candidate=(title.get("content") if title else "") or ""
+        if not candidate:
+            candidate=(soup.select_one("h1").get_text(" ",strip=True)
+                       if soup.select_one("h1") else "")
+        candidate=_plain_company(candidate)
+        if not candidate or len(candidate)>300 or re.search(r"поиск|Результат|404|не найден",candidate,re.I):
+            return None
+        return candidate
+    except Exception as exc:
+        print("V304 RUSPROFILE_UNAVAILABLE "+type(exc).__name__,flush=True)
+        return None
+
+async def company_name(p):
+    inn=str(p.get("customer_inn") or "").strip()
+    cache=storage()/TEMPLATE_DIR/"rusprofile_cache"
+    if INN.fullmatch(inn):
+        path=cache/(inn+".json")
+        try:
+            obj=json.loads(path.read_text(encoding="utf-8"))
+            if obj.get("source")=="rusprofile" and obj.get("inn")==inn and obj.get("name"):
+                return obj["name"],"rusprofile"
+        except (OSError,ValueError,TypeError):pass
+        name=await _rusprofile_company(inn)
+        if name:
+            await asyncio.to_thread(save_atomic,path,json.dumps(
+                {"source":"rusprofile","inn":inn,"name":name},
+                ensure_ascii=False).encode("utf-8"))
+            return name,"rusprofile"
+    return _plain_company(p.get("customer") or ""),"eis_fallback"
+
+def _form_of_purchase(method):
+    text=str(method or "").lower()
+    if "аукцион" in text:return "аукциона в электронной форме" if "электрон" in text else "аукциона"
+    if "конкурс" in text:return "конкурса в электронной форме" if "электрон" in text else "конкурса"
+    if "котиров" in text:return "запроса котировок"
+    if "предлож" in text:return "запроса предложений"
+    if "единствен" in text:return "закупки у единственного поставщика"
+    return "закупки"
+
+def _text(element):
+    return "".join(element.itertext())
+
+def _set_paragraph(par,new):
+    for child in list(par):par.remove(child)
+    par.text=str(new)
+
+def _nonbreaking(text):
+    preps=r"в|во|на|по|из|с|со|к|ко|о|об|от|за|до|у|и|а|но|не|для|при|без|над|под|перед|между|после"
+    return re.sub(r"(?i)(?<![а-яё])("+preps+r") +(?=\S)",
+                  lambda m:m.group(1)+"\u00a0",text)
+
+def _render_odt(template,p,findings,organization,fields):
+    try:
+        with zipfile.ZipFile(io.BytesIO(template)) as z:
+            items={n:z.read(n) for n in z.namelist()}
+    except (zipfile.BadZipFile,KeyError) as exc:
+        raise HTTPException(503,"Сохранённый шаблон ODT повреждён") from exc
+    node=ET.fromstring(items["content.xml"])
+    body=node.find(".//{"+OO+"}text")
+    if body is None:raise HTTPException(503,"Шаблон ODT не содержит текста")
+    paras=list(body.iter("{"+TX+"}p"))
+    if len(paras)<35:raise HTTPException(503,"Неверная структура служебной записки")
+    reg=str(p.get("reg_number"))
+    title=re.sub(r"\s+"," ",str(p.get("title") or "предмет закупки не установлен")).strip()
+    title=title[:580]
+    intro=("Управление контроля размещения государственного заказа "
+           "(далее – Управление) в ходе проведения анализа "+
+           _form_of_purchase(p.get("method"))+
+           " на право заключения договора на "+title+
+           " (извещение № "+reg+") (далее – Закупка) установило следующее.")
+    _set_paragraph(paras[20],intro)
+    main=findings[0]
+    law=str(main.get("law") or "").strip()[:350]
+    evidence=str(main.get("evidence") or "").strip()[:800]
+    document=str(main.get("document") or "закупочной документации").strip()[:180]
+    finding_title=str(main.get("title") or "Нарушение условий закупки")[:220]
+    if not (law and "3.4" in law and re.search(r"МСП|дополнительн|документ|заявк",finding_title,re.I)):
+        # The SME-only rules from the sample must not be presented as applicable
+        # to another procurement. Preserve the other general 223-FZ boilerplate.
+        _set_paragraph(paras[22],
+            "В ходе анализа документации Закупки выявлены положения, требующие оценки "
+            "на соответствие Закону о закупках.")
+        _set_paragraph(paras[23],
+            "При определении правовой оценки применяются требования Закона о закупках "
+            "и положения документации рассматриваемой Закупки.")
+        _set_paragraph(paras[24],
+            ("Правовое основание выявленного нарушения: "+law+".")
+            if law else "Правовое основание устанавливается по конкретным положениям Закона о закупках.")
+        _set_paragraph(paras[25],
+            "Приведённые ниже обстоятельства установлены по тексту "
+            "полученных оригиналов документов закупки.")
+    _set_paragraph(paras[26],
+       "В "+document+" установлено следующее: "+finding_title+". "+evidence)
+    if len(findings)>1:
+        other=findings[1]
+        _set_paragraph(paras[27],
+           "Дополнительно выявлено: "+str(other.get("title") or "")[:210]+
+           ". "+str(other.get("evidence") or "")[:650])
+    else:
+        _set_paragraph(paras[27],
+           "Указанные обстоятельства установлены непосредственно по "
+           "содержанию сохранённых оригиналов закупочной документации.")
+    _set_paragraph(paras[28],
+       "Вместе с тем указанные положения подлежат оценке на предмет "
+       "соответствия требованиям законодательства о закупках товаров, работ, "
+       "услуг отдельными видами юридических лиц.")
+    _set_paragraph(paras[29],
+       "С учетом вышеизложенного, прошу рассмотреть вопрос о наличии/отсутствии "
+       "признаков состава административного правонарушения в действиях "+
+       organization.rstrip(".")+".")
+    if len(paras)>31 and not _text(paras[30]).strip() and not _text(paras[31]).strip():
+        body.remove(paras[31])
+    # The source document ID is another official memo's registration number.
+    # It is not a valid identifier for the newly created draft.
+    for para in body.iter("{"+TX+"}p"):
+        if para.text:para.text=_nonbreaking(para.text)
+        for child in para.iter():
+            if child is para:continue
+            if child.text:child.text=_nonbreaking(child.text)
+            if child.tail:child.tail=_nonbreaking(child.tail)
+    for para in body.iter("{"+TX+"}p"):
+        if "2026-139205" in _text(para):
+            _set_paragraph(para,"")
+    for el in node.iter():
+        if el.text and "2026-139205" in el.text:
+            el.text=el.text.replace("2026-139205","")
+    # Optional fields are copied only where sample already contains those
+    # official recipient/signature lines.
+    for idx,key in ((13,"recipient"),(18,"greeting"),(32,"signer_role"),(33,"signer"),
+                    (55,"executor"),(56,"phone")):
+        v=str(fields.get(key) or "").strip()
+        if v and idx<len(paras) and len(v)<200:
+            _set_paragraph(paras[idx],v)
+    # Remove the barcode belonging to the original registered memo, preserve crest.
+    style=ET.fromstring(items["styles.xml"])
+    for parent in style.iter():
+        for child in list(parent):
+            if child.tag=="{"+DR+"}frame":
+                for image in child.iter():
+                    if image.attrib.get("{"+XL+"}href","").endswith("A1000000253879166AE7F8E4B2.jpg"):
+                        parent.remove(child);break
+    items["content.xml"]=ET.tostring(node,encoding="utf-8",xml_declaration=True)
+    items["styles.xml"]=ET.tostring(style,encoding="utf-8",xml_declaration=True)
+    return _zip_content(items)
+
+UPLOAD_FORM='''<!doctype html><html lang="ru"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Шаблон служебной записки · ODT</title>
+<style>body{font:16px system-ui;background:#f4f7fc;color:#173c63;max-width:720px;
+margin:40px auto;padding:20px}section{background:#fff;border:1px solid #d6e5f4;
+border-radius:14px;padding:24px}button,input{box-sizing:border-box;display:block;
+width:100%;margin:12px 0;padding:13px;font:inherit;border:1px solid #c9d9e8;
+border-radius:8px}button{color:white;background:#266bac;border:0;cursor:pointer}
+p{line-height:1.6}</style><section><h2>Установить шаблон служебной записки</h2>
+<p>Загрузите приложенный ODT один раз. Он будет сохранён на Railway,
+а все будущие служебные записки будут формироваться по нему, только в ODT.
+Встроенные макросы и исходный регистрационный номер не используются.</p>
+<label>Ключ загрузки Railway<input id="token" type="password" autocomplete="off"></label>
+<label>Шаблон LibreOffice ODT<input id="file" type="file" accept=".odt,application/vnd.oasis.opendocument.text"></label>
+<button id="install">Сохранить шаблон</button><p id="status" role="status"></p>
+<a href="/">Вернуться к закупкам</a></section>
+<script>
+document.getElementById('install').onclick=async()=>{
+const b=document.getElementById('install'),label=document.getElementById('status');
+const file=document.getElementById('file').files[0],token=document.getElementById('token').value.trim();
+if(!file||!token){label.textContent='Выберите ODT и укажите ключ Railway';return}
+b.disabled=true;label.textContent='Проверяю шаблон...';
+try{const r=await fetch('/api/v304/memo-template',{method:'POST',
+headers:{'x-eis223-upload-token':token,'content-type':'application/vnd.oasis.opendocument.text'},
+body:await file.arrayBuffer()});const d=await r.json();
+if(!r.ok)throw Error(d.detail||r.status);
+label.textContent='Готово. Шаблон сохранён; служебные записки будут создаваться в ODT.';
+}catch(e){label.textContent='Не удалось установить: '+e.message}finally{b.disabled=false}
+};
+</script></html>'''
+
+def install(ns):
+    app=ns["app"]
+    @app.get("/api/v304/memo-template/status")
+    async def template_status():
+        return status()
+
+    @app.get("/api/v304/memo-template/upload",response_class=HTMLResponse)
+    async def template_upload_page():
+        return HTMLResponse(UPLOAD_FORM,headers={"Cache-Control":"no-store"})
+
+    @app.post("/api/v304/memo-template")
+    async def template_upload(request:Request):
+        auth(request)
+        if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_TEMPLATE_BYTES:
+            raise HTTPException(413,"Шаблон превышает 2 МБ")
+        raw=await request.body()
+        try:
+            safe=await asyncio.to_thread(_safe_odt,raw)
+        except (ValueError,ET.ParseError) as exc:
+            raise HTTPException(422,str(exc)) from exc
+        await asyncio.to_thread(save_atomic,template_path(),safe)
+        print("V304 OFFICIAL_MEMO_TEMPLATE_SAVED bytes="+str(len(safe)),flush=True)
+        return {"installed":True,"format":"ODT","macros_removed":True,"bytes":len(safe)}
+
+    @app.get("/api/v304/memo/{reg}.odt")
+    async def memo_file(reg:str):
+        if not REG.fullmatch(reg):raise HTTPException(422,"Неверный номер закупки")
+        pfile=template_path()
+        if not pfile.is_file():
+            raise HTTPException(409,"Шаблон ODT ещё не установлен. Откройте /api/v304/memo-template/upload")
+        p,findings=await asyncio.to_thread(_read_purchase,ns,reg)
+        org,source=await company_name(p)
+        if not org:raise HTTPException(409,"Отсутствует проверенное наименование заказчика")
+        odt=await asyncio.to_thread(_render_odt,pfile.read_bytes(),p,findings,org,{})
+        print(f"V304 MEMO_GENERATED reg={reg} verified_findings={len(findings)} format=odt name_source={source}",flush=True)
+        return Response(odt,media_type="application/vnd.oasis.opendocument.text",
+            headers={"Content-Disposition":f'attachment; filename="sluzhebnaya_zapiska_{reg}.odt"',
+                     "X-Company-Name-Source":source,
+                     "Cache-Control":"no-store"})
+
+    print("V304 OFFICIAL_MEMO_ODT_READY template_installed="+str(template_path().is_file()),flush=True)
