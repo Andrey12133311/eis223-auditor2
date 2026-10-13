@@ -17,64 +17,19 @@ STYLE = r'''<style id="v300-no-risk">
 
 SCRIPT = r'''<script id="v300-eis-status-script">
 (function(){
-  let scheduled=false;
-  function cleanRisks(){
-    try{
-      document.getElementById('risks')?.closest('.stat')?.remove();
-      document.querySelectorAll('option[value="risks"],.risk,[data-risk]').forEach(el=>el.remove());
-      document.querySelectorAll('button,[role="tab"],h1,h2,h3,h4,summary').forEach(el=>{
-         const t=(el.textContent||'').replace(/\s+/g,' ').trim();
-         if(t==='Нарушения и риски')el.textContent='Нарушения';
-      });
-      document.querySelectorAll('tr').forEach(tr=>{
-        // A risk status alone is not a proven procurement violation.
-        const cells=tr.querySelectorAll('td,th');
-        if([...cells].some(c=>(c.textContent||'').trim()==='Риск'))
-          tr.remove();
-      });
-    }catch(e){}
+  function clean(){
+    document.getElementById('v300-eis-status')?.remove();
+    document.getElementById('risks')?.closest('.stat')?.remove();
+    document.querySelectorAll('option[value="risks"],.risk,[data-risk]').forEach(x=>x.remove());
   }
-  function sync(){
-    scheduled=false;cleanRisks();
-  }
-  function schedule(){
-    if(scheduled)return;
-    scheduled=true;
-    requestAnimationFrame(sync);
-  }
-  function setup(){
-    cleanRisks();
-    const main=document.querySelector('main')||document.body;
-    if(!document.getElementById('v300-eis-status')){
-      const div=document.createElement('div');
-      div.id='v300-eis-status';
-      div.textContent='ЕИС: проверяю состояние пятиминутного загрузчика...';
-      if(main.firstElementChild)main.insertBefore(div,main.firstElementChild);
-      else main.append(div);
-    }
-    async function update(){
-      const el=document.getElementById('v300-eis-status');
-      if(!el)return;
-      try{
-        const r=await fetch('/api/v299/eis223/monitor-status',{cache:'no-store'});
-        if(!r.ok)throw Error('status HTTP '+r.status);
-        const s=await r.json();
-        const when=s.last_scan?new Date(s.last_scan).toLocaleString('ru-RU'):'нет запусков';
-        el.textContent=s.browser_collector_active?
-          'ЕИС: загрузчик активен. Проверка новых закупок примерно каждые 5 минут; последний цикл: '+when+
-          '. Новых закупок в цикле: '+(s.last_new_purchases||0)+
-          ', оригиналов: '+(s.last_originals_uploaded||0)+'.':
-          'ЕИС: пятиминутный загрузчик неактивен. Чтобы новые закупки поступали автоматически, загрузчик должен быть запущен во вкладке zakupki.gov.ru. Последний цикл: '+when+'.';
-      }catch(e){el.textContent='ЕИС: пока нет данных о пятиминутном загрузчике.';}
-    }
-    update();
-    setInterval(()=>{if(!document.hidden)update()},60000);
-    new MutationObserver(schedule).observe(main,{childList:true,subtree:true});
-  }
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',setup,{once:true});
-  else setup();
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',clean);
+  else clean();
+  let queued=false;
+  new MutationObserver(()=>{
+    if(!queued){queued=true;requestAnimationFrame(()=>{queued=false;clean()})}
+  }).observe(document.documentElement,{childList:true,subtree:true});
 })();
-</script>'''
+</script>
 
 def install(ns):
     app=ns["app"]
