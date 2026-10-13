@@ -733,11 +733,19 @@
         const fresh=numbers.filter(n=>!known[n]?.complete||known[n]?.needs_metadata);
         log("В выдаче",numbers.length,"номеров; ещё требуют загрузки",fresh.length);
         const picks=[];
-        if(fresh.length) {
-          for(let i=0;i<Math.min(MAX_BUYS,fresh.length);i++)
-            picks.push(fresh[(rotatingIndex+i)%fresh.length]);
-          rotatingIndex=(rotatingIndex+MAX_BUYS)%fresh.length;
+        const previouslyComplete=numbers.filter(n=>known[n]?.complete&&!fresh.includes(n));
+        // Every third cycle re-enumerate ONE previously "complete" notice.
+        // Legacy incomplete manifests must not prevent discovery of newly
+        // published originals, but fresh purchases retain priority.
+        const verifyOlder=(cycles%3===0)&&previouslyComplete.length>0;
+        const freshSlots=verifyOlder?Math.max(1,MAX_BUYS-1):MAX_BUYS;
+        for(let i=0;i<Math.min(freshSlots,fresh.length);i++)
+          picks.push(fresh[(rotatingIndex+i)%fresh.length]);
+        if(verifyOlder){
+          const candidate=previouslyComplete[rotatingIndex%previouslyComplete.length];
+          if(!picks.includes(candidate))picks.push(candidate);
         }
+        rotatingIndex+=Math.max(1,MAX_BUYS);
         for(const n of picks){
           if(!active)break;
           try{const result=await handleRegistry(n,search);if(result.uploaded>0)added++;}
@@ -780,26 +788,25 @@
       log("Самостоятельная проверка:",job.kind,job.target,
           job.kind==="inn" ? "страница "+job.page : "");
       if(job.kind==="reg") {
-        const already=await getKnown([job.target]);
-        if(already[job.target]?.complete) {
-          report={status:"done",detail:"Оригиналы уже сохранены; юридическая перепроверка поставлена в очередь",accepted:0,found:1};
-        } else {
-          const before=uploaded;
-          const outcome=await handleRegistry(job.target,null);
-          const accepted=outcome.uploaded>0;
-          const updated=(await getKnown([job.target]))[job.target]||{};
-          const fullyReceived=outcome.complete &&
-            updated.manifest_documents>=outcome.discovered;
-          report={
-            status:fullyReceived?"done":"partial",
-            detail:fullyReceived?
-              "Все официальные оригиналы получены; юридическая проверка запускается":
-              ("Получено "+(updated.originals_received||0)+" из "+
-                 (updated.manifest_documents||0)+
-                 " оригиналов; недостающие файлы остаются в приоритетной очереди"),
-            accepted:uploaded-before,found:accepted?1:0
-          };
-        }
+        // A previously "complete" manifest can be partial: older bridge
+        // releases only recognized files with an extension in their title.
+        // Re-discover the official tab and its full file list every time
+        // the user explicitly requests a check, without re-downloading
+        // previously verified identical originals.
+        const before=uploaded;
+        const outcome=await handleRegistry(job.target,null);
+        const updated=(await getKnown([job.target]))[job.target]||{};
+        const fullyReceived=outcome.complete &&
+          updated.manifest_documents>=outcome.discovered;
+        report={
+          status:fullyReceived?"done":"partial",
+          detail:fullyReceived?
+            "Все обнаруженные оригиналы ЕИС получены и проверены":
+            ("Получено "+(updated.originals_received||0)+" из "+
+               (updated.visible_attachments||outcome.discovered||0)+
+               " вложений ЕИС; остальные остаются в очереди"),
+          accepted:uploaded-before,found:outcome.discovered?1:0
+        };
       } else if(job.kind==="inn") {
         const q="/epz/order/extendedsearch/results.html?"+
           new URLSearchParams({
