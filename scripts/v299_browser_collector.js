@@ -248,6 +248,7 @@
   }
   const INFO_PAGES=new Set([
     "/223/purchase/public/purchase/info/common-info.html",
+    "/223/purchase/public/purchase/info/commoninfo.html",
     "/epz/order/notice/notice223/common-info.html"
   ]);
   const DOC_PAGES=new Set([
@@ -273,7 +274,7 @@
         let found=null;
         if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES);
         if(!found){
-          const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/common-info\.html\?[^"'<>\s)]+/i);
+          const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/common-?info\.html\?[^"'<>\s)]+/i);
           if(match)found=officialCardUrl(match[0],reg,INFO_PAGES);
         }
         if(found&&!seen.has(found.href)){seen.add(found.href);output.push(found.href);}
@@ -330,6 +331,20 @@
     const m=String(inn).replace(/[^0-9]/g,"").match(/^(?:[0-9]{10}|[0-9]{12})$/);
     return {name,inn:m?m[0]:""};
   }
+  function searchResultCard(doc,reg){
+    if(!doc)return null;
+    for(const a of doc.querySelectorAll("a[href]")){
+      const href=a.getAttribute("href")||"";
+      if(!href.includes("regNumber="+reg))continue;
+      return a.closest(".search-registry-entry-block,.registry-entry,article,tr,"+
+        ".registry-entry__form,.search-registry-entry-block__form");
+    }
+    return null;
+  }
+  function verifiedSearchCustomer(doc,reg){
+    const card=searchResultCard(doc,reg);
+    return card?customerFromDocument(card,reg):{name:"",inn:""};
+  }
   function titleFromDocument(doc,reg){
     if(!doc)return "";
     const title=valueByLabel(doc,[/^наименование закупки$/i,/^предмет закупки$/i,
@@ -362,13 +377,26 @@
   }
   async function discoverFromOfficialCard(reg,searchDoc){
     const problems=[];
-    const liveUrl=officialCardUrl(location.href,reg,new Set([...INFO_PAGES,...DOC_PAGES]));
+    const searchCustomer=verifiedSearchCustomer(searchDoc,reg);
+    const actualUrl=new URL(location.href);
+    let liveUrl=officialCardUrl(location.href,reg,new Set([...INFO_PAGES,...DOC_PAGES]));
+    let liveLanding=liveUrl?.href||"";
+    if(!liveUrl&&actualUrl.origin===SITE&&DOC_PAGES.has(actualUrl.pathname)&&
+        /^[0-9]{1,15}$/.test(actualUrl.searchParams.get("noticeInfoId")||"")&&
+        (document.body?.textContent||"").includes(reg)){
+      const actualLinks=actualCardLinks(document,reg);
+      if(actualLinks.length){
+        liveUrl=actualUrl;
+        liveLanding=actualLinks[0];
+      }
+    }
     if(liveUrl){
       const docs=discoverDocs(document,reg);
       if(docs.length){
         log(reg,"найдено на открытой официальной странице ЕИС:",docs.length);
-        return {docs,source:liveUrl.href,landing:liveUrl.href,
-                customer:customerFromDocument(document,reg),
+        const meta=customerFromDocument(document,reg);
+        return {docs,source:liveUrl.href,landing:liveLanding||liveUrl.href,
+                customer:meta.name?meta:searchCustomer,
                 title:titleFromDocument(document,reg)||searchTitle(searchDoc,reg)};
       }
     }
@@ -377,6 +405,7 @@
     // displays it; dynamically read the official card route instead.
     const urls=actualCardLinks(searchDoc,reg);
     urls.push(SITE+"/223/purchase/public/purchase/info/common-info.html?regNumber="+reg);
+    urls.push(SITE+"/223/purchase/public/purchase/info/commoninfo.html?regNumber="+reg);
     urls.push(SITE+"/epz/order/notice/notice223/common-info.html?regNumber="+reg);
     const seen=new Set();
     for(const raw of urls){
@@ -391,6 +420,7 @@
         continue;
       }
       let customer=customerFromDocument(landing,reg);
+      if(!customer.name)customer=searchCustomer;
       const title=titleFromDocument(landing,reg)||searchTitle(searchDoc,reg);
       const onCard=discoverDocs(landing,reg);
       if(onCard.length)return {docs:onCard,source:url.href,landing:url.href,customer,title};
@@ -405,6 +435,7 @@
               throw Error("ЕИС вернула не страницу документов");
             const details=customerFromDocument(page,reg);
             if(!customer.name)customer=details;
+            if(!customer.name)customer=searchCustomer;
             return {docs,source:redirected.href,landing:url.href,customer,title};
           }
           problems.push(u.pathname+" — на странице отсутствуют файлы");
