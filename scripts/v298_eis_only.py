@@ -106,7 +106,15 @@ async def offline_audit(ns,reg):
     lot_data=direct(lot,"lotData")
     cust=direct(direct(notice,"customer"),"mainInfo")
     reg_name=field(notice,"name") or public.get("title") or previous.get("title") or ("Закупка № "+reg)
-    customer=field(cust,"fullName") or field(cust,"shortName") or public.get("customer") or previous.get("customer") or ""
+    # Verified official buyer must win over old manual-INN search records;
+    # those previously mislabeled unrelated Kamchatka procurements.
+    from v311_verified_customer import read_verified
+    trusted=await asyncio.to_thread(read_verified,ns,reg)
+    customer=(field(cust,"fullName") or field(cust,"shortName")
+              or trusted.get("name") or public.get("customer")
+              or previous.get("customer") or "")
+    customer_inn=(field(cust,"inn") or trusted.get("inn")
+                  or public.get("customer_inn") or previous.get("customer_inn") or "")
     start=field(notice,"applSubmisionStartDate")[:10] or public.get("submission_start","")[:10]
     end=field(notice,"submissionCloseDateTime")[:10] or public.get("submission_end","")[:10]
     published=field(notice,"publicationDateTime") or public.get("published","")
@@ -115,6 +123,7 @@ async def offline_audit(ns,reg):
     p={"reg":reg,
        "title":reg_name,
        "customer":customer,
+       "customer_inn":customer_inn,
        "method":field(notice,"purchaseCodeName") or previous.get("method") or "",
        "price":price,
        "price_num":num if num is not None else previous.get("price_num"),
