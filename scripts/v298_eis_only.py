@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from v295_eis_originals import (
     allowed_documents, saved_document, root as data_root,
 )
+from v310_archive_scan import ARCHIVE_EXT,extract_members
 
 REG=re.compile(r"[0-9]{11,20}$")
 
@@ -139,16 +140,57 @@ async def offline_audit(ns,reg):
             existing.setdefault("meta",{}).setdefault("identical_sources",[]).append(
                 {"url":item["url"],"name":item["name"],"uid":uid})
             continue
+        dedup_by_sha[sha]=len(docs)
+        ext=path.suffix.lower()
+        if ext in ARCHIVE_EXT:
+            # Keep the binary original as source evidence but NEVER count
+            # the archive itself as a checked legal document.
+            members,warnings=await asyncio.wait_for(
+                asyncio.to_thread(extract_members,path,reg,uid,data_root(),extractor),
+                timeout=160)
+            docs.append({
+                "name":item["name"],"url":item["url"],"type":"archive",
+                "published":"","meta":{"source":"official_eis_archive",
+                    "uid":uid,"sha256":sha,"source_url":item["url"],
+                    "archive_members_checked":len(members),
+                    "archive_warnings":warnings},
+                "text":"","local":str(path),"annotated":None,
+                "status":"archive_processed" if members else "archive_unreadable",
+                "error":"; ".join(warnings[:4]) if warnings else
+                    ("В архиве нет читаемых документов" if not members else None),
+                "final_url":item["url"],
+            })
+            for member in members:
+                part_id=hashlib.sha256(member["name"].encode("utf-8")).hexdigest()[:24]
+                name=item["name"]+" / "+member["name"]
+                docs.append({
+                    "name":name,
+                    # A fragment refers to a specific member of the real
+                    # downloaded EIS archive; it is NOT a separate EIS URL.
+                    "url":item["url"]+"#archive-member="+part_id,
+                    "type":ns.get("doc_type",lambda n,d="":"other")(member["name"]),
+                    "published":"",
+                    "meta":{"source":"official_eis_archive_member","uid":uid,
+                        "sha256":member["sha256"],
+                        "archive_name":item["name"],
+                        "archive_member":member["name"],
+                        "archive_sha256":sha,"source_url":item["url"]},
+                    "text":member["text"],"local":str(member["path"]),
+                    "annotated":None,"status":"checked","error":None,
+                    "final_url":item["url"],
+                })
+            print(f"V310 ARCHIVE_EXTRACTED reg={reg} uid={uid} members_checked={len(members)} "
+                  f"warnings={len(warnings)}",flush=True)
+            continue
         text=await asyncio.wait_for(asyncio.to_thread(extractor,path),timeout=45)
         text=str(text or "")
         valid=len(text.strip())>=3
-        dedup_by_sha[sha]=len(docs)
         docs.append({
             "name":item["name"],
             "url":item["url"],
             "type":ns.get("doc_type",lambda n,d="":"other")(item["name"]),
             "published":"",
-            "meta":{"source":"official_eis_getDocsIP","uid":uid,"sha256":sha,
+            "meta":{"source":"official_eis_original","uid":uid,"sha256":sha,
                     "source_url":item["url"]},
             "text":text,
             "local":str(path),
