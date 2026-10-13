@@ -11,6 +11,7 @@ import os
 import re
 from datetime import datetime,timezone,timedelta
 from pathlib import Path
+from urllib.parse import urlsplit,parse_qs
 from fastapi import HTTPException,Request
 from fastapi.responses import JSONResponse,PlainTextResponse
 
@@ -32,9 +33,30 @@ def _parse_manifest(payload):
     if not REG.fullmatch(reg) or not (reg.startswith("3") and len(reg)==11):
         raise ValueError("Not a valid 223-FZ procurement registry number")
     source_page=_safe_string(payload.get("source_page"),1000)
-    expected="https://zakupki.gov.ru/223/purchase/public/purchase/info/documents.html"
-    if not source_page.startswith(expected+"?") or ("regNumber="+reg) not in source_page:
-        raise ValueError("Invalid official EIS document-page provenance")
+    landing_page=_safe_string(payload.get("landing_page"),1000)
+    try:
+        source=urlsplit(source_page)
+        q=parse_qs(source.query)
+        source_ok=(source.scheme=="https" and source.hostname=="zakupki.gov.ru"
+            and source.port is None and not source.username and not source.password
+            and source.path in (
+                "/epz/order/notice/notice223/documents.html",
+                "/223/purchase/public/purchase/info/documents.html"))
+        supplied=q.get("regNumber",[])+q.get("purchaseNoticeNumber",[])
+        if supplied and (len(supplied)!=1 or supplied[0]!=reg):source_ok=False
+        has_reg=bool(supplied and supplied[0]==reg)
+        has_notice_id=bool(len(q.get("noticeInfoId",[]))==1
+            and re.fullmatch(r"[0-9]{1,15}",q["noticeInfoId"][0]))
+        landing=urlsplit(landing_page)
+        lq=parse_qs(landing.query)
+        landing_ok=(landing.scheme=="https" and landing.hostname=="zakupki.gov.ru"
+             and landing.port is None and not landing.username and not landing.password
+             and landing.path=="/epz/order/notice/notice223/common-info.html"
+             and lq.get("regNumber")==[reg])
+        if not source_ok or not (has_reg or (has_notice_id and landing_ok)):
+            raise ValueError("Invalid official EIS notice223 provenance")
+    except ValueError as exc:
+        raise ValueError("Invalid official EIS document-page provenance") from exc
     docs=payload.get("documents")
     if not isinstance(docs,list) or not 1<=len(docs)<=MAX_DOCS:
         raise ValueError("Expected 1–100 EIS original-file references")
@@ -55,6 +77,7 @@ def _parse_manifest(payload):
         "source":"public_eis_223_browser",
         "reg_number":reg,
         "source_page":source_page,
+        "landing_page":landing_page,
         "title":_safe_string(payload.get("title"),800),
         "customer":_safe_string(payload.get("customer"),400),
         "published":_safe_string(payload.get("published"),40),
