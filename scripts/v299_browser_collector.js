@@ -426,14 +426,15 @@
     // Prefer the actual common-info link from the search result. A 223-FZ
     // notice is NOT a 44-FZ notice223 page merely because the search screen
     // displays it; dynamically read the official card route instead.
-    const urls=actualCardLinks(searchDoc,reg);
+    const validatedSearchLinks=new Set(actualCardLinks(searchDoc,reg));
+    const urls=[...validatedSearchLinks];
     urls.push(SITE+"/223/purchase/public/purchase/info/common-info.html?regNumber="+reg);
     urls.push(SITE+"/223/purchase/public/purchase/info/commoninfo.html?regNumber="+reg);
     urls.push(SITE+"/epz/order/notice/notice223/common-info.html?regNumber="+reg);
     const seen=new Set();
     for(const raw of urls){
       if(seen.has(raw))continue;seen.add(raw);
-      const url=officialCardUrl(raw,reg,INFO_PAGES);
+      const url=officialCardUrl(raw,reg,INFO_PAGES,validatedSearchLinks.has(raw));
       if(!url)continue;
       let landing;
       try{landing=await eisHtml(url.pathname+url.search)}
