@@ -1,117 +1,111 @@
-"""Immediate, source-grounded customer-name backfill for saved 223-FZ audits.
+"""Resolve displayed EIS buyer names from verified local official metadata.
 
-Never infer an organization's name from the procurement subject or INN alone.
-Use exact EIS XML, previously saved official browser manifests, and historical
-purchases with the same validated INN; do not overwrite known organization names.
+Never invent a company name, never use the procurement title as a buyer, and
+never count missing attachments as checked. A confirmed buyer can be shown
+independently of the (possibly unavailable) procurement file download.
 """
 from __future__ import annotations
-
 import asyncio
 import json
+import logging
 import re
-import sqlite3
 from pathlib import Path
 
 from v295_eis_originals import root
 
-INN=re.compile(r"(?:[0-9]{10}|[0-9]{12})$")
+logger=logging.getLogger(__name__)
+INN=re.compile(r"^(?:\d{10}|\d{12})$")
+PLACEHOLDER=re.compile(
+    r"уточня|заказчик не найден|заказчик не указан|сведения отсутствуют|^неизвестно$",
+    re.I)
 
-def real_name(value):
-    name=" ".join(str(value or "").split())
-    if len(name)<5 or len(name)>400 or name.isdigit():return ""
-    if re.search(r"^(?:уточняем заказчика|заказчик уточняется|не указано|нет данных|сведения отсутствуют)$",
-                 name,re.I):return ""
-    return name
+def buyer(value):
+    s=" ".join(str(value or "").split())[:400]
+    if len(s)<5 or PLACEHOLDER.search(s) or s.isdigit():
+        return ""
+    return s
 
-def from_manifest(reg):
-    try:
-        p=root()/"eis223_public_browser_intake"/reg/"manifest.json"
-        data=json.loads(p.read_text(encoding="utf8"))
-        if data.get("source")=="public_eis_223_browser" and data.get("reg_number")==reg:
-            return real_name(data.get("customer")),str(data.get("customer_inn") or "")
-    except (OSError,ValueError,TypeError,AttributeError):pass
+def legitimate_inn(value):
+    value=str(value or "").strip()
+    return value if INN.fullmatch(value) else ""
+
+def card_from_storage(reg):
+    folder=root()/"eis223_public_browser_intake"/reg
+    for filename,source in [
+        ("buyer.json","public_eis_223_browser_card"),
+        ("manifest.json","public_eis_223_browser")]:
+        try:
+            r=json.loads((folder/filename).read_text(encoding="utf8"))
+            if (r.get("reg_number")==reg and r.get("source")==source):
+                name=buyer(r.get("customer"))
+                inn=legitimate_inn(r.get("customer_inn"))
+                if name or inn:return name,inn
+        except (OSError,ValueError,TypeError,AttributeError):
+            continue
     return "",""
 
-def from_official_archive(reg):
-    try:
-        from v298_eis_only import official_notice,direct,field
-        notice=official_notice(reg)
-        if notice is not None:
-            customer=direct(direct(notice,"customer"),"mainInfo")
-            return real_name(field(customer,"fullName") or field(customer,"shortName"))
-    except Exception:pass
-    return ""
-
-def rebuild(ns):
+def reconcile_buyers(ns):
     db=ns["conn"]()
-    db.row_factory=sqlite3.Row
-    fixed=0
-    missing=0
+    updated=0
     try:
+        db.execute("BEGIN IMMEDIATE")
         rows=db.execute("""
-            SELECT reg_number,customer,customer_inn,title
-              FROM purchases
-             WHERE customer IS NULL OR LENGTH(TRIM(customer))<5
-                 OR LOWER(TRIM(customer)) LIKE 'уточняем%'
-                 OR LOWER(TRIM(customer)) LIKE '%уточняется%'
+            SELECT reg_number,customer,customer_inn
+            FROM purchases
+            WHERE customer IS NULL OR TRIM(customer)=''
+              OR LOWER(customer) LIKE '%уточня%'
+              OR LOWER(customer) LIKE '%не найден%'
+              OR LOWER(customer) LIKE '%не указан%'
+            LIMIT 20000
         """).fetchall()
-        for r in rows[:3500]:
-            reg=str(r["reg_number"])
-            name,from_inn=from_manifest(reg)
-            if not name:name=from_official_archive(reg)
-            inn=str(r["customer_inn"] or "").strip()
-            if not INN.fullmatch(inn) and INN.fullmatch(from_inn):
-                inn=from_inn
-            if not INN.fullmatch(inn):
-                # Only a unique official customer-INN search match qualifies.
-                try:
-                    ids=db.execute("SELECT DISTINCT inn FROM v301_inn_purchases WHERE reg=? LIMIT 2",
-                                   (reg,)).fetchall()
-                    if len(ids)==1 and INN.fullmatch(ids[0][0]):inn=ids[0][0]
-                except sqlite3.OperationalError:
-                    pass
-            if not name and INN.fullmatch(inn):
-                known=db.execute("""
+        for reg,current,old_inn in rows:
+            name,source_inn=card_from_storage(reg)
+            inn=source_inn or legitimate_inn(old_inn)
+            if not name and inn:
+                row=db.execute("""
                     SELECT customer FROM purchases
-                     WHERE customer_inn=? AND customer IS NOT NULL
-                        AND LENGTH(TRIM(customer))>=5
-                        AND LOWER(customer) NOT LIKE '%уточня%'
-                     ORDER BY last_seen DESC LIMIT 1
-                """,(inn,)).fetchone()
-                if known:name=real_name(known[0])
-            if name:
-                db.execute("""
-                    UPDATE purchases
-                       SET customer=?,customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
-                     WHERE reg_number=? AND
-                      (customer IS NULL OR LENGTH(TRIM(customer))<5
-                       OR LOWER(customer) LIKE '%уточня%')
-                """,(name,inn,inn,reg))
-                fixed+=1
-            else:
-                missing+=1
-                # Persist an INN found from the user's validated EIS query,
-                # even when there is no verified name yet.
-                if INN.fullmatch(inn):
-                    db.execute("""UPDATE purchases SET customer_inn=?
-                        WHERE reg_number=? AND (customer_inn IS NULL OR customer_inn='')""",
-                        (inn,reg))
+                    WHERE customer_inn=? AND LENGTH(TRIM(customer))>6
+                      AND LOWER(customer) NOT LIKE '%уточня%'
+                      AND LOWER(customer) NOT LIKE '%не найден%'
+                      AND LOWER(customer) NOT LIKE '%не указан%'
+                      AND reg_number<>?
+                    ORDER BY last_seen DESC LIMIT 1
+                """,(inn,reg)).fetchone()
+                if row:name=buyer(row[0])
+            if not name:continue
+            db.execute("""
+                UPDATE purchases SET customer=?,
+                    customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
+                WHERE reg_number=?
+            """,(name,inn,inn,reg))
+            updated+=1
         db.commit()
+        print(f"V311 BUYER_RECONCILED corrected={updated} reviewed={len(rows)}",
+              flush=True)
+        return {"reviewed":len(rows),"corrected":updated}
     except Exception:
         if db.in_transaction:db.rollback()
-        raise
+        logger.exception("Customer name reconciliation failed")
+        return {"reviewed":0,"corrected":0}
     finally:db.close()
-    print(f"V311 CUSTOMER_BACKFILL saved_names={fixed} source_unavailable={missing}",flush=True)
-    return fixed,missing
 
 def install(ns):
     app=ns["app"]
 
     @app.on_event("startup")
-    async def fill_verified_customer_names():
-        try:
-            await asyncio.to_thread(rebuild,ns)
-        except Exception as exc:
-            print("V311 CUSTOMER_BACKFILL_FAILED "+type(exc).__name__,flush=True)
+    async def resolve_official_customer_names():
+        await asyncio.to_thread(reconcile_buyers,ns)
 
-    print("V311 CUSTOMER_NAME_RESOLUTION_READY sources=eis_manifest,eis_xml,cached_inn",flush=True)
+    @app.get("/api/v311/buyer-status")
+    async def buyer_status():
+        # Read-only support endpoint. Do not expose an editable company name.
+        db=ns["conn"]()
+        try:
+            pending=db.execute("""
+                SELECT COUNT(*) FROM purchases WHERE customer IS NULL
+                  OR TRIM(customer)='' OR LOWER(customer) LIKE '%уточня%'
+            """).fetchone()[0]
+            return {"pending_official_name":int(pending),
+                    "source":"verified ЕИС card/manifest or same verified INN",
+                    "note":"Нельзя выдавать непроверенное название за официальный источник"}
+        finally:db.close()
