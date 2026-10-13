@@ -43,7 +43,8 @@ def _parse_manifest(payload):
                 "/epz/order/notice/notice223/documents.html",
                 "/223/purchase/public/purchase/info/documents.html",
                 "/epz/order/notice/notice223/common-info.html",
-                "/223/purchase/public/purchase/info/common-info.html"))
+                "/223/purchase/public/purchase/info/common-info.html",
+                "/223/purchase/public/purchase/info/commoninfo.html"))
         supplied=q.get("regNumber",[])+q.get("purchaseNoticeNumber",[])
         if supplied and (len(supplied)!=1 or supplied[0]!=reg):source_ok=False
         has_reg=bool(supplied and supplied[0]==reg)
@@ -55,7 +56,8 @@ def _parse_manifest(payload):
              and landing.port is None and not landing.username and not landing.password
              and landing.path in (
                  "/epz/order/notice/notice223/common-info.html",
-                 "/223/purchase/public/purchase/info/common-info.html")
+                 "/223/purchase/public/purchase/info/common-info.html",
+                 "/223/purchase/public/purchase/info/commoninfo.html")
              and lq.get("regNumber")==[reg])
         if not source_ok or not (has_reg or (has_notice_id and landing_ok)):
             raise ValueError("Invalid official EIS notice223 provenance")
