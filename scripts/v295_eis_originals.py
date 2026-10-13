@@ -52,7 +52,8 @@ def allowed_documents(reg):
     if not REG.fullmatch(reg):raise HTTPException(400,"Invalid registry number")
     folder=root()/"eis223_official_archive_inbox"/reg
     found={}
-    if not folder.is_dir():return found
+    # SOAP archives are preferred; browser-origin public EIS metadata is fallback.
+    if not folder.is_dir():folder.mkdir(parents=True,exist_ok=True)
     for path in sorted(folder.glob("*.json"))[:100]:
         try:
             record=json.loads(path.read_text(encoding="utf-8"))
@@ -69,6 +70,23 @@ def allowed_documents(reg):
                     found[uid]={"uid":uid,"name":name,"url":url,"ext":Path(name).suffix.lower()}
         except (OSError,ValueError,TypeError,KeyError):
             continue
+    # Additional 223-FZ notices discovered on the PUBLIC EIS domain in a
+    # browser session, without server-to-EIS traffic.
+    manifest=root()/"eis223_public_browser_intake"/reg/"manifest.json"
+    try:
+        public=json.loads(manifest.read_text(encoding="utf-8"))
+        if (public.get("reg_number")==reg and
+                public.get("source")=="public_eis_223_browser" and
+                isinstance(public.get("documents"),list)):
+            for item in public["documents"][:100]:
+                url=item.get("url","")
+                uid=uid_from_url(url)
+                if not uid or uid in found:continue
+                name=Path(item.get("name") or "").name
+                if not name or len(name)>255 or Path(name).suffix.lower() not in EXT:continue
+                found[uid]={"uid":uid,"name":name,"url":url,"ext":Path(name).suffix.lower()}
+    except (OSError,ValueError,TypeError,KeyError):
+        pass
     return found
 
 def saved_document(reg,uid):
@@ -294,15 +312,17 @@ def install(ns):
     @app.on_event("startup")
     async def resume_official_uploads():
         inbox=root()/"eis223_official_archive_inbox"
-        if inbox.is_dir():
-            for folder in sorted(inbox.iterdir())[:500]:
-                if folder.is_dir() and REG.fullmatch(folder.name):
-                    try:
-                        state=enqueue_review(folder.name)
-                        if state.get("status")=="completed":
-                            asyncio.create_task(reconcile_rows_after_lock(folder.name))
-                    except Exception as exc:
-                        print("V296 REQUEUE_ERROR "+type(exc).__name__,flush=True)
+        public_inbox=root()/"eis223_public_browser_intake"
+        for source_dir in (inbox,public_inbox):
+            if source_dir.is_dir():
+                for folder in sorted(source_dir.iterdir())[:500]:
+                    if folder.is_dir() and REG.fullmatch(folder.name):
+                        try:
+                            state=enqueue_review(folder.name)
+                            if state.get("status")=="completed":
+                                asyncio.create_task(reconcile_rows_after_lock(folder.name))
+                        except Exception as exc:
+                            print("V299 REQUEUE_ERROR "+type(exc).__name__,flush=True)
         async def periodic_unique_reconciliation():
             await asyncio.sleep(600)
             while True:
