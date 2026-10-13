@@ -140,8 +140,12 @@
       if(!(a.getAttribute("href")||"").includes("regNumber="+reg))continue;
       const block=a.closest(".search-registry-entry-block,.registry-entry,article,tr");
       const node=block?.querySelector(".registry-entry__body-title,.registry-entry__header-mid__title,.registry-entry__body-value,h2,h3");
+      const title=titleFromDocument(block,reg);
+      if(title)return title;
       const value=(node?.textContent||"").split(/\s+/).join(" ").trim();
-      if(value && value.length>12 && value.length<=800 && !/^[0-9]+$/.test(value))return value;
+      if(value && value.length>12 && value.length<=800 &&
+         !/^(?:подача заявок|приём заявок|извещение|заказчик|номер закупки|наименование закупки)$/i.test(value) &&
+         !/^[0-9]+$/.test(value))return value;
     }
     return "";
   }
@@ -433,6 +437,14 @@
     if(/^\s*<!doctype html|^\s*<html\b/i.test(prefix)||mime==="text/html")
       throw new Error("Вместо оригинала ЕИС вернула HTML");
     if(prefix.startsWith("%PDF"))return ".pdf";
+    if(prefix.startsWith("Rar!\x1a\x07"))return ".rar";
+    if(prefix.startsWith("7z\xbc\xaf\x27\x1c"))return ".7z";
+    if(prefix.startsWith("MSCF"))return ".cab";
+    if(bytes[0]===0x1f&&bytes[1]===0x8b)return ".gz";
+    if(prefix.startsWith("BZh"))return ".bz2";
+    if(bytes.length>=6&&bytes[0]===0xfd&&bytes[1]===0x37&&
+       bytes[2]===0x7a&&bytes[3]===0x58&&bytes[4]===0x5a&&bytes[5]===0)return ".xz";
+    if(bytes.length>=262&&String.fromCharCode(...bytes.slice(257,262))==="ustar")return ".tar";
     if(prefix.startsWith("{\\rtf"))return ".rtf";
     const header=new DataView(buffer,0,Math.min(8,buffer.byteLength));
     const ole=bytes.length>=8&&
