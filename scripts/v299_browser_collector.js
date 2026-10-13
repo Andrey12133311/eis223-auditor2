@@ -704,9 +704,17 @@
       "новых оригиналов:",uploadedNow,
       "неудачных попыток:",unresolved,
       "полностью проверено:",complete);
-    if(uploadedNow===0&&!complete)
-      throw new Error("Новых оригиналов 0 из "+docs.length+
-        "; неудачных попыток "+unresolved+". Проверка остаётся неполной.");
+    if(uploadedNow===0&&!complete){
+      const originalsPresent=state.manifest_documents>=docs.length&&
+        state.originals_received>=docs.length;
+      if(originalsPresent){
+        log(reg,"все оригиналы уже находятся на Railway; ожидание юридической перепроверки.");
+        return {discovered:docs.length,uploaded:0,complete:false};
+      }
+      throw new Error("Оригиналы ЕИС получены не полностью: "+
+        (state.originals_received||0)+" из "+docs.length+
+        ". Ошибок скачивания: "+unresolved+".");
+    }
     return {discovered:docs.length,uploaded:uploadedNow,complete};
   }
   async function heartbeat(status,newPurchases,newOriginals,error="") {
