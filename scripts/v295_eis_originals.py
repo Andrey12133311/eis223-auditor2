@@ -309,6 +309,9 @@ def install(ns):
         review_jobs[reg]=asyncio.create_task(review_worker(reg))
         return data
 
+    # Shared offline recheck entry point for immediate manual searches.
+    ns["_v295_enqueue_review"]=enqueue_review
+
     @app.on_event("startup")
     async def resume_official_uploads():
         inbox=root()/"eis223_official_archive_inbox"
