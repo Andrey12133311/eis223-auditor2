@@ -53,8 +53,8 @@ def allowed_documents(reg):
     folder=root()/"eis223_official_archive_inbox"/reg
     found={}
     # SOAP archives are preferred; browser-origin public EIS metadata is fallback.
-    if not folder.is_dir():folder.mkdir(parents=True,exist_ok=True)
-    for path in sorted(folder.glob("*.json"))[:100]:
+    soap_receipts=sorted(folder.glob("*.json"))[:100] if folder.is_dir() else []
+    for path in soap_receipts:
         try:
             record=json.loads(path.read_text(encoding="utf-8"))
             if record.get("reg_number")!=reg or record.get("source")!="official_eis_soap_archive":
