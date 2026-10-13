@@ -27,13 +27,34 @@ def main():
     assert v["documents"][0]["uid"]==uid_from_url(FILE)
     assert len(v["documents"][0]["uid"])==32
     assert _official_source(CARD,REG)
+    # Regression: 223-FZ uses noticeId (without Info), not just noticeInfoId.
+    old_source=SOURCE.replace("noticeInfoId=","noticeId=")
+    old_card=CARD.replace("noticeInfoId=","noticeId=")
+    older=_parse_manifest({
+      "reg_number":REG,
+      "source_page":old_source,
+      "landing_page":old_card,
+      "documents":[{"name":"Документация о закупке.zip","url":FILE}],
+      "declared_attachment_count":11,
+    })
+    assert older["documents"][0]["ext"]==".zip"
+    assert _official_source(old_card,REG)
+    try:
+        _parse_manifest({
+            "reg_number":REG,"source_page":old_source,
+            "landing_page":old_card.replace(NOTICE,"999999"),
+            "documents":[{"name":"Документация.zip","url":FILE}],
+        })
+        raise AssertionError("Mismatched EIS noticeId must be rejected")
+    except ValueError:
+        pass
     for bad in [
         FILE.replace("zakupki.gov.ru","example.org"),
         FILE.replace("id=23230413","id=23230413&path=/etc/passwd"),
         "http://zakupki.gov.ru/223/purchase/public/download/download.html?id=23230413"
     ]:
         assert uid_from_url(bad) is None,bad
-    print("V312 MANIFEST_SELFTEST_OK noticeInfoId=accepted archive=RAR uid=validated buyer_source=official",flush=True)
+    print("V313 MANIFEST_SELFTEST_OK noticeId=accepted noticeInfoId=accepted archive=RAR uid=validated buyer_source=official",flush=True)
 
 if __name__=="__main__":
     main()
