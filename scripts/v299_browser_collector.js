@@ -367,9 +367,14 @@
       for(const field of ["href","onclick","data-href","data-url"]){
         const raw=el.getAttribute(field)||"";
         if(!raw.includes("documents.html"))continue;
-        const m=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/documents\.html\?[^"'<>\s)]+/i);
+        const m=raw.match(/(?:(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/)?documents\.html\?[^"'<>\s)]+/i);
         if(!m)continue;
-        const url=new URL(m[0].replace(/&amp;/gi,"&"),SITE);
+        // Official 223-FZ navigation may provide only a relative link
+        // 'documents.html?noticeInfoId=...'. Resolve relative to the
+        // actual fetched common-info URL, never invent a regNumber route.
+        const base=landing.__eis223_source_url||
+          SITE+"/223/purchase/public/purchase/info/common-info.html?regNumber="+reg;
+        const url=new URL(m[0].replace(/&amp;/gi,"&"),base);
         if(url.origin!==SITE||!DOC_PAGES.has(url.pathname))continue;
         const regNum=url.searchParams.get("regNumber")||url.searchParams.get("purchaseNoticeNumber");
         if(regNum&&regNum!==reg)continue;
