@@ -12,7 +12,7 @@ MAX_UPLOAD = 15*1024*1024
 MAX_UNCOMPRESSED = 50*1024*1024
 MAX_XML = 15*1024*1024
 ALLOWED_ORIGIN = "https://int.zakupki.gov.ru"
-REG = re.compile(r"[0-9]{11,20}\\Z")
+REG = re.compile(r"[0-9]{11,20}$")
 
 def _name(tag):
     return tag.rsplit("}",1)[-1]
@@ -38,7 +38,7 @@ def parse_notices(data):
             if m.flag_bits&1 or m.file_size>MAX_XML:
                 raise ValueError("Encrypted or oversized member")
             if ("/" in fn or "\\" in fn or ".." in fn or not
-                    re.fullmatch(r"purchaseNotice_[0-9]{11,20}_[^/\\]{1,120}\\.xml",fn)):
+                    re.fullmatch(r"purchaseNotice_[0-9]{11,20}_[A-Za-z0-9_-]{1,120}[.]xml",fn)):
                 raise ValueError("Expected official purchaseNotice XML only")
             xml=archive.read(m)
             if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
