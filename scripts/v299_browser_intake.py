@@ -73,6 +73,11 @@ def _parse_manifest(payload):
         seen.add(uid)
         out.append({"uid":uid,"url":url,"name":name,"ext":ext})
     if not out:raise ValueError("No recognized official EIS attachment URLs")
+    raw_count=payload.get("declared_attachment_count",len(out))
+    try:attachment_count=int(raw_count)
+    except (ValueError,TypeError):raise ValueError("Invalid attachment count")
+    if attachment_count<len(out) or attachment_count>MAX_DOCS:
+        raise ValueError("Invalid attachment count")
     return {
         "source":"public_eis_223_browser",
         "reg_number":reg,
@@ -85,6 +90,10 @@ def _parse_manifest(payload):
         "submission_end":_safe_string(payload.get("submission_end"),40),
         "price":_safe_string(payload.get("price"),60),
         "documents":out,
+        # EIS attachments lacking extensions enter this count immediately.
+        # Registration of their original-file URL is deferred until the
+        # browser has fetched and validated the actual binary file format.
+        "declared_attachment_count":attachment_count,
         "verified_originals":0,
     }
 
@@ -101,6 +110,9 @@ def _save_manifest(value):
                 by_uid={x["uid"]:x for x in old_docs if isinstance(x,dict) and "uid" in x}
                 for x in value["documents"]:by_uid[x["uid"]]=x
                 value["documents"]=list(by_uid.values())[:MAX_DOCS]
+                value["declared_attachment_count"]=max(
+                    int(previous.get("declared_attachment_count") or 0),
+                    value["declared_attachment_count"],len(value["documents"]))
                 for key in ("title","customer","published","submission_start","submission_end","price"):
                     if not value.get(key):value[key]=previous.get(key,"")
         except (OSError,ValueError,KeyError,TypeError):
@@ -124,11 +136,21 @@ def _known(ns,regs):
             refs=allowed_documents(reg)
             saved=sum(bool(saved_document(reg,uid)) for uid in refs)
             expected=len(refs)
+            declared=expected
+            try:
+                info=json.loads(_manifest_path(reg).read_text(encoding="utf8"))
+                if info.get("reg_number")==reg and info.get("source")=="public_eis_223_browser":
+                    declared=max(expected,int(info.get("declared_attachment_count") or 0))
+            except (OSError,ValueError,TypeError,AttributeError):
+                pass
             result[reg]={
                 "manifest_documents":expected,
+                "visible_attachments":declared,
+                "unresolved_attachments":max(0,declared-expected),
                 "originals_received":saved,
                 "checked_documents":existing.get(reg,0),
-                "complete":bool(expected and saved==expected and existing.get(reg,0)>=expected),
+                "complete":bool(expected and saved==expected and expected>=declared
+                                and existing.get(reg,0)>=expected),
             }
         return result
     finally:db.close()
