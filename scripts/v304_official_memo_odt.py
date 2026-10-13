@@ -5,6 +5,9 @@ The FAS ODT attachment is uploaded once to the private Railway /data volume.
 """
 from __future__ import annotations
 import asyncio
+import os
+import hashlib
+import base64
 import io
 import json
 import re
@@ -346,6 +349,23 @@ label.textContent='Готово. Шаблон сохранён; служебны
 </script></html>'''
 
 def install(ns):
+    # Deploy the user's uploaded, macro-stripped FAS ODT from private
+    # Railway configuration once. Keep this fallback so no workstation,
+    # extension or manual browser visit is needed for the original template.
+    if not template_path().is_file():
+        parts=[os.environ.get(f"EIS223_MEMO_TEMPLATE_B64_{n:02d}","")
+               for n in range(1,7)]
+        if all(parts):
+            try:
+                original=base64.b64decode("".join(parts),validate=True)
+                expected="9445a0ec77e733f9429bf91138fe2eb21d577ac94ab0623e099a7839d0888c73"
+                if hashlib.sha256(original).hexdigest()!=expected:
+                    raise ValueError("Uploaded ODT checksum mismatch")
+                clean=_safe_odt(original)
+                save_atomic(template_path(),clean)
+                print("V304 OFFICIAL_TEMPLATE_AUTO_INSTALLED bytes="+str(len(clean)),flush=True)
+            except Exception as exc:
+                print("V304 TEMPLATE_BOOT_ERROR "+type(exc).__name__,flush=True)
     app=ns["app"]
     @app.get("/api/v304/memo-template/status")
     async def template_status():
