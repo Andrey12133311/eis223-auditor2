@@ -245,17 +245,22 @@ def install(ns):
         total,received=review_counts(reg)
         lock=ns.get("lock")
         process=ns.get("process_purchase")
-        if lock is None or process is None:
+        offline=ns.get("_v298_offline_audit")
+        if lock is None or (not callable(offline) and process is None):
             update_review(reg,"failed",originals_received=received,reason="Audit pipeline unavailable")
             return
         try:
-            # FIFO lock guarantees this job runs after the current background scan.
+            # One running official EIS analysis at a time. Never query the
+            # unreachable server or other feeds when offline mode is active.
             async with lock:
                 update_review(reg,"running",originals_received=received)
-                import httpx
-                async with httpx.AsyncClient(timeout=httpx.Timeout(20,connect=6),
-                                            follow_redirects=True) as client:
-                    result=await asyncio.wait_for(process(client,reg,None),timeout=240)
+                if callable(offline):
+                    result=await asyncio.wait_for(offline(reg),timeout=240)
+                else:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(20,connect=6),
+                                                follow_redirects=True) as client:
+                        result=await asyncio.wait_for(process(client,reg,None),timeout=240)
                 verified=await asyncio.to_thread(reconcile_document_rows,reg)
                 checked=(int(verified["checked"]) if verified is not None
                          else int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0)
