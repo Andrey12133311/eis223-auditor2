@@ -129,7 +129,7 @@ def assert_format(data,ext):
         raise ValueError("ЕИС вернула XML вместо запрошенного документа")
     ole=data[:8]==bytes.fromhex("d0cf11e0a1b11ae1")
     is_zip=data[:4]==bytes.fromhex("504b0304")
-    rar=data.startswith(b"Rar!\\x1a\\x07".decode("unicode_escape").encode("latin1"))
+    rar=data.startswith(bytes.fromhex("526172211a07"))
     seven=data.startswith(bytes.fromhex("377abcaf271c"))
     gzip_data=data.startswith(bytes.fromhex("1f8b"))
     bz2_data=data.startswith(b"BZh")
