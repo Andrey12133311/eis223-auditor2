@@ -151,6 +151,7 @@ def _scan_status():
         "browser_collector_active":active,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),
+        "last_error":info.get("error",""),
         "last_new_purchases":info.get("new_purchases",0),
         "last_originals_uploaded":info.get("originals_uploaded",0),
         "poll_interval_seconds":300,
@@ -208,10 +209,12 @@ def install(ns):
             value=body.get(key,0)
             vals[key]=max(0,min(100,int(value))) if str(value).isdigit() else 0
         status=str(body.get("status") or "")[:32]
-        if status not in ("ok","rate_limited","fetch_error","collector_started","empty","stopped"):
+        if status not in ("ok","rate_limited","fetch_error","collector_started","empty",
+                          "stopped","no_downloadable_originals"):
             status="fetch_error"
+        error=_safe_string(body.get("error"),240).replace("\n"," ")
         record={"last_scan":datetime.now(timezone.utc).isoformat(),
-                "status":status,**vals}
+                "status":status,"error":error,**vals}
         path=root()/"eis223_public_browser_intake"/"_monitor_status.json"
         await asyncio.to_thread(save_atomic,path,json.dumps(record).encode())
         return {"received":True,**_scan_status()}
