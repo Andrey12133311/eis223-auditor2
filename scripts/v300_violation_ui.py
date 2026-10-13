@@ -29,7 +29,7 @@ SCRIPT = r'''<script id="v300-eis-status-script">
     if(!queued){queued=true;requestAnimationFrame(()=>{queued=false;clean()})}
   }).observe(document.documentElement,{childList:true,subtree:true});
 })();
-</script>
+</script>'''
 
 def install(ns):
     app=ns["app"]
