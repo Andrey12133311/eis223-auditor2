@@ -31,6 +31,7 @@
   }
   key = key.trim();
   let active = true, timer = null, busy = false;
+  let manualTimer = null, manualBusy = false, pausedUntil = 0;
   let cycles = 0, uploaded = 0, admitted = 0, rotatingIndex = 0;
   const log = (...args) => console.log("[ЕИС-5мин]", ...args);
   const wait = ms => new Promise(ok => setTimeout(ok, ms));
@@ -40,12 +41,13 @@
     stop() {
       active = false;
       clearTimeout(timer);
+      clearInterval(manualTimer);
       controller.abort();
       log("Остановлено. Повторных запросов больше не будет.");
       delete window.__eis223_five_minutes;
     },
     status() {
-      return {active, busy, cycles, admitted, uploaded,
+      return {active, busy, manualBusy, cycles, admitted, uploaded,
         next_check: timer ? "через примерно 5 минут" : "после текущего цикла"};
     }
   };
@@ -122,6 +124,7 @@
     return [...numbers].filter(x => NUMBER.test(x)).slice(0,30);
   }
   function searchTitle(doc,reg) {
+    if(!doc)return "";
     for(const a of doc.querySelectorAll("a[href]")) {
       if(!(a.getAttribute("href")||"").includes("regNumber="+reg))continue;
       const block=a.closest(".search-registry-entry-block,.registry-entry,article,tr");
@@ -236,6 +239,10 @@
   }
   async function run() {
     if(!active || busy)return;
+    if(manualBusy || Date.now()<pausedUntil){
+      timer=setTimeout(run,Math.max(30000,Math.min(300000,pausedUntil-Date.now())));
+      return;
+    }
     busy=true;
     let status="ok",added=0,downloadedStart=uploaded,delay=INTERVAL;
     cycles++;
@@ -280,7 +287,76 @@
       }
     }
   }
-  log("Старт. Интервал 5 минут, одна страница поиска, до 2 закупок за цикл.");
+  /* Manual searches are always first priority. Poll only Railway's queue,
+   * not EIS, every 8s. EIS itself is queried only for a real new job. */
+  async function pollManual() {
+    if(!active || busy || manualBusy || Date.now()<pausedUntil)return;
+    manualBusy=true;
+    let job=null;
+    let report=null;
+    try{
+      const next=await api("/api/v301/bridge/next");
+      job=next.job;
+      if(!job)return;
+      log("Самостоятельная проверка:",job.kind,job.target,
+          job.kind==="inn" ? "страница "+job.page : "");
+      if(job.kind==="reg") {
+        const already=await getKnown([job.target]);
+        if(already[job.target]?.complete) {
+          report={status:"done",detail:"Оригиналы уже сохранены; юридическая перепроверка поставлена в очередь",accepted:0,found:1};
+        } else {
+          const before=uploaded;
+          const accepted=await handleRegistry(job.target,null);
+          report={status:accepted?"done":"partial",
+                  detail:accepted?"Оригиналы переданы на юридическую проверку":"ЕИС не предоставила доступные оригиналы",
+                  accepted:uploaded-before,found:accepted?1:0};
+        }
+      } else if(job.kind==="inn") {
+        const q="/epz/order/extendedsearch/results.html?"+
+          new URLSearchParams({
+            searchString:"",morphology:"on",
+            openMode:"USE_DEFAULT_PARAMS",
+            pageNumber:String(job.page),sortDirection:"false",
+            recordsPerPage:"_20",showLotsInfoHidden:"false",
+            fz223:"on",af:"on",ca:"on",pc:"on",pa:"on",
+            customerInn:job.target,sortBy:"UPDATE_DATE",
+            currencyIdGeneral:"-1"
+          });
+        const result=await eisHtml(q);
+        const shown=result.querySelector('input[name="customerInn"]');
+        if(shown && shown.value && shown.value.trim()!==job.target)
+          throw Error("ЕИС вернула иной ИНН вместо запрошенного");
+        const regs=registryNumbers(result);
+        report={status:"done",found:regs.length,
+                accepted:0,regs,more:regs.length>=20 && job.page<10,
+                detail:regs.length?"Найдены номера закупок заказчика; загружаю оригиналы в приоритетном порядке":
+                                  "По официальной выдаче ЕИС закупки по ИНН не найдены"};
+        log("По ИНН",job.target,"найдено",regs.length,
+            "закупок на странице",job.page);
+      }
+      if(!report)report={status:"error",detail:"Неизвестный вид задания"};
+    }catch(e){
+      if(e.backoff){
+        pausedUntil=Date.now()+BACKOFF;
+        report={status:"deferred",defer:1200,detail:"ЕИС ограничила запросы. Повтор через 20 минут"};
+      }else{
+        report={status:"partial",detail:String(e.message||e).slice(0,250)};
+      }
+      log("Самостоятельный поиск",job?.target||"",String(e.message||e).slice(0,170));
+    }finally{
+      if(job){
+        try{
+          await api("/api/v301/bridge/report/"+job.id,"POST",report||
+            {status:"error",detail:"Загрузка прервана"});
+        }catch(e){log("Отчёт о самостоятельном поиске не отправлен",e.message);}
+      }
+      manualBusy=false;
+    }
+  }
+  manualTimer=setInterval(pollManual,8000);
+  pollManual();
+  log("Старт. Приоритетный поиск по номеру и ИНН опрашивает Railway каждые 8 секунд.");
+  log("Фоновый поиск ЕИС: одна страница каждые 5 минут, до двух закупок.");
   log("Не закрывай вкладку; остановка: __eis223_five_minutes.stop()");
   await heartbeat("collector_started",0,0);
   run();
