@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit,parse_qs
 from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse,JSONResponse
+from starlette.middleware.cors import CORSMiddleware
 
 REG = re.compile(r"[0-9]{11,20}$")
 UID = re.compile(r"[0-9A-F]{32}$")
@@ -129,6 +130,14 @@ def save_atomic(path,data):
 
 def install(ns):
     app=ns["app"]
+    # Browser-only bridge: permit requests exclusively from the two official EIS origins.
+    # Token authentication still protects XML/original uploads and manifests.
+    app.add_middleware(CORSMiddleware,
+        allow_origins=["https://zakupki.gov.ru","https://int.zakupki.gov.ru"],
+        allow_methods=["GET","POST","OPTIONS"],
+        allow_headers=["content-type","x-eis223-upload-token"],
+        allow_credentials=False,
+        max_age=600)
     discovery=ns.get("discover_eis_documents")
     downloader=ns.get("download_doc")
     extractor=ns.get("extract_text")
