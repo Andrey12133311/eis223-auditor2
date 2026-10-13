@@ -148,18 +148,33 @@
   // Only certified public EIS file references are accepted. Reconstruct a
   // canonical URL from the exact 32-hex UID found in the official HTML.
   const FILE_PATH="/223/filestore/public/1.0/download/fz223/file.html";
+  const LEGACY_PATH="/223/purchase/public/download/download.html";
   const EXT_NAME=/([^\\/:<>?"|*\r\n]{2,180}\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|xml))(?=$|[\s,'"<>;)]|$)/i;
-  const EIS_FILE_LINK=/(?:https?:\/\/zakupki\.gov\.ru)?\/223\/filestore\/public\/1\.0\/download\/fz223\/file\.html\?[^"'<>\\\s)]{0,420}/gi;
-  function maybeFileUid(text) {
+  // Public 223-FZ EIS supports two verified attachment link schemes.
+  // Other URLs, signatures and untrusted domains are never downloaded.
+  const EIS_FILE_LINK=/(?:https?:\/\/zakupki\.gov\.ru)?\/223\/(?:filestore\/public\/1\.0\/download\/fz223\/file\.html|purchase\/public\/download\/download\.html)\?[^"'<>\\\s)]{1,420}/gi;
+  function maybeOfficialFile(text) {
     if(!text)return null;
     const raw=String(text).replace(/&amp;/gi,"&").replace(/\\u0026/gi,"&");
     const matches=raw.match(EIS_FILE_LINK)||[];
-    for(const href of matches) {
-      try {
+    for(const href of matches){
+      try{
         const u=new URL(href,SITE);
-        const uid=(u.searchParams.get("uid")||"").toUpperCase();
-        if(u.origin===SITE&&u.pathname===FILE_PATH&&/^[0-9A-F]{32}$/.test(uid))
-          return uid;
+        if(u.origin!==SITE||u.username||u.password||u.hash)continue;
+        if(u.pathname===FILE_PATH){
+          const uid=(u.searchParams.get("uid")||"").toUpperCase();
+          if(!/^[0-9A-F]{32}$/.test(uid))continue;
+          return {uid,url:SITE+FILE_PATH+"?uid="+uid};
+        }
+        if(u.pathname===LEGACY_PATH){
+          const id=u.searchParams.getAll("id");
+          if(id.length!==1||[...u.searchParams.keys()].some(k=>k!=="id")||
+              !/^[0-9]{1,15}$/.test(id[0])||BigInt(id[0])===0n)continue;
+          // Prefix F1 denotes an INTERNAL numeric-id reference, never a
+          // claim that EIS supplied a 32-hex filestore UID.
+          const uid="F1"+BigInt(id[0]).toString(16).toUpperCase().padStart(30,"0");
+          return {uid,url:SITE+LEGACY_PATH+"?id="+String(BigInt(id[0]))};
+        }
       }catch(e){}
     }
     return null;
@@ -204,25 +219,25 @@
     const elements=doc.querySelectorAll(
       "a,button,[onclick],[data-href],[data-url],[data-file-uid],[data-download-url]");
     for(const element of elements){
-      let uid=null;
+      let official=null;
       for(const key of ["href","onclick","data-href","data-url",
                         "data-download-url","data-file-url"]){
-        uid=maybeFileUid(element.getAttribute?.(key));
-        if(uid)break;
+        official=maybeOfficialFile(element.getAttribute?.(key));
+        if(official)break;
       }
       // Some EIS components store the download URL on a wrapper.
       let wrapper=element.parentElement;
-      for(let j=0;!uid&&wrapper&&j<3;j++,wrapper=wrapper.parentElement){
+      for(let j=0;!official&&wrapper&&j<3;j++,wrapper=wrapper.parentElement){
         for(const key of ["href","onclick","data-href","data-url","data-download-url"]){
-          uid=maybeFileUid(wrapper.getAttribute?.(key));
-          if(uid)break;
+          official=maybeOfficialFile(wrapper.getAttribute?.(key));
+          if(official)break;
         }
       }
-      if(!uid||seen.has(uid))continue;
+      if(!official||seen.has(official.uid))continue;
       const name=safeFilename(element);
       if(!name)continue;
-      seen.add(uid);
-      documents.push({name,url:SITE+FILE_PATH+"?uid="+uid,uid});
+      seen.add(official.uid);
+      documents.push({name,url:official.url,uid:official.uid});
       if(documents.length>=100)break;
     }
     return documents;
@@ -302,12 +317,10 @@
   }
 
   function downloadUid(item) {
-    const u=new URL(item.url,SITE);
-    if(u.origin!==SITE||u.pathname!==FILE_PATH)
-      throw new Error("Файл не принадлежит официальному хранилищу ЕИС");
-    const uid=(u.searchParams.get("uid")||"").toUpperCase();
-    if(!/^[0-9A-F]{32}$/.test(uid))throw new Error("Неверный UID файла ЕИС");
-    return uid;
+    const match=maybeOfficialFile(item.url);
+    if(!match||match.url!==item.url)
+      throw new Error("Недопустимая ссылка на оригинал ЕИС");
+    return match.uid;
   }
 
   function sniffFileExtension(buffer,headers){
