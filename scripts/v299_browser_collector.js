@@ -255,27 +255,36 @@
     "/223/purchase/public/purchase/info/documents.html",
     "/epz/order/notice/notice223/documents.html"
   ]);
-  function officialCardUrl(raw,reg,validPaths){
+  function officialCardUrl(raw,reg,validPaths,associatedNoticeId=false){
     try{
       const u=new URL(String(raw||"").replace(/&amp;/gi,"&"),SITE);
       if(u.origin!==SITE||!validPaths.has(u.pathname))return null;
       const regNum=u.searchParams.get("regNumber")||
                    u.searchParams.get("purchaseNoticeNumber");
-      if(regNum!==reg)return null;
-      return u;
+      if(regNum===reg)return u;
+      // Many live EIS 223 cards are addressed by noticeInfoId, not regNumber.
+      // Associate this identifier ONLY with a search result visibly containing
+      // the exact registry number; do not guess random notice identifiers.
+      const noticeId=u.searchParams.get("noticeInfoId");
+      if(associatedNoticeId&&!regNum&&/^[0-9]{1,15}$/.test(noticeId||""))return u;
+      return null;
     }catch(e){return null}
   }
   function actualCardLinks(doc,reg){
     const output=[],seen=new Set();
     if(!doc)return output;
     for(const element of doc.querySelectorAll("a[href],[onclick],[data-href]")){
+      const block=element.closest?.(
+        ".search-registry-entry-block,.registry-entry,article,tr,.registry-entry__form");
+      const context=String(block?.textContent||element.textContent||"");
+      const correlated=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(context);
       for(const key of ["href","onclick","data-href"]){
         const raw=element.getAttribute(key)||"";
         let found=null;
-        if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES);
+        if(key==="href")found=officialCardUrl(raw,reg,INFO_PAGES,correlated);
         if(!found){
           const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/common-?info\.html\?[^"'<>\s)]+/i);
-          if(match)found=officialCardUrl(match[0],reg,INFO_PAGES);
+          if(match)found=officialCardUrl(match[0],reg,INFO_PAGES,correlated);
         }
         if(found&&!seen.has(found.href)){seen.add(found.href);output.push(found.href);}
       }
