@@ -162,17 +162,8 @@ def _apply_customer(ns,value):
                  WHERE reg_number=? AND (customer IS NULL OR TRIM(customer)=''
                      OR LOWER(customer) LIKE 'уточняем%' OR LOWER(customer) LIKE '%уточняется%')""",
               (name,inn,inn,reg))
-        if inn and not name:
-            row=db.execute(
-                """SELECT customer FROM purchases WHERE customer_inn=?
-                   AND customer IS NOT NULL AND LENGTH(TRIM(customer))>7
-                   AND LOWER(customer) NOT LIKE '%уточня%'
-                   ORDER BY last_seen DESC LIMIT 1""",(inn,)).fetchone()
-            if row and _real_customer(row[0]):
-                db.execute("""UPDATE purchases SET customer=?,customer_inn=?
-                    WHERE reg_number=? AND (customer IS NULL OR TRIM(customer)=''
-                    OR LOWER(customer) LIKE '%уточня%')""",
-                    (row[0],inn,reg))
+        # A submitted search INN is NOT evidence that the retrieved buyer
+        # has this INN. Do not copy buyer names between unrelated cards.
         db.commit()
     except Exception:
         if db.in_transaction:db.rollback()
