@@ -178,7 +178,7 @@ SCRIPT='''<script id="v302-modern-js">
  }
  function initialize(){
   const host=document.querySelector('main')||document.body;
-  if(page&&!by('v302-search-panel')){
+  if(page&&location.pathname!=='/'&&!by('v302-search-panel')){
     const node=document.createElement('section');node.id='v302-search-panel';
     node.setAttribute('aria-label','Поиск закупок по 223-ФЗ');
     node.innerHTML=[
