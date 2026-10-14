@@ -113,12 +113,21 @@ SCRIPT='''<script id="v302-modern-js">
   const node=by('v302-search-result');if(!node)return;
   node.style.display='block';node.className=kind||'';node.innerHTML=content;
  }
+ function money(p){
+  if(p.price_num!==null&&p.price_num!==undefined&&p.price_num!==''){
+   const n=Number(p.price_num);
+   if(Number.isFinite(n)&&n>=0)
+    return new Intl.NumberFormat('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n)+' ₽';
+  }
+  return String(p.price||'не установлена');
+ }
  function rows(items){
-  if(!items?.length)return '<p>В базе пока нет проверенных закупок по запросу.</p>';
+  if(!items?.length)return '<p>В базе пока нет проверенных документов по запросу. Поиск не считается юридической проверкой.</p>';
   return '<ul class="v302-results">'+items.slice(0,35).map(p=>
     '<li><span><a href="/check-new/'+encodeURIComponent(p.reg_number)+'">'+escape(p.reg_number)+'</a>'+
-    '<small> · '+escape(p.title||p.customer||'Документы ЕИС')+'</small></span>'+
-    '<span>Проверено: '+Number(p.documents_checked||0)+' · Нарушений: <b>'+
+    '<small> · '+escape(p.title||p.customer||'Документы ЕИС')+'</small>'+
+    '<small> · НМЦД: '+escape(money(p))+'</small></span>'+
+    '<span>Обработано документов: '+Number(p.documents_checked||0)+' · Нарушений: <b>'+
     Number(p.violations||0)+'</b></span></li>').join('')+'</ul>';
  }
  async function bridge(){
@@ -161,17 +170,33 @@ SCRIPT='''<script id="v302-modern-js">
         const j=await req('/api/v301/job/'+r.id);
         const state=j.job?.status||'queued';
         const labels={queued:'В очереди',leased:'ЕИС получает документы',
-          done:'Поиск выполнен',partial:'Загружено частично',
+          done:'Поиск ЕИС завершён',partial:'Загружено частично',
           error:'Ошибка получения',deferred:'Ожидает повтор'};
         const el=by('v302-task-status');
-        if(el)el.textContent=(labels[state]||state)+(j.job?.detail?' — '+j.job.detail:'')+
-          (kind==='inn'?' · закупок в базе: '+j.total_existing:'');
-        const list=by('v302-task-items');if(list)list.innerHTML=rows(j.existing);
-        if(['done','partial','error'].includes(state)){
-          if(state==='done'&&kind==='inn'&&el)
-            el.textContent+=' · загрузка документов найденных закупок продолжается в отдельной очереди';
-          break;
+        const audit=j.audit;
+        let message=labels[state]||state;
+        if(kind==='reg'){
+          if(audit?.audit_complete)
+            message='Проверено: все полученные оригиналы прошли юридическую проверку';
+          else if(audit?.audit_status==='auditing')
+            message='Юридическая проверка оригиналов выполняется';
+          else if(audit?.audit_status==='waiting')
+            message='Ожидаются оригиналы ЕИС';
+          else if(state==='done')
+            message='Поиск ЕИС завершён; юридическая проверка НЕ подтверждена';
+          if(audit?.originals_expected>0)
+            message+=' · получено оригиналов: '+audit.originals_received+'/'+audit.originals_expected;
+        }else if(state==='done'){
+          message='Поиск закупок по ИНН завершён. Документы ещё проверяются в отдельной очереди';
         }
+        if(el)el.textContent=message+
+          (state==='error'&&j.job?.detail?' — '+j.job.detail:'')+
+          (kind==='inn'?' · закупок с данными в базе: '+j.total_existing:'');
+        const list=by('v302-task-items');if(list)list.innerHTML=rows(j.existing);
+        if(state==='error'||kind==='reg'&&audit?.audit_complete)break;
+        if(state==='done'&&kind==='inn')break;
+        if(state==='done'&&kind==='reg'&&k>=5)break;
+        if(state==='partial'&&k>=5)break;
       }catch(e){if(k>3)break}
     }
   }catch(e){if(seq===i)notice('Не удалось выполнить поиск: '+escape(e.message),'error')}
