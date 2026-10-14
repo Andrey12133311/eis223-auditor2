@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "314"; // buyer metadata from actual EIS labels/cards
+  const COLLECTOR_VERSION = "315"; // buyer metadata from actual EIS labels/cards
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -65,11 +65,15 @@
   async function request(url, options = {}, ms = 45000) {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), ms);
+    const onStop=()=>ctrl.abort();
+    controller.signal.addEventListener("abort",onStop,{once:true});
     try {
+      if(!active||controller.signal.aborted)throw Error("Загрузчик остановлен");
       const opt = {...options, signal:ctrl.signal};
       return await fetch(url, opt);
     } finally {
       clearTimeout(timeout);
+      controller.signal.removeEventListener("abort",onStop);
     }
   }
   async function api(path, method, data) {
@@ -741,7 +745,13 @@
     cycles++;
     try {
       log("Цикл",cycles,": получаю первую страницу последних закупок 223-ФЗ");
-      const search=await eisHtml(SEARCH);
+      // Every fourth cycle revisit a historical results page to repair buyer/INN/title.
+      // Still exactly ONE EIS search request per cycle.
+      const historicalPage=(cycles%4===0)?(2+Math.floor(cycles/4-1)%19):1;
+      const searchUrl=new URL(SEARCH,SITE);
+      searchUrl.searchParams.set("pageNumber",String(historicalPage));
+      log("Страница поиска ЕИС:",historicalPage);
+      const search=await eisHtml(searchUrl.pathname+searchUrl.search);
       const numbers=registryNumbers(search);
       if (!numbers.length) {
         log("Номера закупок на странице ЕИС не обнаружены. Ничего не добавлено.");
