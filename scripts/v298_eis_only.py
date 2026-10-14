@@ -259,10 +259,24 @@ async def offline_audit(ns,reg):
     # Weak heuristic "risk" matches do not become violations and are not
     # presented as a performance indicator. Historical data are retained.
     findings=[f for f in findings if isinstance(f,dict) and f.get("kind")=="violation"]
-    # Preserve document-backed review findings separately from confirmed violations.
-    review_findings=[f for f in findings if f.get("kind")=="check"]
     checks=await asyncio.to_thread(build_checks,p,detail,card,docs)
     checks=[c for c in checks if isinstance(c,dict) and c.get("status")!="risk"]
+    # Explicit wording in a verified original is a review signal, not
+    # an automatically established legal violation.
+    for doc in docs:
+        if doc.get("status")!="checked":continue
+        body=" ".join(str(doc.get("text") or "").split())
+        for phrase in ("эквивалент не допускается","аналоги не допускаются"):
+            offset=body.casefold().find(phrase)
+            if offset<0:continue
+            checks.append({"code":"equivalence_restriction_review",
+                           "status":"check",
+                           "title":"Проверить ограничение эквивалентности товара",
+                           "document":doc.get("name") or "",
+                           "evidence":body[max(0,offset-90):offset+len(phrase)+90],
+                           "legal_basis":"223-ФЗ, статья 3, часть 1, пункт 2",
+                           "reason":"Требуется оценить предмет закупки и исключения"})
+
     annotate=ns.get("annotate")
     if callable(annotate):
         await asyncio.to_thread(annotate,reg,docs,findings,checks)
