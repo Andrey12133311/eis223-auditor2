@@ -227,47 +227,6 @@ _LAW_CITATION = re.compile(
     r"настоящ(?:ий|его)\s+федеральн\w*\s+закон)",re.I,
 )
 
-_DIAGNOSTIC_DONE=set()
-def _target_evidence_probe(p,docs,admissions):
-    """Small excerpts from already verified public EIS originals, for debugging."""
-    reg=str(p.get("reg") or "")
-    if reg!="32616324151" or reg in _DIAGNOSTIC_DONE:return
-    _DIAGNOSTIC_DONE.add(reg)
-    from v324_official_price import LABEL,prices_in_text,verified_nmcd
-    verified=[d for d in docs if _verified(d)]
-    evidence=[]
-    prices=[]
-    nmcd_labels=nmcd_amounts=0
-    for doc in verified:
-        text=_plain(doc.get("text"))
-        nmcd_labels+=len(LABEL.findall(text))
-        extracted_prices=prices_in_text(text)
-        nmcd_amounts+=len(extracted_prices)
-        for price,number,excerpt in extracted_prices[:4]:
-            if len(prices)<12:
-                prices.append((str(doc.get("name") or "")[:80],number,excerpt[:200]))
-        terms=list(re.finditer(
-           r"(?:коллективн\w*|нескольк\w*\s+юридическ\w*\s+лиц|"
-           r"могут\s+принять\s+участи\w*|"
-           r"член\w*\s+объединени\w*)",text,re.I))
-        for match in terms[:3]:
-            if len(evidence)>=8:break
-            context=" ".join(text[max(0,match.start()-160):match.end()+210].split())
-            evidence.append((str(doc.get("name") or "")[:90],context[:390]))
-    candidates=verified_nmcd(docs)
-    print(f"V326 EVIDENCE_PROBE reg={reg} originals={len(verified)} "
-          f"nmcd_labels={nmcd_labels} nmcd_candidates={nmcd_amounts} "
-          f"nmcd_conflict={bool(candidates.get('price_conflict'))} "
-          f"admission_candidates={len(admissions)} excerpt_count={len(evidence)}",
-          flush=True)
-    for index,(name,excerpt) in enumerate(evidence):
-        print(f"V326 EVIDENCE_EXCERPT reg={reg} i={index} "
-              f"document={name!r} excerpt={excerpt!r}",flush=True)
-    for index,(name,number,excerpt) in enumerate(prices):
-        print(f"V327 VERIFIED_PRICE_EXCERPT reg={reg} i={index} "
-              f"document={name!r} amount={number:.2f} context={excerpt!r}",flush=True)
-
-
 def _admission_cases(p,docs):
     confirmed,_=_sme_scope(p,docs)
     if not confirmed:return []
@@ -316,6 +275,46 @@ def _admission_cases(p,docs):
             })
             if len(result)>=5:return result
     return result
+
+def _fas_admission_finding(record):
+    """Administrative FAS-rule finding, with transparent contrary case law.
+
+    This is documentary evidence of an SME-only collective-admission CLAUSE,
+    not a claim that any contract has been annulled by a court. Never use
+    in a non-SME competition or where a verified tender actually forbids
+    collective applicants.
+    """
+    doc=record["doc"]
+    return {
+        "code":"SME-COLLECTIVE-ADMISSION-FAS-223FZ-9-25",
+        "kind":"violation",
+        "title":"Допуск коллективных участников в конкурсе только для МСП — нарушение по позиции ФАС России",
+        "law":"223-ФЗ, ст. 3.4, ч. 19.1, 19.3; ст. 2, ч. 1; ст. 3, ч. 5",
+        "law_url":"https://www.consultant.ru/document/cons_doc_LAW_116964/",
+        "evidence":record["section"],
+        "note":(
+            "Проверенный оригинал содержит прямое условие о возможности "
+            "участия нескольких юридических лиц на стороне одного участника "
+            "в конкурсе, участники которого ограничены субъектами МСП. "
+            "Комиссия ФАС России квалифицирует подобное условие как нарушение "
+            "статьи 3.4 и части 1 статьи 2 Закона № 223-ФЗ (решение "
+            "ФАС России от 14.01.2025 № 223ФЗ-9/25; решение "
+            "Московского УФАС от 23.01.2025 № 077/07/00-233/2025; "
+            "решение Московского УФАС от 02.07.2026 № 29558/26). "
+            "ВНИМАНИЕ: судебная практика неоднородна. Постановление "
+            "Арбитражного суда Московского округа от 28.05.2026 "
+            "№ Ф05-6397/26 (дело № А40-45512/2025) допускает "
+            "коллективное участие МСП при определённых условиях. "
+            "Вывод отражает правоприменительную позицию ФАС, не "
+            "безусловно установленный судом факт. Перед оформлением "
+            "материалов необходимо проверить актуальную редакцию "
+            "документации и положение о закупке."),
+        "document":doc.get("name"),
+        "source_url":(doc.get("meta") or {}).get("source_url"),
+        "location":record["location"],
+        "match_text":record["seed"],
+    }
+
 
 def _admission_check(record):
     doc=record["doc"]
@@ -395,7 +394,6 @@ def install(ns):
         cases=_cases(p,docs)
         definitive=[v for v in cases if v["classification"]=="violation"]
         admissions=_admission_cases(p,docs)
-        _target_evidence_probe(p,docs,admissions)
         if p.get("reg")=="32616324151" or cases:
             print(f"V324 FAS_EVIDENCE reg={p.get('reg')} "
                   f"sme_confirmed={any(c.get('scope') for c in cases)} "
@@ -404,9 +402,12 @@ def install(ns):
                   f"collective_admission={len(admissions)} "
                   f"nmcd_verified={p.get('price_num') is not None}",
                   flush=True)
-        # FAS decisions and a 2026 circuit-court judgment disagree about
-        # collective SME admission; never inflate violation counts based on
-        # admission alone. Add an evidence-backed "check" below instead.
+        # Only an affirmative tender-specific, hash-verified condition
+        # matching an explicit FAS legal determination is counted. The
+        # resulting finding states the opposing 2026 circuit-court holding.
+        # Duplicated archive revisions count as a single infringement type.
+        if admissions:
+            output.append(_fas_admission_finding(admissions[0]))
         if definitive:
             # Avoid multiple historic archive revisions inflating counts:
             # same legal issue is represented once per procurement.
@@ -425,11 +426,10 @@ def install(ns):
             or _admission_cases(p,docs)) else []
         if candidates:
             output.append(_check(candidates[0]))
-        admissions=_admission_cases(p,docs)
-        if admissions:
-            output.append(_admission_check(admissions[0]))
+        # The same documented FAS-practice issue is now present once in
+        # findings; avoid duplicating a separate generic "check" entry.
         return output
 
     ns["analyze"]=analyze
     ns["build_checks"]=build_checks
-    print("V325 FAS_PRACTICE_READY sources=6 verified_only=True SME_scope_required=True collective_admission_review=True",flush=True)
+    print("V328 FAS_PRACTICE_READY official_evidence_only=True FAS_admission_finding=True court_conflict_disclosed=True",flush=True)
