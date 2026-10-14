@@ -59,7 +59,7 @@ def test_queue():
         CREATE TABLE purchases (
           reg_number TEXT PRIMARY KEY,violations INTEGER DEFAULT 0,
           documents_checked INTEGER DEFAULT 0,checks_ok INTEGER DEFAULT 0,
-          checks_attention INTEGER DEFAULT 0
+          checks_attention INTEGER DEFAULT 0,last_seen TEXT DEFAULT '2026-10-14'
         );
         CREATE TABLE findings (
           id INTEGER PRIMARY KEY,reg_number TEXT,code TEXT,kind TEXT,title TEXT,
@@ -71,12 +71,14 @@ def test_queue():
           evidence TEXT,source TEXT,source_url TEXT,document TEXT,
           field_path TEXT,note TEXT,law TEXT,law_url TEXT,location TEXT
         );
-        INSERT INTO purchases(reg_number) VALUES('32616233661');
+        CREATE TABLE v319_manual_inputs (reg TEXT PRIMARY KEY);
+                INSERT INTO purchases(reg_number) VALUES('32616233661');
         INSERT INTO purchases(reg_number) VALUES('32616324151');
         INSERT INTO purchases(reg_number) VALUES('32616434308');
         """)
         c.commit();c.close()
-        ns={"conn":conn,"extract_text":lambda p:Path(p).read_text(encoding="utf-8")}
+        ns={"conn":conn,"extract_text":lambda p:Path(p).read_text(encoding="utf-8"),
+            "_verified_set235":lambda:[REG,"32616324151","32616434308"]}
         first=initialize(ns)
         assert first["total_registered"]==3,first
         assert first["baseline_recorded_violations"]==0
