@@ -236,11 +236,16 @@ def _target_evidence_probe(p,docs,admissions):
     from v324_official_price import LABEL,prices_in_text,verified_nmcd
     verified=[d for d in docs if _verified(d)]
     evidence=[]
+    prices=[]
     nmcd_labels=nmcd_amounts=0
     for doc in verified:
         text=_plain(doc.get("text"))
         nmcd_labels+=len(LABEL.findall(text))
-        nmcd_amounts+=len(prices_in_text(text))
+        extracted_prices=prices_in_text(text)
+        nmcd_amounts+=len(extracted_prices)
+        for price,number,excerpt in extracted_prices[:4]:
+            if len(prices)<12:
+                prices.append((str(doc.get("name") or "")[:80],number,excerpt[:200]))
         terms=list(re.finditer(
            r"(?:коллективн\w*|нескольк\w*\s+юридическ\w*\s+лиц|"
            r"могут\s+принять\s+участи\w*|"
@@ -249,7 +254,6 @@ def _target_evidence_probe(p,docs,admissions):
             if len(evidence)>=8:break
             context=" ".join(text[max(0,match.start()-160):match.end()+210].split())
             evidence.append((str(doc.get("name") or "")[:90],context[:390]))
-        if len(evidence)>=8:break
     candidates=verified_nmcd(docs)
     print(f"V326 EVIDENCE_PROBE reg={reg} originals={len(verified)} "
           f"nmcd_labels={nmcd_labels} nmcd_candidates={nmcd_amounts} "
@@ -259,6 +263,9 @@ def _target_evidence_probe(p,docs,admissions):
     for index,(name,excerpt) in enumerate(evidence):
         print(f"V326 EVIDENCE_EXCERPT reg={reg} i={index} "
               f"document={name!r} excerpt={excerpt!r}",flush=True)
+    for index,(name,number,excerpt) in enumerate(prices):
+        print(f"V327 VERIFIED_PRICE_EXCERPT reg={reg} i={index} "
+              f"document={name!r} amount={number:.2f} context={excerpt!r}",flush=True)
 
 
 def _admission_cases(p,docs):
