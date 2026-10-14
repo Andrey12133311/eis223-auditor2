@@ -132,6 +132,60 @@ def summary(connect):
     finally:
         db.close()
 
+
+def compare_same_titles(connect,limit=100):
+    """Diagnostic of duplicate candidates; no deletion or requalification."""
+    from v333_dedup_ui import issue_key
+    db=connect()
+    try:
+        db.row_factory=sqlite3.Row
+        tables=[]
+        for name,column,condition in (("findings","title","kind='violation'"),
+                                      ("checks","item","status='violation'")):
+            groups={}
+            for row in db.execute("SELECT reg_number,"+column+
+                                  " title,document,evidence,law,source_url FROM "+name+
+                                  " WHERE "+condition):
+                key=(str(row["reg_number"]),issue_key(row["title"]))
+                if key[1]:groups.setdefault(key,[]).append(dict(row))
+            tables.append(groups)
+        left,right=tables
+        def norm(x):
+            return re.sub(r"\s+"," ",str(x or "").casefold().replace("ё","е")).strip()
+        def same(a,b):
+            doc_a,doc_b=norm(a.get("document")),norm(b.get("document"))
+            url_a,url_b=norm(a.get("source_url")),norm(b.get("source_url"))
+            shared_document=bool((doc_a and doc_a==doc_b) or
+                                 (url_a and url_a==url_b))
+            x,y=norm(a.get("evidence")),norm(b.get("evidence"))
+            same_excerpt=bool(x and y and (x==y or
+                (min(len(x),len(y))>=70 and (x in y or y in x))))
+            law_a,law_b=norm(a.get("law")),norm(b.get("law"))
+            return shared_document and same_excerpt and not (
+                law_a and law_b and law_a!=law_b)
+        items=[]
+        for key in sorted(left.keys()&right.keys()):
+            matched=any(same(a,b) for a in left[key] for b in right[key])
+            items.append({
+                "reg_number":key[0],
+                "issue":left[key][0]["title"],
+                "finding_rows":len(left[key]),
+                "check_rows":len(right[key]),
+                "classification":("matching_documentary_excerpt" if matched else
+                                  "evidence_review_required"),
+                "finding_documents":sorted({str(r.get("document") or "") for r in left[key]})[:5],
+                "check_documents":sorted({str(r.get("document") or "") for r in right[key]})[:5]
+            })
+        matched=sum(x["classification"]=="matching_documentary_excerpt" for x in items)
+        return {"shared_procurement_issue_groups":len(items),
+                "matching_documentary_excerpt_groups":matched,
+                "groups_requiring_evidence_review":len(items)-matched,
+                "items":items[:min(max(int(limit),0),300)],
+                "note":"Names alone do not prove duplicates. No rows were deleted."}
+    finally:
+        db.close()
+
+
 def install(ns):
     connect=ns["conn"]
     app=ns["app"]
@@ -148,6 +202,8 @@ def install(ns):
     # destructive legacy save(). Fail startup closed if persistence fails.
     snapshot(connect)
     print("V334 BASELINE "+json.dumps(summary(connect),ensure_ascii=False),flush=True)
+    overlap=compare_same_titles(connect,0)
+    print("V334 CROSS_TABLE "+json.dumps({k:v for k,v in overlap.items() if k!="items"},ensure_ascii=False),flush=True)
 
     if not getattr(existing_save,"__v334_protected__",False):
         @wraps(existing_save)
@@ -167,6 +223,10 @@ def install(ns):
     @app.get("/api/v334/violation-ledger/summary",include_in_schema=False)
     def ledger_summary():
         return summary(connect)
+
+    @app.get("/api/v334/violation-ledger/overlaps",include_in_schema=False)
+    def ledger_overlaps(limit:int=100):
+        return compare_same_titles(connect,limit)
 
     @app.get("/api/v334/violation-ledger/changes",include_in_schema=False)
     def ledger_changes(limit:int=50):
