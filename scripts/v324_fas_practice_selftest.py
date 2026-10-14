@@ -2,6 +2,8 @@
 from __future__ import annotations
 from v324_fas_practice import _cases,install,PRACTICE
 from v324_official_price import verified_nmcd,prices_in_text
+from v298_eis_only import verified_xml_nmcd
+from xml.etree import ElementTree as ET
 
 REG="32616324151"
 METHOD="Конкурс в электронной форме, участниками которого могут быть только субъекты малого и среднего предпринимательства"
@@ -45,6 +47,13 @@ def run():
     assert conflict.get("price_conflict") and not conflict.get("price"),conflict
     assert verified_nmcd([doc("НМЦД 394 633,33 руб.",
                                source="unknown_other_source")])=={}
+    xml=ET.fromstring("<purchaseNoticeData><lots><lot><lotData><initialSum>"
+                      "<value>394633.33</value></initialSum></lotData></lot></lots>"
+                      "</purchaseNoticeData>")
+    assert verified_xml_nmcd(xml)=="394633.33"
+    conflicting=ET.fromstring("<purchaseNoticeData><initialSum>10.00</initialSum>"
+                               "<initialSum>20.00</initialSum></purchaseNoticeData>")
+    assert verified_xml_nmcd(conflicting)==""
     # Old parser must remain unmodified; wrapper dispatches actual findings
     # only when explicit vetted evidence exists.
     ns={"analyze":lambda p,docs:[],
