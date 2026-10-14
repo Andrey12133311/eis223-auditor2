@@ -125,7 +125,7 @@ def format_service_memo(data:bytes,findings:list[dict])->bytes:
     # text expands they spill the executor details onto an empty third page.
     current=list(body.iter("{"+TX+"}p"))
     signer_idx=next((i for i,p in enumerate(current)
-        if "Заместитель начальника Управления" in _odf_string(p)),-1)
+        if p.get("{"+TX+"}style-name")=="P24" or "Заместитель начальника Управления" in _odf_string(p)),-1)
     executor_idx=next((i for i,p in enumerate(current)
         if p.get("{"+TX+"}style-name")=="P21" and i>signer_idx),-1)
     if signer_idx>=0 and executor_idx>signer_idx:
