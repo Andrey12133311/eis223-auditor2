@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "315"; // buyer metadata from actual EIS labels/cards
+  const COLLECTOR_VERSION = "316"; // buyer metadata from actual EIS labels/cards
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -304,6 +304,13 @@
         .replace(/\s*:\s*$/,"").toLowerCase();
       if(title.length>180)continue;
       if(!patterns.some(p=>p.test(title)))continue;
+      // EIS sometimes renders "ИНН: 1234567890" in the SAME node.
+      const inline=(label.textContent||"").replace(/\\s+/g," ").trim();
+      const inlineMatch=inline.match(/^([^:：]{1,110})\\s*[:：]\\s*(.+)$/);
+      if(inlineMatch&&patterns.some(p=>p.test(inlineMatch[1].trim().toLowerCase()))){
+        const v=inlineMatch[2].trim();
+        if(v&&v.length<=800)return v;
+      }
       const values=".common-text__value,.section__info,.registry-entry__body-value,"+
         ".registry-entry__body-item-value,.registry-entry__body-href,"+
         ".blockInfo__value,dd,td,.section__value,.value";
@@ -332,6 +339,10 @@
       name=valueByLabel(section,[/^наименование организации/i,/^полное наименование/i,
              /^заказчик$/i,/^наименование заказчика/i])||name;
       inn=valueByLabel(section,[/^инн$/i,/^инн заказчика/i])||inn;
+      if(!inn){
+        const hits=(section.textContent||"").match(/(?:^|[^а-яёa-z])ИНН\\s*[:：№]?\\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)||[];
+        if(hits.length===1)inn=(hits[0].match(/([0-9]{10}|[0-9]{12})/)||[])[1]||"";
+      }
       if(name&&inn)break;
     }
     if(!name){
