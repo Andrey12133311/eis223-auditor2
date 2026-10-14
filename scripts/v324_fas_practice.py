@@ -236,7 +236,8 @@ def install(ns):
             print(f"V324 FAS_EVIDENCE reg={p.get('reg')} "
                   f"sme_confirmed={any(c.get('scope') for c in cases)} "
                   f"agreements={len(cases)} verified_extra_documents={len(definitive)} "
-                  f"review_only={sum(c['classification']!='violation' for c in cases)}",
+                  f"review_only={sum(c['classification']!='violation' for c in cases)} "
+                  f"nmcd_verified={p.get('price_num') is not None}",
                   flush=True)
         if definitive:
             # Avoid multiple historic archive revisions inflating counts:
