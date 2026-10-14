@@ -37,7 +37,8 @@ def initialize(ns):
               conflict INTEGER NOT NULL DEFAULT 0,alternative_price TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS v338_price_requests(
-              reg TEXT PRIMARY KEY,created_at TEXT NOT NULL
+              reg TEXT PRIMARY KEY,created_at TEXT NOT NULL,
+              attempts INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS v338_price_rechecks(
               reg TEXT PRIMARY KEY,state TEXT NOT NULL DEFAULT 'pending',
@@ -45,6 +46,11 @@ def initialize(ns):
               result TEXT NOT NULL DEFAULT ''
             );
         """)
+        # Existing production databases may predate the retry counter.
+        cols={r[1] for r in db.execute('PRAGMA table_info(v338_price_requests)')}
+        if 'attempts' not in cols:
+            db.execute('ALTER TABLE v338_price_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
+        db.commit()
     finally:db.close()
 
 def save_card_price(ns,reg,price,amount,kind,label,source):
@@ -133,8 +139,10 @@ def enqueue_missing_prices(ns,limit=8):
         if ready>=24:return 0
         rows=db.execute("""SELECT p.reg_number FROM purchases p
                     LEFT JOIN v338_price_requests r ON r.reg=p.reg_number
-                    WHERE r.reg IS NULL AND p.documents_checked>0
+                    WHERE p.documents_checked>0
                     AND (p.price_num IS NULL OR TRIM(COALESCE(p.price,''))='')
+                    AND (r.reg IS NULL OR
+                         (r.attempts<3 AND r.created_at<datetime('now','-6 hours')))
                     ORDER BY p.last_seen DESC LIMIT ?""",(min(8,limit),)).fetchall()
     finally:db.close()
     queued=0
@@ -145,8 +153,9 @@ def enqueue_missing_prices(ns,limit=8):
             _enqueue(ns,"reg",reg,1,8,"v338-card-price",False)
             db=ns["conn"]()
             try:
-                db.execute("INSERT OR IGNORE INTO v338_price_requests VALUES(?,?)",
-                           (reg,_now()))
+                db.execute('''INSERT INTO v338_price_requests(reg,created_at,attempts)
+                    VALUES(?,?,1) ON CONFLICT(reg) DO UPDATE SET
+                    created_at=excluded.created_at,attempts=attempts+1''',(reg,_now()))
                 db.commit()
             finally:db.close()
             queued+=1
