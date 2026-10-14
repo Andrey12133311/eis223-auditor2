@@ -115,11 +115,11 @@ def _local_results(ns,kind,target):
     try:
         if kind=="reg":
             rows=db.execute(
-                "SELECT reg_number,title,customer,violations,documents_checked,documents_found "
+                "SELECT reg_number,title,customer,price,price_num,violations,documents_checked,documents_found "
                 "FROM purchases WHERE reg_number=?",(target,)).fetchall()
         else:
             rows=db.execute(
-                "SELECT DISTINCT p.reg_number,p.title,p.customer,p.violations,p.documents_checked,p.documents_found "
+                "SELECT DISTINCT p.reg_number,p.title,p.customer,p.price,p.price_num,p.violations,p.documents_checked,p.documents_found "
                 "FROM purchases p LEFT JOIN v301_inn_purchases m ON m.reg=p.reg_number "
                 "WHERE p.customer_inn=? OR m.inn=? ORDER BY p.last_seen DESC LIMIT 250",
                 (target,target)).fetchall()
@@ -299,7 +299,10 @@ def install(ns):
         else:raise HTTPException(422,"Выберите поиск по номеру или ИНН")
         prior=await asyncio.to_thread(_local_results,ns,kind,value)
         local_recheck=False
-        if kind=="reg" and prior and int(prior[0].get("documents_checked") or 0)>0:
+        if kind=="reg":
+            # A previous failed legal review can leave saved originals but
+            # purchases.documents_checked=0. Do not wait for the browser in
+            # that case: requeue the genuinely saved files for local analysis.
             try:
                 originals=allowed_documents(value)
                 complete=bool(originals and all(saved_document(value,uid) for uid in originals))
@@ -308,14 +311,14 @@ def install(ns):
                     if callable(fn):
                         ret=fn(value,force=True)
                         local_recheck=ret.get("status") in ("queued","running","completed")
-                        print(f"V301 LOCAL_RECHECK reg={value} status={ret.get('status')}",flush=True)
+                        print(f"V322 LOCAL_RECHECK reg={value} status={ret.get('status')}",flush=True)
             except Exception as exc:
-                print(f"V301 RECHECK_FALLBACK reg={value} {type(exc).__name__}",flush=True)
+                print(f"V322 RECHECK_FALLBACK reg={value} {type(exc).__name__}",flush=True)
         job,created=await asyncio.to_thread(_enqueue,ns,kind,value,1,0,"",kind=="reg")
         if local_recheck:
             job=await asyncio.to_thread(
                 _finish,ns,job["id"],"done",
-                "Все подтверждённые оригиналы уже получены. Запущена локальная правовая перепроверка.",1,0)
+                "Сохранённые оригиналы найдены; локальная юридическая проверка запущена, результат ожидается.",1,0)
         return {"id":job["id"],"status":job["status"],"kind":kind,
                 "target":value,"new_request":created,
                 "local_recheck":local_recheck,
@@ -332,9 +335,14 @@ def install(ns):
             job=dict(row)
         finally:db.close()
         existing=await asyncio.to_thread(_local_results,ns,job["kind"],job["target"])
+        audit=None
+        if job["kind"]=="reg":
+            from v257_features import manual_progress
+            checked=int(existing[0].get("documents_checked") or 0) if existing else 0
+            audit=await asyncio.to_thread(manual_progress,job["target"],checked,job["status"])
         return {"job":{k:v for k,v in job.items() if k!="lease_until"},
                 "existing":existing[:100],"total_existing":len(existing),
-                "bridge":await asyncio.to_thread(_bridge,ns)}
+                "audit":audit,"bridge":await asyncio.to_thread(_bridge,ns)}
 
     @app.get("/api/v301/bridge/status")
     async def bridge_status():
@@ -384,6 +392,16 @@ def install(ns):
         except (ValueError,TypeError,AttributeError):
             raise HTTPException(422,"Некорректный отчёт")
         job=await asyncio.to_thread(_finish,ns,job_id,status,detail,found,accepted,defer,regs,more)
+        # A search report is NOT a finished legal audit. Whenever saved
+        # originals are complete, ensure the existing offline review runs.
+        if job["kind"]=="reg" and (found>0 or accepted>0) and status in ("done","partial"):
+            try:
+                enqueue=ns.get("_v295_enqueue_review")
+                if callable(enqueue):
+                    review=enqueue(job["target"])
+                    print(f"V322 AUDIT_RECONCILE reg={job['target']} state={review.get('status')}",flush=True)
+            except Exception as exc:
+                print(f"V322 AUDIT_RECONCILE_ERROR reg={job['target']} type={type(exc).__name__}",flush=True)
         return {"received":True,"status":job["status"],"id":job["id"]}
 
     print("V308 QUEUE_READY modern_notice223=True stale_bridge_requires_reload=True",flush=True)
