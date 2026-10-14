@@ -324,7 +324,7 @@ async def offline_audit(ns,reg):
         if not body or not closing:continue
         matches=list(_legal_re.finditer(
             r"(?:окончани[ея] срока подачи заявок|прием заявок заканчивается)"
-            r"[^\\n.;]{0,100}?(\\d{2}[.]\\d{2}[.]\\d{4})",body,_legal_re.I))
+            r"[^.;]{0,100}?(\d{2}[.]\d{2}[.]\d{4})",body,_legal_re.I))
         for match in matches[:2]:
             try:
                 from datetime import datetime as _legal_datetime
