@@ -35,6 +35,11 @@ def install(ns):
                 if base.is_dir():
                     folders.update(p.name for p in base.iterdir() if p.is_dir() and REG.fullmatch(p.name))
             regs=sorted(folders)
+            # Prioritize the purchase reported with a missed SME-participation
+            # rule, but only if its REAL official originals already exist.
+            if "32616324151" in regs:
+                regs.remove("32616324151")
+                regs.insert(0,"32616324151")
             completed=partial=failed=skipped=0
             print(f"V315 REAUDIT_STARTED candidates={len(regs)}",flush=True)
             for idx,reg in enumerate(regs):
