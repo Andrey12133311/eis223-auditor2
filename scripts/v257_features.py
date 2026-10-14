@@ -37,7 +37,7 @@ async function load(){
  search_only:'Поиск окончен, документы ещё не проверены',failed:'Ошибка юридической проверки'};
  const rows=d.items.map(p=>'<tr><td><b>'+esc(p.reg_number)+'</b><br>'+
  esc(p.customer||'Заказчик уточняется')+'<br><small>'+
- esc(p.title||'Карточка загружается')+'</small><br><small>НМЦД: '+
+ esc(p.title||'Карточка загружается')+'</small><br><small>Стоимость закупки: '+
  esc(priceText(p))+'</small></td><td>'+
  esc(labels[p.audit_status]||labels[p.manual_status]||p.audit_status||p.manual_status||'В очереди')+
  '<br><small>'+esc(p.requested_at||'')+'</small></td><td>'+
