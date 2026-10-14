@@ -223,6 +223,54 @@ def _nonbreaking(text):
     return re.sub(r"(?i)(?<![а-яё])("+preps+r") +(?=\S)",
                   lambda m:m.group(1)+"\u00a0",text)
 
+def _memo_body_format(body,paragraphs):
+    """Uniform body typography without touching the crest, header or signature."""
+    style_ns="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    fo_ns="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    office_styles=body.getparent() if hasattr(body,"getparent") else None
+    # ODF automatic styles belong to content.xml's office:automatic-styles.
+    return style_ns,fo_ns
+
+def _clean_memo_fragment(value):
+    text=str(value or "").replace("\\r"," ").replace("\\n"," ").replace("\\t"," ")
+    text=re.sub(r"[\\u200b\\u200e\\u200f\\ufeff]","",text)
+    return re.sub(r"\\s+"," ",text).strip()
+
+def _format_memo_body(node,body,paragraphs):
+    """Apply a dedicated paragraph style; keep all original template metadata."""
+    style_ns="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    fo_ns="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    auto=node.find("{"+OO+"}automatic-styles")
+    if auto is None:
+        auto=ET.Element("{"+OO+"}automatic-styles")
+        node.insert(0,auto)
+    name="EIS223MemoBodyUniform"
+    for existing in list(auto):
+        if existing.tag=="{"+style_ns+"}style" and existing.get("{"+style_ns+"}name")==name:
+            auto.remove(existing)
+    style=ET.SubElement(auto,"{"+style_ns+"}style",{
+        "{"+style_ns+"}name":name,"{"+style_ns+"}family":"paragraph"})
+    ET.SubElement(style,"{"+style_ns+"}paragraph-properties",{
+        "{"+fo_ns+"}text-align":"justify",
+        "{"+fo_ns+"}margin-top":"0cm",
+        "{"+fo_ns+"}margin-bottom":"0cm",
+        "{"+fo_ns+"}text-indent":"1.25cm",
+        "{"+fo_ns+"}line-height":"115%"})
+    ET.SubElement(style,"{"+style_ns+"}text-properties",{
+        "{"+style_ns+"}font-name":"Times New Roman",
+        "{"+fo_ns+"}font-family":"Times New Roman",
+        "{"+fo_ns+"}font-size":"14pt",
+        "{"+fo_ns+"}font-weight":"normal",
+        "{"+fo_ns+"}font-style":"normal"})
+    # The original template uses paragraph 20 for the introductory body and
+    # paragraphs 22-29 for findings. Other positions contain official fields.
+    for idx in [20,*range(22,30)]:
+        if idx>=len(paragraphs):continue
+        para=paragraphs[idx]
+        value=_clean_memo_fragment(_text(para))
+        _set_paragraph(para,value)
+        para.set("{"+TX+"}style-name",name)
+
 def _render_odt(template,p,findings,organization,fields):
     try:
         with zipfile.ZipFile(io.BytesIO(template)) as z:
@@ -284,6 +332,7 @@ def _render_odt(template,p,findings,organization,fields):
        organization.rstrip(".")+".")
     if len(paras)>31 and not _text(paras[30]).strip() and not _text(paras[31]).strip():
         body.remove(paras[31])
+    _format_memo_body(node,body,paras)
     # The source document ID is another official memo's registration number.
     # It is not a valid identifier for the newly created draft.
     for para in body.iter("{"+TX+"}p"):
