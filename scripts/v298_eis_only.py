@@ -277,6 +277,41 @@ async def offline_audit(ns,reg):
                            "legal_basis":"223-ФЗ, статья 3, часть 1, пункт 2",
                            "reason":"Требуется оценить предмет закупки и исключения"})
 
+    # Cross-check original evidence against EIS dates; uncertain or missing
+    # information is a review item, never an automatic violation.
+    from datetime import date
+    def as_day(value):
+        try:return date.fromisoformat(str(value or "")[:10])
+        except ValueError:return None
+    opening=as_day(p.get("submission_start"))
+    closing=as_day(p.get("submission_end"))
+    if opening and closing and closing<opening:
+        checks.append({"code":"submission_dates_conflict","status":"check",
+                       "title":"Несоответствие дат подачи заявок",
+                       "evidence":f"Начало: {opening}; окончание: {closing}",
+                       "legal_basis":"223-ФЗ, статья 4, часть 9",
+                       "reason":"Сверить исходное извещение и изменения ЕИС"})
+    if closing and as_day(p.get("published")) and closing<as_day(p.get("published")):
+        checks.append({"code":"deadline_before_publication","status":"check",
+                       "title":"Окончание подачи заявок ранее публикации",
+                       "evidence":f"Публикация: {p.get('published')}; окончание: {closing}",
+                       "legal_basis":"223-ФЗ, статья 4, часть 9",
+                       "reason":"Проверить даты и версии извещения ЕИС"})
+    # Keep bid security and performance security strictly distinct.
+    for doc in docs:
+        if doc.get("status")!="checked":continue
+        body=" ".join(str(doc.get("text") or "").split())
+        for phrase,code,title in (
+            ("обеспечение заявки не требуется","bid_security_exemption","Обеспечение заявки не требуется"),
+            ("обеспечение исполнения договора","contract_security_only","Упомянуто обеспечение договора, не заявки"),
+        ):
+            offset=body.casefold().find(phrase)
+            if offset>=0:
+                checks.append({"code":code,"status":"check",
+                    "title":title,"document":doc.get("name") or "",
+                    "evidence":body[max(0,offset-65):offset+len(phrase)+65],
+                    "legal_basis":"223-ФЗ, статья 3.2, часть 25",
+                    "reason":"Не квалифицировать как установленное обеспечение заявки без прямого условия"})
     annotate=ns.get("annotate")
     if callable(annotate):
         await asyncio.to_thread(annotate,reg,docs,findings,checks)
