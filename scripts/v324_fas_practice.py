@@ -269,37 +269,43 @@ def _admission_cases(p,docs):
     for doc in docs:
         if not _verified(doc):continue
         full=_plain(doc.get("text"))
-        # Keep each clause/paragraph narrow, preserving section boundaries.
-        paragraphs=re.split(r"[\n\r]+",full)
-        start=0
-        for paragraph in paragraphs:
-            span=paragraph.strip()
-            start_in_full=start
-            start+=len(paragraph)+1
-            if not 35<=len(span)<=2400:continue
-            if not re.search(r"(?:настоящ\w*|данн\w*|проводим\w*|в\s+(?:конкурсе|закупке|аукционе))",span,re.I):
+        # Parsed PDFs / antiword often put a whole page or table on one very
+        # long line. Never reject the entire line because it exceeds 2400
+        # characters: inspect a bounded local window at each operative verb.
+        hits=list(_ADMISSION.finditer(full))
+        hits+=list(_ADMISSION_REVERSE.finditer(full))
+        for m in sorted(hits,key=lambda x:x.start()):
+            window=full[max(0,m.start()-250):min(len(full),m.end()+260)]
+            clause=" ".join(window.split())
+            if not _SME.search(clause):continue
+            if _PROHIBITED.search(clause[max(0,m.start()-max(0,m.start()-250)-65):
+                                         m.end()-max(0,m.start()-250)+100]):
                 continue
-            if not _SME.search(span):continue
-            m=_ADMISSION.search(span) or _ADMISSION_REVERSE.search(span)
-            if not m:continue
-            # Negated examples and the verbatim law (allowing general
-            # collective bids outside SME-only procurement) are not terms.
-            snippet=span[max(0,m.start()-100):min(len(span),m.end()+100)]
-            if _PROHIBITED.search(snippet):continue
-            if _LAW_CITATION.search(snippet) and not re.search(r"в\s+(?:конкурсе|закупке|аукционе)",snippet,re.I):
+            if not re.search(r"\b(?:в\s+конкурс\w*|в\s+закупк\w*|"
+                             r"в\s+аукцион\w*|настоящ\w*\s+закупк\w*)\b",
+                             clause,re.I):
                 continue
-            if not re.search(r"на\s+сторон[еы]\s+одного\s+участник\w*|"
-                             r"коллективн\w*\s+участник\w*",span,re.I):
+            if _LAW_CITATION.search(clause) and not re.search(
+                    r"в\s+(?:конкурсе|закупке|аукционе)",clause,re.I):
                 continue
-            canonical=re.sub(r"\W+","",span.casefold().replace("ё","е"))
+            if not re.search(
+                    r"на\s+сторон[еы]\s+одного\s+[Уу]частник\w*|"
+                    r"коллективн\w*\s+участник\w*",
+                    clause,re.I):
+                continue
+            # Only actual procurement conditions, not the definition of
+            # participants quoted from art. 3(5) 223-FZ.
+            if re.search(r"согласно\s+(?:част[ьи]\s+5\s+)?стать[еёи]\s+3",clause,re.I):
+                continue
+            canonical=re.sub(r"\W+","",clause.casefold().replace("ё","е"))
             signature=hashlib.sha256(canonical.encode()).hexdigest()[:16]
             if signature in seen:continue
             seen.add(signature)
             result.append({
-                "doc":doc,"section":span[:900],
-                "location":f"Оригинал: {doc.get('name')}; раздел об участниках; позиция ~{start_in_full+1}",
-                "seed":m.group(0)[:140], "classification":"collective_admission",
-                "scope":confirmed
+                "doc":doc,"section":clause[:900],
+                "location":f"Оригинал: {doc.get('name')}; условия участия; позиция ~{m.start()+1}",
+                "seed":m.group(0)[:140],
+                "classification":"collective_admission","scope":confirmed
             })
             if len(result)>=5:return result
     return result
