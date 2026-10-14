@@ -233,10 +233,12 @@ def from_documents(reg, documents):
         if fields:
             candidates.append({**fields, "source_url":url,
                                "document":doc.get("name", ""), "sha256":meta.get("sha256", "")})
-    if not candidates:
+    from v324_official_price import verified_nmcd
+    price_evidence=verified_nmcd(documents)
+    if not candidates and not price_evidence:
         return {}
     # Notices/documentation provide the identity; contracts can add its INN.
-    chosen = next((v for v in candidates if v.get("customer")), candidates[0]).copy()
+    chosen = next((v for v in candidates if v.get("customer")), candidates[0]).copy() if candidates else {}
     if not chosen.get("title"):
         title = next((v for v in candidates if v.get("title")), {})
         if title:
@@ -249,6 +251,13 @@ def from_documents(reg, documents):
         chosen["customer_inn"] = inns.pop()
     elif len(inns) > 1:
         chosen.pop("customer_inn", None)
+    if price_evidence.get("price_num") is not None:
+        chosen.update(price=price_evidence["price"],price_num=price_evidence["price_num"],
+                      price_source_url=price_evidence["source_url"],
+                      price_document=price_evidence["document"],
+                      price_evidence=price_evidence["evidence"])
+    elif price_evidence.get("price_conflict"):
+        chosen["price_conflict"]=True
     return chosen
 
 
@@ -290,11 +299,27 @@ def apply_metadata(ns, reg, metadata):
         title = subject(metadata.get("title"))
         if title and not subject(p.get("title")):
             changes["title"] = title
+        # Only an explicit number extracted from an actual EIS original can
+        # fill a missing price; keep the earlier valid NMCD untouched.
+        price=metadata.get("price")
+        number=metadata.get("price_num")
+        if price and isinstance(number,(int,float)) and 0<=number<1e15:
+            existing_price=str(p.get("price") or "").strip()
+            if not existing_price or existing_price in ("—","-","не установлена","нет данных"):
+                changes["price"]=price
+                if p.get("price_num") is None:changes["price_num"]=number
+            elif p.get("price_num") is None:
+                try:
+                    from v311_verified_customer import _verified_money
+                    if _verified_money(existing_price)[1]==number:
+                        changes["price_num"]=number
+                except ValueError:
+                    pass
         if changes:
             try:
                 card = json.loads(p.get("card_fields_json") or "{}")
                 summary = card.setdefault("summary", {})
-                for key in ("customer", "customer_inn", "title"):
+                for key in ("customer", "customer_inn", "title", "price", "price_num"):
                     if key in changes:
                         summary[key] = changes[key]
                 card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
@@ -356,7 +381,7 @@ def reconcile(ns):
     try:
         rows = db.execute("""SELECT reg_number FROM purchases
             WHERE customer IS NULL OR TRIM(customer)='' OR LOWER(customer) LIKE '%уточня%'
-                OR LOWER(customer) LIKE 'наименование (полное и сокращ%' OR customer_inn IS NULL OR TRIM(customer_inn)='' OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок','прием заявок','статус закупки')
+                OR LOWER(customer) LIKE 'наименование (полное и сокращ%' OR customer_inn IS NULL OR TRIM(customer_inn)='' OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок','прием заявок','статус закупки') OR price_num IS NULL
             ORDER BY last_seen DESC LIMIT 2000""").fetchall()
     finally:
         db.close()
