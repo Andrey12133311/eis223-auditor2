@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from v295_eis_originals import allowed_documents, saved_document, uid_from_url
+from v295_eis_originals import allowed_documents, saved_document, uid_from_url, root
 from v311_verified_customer import _name
 
 LOG = logging.getLogger(__name__)
@@ -351,26 +351,42 @@ def stored_metadata(ns, reg):
         db.close()
     allowed = allowed_documents(reg)
     docs = []
+    data_root=root().resolve()
     for row in rows[:100]:
         d = dict(row)
         try:
             meta = json.loads(d.get("metadata_json") or "{}")
-            uid = uid_from_url(d.get("url", ""))
-            if meta.get("source") != "official_eis_original" or uid not in allowed:
+            if not isinstance(meta,dict):continue
+            provenance=meta.get("source")
+            if provenance not in ("official_eis_original","official_eis_archive_member"):
                 continue
-            saved = saved_document(reg, uid)
-            if saved is None:
+            uid=uid_from_url(meta.get("source_url") or d.get("url",""))
+            if not uid or uid not in allowed:continue
+            receipt=saved_document(reg,uid)
+            if receipt is None:continue
+            original_path,original_meta=receipt
+            file=Path(d.get("local_path") or "").resolve()
+            if not file.is_file() or not file.is_relative_to(data_root) or file.stat().st_size>25*1024*1024:
                 continue
-            path, receipt = saved
-            if str(path) != d.get("local_path") or path.stat().st_size > 25*1024*1024:
+            if file.suffix.lower() not in (".docx",".doc",".pdf",".odt",".rtf"):
                 continue
-            with path.open("rb") as stream:
-                if hashlib.file_digest(stream,"sha256").hexdigest() != receipt["sha256"]:
+            if provenance=="official_eis_original":
+                if file!=original_path.resolve():continue
+                expected=original_meta["sha256"]
+            else:
+                # The extracted member must belong to a verified ZIP/7Z/RAR
+                # attachment, not to arbitrary text from an untrusted file.
+                if meta.get("archive_sha256")!=original_meta["sha256"]:continue
+                expected=meta.get("sha256")
+            if not expected or not re.fullmatch(r"[0-9a-f]{64}",str(expected)):
+                continue
+            with file.open("rb") as stream:
+                if hashlib.file_digest(stream,"sha256").hexdigest()!=expected:
                     continue
-            if path.suffix.lower() not in (".docx", ".doc", ".pdf", ".odt", ".rtf"):
-                continue
-            text = document_text(path,ns["extract_text"])
-            docs.append({"name":d["name"],"url":d["url"],"text":text,"meta":meta})
+            text=document_text(file,ns["extract_text"])
+            docs.append({"name":d["name"],"url":d["url"],"status":"checked",
+                         "type":d.get("doc_type") or "",
+                         "text":text,"meta":meta})
         except (OSError,ValueError,TypeError,KeyError):
             LOG.warning("Cannot read verified metadata reg=%s doc=%s",reg,d.get("id"))
     return from_documents(reg,docs)
