@@ -369,10 +369,11 @@ async def offline_audit(ns,reg):
         request_day=event_day(event.get("request_date") or event.get("requestDate"))
         answer_day=event_day(event.get("publication_date") or event.get("publicationDate"))
         if not request_day or not answer_day or not closing:continue
-        if request_day>closing:continue
+        if request_day>closing or answer_day<request_day:continue
         weekdays_before=sum((request_day+timedelta(days=n)).weekday()<5
                             for n in range(1,(closing-request_day).days+1))
         if weekdays_before<3:continue
+        # Holiday calendars and legally transferred workdays may differ from weekdays.
         elapsed_weekdays=sum((request_day+timedelta(days=n)).weekday()<5
                              for n in range(1,(answer_day-request_day).days+1))
         if elapsed_weekdays>3:
