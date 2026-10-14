@@ -166,7 +166,7 @@ def existing(ns,reg):
 
 def as_procurement(row):
     reg=str(row["reg_number"])
-    return {
+    out={
         "reg":reg,
         "title":row.get("title") or ("Закупка № "+reg),
         "customer":row.get("customer") or "",
@@ -179,6 +179,27 @@ def as_procurement(row):
         "deadline":row.get("deadline") or "",
         "url":row.get("url") or "",
     }
+    # A verified official card can establish NMCD even when its amount is
+    # not repeated in the uploaded text. Do NOT use subject cost/maximum
+    # value as NMCD or a stale unverified DB numeric field.
+    try:
+        card=json.loads(row.get("card_fields_json") or "{}")
+        ev=(card.get("price_evidence") or {}) if isinstance(card,dict) else {}
+        from v311_verified_customer import _official_source
+        from v335_price_recovery import money
+        verified=money(ev.get("price"))
+        number=money(out["price_num"])
+        if (ev.get("source")=="official_eis_card" and
+            ev.get("price_kind")=="nmcd" and verified and
+            number and verified[1]==number[1] and
+            _official_source(ev.get("source_url") or ev.get("evidence_page"),reg)):
+            out["verified_price_source"]={
+                "kind":"nmcd","source":ev.get("source_url") or ev.get("evidence_page"),
+                "price":verified[0]
+            }
+    except (ValueError,TypeError,AttributeError,KeyError):
+        pass
+    return out
 
 def source_verified(reg,path,digest,meta):
     source=meta.get("source")
