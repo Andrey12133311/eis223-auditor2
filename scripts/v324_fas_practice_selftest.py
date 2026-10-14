@@ -80,7 +80,8 @@ def run():
     p={"reg":REG,"method":METHOD}
     assert len([f for f in ns["analyze"](p,[doc(mandatory)]) if f.get("kind")=="violation"])==1
     assert not ns["analyze"](p,[doc(existence)])
-    assert len(ns["analyze"](p,[doc(admitted)]))==1
+    assert not ns["analyze"](p,[doc(admitted)]), "Contradictory judicial practice: admission-only must not auto-inflate violations"
+    assert len(ns["build_checks"](p,{}, {},[doc(admitted)]))==1
     assert len(ns["build_checks"](p,{}, {},[doc(existence)]))==1
     assert not ns["build_checks"](p,{}, {},[doc(mandatory)])
     print("V324_FAS_PRACTICE_SELFTEST_OK official_practice=4 "
