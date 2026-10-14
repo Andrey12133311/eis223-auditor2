@@ -356,6 +356,23 @@ async def offline_audit(ns,reg):
                            "evidence":", ".join(sorted(set(flags))),
                            "legal_basis":"223-ФЗ, статья 3.1-4",
                            "reason":"Сверить коды товаров, действующий нормативный акт и исключения"})
+    # Extract national-regime evidence from checked originals as well as XML.
+    # This is not a statutory violation without product-code classification.
+    for doc in docs:
+        if doc.get("status")!="checked":continue
+        body=" ".join(str(doc.get("text") or "").split())
+        for phrase in ("запрет допуска товаров иностранного происхождения",
+                       "ограничение допуска товаров иностранного происхождения",
+                       "преимущество товарам российского происхождения"):
+            pos=body.casefold().find(phrase)
+            if pos<0:continue
+            checks.append({"code":"national_regime_document_review",
+                           "status":"check",
+                           "title":"Проверить национальный режим в документации",
+                           "document":doc.get("name") or "",
+                           "evidence":body[max(0,pos-80):pos+len(phrase)+100],
+                           "legal_basis":"223-ФЗ, статья 3.1-4",
+                           "reason":"Сопоставить с XML ЕИС, кодом ОКПД2, датой и исключениями"})
     # Structured clarification/cancellation events: compare calendar dates
     # only. Holiday-sensitive statutory conclusions require an authoritative
     # production calendar and are deliberately held for legal review.
