@@ -3,9 +3,11 @@ Only applies at app import, private recovery snapshot is not modified.
 """
 from __future__ import annotations
 import asyncio
+import json
 import re
 import sqlite3
 from contextlib import contextmanager
+from v295_eis_originals import root,allowed_documents,saved_document
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -16,7 +18,40 @@ body{margin:0;font:15px system-ui;background:#f6f7f5;color:#24342a}header{backgr
 </style></head><body><header><h1>Самостоятельные проверки закупок</h1><nav><a href="/">Автоматические закупки</a><a href="/manual-purchases">Самостоятельные проверки</a><a href="/manual-documents">Проверка собственных документов</a></nav></header><main><section class="card"><h2>Проверить по номеру ЕИС</h2><form id="start"><input id="reg" aria-label="Номер закупки ЕИС" required inputmode="numeric" pattern="[0-9]{10,20}" placeholder="Номер закупки ЕИС"><button>Поставить на проверку</button></form><p id="notice" role="status"></p></section><section class="card"><h2>Введённые вручную закупки</h2><p>Список сохраняется отдельно от общей очереди, в том числе пока документ ожидает источник.</p><table><thead><tr><th>Номер / заказчик</th><th>Проверка</th><th>Документы / результат</th><th>Карточка</th></tr></thead><tbody id="rows"><tr><td>Загрузка…</td></tr></tbody></table><p id="page"></p><button id="more" type="button">Показать ещё</button></section></main><script>
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let offset=0,total=0;
 async function api(url,opt){const r=await fetch(url,{cache:'no-store',...opt});const d=await r.json();if(!r.ok)throw Error(d.detail||r.status);return d}
-async function load(){const d=await api('/api/v257/manual?offset='+offset+'&limit=80');total=d.total;const labels={queued:'В очереди',leased:'ЕИС получает документы',done:'Поиск выполнен',partial:'Загружено частично',error:'Ошибка получения',deferred:'Ожидает повтор',pending:'В очереди',running:'Идёт проверка',waiting:'Ожидает источник',saved:'Проверено',completed:'Завершено',failed:'Ошибка'};const rows=d.items.map(p=>'<tr><td><b>'+esc(p.reg_number)+'</b><br>'+esc(p.customer||'Заказчик уточняется')+'<br><small>'+esc(p.title||'Карточка загружается')+'</small></td><td>'+esc(labels[p.manual_status]||p.manual_status||'В очереди')+'<br><small>'+esc(p.requested_at||'')+'</small></td><td>'+Number(p.documents_checked||0)+' / '+Number(p.documents_found||0)+'<br>Нарушений: '+Number(p.violations||0)+' · рисков: '+Number(p.risks||0)+'</td><td><a href="/check-new/'+encodeURIComponent(p.reg_number)+'">Карточка проверки</a></td></tr>').join('');if(offset===0)$('rows').textContent='';$('rows').insertAdjacentHTML('beforeend',rows||'<tr><td>Ручных проверок пока нет</td></tr>');$('page').textContent='Показано '+Math.min(offset+d.items.length,total)+' из '+total;$('more').hidden=offset+d.items.length>=total}
+function priceText(p){
+ const raw=p.price_num;
+ if(raw!==null&&raw!==undefined&&raw!==''){
+  const amount=Number(raw);
+  if(Number.isFinite(amount)&&amount>=0)
+   return new Intl.NumberFormat('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2}).format(amount)+' ₽';
+ }
+ return p.price&&String(p.price).trim()?String(p.price).trim():'не установлена';
+}
+async function load(){
+ const d=await api('/api/v257/manual?offset='+offset+'&limit=80');total=d.total;
+ const labels={queued:'В очереди',leased:'ЕИС получает оригиналы',
+ done:'Поиск окончен, проверка не подтверждена',partial:'Загружено частично',
+ error:'Ошибка получения',deferred:'Ожидает повтор',pending:'В очереди',
+ running:'Юридическая проверка',waiting:'Ожидает оригиналы ЕИС',
+ saved:'Оригиналы сохранены',completed:'Проверено',auditing:'Юридическая проверка',
+ search_only:'Поиск окончен, документы ещё не проверены',failed:'Ошибка юридической проверки'};
+ const rows=d.items.map(p=>'<tr><td><b>'+esc(p.reg_number)+'</b><br>'+
+ esc(p.customer||'Заказчик уточняется')+'<br><small>'+
+ esc(p.title||'Карточка загружается')+'</small><br><small>НМЦД: '+
+ esc(priceText(p))+'</small></td><td>'+
+ esc(labels[p.audit_status]||labels[p.manual_status]||p.audit_status||p.manual_status||'В очереди')+
+ '<br><small>'+esc(p.requested_at||'')+'</small></td><td>'+
+ Number(p.documents_checked||0)+' / '+Number(p.documents_found||0)+
+ '<br>Нарушений: '+Number(p.violations||0)+' · рисков: '+Number(p.risks||0)+
+ (p.originals_expected>0?'<br><small>Оригиналы ЕИС: '+
+ Number(p.originals_received||0)+' / '+Number(p.originals_expected)+'</small>':'')+
+ '</td><td><a href="/check-new/'+encodeURIComponent(p.reg_number)+
+ '">Карточка проверки</a></td></tr>').join('');
+ if(offset===0)$('rows').textContent='';
+ $('rows').insertAdjacentHTML('beforeend',rows||'<tr><td>Ручных проверок пока нет</td></tr>');
+ $('page').textContent='Показано '+Math.min(offset+d.items.length,total)+' из '+total;
+ $('more').hidden=offset+d.items.length>=total
+}
 $('start').onsubmit=async e=>{e.preventDefault();const reg=$('reg').value.trim();if(!/^\d{10,20}$/.test(reg))return;$('notice').textContent='Проверка запускается…';try{await api('/api/v301/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'reg',value:reg})});$('notice').innerHTML='Закупка '+esc(reg)+' добавлена. <a href="/check-new/'+reg+'">Открыть проверку</a>';offset=0;await load()}catch(err){$('notice').textContent='Ошибка: '+err.message}};
 window.addEventListener('eis223:manual-input',()=>{offset=0;load().catch(e=>$('page').textContent=e.message)});$('more').onclick=()=>{offset+=80;load().catch(e=>$('page').textContent=e.message)};load().catch(e=>$('page').textContent='Не удалось загрузить список: '+e.message);setInterval(()=>{if(!document.hidden){offset=0;load().catch(()=>{})}},30000);
 </script></body></html>'''
@@ -29,7 +64,7 @@ function setupFilters(){const f=id('filters'),inn=id('inn');if(!f||!inn)return;
 if(!id('v257-inn-search')){const b=document.createElement('button');b.type='button';b.id='v257-inn-search';b.textContent='Искать закупки по ИНН';inn.insertAdjacentElement('afterend',b);b.onclick=async()=>{const v=inn.value.trim();const notice=id('customer-progress-v233')||id('runStatus');if(!/^(\d{10}|\d{12})$/.test(v)){if(notice)notice.textContent='Введите ИНН из 10 или 12 цифр';inn.focus();return}b.disabled=true;try{const r=await json('/api/v233/customer/'+v,{method:'POST'});if(notice)notice.textContent='Поиск всех закупок заказчика запущен: найдено '+(r.found||0)+'. Новые данные будут появляться по мере проверки.';f.requestSubmit()}catch(e){if(notice)notice.textContent='Ошибка поиска по ИНН: '+e.message}finally{b.disabled=false}}}
 if(!id('v257-violation-type')){const s=document.createElement('select');s.id='v257-violation-type';s.setAttribute('aria-label','Вид нарушения');s.innerHTML='<option value="">Все виды нарушений</option>';const kind=id('kind');if(kind)kind.insertAdjacentElement('afterend',s);else f.appendChild(s);s.onchange=()=>f.requestSubmit();json('/api/v257/violation-types').then(d=>{for(const x of d.items){const o=document.createElement('option');o.value=x.code;o.textContent=x.title+' ('+x.purchases+')';s.appendChild(o)}}).catch(()=>{});id('reset')?.addEventListener('click',()=>{s.value=''},true)}}
 function removeRedundant(){const nav=id('v255-document-nav');if(nav){const home=nav.querySelector('a[href="/"]');if(home)home.remove()}}
-let last='';async function card(){if(location.pathname!=='/')return;const detail=id('detail'),reg=regFrom();if(!detail||!reg||!detail.querySelector('.detailmeta')||detail.querySelector('#v257-extra')||last===reg)return;last=reg;try{const x=await json('/api/v257/purchase-extra/'+reg);if(regFrom()!==reg)return;const box=document.createElement('div');box.id='v257-extra';box.style.cssText='margin:10px 0;padding:14px;border:1px solid #d3ded4;border-radius:8px;background:#f8faf7;line-height:1.8';const fields=[['Способ закупки',x.method],['Дата размещения',x.published_at],['Заказчик: ИНН',x.customer_inn],['ОГРН',x.customer_ogrn],['Статус карточки ЕИС',x.card_source_status],['Источник данных',x.source],['Последнее обновление',x.last_seen],['Срок подачи заявок',x.submission_start&&x.submission_end?x.submission_start+' — '+x.submission_end:x.submission_end],['Документы',x.documents_checked+' проверено из '+x.documents_found],['Извещения / протоколы / разъяснения',x.protocols+' протоколов · '+x.clarifications+' разъяснений · '+x.cancellations+' отмен']];const h=document.createElement('strong');h.textContent='Подробные сведения о закупке';box.appendChild(h);for(const [k,v]of fields){if(v===null||v===undefined||v==='')continue;const p=document.createElement('div'),b=document.createElement('b');b.textContent=k+': ';p.append(b,document.createTextNode(String(v)));box.appendChild(p)}detail.querySelector('.detailmeta')?.insertAdjacentElement('afterend',box)}catch(e){console.warn('Дополнительные сведения',e)}finally{last=''}}
+let last='';async function card(){if(location.pathname!=='/')return;const detail=id('detail'),reg=regFrom();if(!detail||!reg||!detail.querySelector('.detailmeta')||detail.querySelector('#v257-extra')||last===reg)return;last=reg;try{const x=await json('/api/v257/purchase-extra/'+reg);if(regFrom()!==reg)return;const box=document.createElement('div');box.id='v257-extra';box.style.cssText='margin:10px 0;padding:14px;border:1px solid #d3ded4;border-radius:8px;background:#f8faf7;line-height:1.8';const fields=[['Способ закупки',x.method],['НМЦД',x.price||x.price_num],['Дата размещения',x.published_at],['Заказчик: ИНН',x.customer_inn],['ОГРН',x.customer_ogrn],['Статус карточки ЕИС',x.card_source_status],['Источник данных',x.source],['Последнее обновление',x.last_seen],['Срок подачи заявок',x.submission_start&&x.submission_end?x.submission_start+' — '+x.submission_end:x.submission_end],['Документы',x.documents_checked+' проверено из '+x.documents_found],['Извещения / протоколы / разъяснения',x.protocols+' протоколов · '+x.clarifications+' разъяснений · '+x.cancellations+' отмен']];const h=document.createElement('strong');h.textContent='Подробные сведения о закупке';box.appendChild(h);for(const [k,v]of fields){if(v===null||v===undefined||v==='')continue;const p=document.createElement('div'),b=document.createElement('b');b.textContent=k+': ';p.append(b,document.createTextNode(String(v)));box.appendChild(p)}detail.querySelector('.detailmeta')?.insertAdjacentElement('afterend',box)}catch(e){console.warn('Дополнительные сведения',e)}finally{last=''}}
 function run(){nav();setupFilters();removeRedundant();card()}
 let queued=false;new MutationObserver(()=>{if(!queued){queued=true;requestAnimationFrame(()=>{queued=false;run()})}}).observe(document.documentElement,{childList:true,subtree:true});if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run);else run();})();</script>'''
 
@@ -147,6 +182,50 @@ def install(ns:dict)->None:
             result=c.execute('SELECT COUNT(*) purchases,COALESCE(SUM(violations),0) violations,COALESCE(SUM(risks),0) risks,COALESCE(SUM(documents_found),0) documents_found,COALESCE(SUM(documents_checked),0) documents_checked'+sql,args).fetchone()
             records=c.execute('SELECT p.*'+sql+' ORDER BY p.last_seen DESC LIMIT ? OFFSET ?',args+[limit,offset]).fetchall()
         return {'stats':dict(result),'purchases':[dict(r) for r in records],'offset':offset,'limit':limit}
+    def manual_progress(reg,checked,search_status):
+        """Check real saved originals and the legal audit, not search-job state."""
+        review={}
+        try:
+            p=root()/'eis223_official_review_jobs'/(reg+'.json')
+            loaded=json.loads(p.read_text(encoding='utf-8'))
+            if isinstance(loaded,dict) and loaded.get('reg_number')==reg:
+                review=loaded
+        except (OSError,ValueError,TypeError,AttributeError):
+            pass
+        status=str(review.get('status') or 'not_queued')
+        expected=received=0
+        try:
+            files=allowed_documents(reg)
+            expected=len(files)
+            received=sum(saved_document(reg,uid) is not None for uid in files)
+            manifest=root()/'eis223_public_browser_intake'/reg/'manifest.json'
+            try:
+                meta=json.loads(manifest.read_text(encoding='utf-8'))
+                if (isinstance(meta,dict) and meta.get('reg_number')==reg and
+                        meta.get('source')=='public_eis_223_browser'):
+                    declared=int(meta.get('declared_attachment_count') or 0)
+                    if 0<declared<=100:expected=max(expected,declared)
+            except (OSError,ValueError,TypeError,AttributeError):
+                pass
+        except (OSError,ValueError,TypeError,AttributeError):
+            pass
+        def integer(value):
+            try:return max(0,int(value or 0))
+            except (ValueError,TypeError,OverflowError):return 0
+        complete=(status=='completed' and expected>0 and received==expected
+                  and integer(review.get('originals_received'))>=expected
+                  and integer(review.get('checked_documents'))>=expected
+                  and integer(checked)>0)
+        if complete:label='completed'
+        elif status in ('queued','running'):label='auditing'
+        elif status=='failed':label='failed'
+        elif expected>0 and received<expected:label='waiting'
+        elif search_status in ('queued','leased','deferred','partial'):label=search_status
+        else:label='search_only'
+        return {'audit_status':label,'audit_complete':complete,
+                'review_state':status,'originals_expected':expected,
+                'originals_received':received}
+
     @app.get('/api/v257/manual',include_in_schema=False)
     def manual_list(offset:int=0,limit:int=80):
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
@@ -155,12 +234,12 @@ def install(ns:dict)->None:
             has_jobs=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v301_search_jobs'").fetchone()
             job_join=' LEFT JOIN v301_search_jobs sj ON sj.id=r.job_id ' if has_jobs else ''
             status="COALESCE(sj.status,j.status,'В очереди')" if has_jobs else "COALESCE(j.status,'В очереди')"
-            records=c.execute("""SELECT r.reg AS reg_number,r.requested_at,p.customer,p.title,p.documents_found,
+            records=c.execute("""SELECT r.reg AS reg_number,r.requested_at,p.customer,p.title,p.price,p.price_num,p.documents_found,
              p.documents_checked,p.violations,p.risks,"""+status+""" manual_status
              FROM ("""+MANUAL_SOURCE_SQL+""") r LEFT JOIN purchases p ON p.reg_number=r.reg
              LEFT JOIN requests_v233 j ON j.reg=r.reg AND j.lane='manual'
              """+job_join+" ORDER BY r.requested_at DESC,r.reg DESC LIMIT ? OFFSET ?",(limit,offset)).fetchall()
-        return {'total':total,'items':[dict(r) for r in records]}
+        return {'total':total,'items':[{**dict(r),**manual_progress(r['reg_number'],r['documents_checked'],r['manual_status'])} for r in records]}
     @app.post('/api/v257/manual/{reg}',include_in_schema=False)
     def register_manual(reg:str):
         if not re.fullmatch(r'3[0-9]{10}',reg):raise HTTPException(400,'Некорректный номер закупки')
@@ -173,7 +252,7 @@ def install(ns:dict)->None:
     def extra(reg:str):
         if not re.fullmatch(r'\d{10,20}',reg):raise HTTPException(400,'Некорректный номер закупки')
         with db() as c:
-            row=c.execute("""SELECT reg_number,method,published_at,customer_inn,card_source_status,source,
+            row=c.execute("""SELECT reg_number,method,price,price_num,published_at,customer_inn,card_source_status,source,
              last_seen,submission_start,submission_end,documents_found,documents_checked,
              clarifications,protocols,cancellations FROM purchases WHERE reg_number=?""",(reg,)).fetchone()
         if not row:raise HTTPException(404,'Закупка ещё загружается')
