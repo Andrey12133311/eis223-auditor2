@@ -61,7 +61,7 @@ def _same_finding(a,b,field):
     if not ta or ta!=tb:return False
     # Distinct legal bases, documents, source URLs and real locations cannot
     # be hidden merely because the violation title is shared.
-    for attr in ("status","kind","law","legal_basis","document","source_url","location"):
+    for attr in ("status","kind","law","legal_basis","document","source_url"):
         x=str(a.get(attr) or "").strip().casefold()
         y=str(b.get(attr) or "").strip().casefold()
         if x and y and x!=y:return False
@@ -269,7 +269,7 @@ def install(ns):
         @wraps(checks)
         def checks_unique(*args,**kwargs):
             result=checks(*args,**kwargs)
-            return collapse(result,field="item",violation_only=True) if isinstance(result,list) else result
+            return collapse(result,field="item",violation_only=False) if isinstance(result,list) else result
         checks_unique.__v333__=True
         ns["build_checks"]=checks_unique
 
