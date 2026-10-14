@@ -52,18 +52,20 @@ def install(ns):
                     if state.get("status")=="waiting_for_originals":
                         skipped+=1
                         continue
-                    task=ns.get("_v295_review_task")
                     # Review worker serializes itself with the existing app lock.
                     # Poll persisted review state rather than launching an unbounded
                     # number of workers.
                     statefile=root()/"eis223_official_review_jobs"/(reg+".json")
+                    seen_active=False
                     for _ in range(300):
                         await asyncio.sleep(1)
                         try:
                             status=json.loads(statefile.read_text(encoding="utf-8")).get("status")
                         except (OSError,ValueError):
                             status=""
-                        if status in ("completed","partial","failed"):
+                        if status in ("queued","running"):
+                            seen_active=True
+                        if status in ("completed","partial","failed") and seen_active:
                             break
                     else:
                         status="timeout"
