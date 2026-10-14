@@ -51,6 +51,7 @@ def price_changes(p,evidence=None):
 def sync_price_checks(db,reg,price,evidence):
     """Refresh only the two factual extraction checks, never legal conclusions."""
     if not evidence or money(evidence.get("price"))!=money(price):return
+    if evidence.get("price_kind") not in (None,"","nmcd"):return
     columns={r[1] for r in db.execute('PRAGMA table_info(checks)')}
     if not {'reg_number','item','status','evidence'}.issubset(columns):return
     maximum=evidence.get('price_kind')=='maximum_contract_value'
@@ -177,7 +178,8 @@ window.eis223PriceText=function(p){
  let kind=p?.price_kind;
  if(!kind){try{kind=JSON.parse(p?.card_fields_json||'{}').summary?.price_kind}catch(e){}}
  return new Intl.NumberFormat('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2}).format(value)+' ₽'+
-  (kind==='maximum_contract_value'?' (максимальная цена договора)':'');
+  (kind==='maximum_contract_value'?' (максимальная цена договора)':
+   kind==='subject_cost'?' (стоимость предмета закупки)':'');
 };
 </script>'''
 
@@ -199,7 +201,8 @@ def card_price_html(ns,reg):
     p=dict(row)
     try:kind=json.loads(p.get('card_fields_json') or '{}').get('summary',{}).get('price_kind')
     except (ValueError,TypeError,AttributeError):kind=None
-    label='Максимальная цена договора' if kind=='maximum_contract_value' else 'НМЦД'
+    label=({'maximum_contract_value':'Максимальная цена договора',
+            'subject_cost':'Стоимость предмета закупки'}).get(kind,'НМЦД')
     value=format_money(p.get('price_num') if money(p.get('price_num')) else p.get('price'))
     return '<p id="v335-card-price" class="detailmeta"><b>'+label+':</b> '+html.escape(value)+'</p>'
 
