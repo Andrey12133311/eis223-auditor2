@@ -41,6 +41,20 @@ PRACTICE = (
         "principle": "Применение закрытого перечня документов по ч. 19.1–19.3 ст. 3.4",
         "scope": "Сопоставлять с обстоятельствами каждого дела"
     },
+    {
+        "date": "2026-07-02", "authority": "Московское УФАС",
+        "number": "29558/26",
+        "url": "https://base.garant.ru/483665951/",
+        "principle": "Контроль коллективного участия и дополнительных документов по ст. 3.4",
+        "scope": "Административная линия практики"
+    },
+    {
+        "date": "2026-05-28", "authority": "Арбитражный суд Московского округа",
+        "number": "Ф05-6397/26 (А40-45512/2025)",
+        "url": "https://base.garant.ru/69541352/",
+        "principle": "Специальная ст. 3.4 не исключает коллективное участие МСП при выполнении условий закона",
+        "scope": "Судебная позиция, противоположная ряду решений УФАС; учитывать факты дела"
+    },
 )
 
 _SME = re.compile(
@@ -290,29 +304,30 @@ def _admission_cases(p,docs):
             if len(result)>=5:return result
     return result
 
-def _admission_finding(record):
+def _admission_check(record):
     doc=record["doc"]
     return {
-        "code":"SME-COLLECTIVE-ADMISSION-FAS",
-        "kind":"violation",
-        "title":"Допуск коллективного участника в закупку, проводимую только среди субъектов МСП",
+        "code":"SME-COLLECTIVE-ADMISSION-PRACTICE-CONFLICT",
+        "scope":"Документация МСП / коллективный участник",
+        "item":"Проверить допуск коллективного участника в закупку только для МСП",
+        "status":"check",
         "law":"223-ФЗ, ст. 3.4; ст. 3, ч. 5; ст. 3, ч. 1 п. 2",
         "law_url":"https://www.consultant.ru/document/cons_doc_LAW_116964/",
         "evidence":record["section"],
         "note":(
-           "Выявлено прямое условие документации о возможности участия "
-           "нескольких юридических лиц на стороне одного участника, при "
-           "подтверждённом ограничении конкурентной закупки субъектами МСП. "
-           "Такой допуск противоречит позиции ФАС России (письмо 22.06.2023 "
-           "№ 28/48914/23) и решениям территориальных УФАС, в том числе "
-           "Московского УФАС от 23.01.2025 № 077/07/00-233/2025. "
-           "Нужна окончательная оценка действующей редакции документации "
-           "и применимого к ней правового режима; ранее встречались иные "
-           "подходы в практике."),
-        "document":doc.get("name"),
+           "В проверенном оригинале найдено условие о коллективном "
+           "участии нескольких юридических лиц в закупке только среди МСП. "
+           "Письмо ФАС России 22.06.2023 № 28/48914/23 и ряд решений "
+           "территориальных УФАС считают такой допуск неправомерным. "
+           "Вместе с тем Арбитражный суд Московского округа в постановлении "
+           "28.05.2026 № Ф05-6397/26 по делу А40-45512/2025 допустил "
+           "коллективное участие при соответствующих обстоятельствах. "
+           "Требуется оценка положения о закупке, редакции документации "
+           "и правового статуса каждого члена группы. "
+           "Это сигнал проверки, НЕ автоматически установленное нарушение."),
+        "document":doc.get("name"),"source":doc.get("name"),
         "source_url":(doc.get("meta") or {}).get("source_url"),
-        "location":record["location"],
-        "match_text":record["seed"]
+        "location":record["location"],"field_path":"collective-sme-admission"
     }
 
 def _finding(record):
@@ -376,10 +391,9 @@ def install(ns):
                   f"collective_admission={len(admissions)} "
                   f"nmcd_verified={p.get('price_num') is not None}",
                   flush=True)
-        if admissions:
-            # A specific operative SME clause, supported by a checked
-            # original, is a distinct rule from the extra-document issue.
-            output.append(_admission_finding(admissions[0]))
+        # FAS decisions and a 2026 circuit-court judgment disagree about
+        # collective SME admission; never inflate violation counts based on
+        # admission alone. Add an evidence-backed "check" below instead.
         if definitive:
             # Avoid multiple historic archive revisions inflating counts:
             # same legal issue is represented once per procurement.
@@ -398,8 +412,11 @@ def install(ns):
             or _admission_cases(p,docs)) else []
         if candidates:
             output.append(_check(candidates[0]))
+        admissions=_admission_cases(p,docs)
+        if admissions:
+            output.append(_admission_check(admissions[0]))
         return output
 
     ns["analyze"]=analyze
     ns["build_checks"]=build_checks
-    print("V325 FAS_PRACTICE_READY sources=4 verified_only=True SME_scope_required=True collective_admission_rule=True",flush=True)
+    print("V325 FAS_PRACTICE_READY sources=6 verified_only=True SME_scope_required=True collective_admission_review=True",flush=True)
