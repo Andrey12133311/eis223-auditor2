@@ -109,11 +109,20 @@ def run():
     p={"reg":REG,"method":METHOD}
     assert len([f for f in ns["analyze"](p,[doc(mandatory)]) if f.get("kind")=="violation"])==1
     assert not ns["analyze"](p,[doc(existence)])
-    assert not ns["analyze"](p,[doc(admitted)]), "Contradictory judicial practice: admission-only must not auto-inflate violations"
-    assert len(ns["build_checks"](p,{}, {},[doc(admitted)]))==1
+    fa=ns["analyze"](p,[doc(admitted)])
+    assert len(fa)==1 and fa[0]["kind"]=="violation",fa
+    assert "ФАС" in fa[0]["title"] and "практика неоднородна" in fa[0]["note"].lower()
+    assert fa[0]["document"]=="Раздел 1 Документация.pdf"
+    assert fa[0]["source_url"]==ORIGINAL_URL
+    assert len(ns["analyze"](p,[doc(admitted)]*4))==1
+    assert ns["analyze"](p,[doc(excluded)])==[]
+    assert ns["analyze"](p,[doc(admitted,source="unverified_mirror")])==[]
+    assert ns["analyze"]({"reg":"32616324151","method":"Открытый конкурс"},[doc(
+        admitted.replace("только субъекты малого и среднего предпринимательства","любые юридические лица"))])==[]
+    assert ns["build_checks"](p,{}, {},[doc(admitted)])==[]
     assert len(ns["build_checks"](p,{}, {},[doc(existence)]))==1
     assert not ns["build_checks"](p,{}, {},[doc(mandatory)])
-    print("V324_FAS_PRACTICE_SELFTEST_OK official_practice=4 "
+    print("V328_FAS_PRACTICE_SELFTEST_OK official_FAS_case=True "
           "SME_explicit=True agreement_review=True submit_violation=True "
           "unverified_rejected=True no_duplicate_counts=True NMCD_394633_33=True "
           "conflict_rejected=True collective_admission=True",flush=True)
