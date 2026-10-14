@@ -49,7 +49,9 @@ function numberFrom(elem){
   elem.getAttribute('href')||'',
   elem.closest('[data-reg-number]')?.getAttribute('data-reg-number')||'',
   elem.closest('tr')?.querySelector('td:first-child')?.textContent||'',
-  elem.closest('tr')?.textContent||''
+  elem.closest('tr')?.textContent||'',
+  elem.closest('[data-reg]')?.getAttribute('data-reg')||'',
+  elem.closest('.purchase,.purchase-card,.card,article,li')?.textContent||''
  ];
  for(const val of candidates){
   const m=String(val).match(/(?:^|[^0-9])(3[0-9]{10})(?=$|[^0-9])/);
@@ -67,7 +69,10 @@ window.addEventListener('click',function(event){
    text==='карточка проверки'||text==='открыть проверку';
  if(!isCard)return;
  const reg=numberFrom(element);
- if(!reg)return;
+ if(!reg){
+  console.warn('V303: не удалось определить номер закупки для карточки',element);
+  return;
+ }
  event.preventDefault();event.stopPropagation();event.stopImmediatePropagation();
  location.assign('/check-new/'+encodeURIComponent(reg));
 },true);
