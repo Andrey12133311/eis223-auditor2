@@ -10,11 +10,12 @@ from v311_verified_customer import _verified_money
 from v295_eis_originals import uid_from_url
 
 LABEL=re.compile(
-    r"(?:начальн\w*\s*\(максимальн\w*\)\s*цен\w*\s*договора|"
-    r"начальн\w*\s+максимальн\w*\s+цен\w*\s*договора|"
-    r"начальн\w*\s+цен\w*\s*договора|"
+    r"(?:начальн\w*\s*\(максимальн\w*\)\s*цен\w*\s*(?:договора|контракта)|"
+    r"начальн\w*\s+максимальн\w*\s+цен\w*\s*(?:договора|контракта)|"
+    r"начальн\w*\s+цен\w*\s*(?:договора|контракта)|"
     r"начальн\w*\s*\(максимальн\w*\)\s*цен\w*|"
-    r"нмцд)(?:\s*\(нмцд\))?",
+    r"максимальн\w*\s+значени\w*\s+цен\w*\s*договора|"
+    r"\bнмц(?:д|к)?\b)(?:\s*\(нмцд\))?",
     re.I,
 )
 UNSUITABLE=re.compile(
@@ -42,8 +43,11 @@ NOTE_ONLY=re.compile(
 NOT_ACTUAL=re.compile(
     r"(?:не\s+превыша\w*|менее\s+чем|более\s+чем|"
     r"в\s+случае|может\s+составля\w*|"
-    r"не\s+подлеж\w*\s+определени\w*)",re.I,
+    r"не\s+подлеж\w*\s+определени\w*|не\s+долж\w*\s+превыша\w*)",re.I,
 )
+FIELD_SUFFIX=re.compile(
+    r"^\s*(?:\((?:цена\s+лота|НМЦД|НМЦК|НМЦ|с\s+НДС|включая\s+НДС)\)\s*|"
+    r"[,;:]\s*(?:руб\.?|рублей|Российск\w*\s+рубл\w*)\s*)*",re.I)
 
 def _verified(doc):
     if not isinstance(doc,dict) or doc.get("status")!="checked":return False
@@ -55,10 +59,11 @@ def _verified(doc):
 
 def _match_amount(part):
     # A legitimate value follows a label/column delimiter immediately.
-    text=str(part or "")[:300]
+    text=str(part or "")[:500]
+    if re.match(r"^\s*[:;|=,]?\s*-\d",text):return None
     prefix=re.match(
         r"^\s*(?:(?:[:;|=,\-–—()])\s*|руб(?:\.|лей|ля|ль)\s*|"
-        r"Российск\w*\s+рубл\w*\s*)*",
+        r"Российск\w*\s+рубл\w*\s*|(?:составляет|составит|установлена\s+в\s+размере)\s*)*",
         text,re.I)
     start=prefix.end() if prefix else 0
     segment=text[start:].lstrip()
@@ -69,6 +74,12 @@ def _match_amount(part):
     except InvalidOperation:return None
     if not number.is_finite() or number<0 or number>Decimal("1000000000000000"):
         return None
+    tail=segment[found.end():]
+    if re.match(r"^\s*(?:%|процент|дн(?:я|ей)|рабоч|календарн|стать|пункт)",tail,re.I):
+        return None
+    scale=re.match(r"^\s*(тыс\.?|млн\.?|миллион\w*)\s*(?:₽|руб)",tail,re.I)
+    if scale:number*=Decimal(1000 if scale[1].lower().startswith('тыс') else 1000000)
+    if number>Decimal('1000000000000000'):return None
     # Written kopeks within the same labeled monetary cell, e.g.
     # "394 633 (Триста...) рубля 33 копейки".
     if "." not in digits:
@@ -84,7 +95,14 @@ def _match_amount(part):
     return f"{number:.2f}",float(number)
 
 def prices_in_text(text):
-    source=str(text or "")[:600000].replace("\xa0"," ")
+    source=str(text or "")[:600000].replace("\xa0"," ").replace("\u202f"," ").replace("\u00ad","")
+    # Reconstruct wrapped DOC/DOCX monetary fields while preserving columns.
+    from v314_eis_metadata import table_pairs
+    extra=[]
+    for label,value,_ in table_pairs(source):
+        if len(label)<300 and LABEL.search(label) and value:
+            extra.append(label+" | "+value)
+    source+="\n"+"\n".join(extra)
     candidates=[]
     lines=[" ".join(line.split()) for line in source.splitlines()]
     for index,line in enumerate(lines):
@@ -92,7 +110,9 @@ def prices_in_text(text):
         for hit in LABEL.finditer(line):
             before=line[max(0,hit.start()-105):hit.start()]
             if UNSUITABLE.search(before) or NOTE_ONLY.search(before):continue
-            after=line[hit.end():hit.end()+280]
+            after=line[hit.end():hit.end()+480]
+            suffix=FIELD_SUFFIX.match(after)
+            if suffix:after=after[suffix.end():]
             # An EIS notice may put the NMCD label and the sum in adjacent
             # DOCX table cells; accept a directly following monetary cell only.
             if not after.strip(" \t:;|=,-–—()") and index+1<len(lines):
@@ -101,19 +121,20 @@ def prices_in_text(text):
                     re.match(r"^\d[\d \u00a0,.]*",next_line) and
                     (re.search(r"(?:₽|руб(?:ль|ля|лей|\.)|коп(?:ейки|\.))",next_line,re.I)
                      or re.fullmatch(r"\d[\d \u00a0,.]*",next_line))):
-                    after=": "+next_line[:270]
+                    after=": "+next_line[:470]
             if NOT_ACTUAL.search(after[:95]):continue
             # Prices in procurement documents are structured as a labeled
             # cell or clear "НМЦД: <amount>" field. A mere prose mention of
             # initial pricing followed by a number of days/law sections isn't.
-            field=re.match(r"^\s*(?:[,;:|=\-–—()]|руб\.?|"
+            field=re.match(r"^\s*(?:[,;:|=\-–—()]|составляет|составит|руб\.?|"
                            r"Российск\w*\s+рубл\w*)",after,re.I)
             if not field and not re.match(r"^\s*\d",after):
                 continue
             result=_match_amount(after)
             if result is not None:
                 price,number=result
-                candidates.append((price,number,line[max(0,hit.start()-80):hit.end()+240][:350]))
+                evidence=line[max(0,hit.start()-80):hit.end()]+after[:320]
+                candidates.append((price,number,evidence[:500]))
     return candidates
 
 def verified_nmcd(docs):
@@ -136,6 +157,8 @@ def verified_nmcd(docs):
         if len(unique)!=1:continue
         value=values[0]
         records.append({"price":value[0],"price_num":value[1],
+                        "price_kind":"maximum_contract_value" if re.search(
+                            r"максимальн\w*\s+значени\w*\s+цен",value[2],re.I) else "nmcd",
                         "evidence":value[2],"source_url":(d.get("meta") or {}).get("source_url"),
                         "document":d.get("name")})
     if not records:return {}

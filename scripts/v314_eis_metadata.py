@@ -255,6 +255,7 @@ def from_documents(reg, documents):
         chosen.update(price=price_evidence["price"],price_num=price_evidence["price_num"],
                       price_source_url=price_evidence["source_url"],
                       price_document=price_evidence["document"],
+                      price_kind=price_evidence.get("price_kind","nmcd"),
                       price_evidence=price_evidence["evidence"])
     elif price_evidence.get("price_conflict"):
         chosen["price_conflict"]=True
@@ -301,20 +302,9 @@ def apply_metadata(ns, reg, metadata):
             changes["title"] = title
         # Only an explicit number extracted from an actual EIS original can
         # fill a missing price; keep the earlier valid NMCD untouched.
-        price=metadata.get("price")
-        number=metadata.get("price_num")
-        if price and isinstance(number,(int,float)) and 0<=number<1e15:
-            existing_price=str(p.get("price") or "").strip()
-            if not existing_price or existing_price in ("—","-","не установлена","нет данных"):
-                changes["price"]=price
-                if p.get("price_num") is None:changes["price_num"]=number
-            elif p.get("price_num") is None:
-                try:
-                    from v311_verified_customer import _verified_money
-                    if _verified_money(existing_price)[1]==number:
-                        changes["price_num"]=number
-                except ValueError:
-                    pass
+        from v335_price_recovery import price_changes,money
+        if money(metadata.get("price")):
+            changes.update(price_changes(p,metadata))
         if changes:
             try:
                 card = json.loads(p.get("card_fields_json") or "{}")
@@ -322,6 +312,8 @@ def apply_metadata(ns, reg, metadata):
                 for key in ("customer", "customer_inn", "title", "price", "price_num"):
                     if key in changes:
                         summary[key] = changes[key]
+                if "price" in changes and money(changes["price"])==money(metadata.get("price")):
+                    summary["price_kind"]=metadata.get("price_kind") or "nmcd"
                 card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
                 changes["card_fields_json"] = json.dumps(card,ensure_ascii=False)
             except (ValueError,TypeError,AttributeError):
@@ -368,7 +360,7 @@ def stored_metadata(ns, reg):
             file=Path(d.get("local_path") or "").resolve()
             if not file.is_file() or not file.is_relative_to(data_root) or file.stat().st_size>25*1024*1024:
                 continue
-            if file.suffix.lower() not in (".docx",".doc",".pdf",".odt",".rtf"):
+            if file.suffix.lower() not in (".docx",".doc",".pdf",".odt",".rtf",".xlsx",".xls",".ods",".xml"):
                 continue
             if provenance=="official_eis_original":
                 if file!=original_path.resolve():continue

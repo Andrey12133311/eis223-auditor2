@@ -211,18 +211,20 @@ def _save_official_card(value):
     },ensure_ascii=False).encode("utf-8"))
 
 def _known(ns,regs):
+    from v335_price_recovery import money
     db=ns["conn"]()
     try:
         existing={}
         if regs:
             pmarks=",".join("?" for _ in regs)
             rows=db.execute(
-                "SELECT reg_number,documents_checked,customer,title FROM purchases WHERE reg_number IN ("+pmarks+")",
+                "SELECT reg_number,documents_checked,customer,title,price,price_num FROM purchases WHERE reg_number IN ("+pmarks+")",
                 regs).fetchall()
             existing={r[0]:{"checked":int(r[1] or 0),
                             "needs_metadata":not _real_customer(r[2])
                                 or not str(r[3] or "").strip()
-                                or str(r[3] or "").lower().strip()=="подача заявок"}
+                                or str(r[3] or "").lower().strip()=="подача заявок"
+                                or not (money(r[5]) or money(r[4]))}
                       for r in rows}
         result={}
         for reg in regs:

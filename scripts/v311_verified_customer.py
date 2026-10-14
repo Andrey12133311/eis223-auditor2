@@ -219,13 +219,14 @@ def _apply(ns,reg,name,inn,source):
 
 def _verified_money(value):
     """Accept an unambiguous amount, never a guess from procurement title."""
-    raw=" ".join(str(value or "").replace("\u00a0"," ").split())
+    if isinstance(value,bool):raise ValueError("НМЦД не является денежной суммой")
+    raw=" ".join(str(value if value is not None else "").split())
     if not raw or len(raw)>110:
         raise ValueError("НМЦД отсутствует или слишком длинная")
     if re.search(r"(?:не установ|формула|диапазон|за единиц|не определ)",raw,re.I):
         raise ValueError("Отсутствует конкретная НМЦД")
     pattern=r"([0-9][0-9 ]{0,18}(?:[.,][0-9]{1,2})?)"
-    match=re.fullmatch(r"\s*"+pattern+r"\s*(?:₽|руб\.?|рублей)?\s*",raw,re.I)
+    match=re.fullmatch(r"\s*"+pattern+r"\s*(?:₽|руб\.?|рублей|рубля|рубль|RUB|Российский рубль)?\s*",raw,re.I)
     if not match:
         raise ValueError("НМЦД не является одной конкретной суммой")
     normalized=match.group(1).replace(" ","").replace(",",".")
@@ -261,11 +262,9 @@ def _save_verified_price(ns,reg,price,amount,source):
         """,(reg,price,amount,source,stamp))
         # No procurement row is created merely from a price. If a verified
         # purchase already exists, fill only missing price fields.
-        updated=db.execute("""
-          UPDATE purchases SET price=?,price_num=?
-          WHERE reg_number=? AND (price IS NULL OR TRIM(price)='')
-                            AND price_num IS NULL
-        """,(price,amount,reg)).rowcount
+        from v335_price_recovery import update_price
+        updated=update_price(db,reg,{"price":price,"price_num":amount,
+            "source":"official_eis_card","source_url":source})
         db.commit()
         print(f"V322 VERIFIED_NMCD reg={reg} stored=True row_updated={bool(updated)}",flush=True)
         return bool(updated)

@@ -117,6 +117,7 @@ def test_backfill_updates_metadata_preserving_findings_and_partial_status(tmp_pa
 
 
 def test_original_hash_must_match_receipt(tmp_path,monkeypatch):
+    monkeypatch.setenv("EIS223_DATA_DIR",str(tmp_path))
     ns=database(tmp_path)
     path=tmp_path/"original.doc";path.write_bytes(b"authentic original bytes")
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
@@ -131,3 +132,28 @@ def test_original_hash_must_match_receipt(tmp_path,monkeypatch):
     assert stored_metadata(ns,"32616467075")["customer"]=="ООО «Заказчик»"
     path.write_bytes(b"modified bytes")
     assert not stored_metadata(ns,"32616467075")
+
+
+def test_saved_excel_price_is_recovered_and_hash_checked(tmp_path,monkeypatch):
+    from openpyxl import Workbook,load_workbook
+    import v314_eis_metadata as module
+    monkeypatch.setenv("EIS223_DATA_DIR",str(tmp_path))
+    ns=database(tmp_path)
+    path=tmp_path/"price.xlsx"
+    book=Workbook();book.active.append(["Начальная (максимальная) цена договора, руб.",394633.3333333333])
+    book.save(path)
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    with ns["conn"]() as db:
+        db.execute("INSERT INTO docs VALUES(1,?,?,?,?,?,?,?)",(
+            "32616467075","Обоснование НМЦД.xlsx",URL,"other",str(path),
+            json.dumps({"source":"official_eis_original","sha256":digest,"source_url":URL}),"checked"))
+    monkeypatch.setattr(module,"allowed_documents",lambda reg:{"A"*32:{"url":URL}})
+    monkeypatch.setattr(module,"saved_document",lambda reg,uid:(path,{"sha256":digest}))
+    def extract(file):
+        workbook=load_workbook(file,data_only=True)
+        try:return '\n'.join(' | '.join(str(v or '') for v in row) for row in workbook.active.values)
+        finally:workbook.close()
+    ns["extract_text"]=extract
+    assert stored_metadata(ns,"32616467075")["price_num"]==394633.33
+    path.write_bytes(b"changed original")
+    assert stored_metadata(ns,"32616467075")=={}

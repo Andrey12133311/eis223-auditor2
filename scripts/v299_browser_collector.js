@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "323"; // verified NMCD, archived cards and manual-review status
+  const COLLECTOR_VERSION = "335"; // recover price blocks, inline labels and missing NMCD
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -331,24 +331,25 @@
   function valueByLabel(root,patterns){
     if(!root)return "";
     const labeled=root.querySelectorAll(".common-text__title,.section__title,"+
-      ".registry-entry__body-title,.registry-entry__body-item-title,dt,label,th,"+
+      ".registry-entry__body-title,.registry-entry__body-item-title,.price-block__title,.data-block__title,dt,label,th,"+
       ".section__attrib,.attachment__text,.blockInfo__label,.common-text__label,"+
       "td,.title");
     for(const label of labeled){
       const title=(label.textContent||"").replace(/\s+/g," ").trim()
         .replace(/\s*:\s*$/,"").toLowerCase();
       if(title.length>180)continue;
-      if(!patterns.some(p=>p.test(title)))continue;
       // EIS sometimes renders "ИНН: 1234567890" in the SAME node.
       const inline=(label.textContent||"").replace(/\s+/g," ").trim();
       const inlineMatch=inline.match(/^([^:：]{1,110})\s*[:：]\s*(.+)$/);
+      if(!patterns.some(p=>p.test(title))&&
+          !(inlineMatch&&patterns.some(p=>p.test(inlineMatch[1].trim().toLowerCase()))))continue;
       if(inlineMatch&&patterns.some(p=>p.test(inlineMatch[1].trim().toLowerCase()))){
         const v=inlineMatch[2].trim();
         if(v&&v.length<=800)return v;
       }
       const values=".common-text__value,.section__info,.registry-entry__body-value,"+
         ".registry-entry__body-item-value,.registry-entry__body-href,"+
-        ".blockInfo__value,dd,td,.section__value,.value";
+        ".blockInfo__value,.price-block__value,.data-block__value,dd,td,.section__value,.value";
       const candidates=[label.nextElementSibling,
         ...label.parentElement?.querySelectorAll(values)||[]];
       for(const value of candidates){
@@ -486,17 +487,17 @@
     return candidates;
   }
   function priceFromDocument(doc,reg){
-    if(!doc || !new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(doc.body?.textContent||""))
+    if(!doc || !new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(doc.body?.textContent||doc.textContent||""))
       return "";
     const raw=valueByLabel(doc,[
-      /^начальн(?:ая|ой|ую)\s*\(?максимальн(?:ая|ой|ую)\)?\s*цен(?:а|ы|у)\s*договора$/i,
+      /^начальн(?:ая|ой|ую)\s*\(?максимальн(?:ая|ой|ую)\)?\s*цен(?:а|ы|у)\s*договора(?:\s*\(цена лота\))?$/i,
       /^начальн(?:ая|ой|ую)\s*цен(?:а|ы|у)\s*договора$/i,
       /^нмцд$/i,
       /^начальная\s*\(максимальная\)\s*цена$/i
     ]);
     const clean=String(raw||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()
       .replace(/\s*Российский рубль\s*$/i," ₽");
-    if(!/^\d[\d ]{0,18}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|рублей)?$/i.test(clean))
+    if(!/^\d[\d ]{0,18}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|рублей|рубля|рубль|RUB)?$/i.test(clean))
       return "";
     return clean;
   }

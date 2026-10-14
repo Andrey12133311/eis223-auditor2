@@ -46,6 +46,7 @@ import v331_broad_legal
 import v332_all_procurements_audit
 import v333_dedup_ui
 import v334_findings_ledger
+import v335_price_recovery
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
 def main():
@@ -95,6 +96,7 @@ def main():
     v332_all_procurements_audit.install(vars(entry))
     v333_dedup_ui.install(vars(entry))
     v334_findings_ledger.install(vars(entry))
+    v335_price_recovery.install(vars(entry))
     try:
         v312_archive_selftest.run()
     except Exception as exc:

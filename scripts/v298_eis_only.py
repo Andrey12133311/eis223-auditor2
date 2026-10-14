@@ -244,10 +244,11 @@ async def offline_audit(ns,reg,collect_only=False):
     # official SOAP lot, validated manifest and stored purchase lack NMCD.
     from v311_verified_customer import read_verified_price
     verified_price=await asyncio.to_thread(read_verified_price,ns,reg)
-    price=(field(lot_data,"initialSum") or verified_xml_nmcd(notice)
-           or public.get("price") or str(previous.get("price") or "")
-           or verified_price.get("price") or "")
-    num=ns.get("price_num",lambda x:None)(price)
+    from v335_price_recovery import money
+    candidates=(verified_xml_nmcd(notice),public.get("price"),previous.get("price"),
+                previous.get("price_num"),verified_price.get("price"))
+    parsed=next((money(value) for value in candidates if money(value)),None)
+    price,num=parsed if parsed else ("",None)
     p={"reg":reg,
        "title":reg_name,
        "customer":customer,
@@ -380,6 +381,8 @@ async def offline_audit(ns,reg,collect_only=False):
                   "price_num":p["price_num"]},
        "discovery":"getDocsIP, RI223, official-browser-bridge",
     }
+    if metadata and money(metadata.get("price"))==money(p.get("price")) and money(p.get("price")):
+        card["summary"]["price_kind"]=metadata.get("price_kind") or "nmcd"
     if metadata:card["metadata_evidence"]={"source":"official_eis_document",**metadata}
     detail={
        "registrationNumber":reg,
