@@ -36,6 +36,7 @@ def install(ns):
                     folders.update(p.name for p in base.iterdir() if p.is_dir() and REG.fullmatch(p.name))
             regs=sorted(folders)
             completed=failed=skipped=0
+            print(f"V315 REAUDIT_STARTED candidates={len(regs)}",flush=True)
             for idx,reg in enumerate(regs):
                 try:
                     allowed=await asyncio.to_thread(allowed_documents,reg)
