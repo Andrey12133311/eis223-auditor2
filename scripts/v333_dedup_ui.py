@@ -39,17 +39,20 @@ def collapse(items,field="title",violation_only=False):
         if violation_only and item.get("status") not in ("violation",):
             answer.append(item)
             continue
-        key=issue_key(item.get(field) or item.get("item") or item.get("code"))
-        if not key:
+        # Never merge separate events merely because they share a heading.
+        # A different document, statutory norm or excerpt is distinct proof.
+        key=(
+            issue_key(item.get(field) or item.get("item") or item.get("code")),
+            str(item.get("document") or "").strip().casefold(),
+            str(item.get("source_url") or "").strip().casefold(),
+            str(item.get("law") or item.get("legal_basis") or "").strip().casefold(),
+            str(item.get("location") or "").strip().casefold(),
+            re.sub(r"\s+"," ",str(item.get("evidence") or "").strip().casefold()),
+        )
+        if not key[0]:
             answer.append(item)
             continue
-        if key in positions:
-            # Prefer useful documentary evidence, but never fabricate a new
-            # finding by concatenating incompatible snippets.
-            old=answer[positions[key]]
-            if len(str(item.get("evidence") or ""))>len(str(old.get("evidence") or "")):
-                answer[positions[key]]=item
-        else:
+        if key not in positions:
             positions[key]=len(answer)
             answer.append(item)
     return answer
@@ -155,7 +158,8 @@ function cleanup(){
     const lead=node.querySelector('h3,h4,h5,strong,b');
     const name=lead?.textContent?.trim()||'';
     if(!name||norm(name)==='нарушение'||name.length<9)return;
-    const key=norm(name);
+    // Distinct evidence cannot be hidden based on a shared legal heading.
+    const key=norm(name)+'|'+norm(node.textContent||'');
     if(unique.has(key))node.remove();else unique.add(key);
  });
 }
