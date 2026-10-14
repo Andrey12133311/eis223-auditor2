@@ -213,6 +213,40 @@ _LAW_CITATION = re.compile(
     r"настоящ(?:ий|его)\s+федеральн\w*\s+закон)",re.I,
 )
 
+_DIAGNOSTIC_DONE=set()
+def _target_evidence_probe(p,docs,admissions):
+    """Small excerpts from already verified public EIS originals, for debugging."""
+    reg=str(p.get("reg") or "")
+    if reg!="32616324151" or reg in _DIAGNOSTIC_DONE:return
+    _DIAGNOSTIC_DONE.add(reg)
+    from v324_official_price import LABEL,prices_in_text,verified_nmcd
+    verified=[d for d in docs if _verified(d)]
+    evidence=[]
+    nmcd_labels=nmcd_amounts=0
+    for doc in verified:
+        text=_plain(doc.get("text"))
+        nmcd_labels+=len(LABEL.findall(text))
+        nmcd_amounts+=len(prices_in_text(text))
+        terms=list(re.finditer(
+           r"(?:коллективн\w*|нескольк\w*\s+юридическ\w*\s+лиц|"
+           r"могут\s+принять\s+участи\w*|"
+           r"член\w*\s+объединени\w*)",text,re.I))
+        for match in terms[:3]:
+            if len(evidence)>=8:break
+            context=" ".join(text[max(0,match.start()-160):match.end()+210].split())
+            evidence.append((str(doc.get("name") or "")[:90],context[:390]))
+        if len(evidence)>=8:break
+    candidates=verified_nmcd(docs)
+    print(f"V326 EVIDENCE_PROBE reg={reg} originals={len(verified)} "
+          f"nmcd_labels={nmcd_labels} nmcd_candidates={nmcd_amounts} "
+          f"nmcd_conflict={bool(candidates.get('price_conflict'))} "
+          f"admission_candidates={len(admissions)} excerpt_count={len(evidence)}",
+          flush=True)
+    for index,(name,excerpt) in enumerate(evidence):
+        print(f"V326 EVIDENCE_EXCERPT reg={reg} i={index} "
+              f"document={name!r} excerpt={excerpt!r}",flush=True)
+
+
 def _admission_cases(p,docs):
     confirmed,_=_sme_scope(p,docs)
     if not confirmed:return []
@@ -333,6 +367,7 @@ def install(ns):
         cases=_cases(p,docs)
         definitive=[v for v in cases if v["classification"]=="violation"]
         admissions=_admission_cases(p,docs)
+        _target_evidence_probe(p,docs,admissions)
         if p.get("reg")=="32616324151" or cases:
             print(f"V324 FAS_EVIDENCE reg={p.get('reg')} "
                   f"sme_confirmed={any(c.get('scope') for c in cases)} "
