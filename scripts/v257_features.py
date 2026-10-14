@@ -81,6 +81,51 @@ def _html_patch(body: str) -> str:
     if 'id="v257-ui"' not in body:body=body.replace('</body>',SCRIPT+'</body>',1) if '</body>' in body else body+SCRIPT
     return body
 
+def manual_progress(reg,checked,search_status):
+    """Check real saved originals and the legal audit, not search-job state."""
+    review={}
+    try:
+        p=root()/'eis223_official_review_jobs'/(reg+'.json')
+        loaded=json.loads(p.read_text(encoding='utf-8'))
+        if isinstance(loaded,dict) and loaded.get('reg_number')==reg:
+            review=loaded
+    except (OSError,ValueError,TypeError,AttributeError):
+        pass
+    status=str(review.get('status') or 'not_queued')
+    expected=received=0
+    try:
+        files=allowed_documents(reg)
+        expected=len(files)
+        received=sum(saved_document(reg,uid) is not None for uid in files)
+        manifest=root()/'eis223_public_browser_intake'/reg/'manifest.json'
+        try:
+            meta=json.loads(manifest.read_text(encoding='utf-8'))
+            if (isinstance(meta,dict) and meta.get('reg_number')==reg and
+                    meta.get('source')=='public_eis_223_browser'):
+                declared=int(meta.get('declared_attachment_count') or 0)
+                if 0<declared<=100:expected=max(expected,declared)
+        except (OSError,ValueError,TypeError,AttributeError):
+            pass
+    except (OSError,ValueError,TypeError,AttributeError):
+        pass
+    def integer(value):
+        try:return max(0,int(value or 0))
+        except (ValueError,TypeError,OverflowError):return 0
+    complete=(status=='completed' and expected>0 and received==expected
+              and integer(review.get('originals_received'))>=expected
+              and integer(review.get('checked_documents'))>=expected
+              and integer(checked)>0)
+    if complete:label='completed'
+    elif status in ('queued','running'):label='auditing'
+    elif status=='failed':label='failed'
+    elif expected>0 and received<expected:label='waiting'
+    elif search_status in ('queued','leased','deferred','partial'):label=search_status
+    else:label='search_only'
+    return {'audit_status':label,'audit_complete':complete,
+            'review_state':status,'originals_expected':expected,
+            'originals_received':received}
+
+
 def install(ns:dict)->None:
     app,connection=ns['app'],ns['conn']
     @contextmanager
@@ -182,50 +227,6 @@ def install(ns:dict)->None:
             result=c.execute('SELECT COUNT(*) purchases,COALESCE(SUM(violations),0) violations,COALESCE(SUM(risks),0) risks,COALESCE(SUM(documents_found),0) documents_found,COALESCE(SUM(documents_checked),0) documents_checked'+sql,args).fetchone()
             records=c.execute('SELECT p.*'+sql+' ORDER BY p.last_seen DESC LIMIT ? OFFSET ?',args+[limit,offset]).fetchall()
         return {'stats':dict(result),'purchases':[dict(r) for r in records],'offset':offset,'limit':limit}
-    def manual_progress(reg,checked,search_status):
-        """Check real saved originals and the legal audit, not search-job state."""
-        review={}
-        try:
-            p=root()/'eis223_official_review_jobs'/(reg+'.json')
-            loaded=json.loads(p.read_text(encoding='utf-8'))
-            if isinstance(loaded,dict) and loaded.get('reg_number')==reg:
-                review=loaded
-        except (OSError,ValueError,TypeError,AttributeError):
-            pass
-        status=str(review.get('status') or 'not_queued')
-        expected=received=0
-        try:
-            files=allowed_documents(reg)
-            expected=len(files)
-            received=sum(saved_document(reg,uid) is not None for uid in files)
-            manifest=root()/'eis223_public_browser_intake'/reg/'manifest.json'
-            try:
-                meta=json.loads(manifest.read_text(encoding='utf-8'))
-                if (isinstance(meta,dict) and meta.get('reg_number')==reg and
-                        meta.get('source')=='public_eis_223_browser'):
-                    declared=int(meta.get('declared_attachment_count') or 0)
-                    if 0<declared<=100:expected=max(expected,declared)
-            except (OSError,ValueError,TypeError,AttributeError):
-                pass
-        except (OSError,ValueError,TypeError,AttributeError):
-            pass
-        def integer(value):
-            try:return max(0,int(value or 0))
-            except (ValueError,TypeError,OverflowError):return 0
-        complete=(status=='completed' and expected>0 and received==expected
-                  and integer(review.get('originals_received'))>=expected
-                  and integer(review.get('checked_documents'))>=expected
-                  and integer(checked)>0)
-        if complete:label='completed'
-        elif status in ('queued','running'):label='auditing'
-        elif status=='failed':label='failed'
-        elif expected>0 and received<expected:label='waiting'
-        elif search_status in ('queued','leased','deferred','partial'):label=search_status
-        else:label='search_only'
-        return {'audit_status':label,'audit_complete':complete,
-                'review_state':status,'originals_expected':expected,
-                'originals_received':received}
-
     @app.get('/api/v257/manual',include_in_schema=False)
     def manual_list(offset:int=0,limit:int=80):
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
