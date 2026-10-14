@@ -202,8 +202,11 @@ def install(ns):
     # destructive legacy save(). Fail startup closed if persistence fails.
     snapshot(connect)
     print("V334 BASELINE "+json.dumps(summary(connect),ensure_ascii=False),flush=True)
-    overlap=compare_same_titles(connect,0)
+    overlap=compare_same_titles(connect,100)
     print("V334 CROSS_TABLE "+json.dumps({k:v for k,v in overlap.items() if k!="items"},ensure_ascii=False),flush=True)
+    unsettled=[i for i in overlap["items"] if i["classification"]=="evidence_review_required"]
+    if unsettled:
+        print("V334 EVIDENCE_REVIEW "+json.dumps(unsettled[:10],ensure_ascii=False),flush=True)
 
     if not getattr(existing_save,"__v334_protected__",False):
         @wraps(existing_save)
