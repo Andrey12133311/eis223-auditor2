@@ -35,7 +35,7 @@ def install(ns):
                 if base.is_dir():
                     folders.update(p.name for p in base.iterdir() if p.is_dir() and REG.fullmatch(p.name))
             regs=sorted(folders)
-            completed=failed=skipped=0
+            completed=partial=failed=skipped=0
             print(f"V315 REAUDIT_STARTED candidates={len(regs)}",flush=True)
             for idx,reg in enumerate(regs):
                 try:
@@ -67,8 +67,10 @@ def install(ns):
                             break
                     else:
                         status="timeout"
-                    if status in ("completed","partial"):
+                    if status=="completed":
                         completed+=1
+                    elif status=="partial":
+                        partial+=1
                     else:
                         failed+=1
                 except Exception as exc:
@@ -77,10 +79,10 @@ def install(ns):
                 if idx%10==0 or idx==len(regs)-1:
                     await asyncio.to_thread(write_status,{
                         "total_candidates":len(regs),"processed":idx+1,
-                        "completed_or_partial":completed,"failed":failed,
+                        "completed":completed,"partial":partial,"failed":failed,
                         "skipped_without_all_originals":skipped,
                         "updated_at":datetime.now(timezone.utc).isoformat(),
                         "note":"Results are real re-audits, not new procurements or files"})
-            print(f"V315 REAUDIT_FINISHED candidates={len(regs)} completed={completed} failed={failed} skipped={skipped}",flush=True)
+            print(f"V315 REAUDIT_FINISHED candidates={len(regs)} completed={completed} partial={partial} failed={failed} skipped={skipped}",flush=True)
         asyncio.create_task(run())
     print("V315 VERIFIED_REAUDIT_READY",flush=True)
