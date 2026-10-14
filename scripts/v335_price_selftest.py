@@ -8,7 +8,7 @@ import tempfile
 from fastapi import FastAPI
 from v311_verified_customer import _initialize,_save_verified_price,_verified_money
 from v324_official_price import prices_in_text,verified_nmcd
-from v335_price_recovery import price_changes,repair_cached,install,patch_html
+from v335_price_recovery import price_changes,repair_cached,install,patch_html,card_price_html
 from v299_browser_intake import _known
 
 REG='32616471929'
@@ -66,10 +66,11 @@ def run():
             price TEXT,price_num REAL,card_fields_json TEXT,customer TEXT,customer_inn TEXT,
             title TEXT,last_seen TEXT,documents_checked INTEGER);
             CREATE TABLE findings(reg_number TEXT,title TEXT);
-            CREATE TABLE checks(reg_number TEXT,item TEXT,status TEXT);
+            CREATE TABLE checks(reg_number TEXT,item TEXT,status TEXT,evidence TEXT);
             CREATE TABLE docs(reg_number TEXT,name TEXT);''')
         db.execute("INSERT INTO findings VALUES(?,?)",(REG,'Сохранённое нарушение'))
-        db.execute("INSERT INTO checks VALUES(?,?,?)",(REG,'Контроль срока','violation'))
+        db.execute("INSERT INTO checks VALUES(?,?,?,?)",(REG,'Контроль срока','violation','Нарушение срока'))
+        db.execute("INSERT INTO checks VALUES(?,?,?,?)",(REG,'НМЦД','check','Не найдено'))
         db.execute("INSERT INTO docs VALUES(?,?)",(REG,'Извещение.doc'))
         db.execute("INSERT INTO purchases VALUES(?,?,?,?,?,?,?,?,?)",(REG,'—',None,'{}','ООО «Заказчик»','',
             'Поставка лекарственных средств','2026-10-14',3))
@@ -80,6 +81,7 @@ def run():
         assert _save_verified_price(ns,REG,'41081.60',41081.60,CARD)
         db=conn();row=dict(db.execute('SELECT * FROM purchases WHERE reg_number=?',(REG,)).fetchone())
         assert row['price_num']==41081.60 and row['price']=='41081.60'
+        assert tuple(db.execute("SELECT status,evidence FROM checks WHERE item='НМЦД'").fetchone())==('ok','41\u00a0081,60 ₽')
         assert json.loads(row['card_fields_json'])['summary']['price_num']==41081.60
         assert not _known(ns,[REG])[REG]['needs_metadata']
         # Two independently missing fields were not repaired by the old AND condition.
@@ -93,7 +95,8 @@ def run():
         db=conn()
         assert db.execute('SELECT price_num FROM purchases').fetchone()[0]==123456.78
         assert db.execute('SELECT COUNT(*) FROM findings').fetchone()[0]==1
-        assert db.execute('SELECT COUNT(*) FROM checks').fetchone()[0]==1
+        assert tuple(db.execute("SELECT status,evidence FROM checks WHERE item='Контроль срока'").fetchone())==('violation','Нарушение срока')
+        assert db.execute('SELECT COUNT(*) FROM checks').fetchone()[0]==2
         assert db.execute('SELECT COUNT(*) FROM docs').fetchone()[0]==1
         db.close()
         saved=[]
@@ -103,11 +106,12 @@ def run():
         ns['save'](p,[],[],[],{'summary':{}})
         assert p['price_num']==123456.78 and p['price']=='123456.78'
         assert saved[0][4]['summary']['price_num']==123456.78
+        assert '123\u00a0456,78 ₽' in card_price_html(ns,REG)
     html=patch_html('<head></head><script>money(x.price_num);money(p.price_num);</script>')
     assert 'window.eis223PriceText(x)' in html and 'window.eis223PriceText(p)' in html
     assert patch_html(html)==html
     print('V335_PRICE_SELFTEST_OK actual_notice_41081_60=True separate_fields=True '
-          'preserve_existing=True zero_not_missing=True no_audit_changes=True')
+          'preserve_existing=True zero_not_missing=True no_violation_changes=True')
 
 
 if __name__=='__main__':run()

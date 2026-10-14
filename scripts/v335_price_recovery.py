@@ -6,9 +6,11 @@ single background worker; readiness, findings and document counts are untouched.
 from __future__ import annotations
 import asyncio
 from functools import wraps
+import html
 import json
 import logging
 import math
+import re
 import sqlite3
 from decimal import Decimal,ROUND_HALF_UP
 
@@ -46,13 +48,40 @@ def price_changes(p,evidence=None):
     return updates
 
 
+def sync_price_checks(db,reg,price,evidence):
+    """Refresh only the two factual extraction checks, never legal conclusions."""
+    if not evidence or money(evidence.get("price"))!=money(price):return
+    columns={r[1] for r in db.execute('PRAGMA table_info(checks)')}
+    if not {'reg_number','item','status','evidence'}.issubset(columns):return
+    maximum=evidence.get('price_kind')=='maximum_contract_value'
+    value=format_money(price)
+    values={'evidence':('Максимальное значение цены договора: ' if maximum else '')+value,
+            'source':'Подтверждённые сведения ЕИС',
+            'source_url':evidence.get('price_source_url') or evidence.get('source_url') or evidence.get('evidence_page') or '',
+            'document':evidence.get('price_document') or evidence.get('document') or '',
+            'note':'Сумма получена из сохранённого официального источника ЕИС.'}
+    values={k:v for k,v in values.items() if k in columns}
+    if not maximum:values['status']='ok'
+    db.execute('UPDATE checks SET '+','.join(k+'=?' for k in values)+
+        " WHERE reg_number=? AND item IN ('НМЦД','НМЦД распознана как число') "
+        "AND status IN ('check','read','pending','unknown')",(*values.values(),reg))
+
+
+def format_money(value):
+    parsed=money(value)
+    if not parsed:return 'Не указана в полученных данных'
+    return f'{parsed[1]:,.2f}'.replace(',','\u00a0').replace('.',',')+' ₽'
+
+
 def update_price(db,reg,evidence=None):
     db.row_factory=sqlite3.Row
     row=db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
     if row is None:return False
     p=dict(row)
     updates=price_changes(p,evidence)
-    if not updates:return False
+    if not updates:
+        sync_price_checks(db,reg,p.get('price'),evidence)
+        return False
     if "card_fields_json" in p:
         try:
             card=json.loads(p.get("card_fields_json") or "{}")
@@ -67,6 +96,7 @@ def update_price(db,reg,evidence=None):
         updates["card_fields_json"]=json.dumps(card,ensure_ascii=False)
     db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in updates)+
                " WHERE reg_number=?",(*updates.values(),reg))
+    sync_price_checks(db,reg,updates.get('price',p.get('price')),evidence)
     return True
 
 
@@ -158,6 +188,19 @@ def patch_html(body):
     return body.replace('</head>',PRICE_JS+'</head>',1) if '</head>' in body else PRICE_JS+body
 
 
+def card_price_html(ns,reg):
+    db=ns['conn']();db.row_factory=sqlite3.Row
+    try:row=db.execute('SELECT * FROM purchases WHERE reg_number=?',(reg,)).fetchone()
+    finally:db.close()
+    if row is None:return ''
+    p=dict(row)
+    try:kind=json.loads(p.get('card_fields_json') or '{}').get('summary',{}).get('price_kind')
+    except (ValueError,TypeError,AttributeError):kind=None
+    label='Максимальная цена договора' if kind=='maximum_contract_value' else 'НМЦД'
+    value=format_money(p.get('price_num') if money(p.get('price_num')) else p.get('price'))
+    return '<p id="v335-card-price" class="detailmeta"><b>'+label+':</b> '+html.escape(value)+'</p>'
+
+
 def install(ns):
     app=ns["app"]
     status={"recovered":0,"reviewed":0,"remaining":None,"running":False}
@@ -228,6 +271,11 @@ def install(ns):
             raw=b"".join([part async for part in response.body_iterator])
             headers={k:v for k,v in response.headers.items() if k.lower() not in ('content-length','content-encoding')}
             headers['Cache-Control']='no-store'
-            return HTMLResponse(patch_html(raw.decode('utf-8')),headers=headers)
+            body=patch_html(raw.decode('utf-8'))
+            match=re.fullmatch(r'/check-new/(3\d{10})',request.url.path)
+            if match and 'id="v335-card-price"' not in body:
+                panel=await asyncio.to_thread(card_price_html,ns,match[1])
+                body=re.sub(r'(<main\b[^>]*>)',lambda m:m[0]+panel,body,count=1,flags=re.I)
+            return HTMLResponse(body,headers=headers)
     app.add_middleware(PricePresentation)
     print("V335_PRICE_READY verified_original_recovery=True empty_overwrite_blocked=True",flush=True)
