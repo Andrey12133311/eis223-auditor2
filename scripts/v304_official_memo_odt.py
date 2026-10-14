@@ -130,7 +130,7 @@ def _read_purchase(ns,reg):
             evidence=str(finding.get("evidence") or "").strip()
             if not title or not evidence or re.search(r"риск|требует проверки|не найдена информация",title,re.I):
                 continue
-            key=(title.casefold(),evidence[:160])
+            key=re.sub(r"[^а-яёa-z0-9]+","",title.casefold().replace("ё","е"))  # one legal issue per memo
             if key in seen:continue
             seen.add(key);accepted.append(finding)
             if len(accepted)>=MAX_FINDINGS:break
