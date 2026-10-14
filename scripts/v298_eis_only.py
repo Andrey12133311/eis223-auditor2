@@ -259,6 +259,8 @@ async def offline_audit(ns,reg):
     # Weak heuristic "risk" matches do not become violations and are not
     # presented as a performance indicator. Historical data are retained.
     findings=[f for f in findings if isinstance(f,dict) and f.get("kind")=="violation"]
+    # Preserve document-backed review findings separately from confirmed violations.
+    review_findings=[f for f in findings if f.get("kind")=="check"]
     checks=await asyncio.to_thread(build_checks,p,detail,card,docs)
     checks=[c for c in checks if isinstance(c,dict) and c.get("status")!="risk"]
     annotate=ns.get("annotate")
