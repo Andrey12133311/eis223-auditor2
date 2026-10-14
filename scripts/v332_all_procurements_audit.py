@@ -22,7 +22,7 @@ from v295_eis_originals import allowed_documents, saved_document, root, uid_from
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 
-CAMPAIGN="2026-10-14-full-available-documents-v332"
+CAMPAIGN="2026-10-14-expanded-legal-v336"
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
 FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
