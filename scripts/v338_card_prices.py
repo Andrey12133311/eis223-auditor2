@@ -137,13 +137,15 @@ def enqueue_missing_prices(ns,limit=8):
         ready=db.execute("""SELECT COUNT(*) FROM v301_search_jobs
                        WHERE status IN ('queued','leased','deferred')""").fetchone()[0]
         if ready>=24:return 0
+        from v332_all_procurements_audit import CAMPAIGN
         rows=db.execute("""SELECT p.reg_number FROM purchases p
+                    JOIN v332_audit_queue aq ON aq.reg=p.reg_number AND aq.campaign=?
                     LEFT JOIN v338_price_requests r ON r.reg=p.reg_number
                     WHERE p.documents_checked>0
                     AND (p.price_num IS NULL OR TRIM(COALESCE(p.price,''))='')
                     AND (r.reg IS NULL OR
                          (r.attempts<3 AND strftime('%s',r.created_at)<strftime('%s','now','-6 hours')))
-                    ORDER BY p.last_seen DESC LIMIT ?""",(min(8,limit),)).fetchall()
+                    ORDER BY p.last_seen DESC LIMIT ?""",(CAMPAIGN,min(8,limit))).fetchall()
     finally:db.close()
     queued=0
     for row in rows:
@@ -220,10 +222,21 @@ def install(ns):
                 try:
                     run=await asyncio.to_thread(progress,ns)
                     if run.get("status")=="finished":
+                        from v332_all_procurements_audit import CAMPAIGN
                         db=ns["conn"]()
                         try:
+                            # Source-price rechecks may not extend the 985-item
+                            # user-requested audit into the rest of the database.
+                            db.execute("""UPDATE v338_price_rechecks SET
+                                state='out_of_scope', checked_at=?,result=?
+                                WHERE state='pending' AND reg NOT IN
+                                (SELECT reg FROM v332_audit_queue WHERE campaign=?)""",
+                                (_now(),"За пределами списка из 985 закупок",CAMPAIGN))
+                            db.commit()
                             reg_row=db.execute("""SELECT reg FROM v338_price_rechecks
-                                    WHERE state='pending' ORDER BY changed_at LIMIT 1""").fetchone()
+                                    WHERE state='pending'
+                                    AND reg IN (SELECT reg FROM v332_audit_queue WHERE campaign=?)
+                                    ORDER BY changed_at LIMIT 1""",(CAMPAIGN,)).fetchone()
                         finally:db.close()
                         if reg_row:
                             reg=str(reg_row[0])
