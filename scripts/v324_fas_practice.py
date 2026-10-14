@@ -181,6 +181,106 @@ def _cases(p,docs):
             if len(matches)>=12:return matches
     return matches
 
+# Current FAS enforcement practice also treats the explicit admission of
+# several legal entities AS ONE PARTICIPANT in an SME-only tender as an
+# independent issue, not merely the requirement to attach their agreement.
+# Narrowly require an operative invitation, collective membership, and an
+# SME-only clause in the same tender paragraph of an EIS verified original.
+_ADMISSION = re.compile(
+    r"(?:могут\s+принять\s+участи\w*|"
+    r"допуска\w*\s+к\s+участи\w*|"
+    r"допускается\s+участи\w*).{0,260}?"
+    r"(?:нескольк\w*\s+юридическ\w*\s+лиц|"
+    r"нескольк\w*\s+физическ\w*\s+лиц|"
+    r"коллективн\w*\s+участник\w*)",
+    re.I | re.S,
+)
+_ADMISSION_REVERSE = re.compile(
+    r"(?:нескольк\w*\s+юридическ\w*\s+лиц|"
+    r"коллективн\w*\s+участник\w*).{0,220}?"
+    r"(?:могут\s+принять\s+участи\w*|"
+    r"допуска\w*\s+к\s+участи\w*)",re.I | re.S,
+)
+_PROHIBITED = re.compile(
+    r"(?:не\s+допуска\w*|не\s+могут\s+принять\s+участи\w*|"
+    r"запреща\w*|не\s+предусматрива\w*|"
+    r"не\s+допускается\s+участи\w*)",re.I,
+)
+_LAW_CITATION = re.compile(
+    r"(?:част[ьи]\s+5\s+стать[ьи]\s+3|"
+    r"в\s+соответствии\s+со\s+стать[её]й\s+3|"
+    r"стат[ьея]\s+3\.4\s+закона|"
+    r"настоящ(?:ий|его)\s+федеральн\w*\s+закон)",re.I,
+)
+
+def _admission_cases(p,docs):
+    confirmed,_=_sme_scope(p,docs)
+    if not confirmed:return []
+    seen=set()
+    result=[]
+    for doc in docs:
+        if not _verified(doc):continue
+        full=_plain(doc.get("text"))
+        # Keep each clause/paragraph narrow, preserving section boundaries.
+        paragraphs=re.split(r"[\n\r]+",full)
+        start=0
+        for paragraph in paragraphs:
+            span=paragraph.strip()
+            start_in_full=start
+            start+=len(paragraph)+1
+            if not 35<=len(span)<=2400:continue
+            if not re.search(r"(?:настоящ\w*|данн\w*|проводим\w*|в\s+(?:конкурсе|закупке|аукционе))",span,re.I):
+                continue
+            if not _SME.search(span):continue
+            m=_ADMISSION.search(span) or _ADMISSION_REVERSE.search(span)
+            if not m:continue
+            # Negated examples and the verbatim law (allowing general
+            # collective bids outside SME-only procurement) are not terms.
+            snippet=span[max(0,m.start()-100):min(len(span),m.end()+100)]
+            if _PROHIBITED.search(snippet):continue
+            if _LAW_CITATION.search(snippet) and not re.search(r"в\s+(?:конкурсе|закупке|аукционе)",snippet,re.I):
+                continue
+            if not re.search(r"на\s+сторон[еы]\s+одного\s+участник\w*|"
+                             r"коллективн\w*\s+участник\w*",span,re.I):
+                continue
+            canonical=re.sub(r"\W+","",span.casefold().replace("ё","е"))
+            signature=hashlib.sha256(canonical.encode()).hexdigest()[:16]
+            if signature in seen:continue
+            seen.add(signature)
+            result.append({
+                "doc":doc,"section":span[:900],
+                "location":f"Оригинал: {doc.get('name')}; раздел об участниках; позиция ~{start_in_full+1}",
+                "seed":m.group(0)[:140], "classification":"collective_admission",
+                "scope":confirmed
+            })
+            if len(result)>=5:return result
+    return result
+
+def _admission_finding(record):
+    doc=record["doc"]
+    return {
+        "code":"SME-COLLECTIVE-ADMISSION-FAS",
+        "kind":"violation",
+        "title":"Допуск коллективного участника в закупку, проводимую только среди субъектов МСП",
+        "law":"223-ФЗ, ст. 3.4; ст. 3, ч. 5; ст. 3, ч. 1 п. 2",
+        "law_url":"https://www.consultant.ru/document/cons_doc_LAW_116964/",
+        "evidence":record["section"],
+        "note":(
+           "Выявлено прямое условие документации о возможности участия "
+           "нескольких юридических лиц на стороне одного участника, при "
+           "подтверждённом ограничении конкурентной закупки субъектами МСП. "
+           "Такой допуск противоречит позиции ФАС России (письмо 22.06.2023 "
+           "№ 28/48914/23) и решениям территориальных УФАС, в том числе "
+           "Московского УФАС от 23.01.2025 № 077/07/00-233/2025. "
+           "Нужна окончательная оценка действующей редакции документации "
+           "и применимого к ней правового режима; ранее встречались иные "
+           "подходы в практике."),
+        "document":doc.get("name"),
+        "source_url":(doc.get("meta") or {}).get("source_url"),
+        "location":record["location"],
+        "match_text":record["seed"]
+    }
+
 def _finding(record):
     d=record["doc"]
     law="223-ФЗ, ст. 3.4 ч. 19.1, 19.2, 19.3"
@@ -232,13 +332,19 @@ def install(ns):
         output=list(base_analyze(p,docs))
         cases=_cases(p,docs)
         definitive=[v for v in cases if v["classification"]=="violation"]
+        admissions=_admission_cases(p,docs)
         if p.get("reg")=="32616324151" or cases:
             print(f"V324 FAS_EVIDENCE reg={p.get('reg')} "
                   f"sme_confirmed={any(c.get('scope') for c in cases)} "
                   f"agreements={len(cases)} verified_extra_documents={len(definitive)} "
                   f"review_only={sum(c['classification']!='violation' for c in cases)} "
+                  f"collective_admission={len(admissions)} "
                   f"nmcd_verified={p.get('price_num') is not None}",
                   flush=True)
+        if admissions:
+            # A specific operative SME clause, supported by a checked
+            # original, is a distinct rule from the extra-document issue.
+            output.append(_admission_finding(admissions[0]))
         if definitive:
             # Avoid multiple historic archive revisions inflating counts:
             # same legal issue is represented once per procurement.
@@ -252,12 +358,13 @@ def install(ns):
         cases=_cases(p,docs)
         # An established extra-document finding supersedes an ambiguous
         # agreement warning for the same procurement.
-        candidates=[x for x in cases if x["classification"]!="violation"] if not any(
-            x["classification"]=="violation" for x in cases) else []
+        candidates=[x for x in cases if x["classification"]!="violation"] if not (
+            any(x["classification"]=="violation" for x in cases)
+            or _admission_cases(p,docs)) else []
         if candidates:
             output.append(_check(candidates[0]))
         return output
 
     ns["analyze"]=analyze
     ns["build_checks"]=build_checks
-    print("V324 FAS_PRACTICE_READY sources=4 verified_only=True SME_scope_required=True confirmed_findings_not_fabricated=True",flush=True)
+    print("V325 FAS_PRACTICE_READY sources=4 verified_only=True SME_scope_required=True collective_admission_rule=True",flush=True)
