@@ -56,6 +56,8 @@ def reconcile_buyers(ns):
               OR LOWER(customer) LIKE '%уточня%'
               OR LOWER(customer) LIKE '%не найден%'
               OR LOWER(customer) LIKE '%не указан%'
+              OR LOWER(customer) LIKE 'наименование (полное и сокращ%'
+              OR customer_inn IS NULL OR TRIM(customer_inn)=''
             LIMIT 20000
         """).fetchall()
         for reg,current,old_inn in rows:
@@ -77,6 +79,8 @@ def reconcile_buyers(ns):
                 """,(inn,reg)).fetchone()
                 if row:name=buyer(row[0])
             if not name:continue
+            if buyer(current) and not PLACEHOLDER.search(str(current)) and not str(current).lower().startswith('наименование (полное и сокращ'):
+                name=buyer(current)
             db.execute("""
                 UPDATE purchases SET customer=?,
                     customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
