@@ -47,6 +47,7 @@ import v332_all_procurements_audit
 import v333_dedup_ui
 import v334_findings_ledger
 import v335_price_recovery
+import v336_legal_matrix
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
 def main():
@@ -81,6 +82,7 @@ def main():
     v324_fas_practice.install(vars(entry))
     v330_amendments_223.install(vars(entry))
     v331_broad_legal.install(vars(entry))
+    v336_legal_matrix.install(vars(entry))
     v298_eis_only.install(vars(entry))
     v300_violation_ui.install(vars(entry))
     v301_search_jobs.install(vars(entry))
