@@ -225,7 +225,7 @@ def _verified_money(value):
     if re.search(r"(?:не установ|формула|диапазон|за единиц|не определ)",raw,re.I):
         raise ValueError("Отсутствует конкретная НМЦД")
     pattern=r"([0-9][0-9 ]{0,18}(?:[.,][0-9]{1,2})?)"
-    match=re.fullmatch(r"\\s*"+pattern+r"\\s*(?:₽|руб\\.?|рублей)?\\s*",raw,re.I)
+    match=re.fullmatch(r"\s*"+pattern+r"\s*(?:₽|руб\.?|рублей)?\s*",raw,re.I)
     if not match:
         raise ValueError("НМЦД не является одной конкретной суммой")
     normalized=match.group(1).replace(" ","").replace(",",".")
