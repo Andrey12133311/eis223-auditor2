@@ -340,7 +340,7 @@
              /^заказчик$/i,/^наименование заказчика/i])||name;
       inn=valueByLabel(section,[/^инн$/i,/^инн заказчика/i])||inn;
       if(!inn){
-        const hits=(section.textContent||"").match(/(?:^|[^а-яёa-z])ИНН\\s*[:：№]?\\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)||[];
+        const hits=(section.textContent||"").match(/(?:^|[^а-яёa-z])ИНН\s*[:：№]?\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)||[];
         if(hits.length===1)inn=(hits[0].match(/([0-9]{10}|[0-9]{12})/)||[])[1]||"";
       }
       if(name&&inn)break;
@@ -350,6 +350,18 @@
     }
     if(!inn){
       inn=valueByLabel(doc,[/^инн заказчика/i]);
+    }
+    // Some EIS templates put the buyer's INN in a nearby plain-text field.
+    // Only use the unique INN inside an explicitly buyer-labelled section.
+    if(!inn){
+      const sections=[...doc.querySelectorAll("section,.blockInfo,.blockInfo__section,fieldset")];
+      for(const section of sections){
+        const heading=(section.querySelector("h2,h3,legend,.blockInfo__title,.section__header")?.textContent||"").trim();
+        if(!/^(?:сведения|информация) о заказчике|^заказчик(?:и по лоту)?$/i.test(heading))continue;
+        const matches=[...section.textContent.matchAll(/(?:^|[^а-яёa-z])ИНН\\s*[:：№]?\\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)];
+        const unique=[...new Set(matches.map(m=>m[1]))];
+        if(unique.length===1){inn=unique[0];break;}
+      }
     }
     name=name.replace(/\s+/g," ").trim().slice(0,400);
     if(/^(?:уточняем|заказчик уточняется|не указан|не найден|сведения отсутствуют)/i.test(name))
@@ -477,7 +489,7 @@
       if(docs.length){
         log(reg,"найдено на открытой официальной странице ЕИС:",docs.length);
         const meta=customerFromDocument(document,reg);
-        const customer=meta.name?meta:searchCustomer;
+        const customer={name:meta.name||searchCustomer.name,inn:meta.inn||searchCustomer.inn};
         const title=titleFromDocument(document,reg)||searchTitle(searchDoc,reg);
         await reportOfficialBuyer(reg,liveLanding||liveUrl.href,customer,title);
         return {docs,source:liveUrl.href,landing:liveLanding||liveUrl.href,
@@ -525,7 +537,7 @@
         continue;
       }
       let customer=customerFromDocument(landing,reg);
-      if(!customer.name)customer=searchCustomer;
+      customer={name:customer.name||searchCustomer.name,inn:customer.inn||searchCustomer.inn};
       const title=titleFromDocument(landing,reg)||searchTitle(searchDoc,reg);
       // Save the buyer NOW even if every document tab below returns HTTP 404.
       await reportOfficialBuyer(reg,url.href,customer,title);
