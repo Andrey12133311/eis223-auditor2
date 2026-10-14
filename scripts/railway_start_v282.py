@@ -40,6 +40,7 @@ import v303_mobile_fixes
 import v311_verified_customer
 import v311_customer_backfill
 import v314_eis_metadata
+import v315_verified_reaudit
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
 def main():
@@ -82,6 +83,7 @@ def main():
     v311_verified_customer.install(vars(entry))
     v311_customer_backfill.install(vars(entry))
     v314_eis_metadata.install(vars(entry))
+    v315_verified_reaudit.install(vars(entry))
     try:
         v312_archive_selftest.run()
     except Exception as exc:
