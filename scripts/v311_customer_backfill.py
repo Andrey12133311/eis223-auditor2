@@ -59,7 +59,11 @@ def reconcile_buyers(ns):
             LIMIT 20000
         """).fetchall()
         for reg,current,old_inn in rows:
-            name,source_inn=card_from_storage(reg)
+            verified=db.execute("SELECT name,inn FROM v311_verified_buyers WHERE reg=?",(reg,)).fetchone()
+            if verified and buyer(verified[0]):
+                name,source_inn=buyer(verified[0]),legitimate_inn(verified[1])
+            else:
+                name,source_inn=card_from_storage(reg)
             inn=source_inn or legitimate_inn(old_inn)
             if not name and inn:
                 row=db.execute("""
@@ -95,6 +99,11 @@ def install(ns):
     @app.on_event("startup")
     async def resolve_official_customer_names():
         await asyncio.to_thread(reconcile_buyers,ns)
+        async def periodic_backfill():
+            while True:
+                await asyncio.sleep(300)
+                await asyncio.to_thread(reconcile_buyers,ns)
+        asyncio.create_task(periodic_backfill())
 
     @app.get("/api/v311/buyer-status")
     async def buyer_status():
