@@ -304,6 +304,28 @@
         }
       }
     }
+    // Some EIS results link only to the documents tab, or store the URL in
+    // a data attribute. Convert a VERIFIED noticeId to the common-info tab.
+    // Never derive a card from regNumber alone (that route returns 404).
+    const exactCard=searchResultCard(doc,reg);
+    if(exactCard && new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(exactCard.textContent||"")){
+      for(const element of exactCard.querySelectorAll("a[href],[onclick],[data-href],[data-url]")){
+        for(const key of ["href","onclick","data-href","data-url"]){
+          const raw=element.getAttribute(key)||"";
+          const match=raw.match(/(?:https?:\\/\\/zakupki\\.gov\\.ru)?\\/(?:223\\/purchase\\/public\\/purchase\\/info|epz\\/order\\/notice\\/notice223)\\/(?:documents|common-?info)\\.html\\?[^"'<>\\s)]+/i);
+          if(!match)continue;
+          try{
+            const candidate=new URL(match[0].replace(/&amp;/gi,"&"),docBase);
+            if(candidate.origin!==SITE||!officialNoticeId(candidate))continue;
+            candidate.pathname=candidate.pathname.replace(/\\/(?:documents|commoninfo)\\.html$/,"/common-info.html");
+            const verified=officialCardUrl(candidate.href,reg,INFO_PAGES,true);
+            if(verified&&!seen.has(verified.href)){
+              seen.add(verified.href);output.push(verified.href);
+            }
+          }catch(e){}
+        }
+      }
+    }
     return output;
   }
   function valueByLabel(root,patterns){
