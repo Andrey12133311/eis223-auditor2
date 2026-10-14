@@ -1,6 +1,6 @@
 """Regression suite; never touches Railway data, counters, or sources."""
 from __future__ import annotations
-from v324_fas_practice import _cases,install,PRACTICE
+from v324_fas_practice import _cases,_admission_cases,install,PRACTICE
 from v324_official_price import verified_nmcd,prices_in_text
 from v298_eis_only import verified_xml_nmcd
 from xml.etree import ElementTree as ET
@@ -25,6 +25,24 @@ def run():
     mandatory=(
         "1.3.6. Коллективные участники закупки обязаны представить в составе "
         "заявки на участие в конкурсе соглашение между всеми членами объединения.")
+    admitted=(
+        "1.3.1. В конкурсе могут принять участие только субъекты малого "
+        "и среднего предпринимательства из числа юридических лиц или "
+        "нескольких юридических лиц, выступающих на стороне одного "
+        "участника закупки, независимо от организационно-правовой формы."
+    )
+    excluded=(
+        "1.3.1. В конкурсе не могут принять участие коллективные "
+        "участники, в том числе несколько юридических лиц, выступающих "
+        "на стороне одного участника закупки. Участниками могут быть "
+        "только субъекты малого и среднего предпринимательства."
+    )
+    assert len(_admission_cases({"method":METHOD},[doc(admitted)]))==1
+    assert not _admission_cases({"method":METHOD},[doc(excluded)])
+    assert not _admission_cases({"method":"Открытый конкурс"},[doc(admitted.replace(
+        "только субъекты малого и среднего предпринимательства",
+        "любые юридические лица"))])
+    assert not _admission_cases({"method":METHOD},[doc(admitted,source="unverified_mirror")])
     cases=_cases({"method":METHOD},[doc(mandatory)])
     assert cases and cases[0]["classification"]=="violation",cases
     assert not _cases({"method":METHOD},[doc("Начальная цена договора 394 633,33 рублей")])
@@ -62,12 +80,13 @@ def run():
     p={"reg":REG,"method":METHOD}
     assert len([f for f in ns["analyze"](p,[doc(mandatory)]) if f.get("kind")=="violation"])==1
     assert not ns["analyze"](p,[doc(existence)])
+    assert len(ns["analyze"](p,[doc(admitted)]))==1
     assert len(ns["build_checks"](p,{}, {},[doc(existence)]))==1
     assert not ns["build_checks"](p,{}, {},[doc(mandatory)])
     print("V324_FAS_PRACTICE_SELFTEST_OK official_practice=4 "
           "SME_explicit=True agreement_review=True submit_violation=True "
           "unverified_rejected=True no_duplicate_counts=True NMCD_394633_33=True "
-          "conflict_rejected=True",flush=True)
+          "conflict_rejected=True collective_admission=True",flush=True)
 
 if __name__=="__main__":
     run()
