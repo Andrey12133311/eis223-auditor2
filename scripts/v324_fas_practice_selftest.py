@@ -38,6 +38,12 @@ def run():
         "только субъекты малого и среднего предпринимательства."
     )
     assert len(_admission_cases({"method":METHOD},[doc(admitted)]))==1
+    # Production PDF extractor returns pages as long single paragraphs;
+    # section 1.3.1 must remain detectable after thousands of characters.
+    page=("Сведения о конкурсной документации и планах закупки. "*85)+admitted+(
+        " Порядок работы комиссии и окончание приёма заявок. "*85)
+    assert len(page)>2400
+    assert _admission_cases({"method":METHOD},[doc(page)]), "Long PDF page must not suppress section 1.3.1"
     assert not _admission_cases({"method":METHOD},[doc(excluded)])
     assert not _admission_cases({"method":"Открытый конкурс"},[doc(admitted.replace(
         "только субъекты малого и среднего предпринимательства",
