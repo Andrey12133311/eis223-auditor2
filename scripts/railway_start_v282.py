@@ -48,6 +48,7 @@ import v333_dedup_ui
 import v334_findings_ledger
 import v335_price_recovery
 import v336_legal_matrix
+import v338_card_prices
 import v337_all_legal_categories
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
@@ -101,6 +102,7 @@ def main():
     v333_dedup_ui.install(vars(entry))
     v334_findings_ledger.install(vars(entry))
     v335_price_recovery.install(vars(entry))
+    v338_card_prices.install(vars(entry))
     try:
         v312_archive_selftest.run()
     except Exception as exc:
