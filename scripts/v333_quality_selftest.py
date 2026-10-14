@@ -20,6 +20,33 @@ def run():
         {"title":"Срок разъяснений","document":"a.docx","evidence":"2026-10-06"},
     ]))==2
     assert issue_key(x[2]["title"])==issue_key(x[3]["title"])
+    # Real repeated SME payment finding: raw excerpt and file/source wrapper
+    # describe the SAME clause even if a truncated snippet starts midword.
+    payment="Срок оплаты требует проверки: превышен предел для МСП"
+    paragraph=("ации. 9 | Форма, сроки и порядок оплаты товара, работы, услуги | "
+               "Расчет производится на основании счета (счета-фактуры) "
+               "в течение 15 рабочих дней с даты подписания Заказчиком "
+               "документов о приемке товара. Сроки и порядок проведения "
+               "процедур аукциона | Сроки и порядок")
+    repeats=[
+        {"title":payment,"kind":"violation","document":"Документация о поставке круп.docx",
+         "evidence":"Файл/источник: Документация о поставке круп.docx; фрагмент: "+paragraph},
+        {"title":payment,"kind":"violation","evidence":paragraph},
+        {"title":payment,"kind":"violation","evidence":paragraph},
+    ]
+    unique=collapse(repeats)
+    assert len(unique)==1,unique
+    assert unique[0]["document"]=="Документация о поставке круп.docx"
+    # Different factual deadlines must remain independent, even with the
+    # same legal title and document.
+    other=dict(repeats[1],evidence=paragraph.replace("15 рабочих","10 рабочих"))
+    assert len(collapse([repeats[1],other]))==2
+    # Different originals containing separately sourced clauses remain visible.
+    other_doc=dict(repeats[0],document="Другой договор.docx")
+    assert len(collapse([repeats[0],other_doc]))==2
+    # A short generic common title is insufficient to erase distinct evidence.
+    assert len(collapse([{"title":payment,"evidence":"Оплата 15 дней, раздел 2"},
+                         {"title":payment,"evidence":"Оплата 15 дней, раздел 3"}]))==2
     root=ET.Element("{urn:oasis:names:tc:opendocument:xmlns:office:1.0}document-content")
     table=ET.SubElement(root,"{"+ODF_TABLE+"}table")
     for number in range(3):
