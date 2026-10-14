@@ -148,6 +148,22 @@ def _real_customer(value):
     if name.isdigit() or re.fullmatch(r"[0-9\\s-]+",name):return ""
     return name
 
+def _valid_subject(value):
+    subject=" ".join(str(value or "").split())[:800]
+    if len(subject)<12 or re.fullmatch(r"[0-9\\W_]+",subject):
+        return ""
+    low=subject.casefold().strip(" .:;-")
+    bad=("подача заявок","приём заявок","прием заявок",
+         "начало подачи заявок","окончание подачи заявок",
+         "прием заявок окончен","приём заявок окончен",
+         "подведение итогов","работа комиссии","статус закупки",
+         "опубликовано","размещено","закупка завершена",
+         "закупка отменена","идёт приём заявок","идет прием заявок")
+    if low in bad or low.startswith(("статус:","статус закупки:",
+         "этап закупки:","прием заявок:","приём заявок:")):
+        return ""
+    return subject
+
 def _apply_customer(ns,value):
     name=_real_customer(value.get("customer"))
     inn=str(value.get("customer_inn") or "").strip()
@@ -156,12 +172,16 @@ def _apply_customer(ns,value):
     try:
         db.execute("BEGIN IMMEDIATE")
         reg=value["reg_number"]
-        subject=" ".join(str(value.get("title") or "").split())[:800]
-        if subject and len(subject)>=10 and subject.lower() not in (
-                "подача заявок","приём заявок","начало подачи заявок"):
+        subject=_valid_subject(value.get("title"))
+        if subject:
             db.execute("""UPDATE purchases SET title=?
-                WHERE reg_number=? AND (title IS NULL OR LENGTH(TRIM(title))<10
-                    OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок')
+                WHERE reg_number=? AND (title IS NULL OR LENGTH(TRIM(title))<12
+                    OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок',
+                       'прием заявок','статус закупки','подведение итогов',
+                       'закупка завершена','закупка отменена')
+                    OR LOWER(TRIM(title)) LIKE 'статус:%'
+                    OR LOWER(TRIM(title)) LIKE 'статус закупки:%'
+                    OR LOWER(TRIM(title)) LIKE 'этап закупки:%'
                     OR LOWER(title) LIKE 'закупка №%')""",(subject,reg))
         if inn:
             db.execute("""UPDATE purchases SET customer_inn=?
@@ -169,11 +189,11 @@ def _apply_customer(ns,value):
                 (inn,reg))
         if name:
             db.execute(
-              """UPDATE purchases SET customer=?,
-                 customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
+              """UPDATE purchases SET customer=?
                  WHERE reg_number=? AND (customer IS NULL OR TRIM(customer)=''
-                     OR LOWER(customer) LIKE 'уточняем%' OR LOWER(customer) LIKE '%уточняется%')""",
-              (name,inn,inn,reg))
+                     OR LOWER(customer) LIKE 'уточняем%' OR LOWER(customer) LIKE '%уточняется%'
+                     OR LOWER(customer) IN ('не указан','нет данных'))""",
+              (name,reg))
         # A submitted search INN is NOT evidence that the retrieved buyer
         # has this INN. Do not copy buyer names between unrelated cards.
         db.commit()
