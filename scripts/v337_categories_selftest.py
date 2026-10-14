@@ -21,7 +21,7 @@ def run():
     assert all(x["law"] and x["title"] and x["qualification"] for x in report["items"])
     assert all(x["qualification"]!="automatic_violation" for x in report["items"])
     cases=[
-        ("Реестр недобросовестных поставщиков: сведения представлены заказчику.","rnp"),
+        ("Реестр недобросовестных поставщиков: сведения представлены заказчику.","unfair_suppliers"),
         ("В составе заявки участник обязан представить банковскую справку.","bank_certificates"),
         ("Протокол рассмотрения заявок по запросу предложений.","application_protocol"),
         ("Несостоявшаяся конкурентная закупка передана единственному поставщику.","negotiated_single"),
