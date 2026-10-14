@@ -395,10 +395,25 @@ def stored_metadata(ns, reg):
 def reconcile(ns):
     db = ns["conn"]()
     try:
-        rows = db.execute("""SELECT reg_number FROM purchases
-            WHERE customer IS NULL OR TRIM(customer)='' OR LOWER(customer) LIKE '%уточня%'
-                OR LOWER(customer) LIKE 'наименование (полное и сокращ%' OR customer_inn IS NULL OR TRIM(customer_inn)='' OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок','прием заявок','статус закупки') OR price_num IS NULL
-            ORDER BY last_seen DESC LIMIT 2000""").fetchall()
+        # Bounded rotating batch. Missing prices are common in old records;
+        # rescanning thousands of DOCX/PDF originals on every restart can
+        # stall Railway readiness and starve the actual legal-audit queue.
+        condition="""customer IS NULL OR TRIM(customer)='' OR
+                LOWER(customer) LIKE '%уточня%' OR
+                LOWER(customer) LIKE 'наименование (полное и сокращ%' OR
+                customer_inn IS NULL OR TRIM(customer_inn)='' OR
+                title IS NULL OR LOWER(TRIM(title)) IN
+                ('подача заявок','приём заявок','прием заявок','статус закупки')
+                OR price_num IS NULL"""
+        total=int(db.execute("SELECT COUNT(*) FROM purchases WHERE "+condition).fetchone()[0])
+        offset=int(ns.get("_v314_metadata_offset") or 0)%max(1,total)
+        rows=db.execute("SELECT reg_number FROM purchases WHERE "+condition+
+                        " ORDER BY last_seen DESC LIMIT 55 OFFSET ?",(offset,)).fetchall()
+        if not rows and total:
+            offset=0
+            rows=db.execute("SELECT reg_number FROM purchases WHERE "+condition+
+                            " ORDER BY last_seen DESC LIMIT 55",()).fetchall()
+        ns["_v314_metadata_offset"]=(offset+len(rows))%max(1,total)
     finally:
         db.close()
     corrected = 0
@@ -420,11 +435,15 @@ def install(ns):
 
     @app.on_event("startup")
     async def backfill():
-        status.update(await asyncio.to_thread(reconcile,ns))
         async def periodic():
+            # Do not block service boot/healthchecks on historical PDF/OCR.
+            await asyncio.sleep(25)
             while True:
+                try:
+                    status.update(await asyncio.to_thread(reconcile,ns))
+                except Exception:
+                    LOG.exception("V324 metadata background sweep failed")
                 await asyncio.sleep(300)
-                status.update(await asyncio.to_thread(reconcile,ns))
         asyncio.create_task(periodic())
 
     @app.get("/api/v314/customer-metadata/status")
