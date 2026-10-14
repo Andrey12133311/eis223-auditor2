@@ -386,6 +386,29 @@ async def offline_audit(ns,reg):
                            "evidence":body[max(0,pos-80):pos+len(phrase)+100],
                            "legal_basis":"223-ФЗ, статья 3.1-4",
                            "reason":"Сопоставить с XML ЕИС, кодом ОКПД2, датой и исключениями"})
+    # National regime: compare the same explicit clause across the notice
+    # and verified originals. Absence alone is not an infringement.
+    if notice is not None:
+        xml_flags=set()
+        for node in notice.iter():
+            key=tag(node).casefold()
+            if key in ("prohibitionnationalregime","restrictionnationalregime",
+                       "preferencenationalregime") and str(node.text or "").strip().lower()=="true":
+                xml_flags.add(key)
+        for doc in docs:
+            if doc.get("status")!="checked":continue
+            body=" ".join(str(doc.get("text") or "").lower().split())
+            pairs=(("prohibitionnationalregime","запрет допуска товаров иностранного происхождения"),
+                   ("restrictionnationalregime","ограничение допуска товаров иностранного происхождения"))
+            for flag,phrase in pairs:
+                if phrase not in body or flag in xml_flags:continue
+                checks.append({"code":"national_regime_notice_document_discrepancy",
+                               "status":"check",
+                               "title":"Условие национального режима есть в документе, но не отмечено в XML",
+                               "document":doc.get("name") or "",
+                               "evidence":phrase,
+                               "legal_basis":"223-ФЗ, статья 4, часть 8",
+                               "reason":"Проверить применимость режима и действующую редакцию извещения"})
     # Structured clarification/cancellation events: compare calendar dates
     # only. Holiday-sensitive statutory conclusions require an authoritative
     # production calendar and are deliberately held for legal review.
