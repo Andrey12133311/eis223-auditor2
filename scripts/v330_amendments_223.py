@@ -22,24 +22,21 @@ DECISION=re.compile(
     r"(?:дата\s+(?:принятия\s+)?решения\s+о\s+внесении\s+изменени\w*|"
     r"решени\w*\s+о\s+внесении\s+изменени\w*\s+(?:от|принят\w*)|"
     r"(?:изменени\w*|редакци\w*)\s+документаци\w*\s+(?:от|утвержден\w*\s*))"
-    r"\s*[:№–—\-]*\s*"+DATE_RX,re.I),
+    r"\s*[:№–—\-]*\s*"+DATE_RX,re.I)
 PUBLISHED=re.compile(
     r"(?:дата\s+(?:и\s+время\s+)?(?:публикации|размещения)\s+"
     r"(?:изменени\w*|новой\s+редакци\w*)\s+(?:в\s+)?ЕИС|"
     r"(?:изменени\w*|редакци\w*)\s+(?:размещен\w*|опубликован\w*)\s+(?:в\s+)?ЕИС)"
-    r"\s*[:№–—\-]*\s*"+DATE_RX,re.I),
-)
+    r"\s*[:№–—\-]*\s*"+DATE_RX,re.I)
 # Separate clues: a document dated Aug 10 is NOT proof of formal adoption;
 # a publication date of a general notice is NOT an amendment's publication.
 DOC_DATE=re.compile(
     r"(?:изменени\w*|редакци\w*|документаци\w*)"
-    r".{0,95}?\b(?:от|утвержден\w*)\s*"+DATE_RX,re.I),
-)
+    r".{0,95}?\b(?:от|утвержден\w*)\s*"+DATE_RX,re.I)
 SUBMISSION_DATE=re.compile(
     r"(?:дата\s+(?:и\s+время\s+)?окончани\w*\s+(?:срока\s+)?"
     r"подачи\s+заявок|окончани\w*\s+(?:срока\s+)?подачи\s+заявок)"
-    r".{0,70}?"+DATE_RX,re.I),
-)
+    r".{0,70}?"+DATE_RX,re.I)
 
 def day(value):
     if not value:return None
