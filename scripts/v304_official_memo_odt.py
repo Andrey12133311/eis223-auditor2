@@ -364,7 +364,10 @@ def _render_odt(template,p,findings,organization,fields):
                         parent.remove(child);break
     items["content.xml"]=ET.tostring(node,encoding="utf-8",xml_declaration=True)
     items["styles.xml"]=ET.tostring(style,encoding="utf-8",xml_declaration=True)
-    return _zip_content(items)
+    # Preserve the exact official template; standardize only memo body styles,
+    # verified evidence paragraphs and trailing empty spacers.
+    from v321_memo_layout import format_service_memo
+    return format_service_memo(_zip_content(items), findings)
 
 UPLOAD_FORM='''<!doctype html><html lang="ru"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
