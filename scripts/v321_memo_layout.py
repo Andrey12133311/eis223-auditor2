@@ -59,7 +59,8 @@ def _style(root):
         "{"+ST+"}family":"paragraph",
         "{"+ST+"}parent-style-name":"Standard"})
     ET.SubElement(style,"{"+ST+"}paragraph-properties",{
-        "{"+FO+"}text-align":"justify",
+        "{"+FO+"}text-align":"left",
+        # Left alignment prevents LibreOffice from stretching gaps between words.
         "{"+ST+"}justify-single-word":"false",
         "{"+FO+"}text-indent":"1.25cm",
         "{"+FO+"}margin-left":"0cm",
