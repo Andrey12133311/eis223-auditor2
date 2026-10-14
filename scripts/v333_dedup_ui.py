@@ -139,8 +139,10 @@ function cleanup(){
  if(!card)return;
  const panel=document.getElementById('v267-canonical');
  const heading=panel?.querySelector('h2');
- if(heading)heading.textContent='Нарушения'+(heading.textContent.match(/\d+/)?.[0]
-     ?': '+heading.textContent.match(/\d+/)[0]:'');
+ if(heading && !/^Нарушения(?:\s*:\s*\d+)?$/i.test((heading.textContent||'').trim())){
+    const count=(heading.textContent||'').match(/\d+/)?.[0];
+    heading.textContent='Нарушения'+(count?': '+count:'');
+ }
  // Result cards are sometimes duplicated independently of the canonical API.
  const results=[...document.querySelectorAll('h2,h3')].find(h=>
     /^Результаты проверки$/i.test((h.textContent||'').trim()));
