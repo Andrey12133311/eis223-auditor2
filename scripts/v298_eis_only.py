@@ -498,6 +498,23 @@ async def offline_audit(ns,reg):
                                "evidence":phrase,
                                "legal_basis":"223-ФЗ, статья 4, часть 8",
                                "reason":"Проверить применимость режима и действующую редакцию извещения"})
+    if notice is not None:
+        regime_flags=[tag(node) for node in notice.iter()
+                      if tag(node).casefold() in ("prohibitionnationalregime",
+                      "restrictionnationalregime","preferencenationalregime")
+                      and str(node.text or "").strip().lower()=="true"]
+        if regime_flags:
+            codes=sorted({str(node.text).strip() for node in notice.iter()
+                          if tag(node).casefold() in ("okpd2","okpd2code","okpdcode")
+                          and node.text})
+            checks.append({"code":"national_regime_exception_qualification",
+                           "status":"check",
+                           "title":"Проверка исключений национального режима",
+                           "document":"Официальное извещение ЕИС",
+                           "evidence":"Признаки: "+", ".join(sorted(set(regime_flags)))+
+                                      "; ОКПД2: "+(", ".join(codes[:20]) if codes else "не указан"),
+                           "legal_basis":"223-ФЗ, статья 3.1-4",
+                           "reason":"Сопоставить нормативный акт, код товара и применимые исключения"})
     # Structured clarification/cancellation events: compare calendar dates
     # only. Holiday-sensitive statutory conclusions require an authoritative
     # production calendar and are deliberately held for legal review.
