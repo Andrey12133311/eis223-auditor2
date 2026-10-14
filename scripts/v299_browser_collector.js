@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "320"; // validated archived cards and correct link regex
+  const COLLECTOR_VERSION = "323"; // verified NMCD, archived cards and manual-review status
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -485,6 +485,33 @@
     }
     return candidates;
   }
+  function priceFromDocument(doc,reg){
+    if(!doc || !new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(doc.body?.textContent||""))
+      return "";
+    const raw=valueByLabel(doc,[
+      /^начальн(?:ая|ой|ую)\s*\(?максимальн(?:ая|ой|ую)\)?\s*цен(?:а|ы|у)\s*договора$/i,
+      /^начальн(?:ая|ой|ую)\s*цен(?:а|ы|у)\s*договора$/i,
+      /^нмцд$/i,
+      /^начальная\s*\(максимальная\)\s*цена$/i
+    ]);
+    const clean=String(raw||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()
+      .replace(/\s*Российский рубль\s*$/i," ₽");
+    if(!/^\d[\d ]{0,18}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|рублей)?$/i.test(clean))
+      return "";
+    return clean;
+  }
+  async function reportOfficialPrice(reg,source,doc){
+    const price=priceFromDocument(doc,reg);
+    if(!price)return;
+    try{
+      const result=await api("/api/v322/eis223/price","POST",{
+        reg_number:reg,source_page:source,price
+      });
+      if(result.accepted)log(reg,"НМЦД подтверждена карточкой ЕИС");
+    }catch(e){
+      log(reg,"не удалось сохранить НМЦД:",String(e.message).slice(0,110));
+    }
+  }
   async function reportOfficialBuyer(reg,source,customer,title){
     // Buyer's verified official card metadata must not depend on document
     // availability. This call is intentionally separate from original upload.
@@ -533,6 +560,7 @@
         const customer={name:meta.name||searchCustomer.name,inn:meta.inn||searchCustomer.inn};
         const title=titleFromDocument(document,reg)||searchTitle(searchDoc,reg);
         await reportOfficialBuyer(reg,liveLanding||liveUrl.href,customer,title);
+        await reportOfficialPrice(reg,liveUrl.href,document);
         return {docs,source:liveUrl.href,landing:liveLanding||liveUrl.href,
                 customer,title};
       }
@@ -613,6 +641,7 @@
       const title=titleFromDocument(landing,reg)||searchTitle(searchDoc,reg);
       // Save the buyer NOW even if every document tab below returns HTTP 404.
       await reportOfficialBuyer(reg,url.href,customer,title);
+      await reportOfficialPrice(reg,url.href,landing);
       const onCard=discoverDocs(landing,reg);
       if(onCard.length)return {docs:onCard,source:url.href,landing:url.href,customer,title};
       for(const target of documentPageCandidates(reg,landing)){
@@ -627,6 +656,7 @@
             const details=customerFromDocument(page,reg);
             if(!customer.name)customer=details;
             if(!customer.name)customer=searchCustomer;
+            await reportOfficialPrice(reg,redirected.href,page);
             return {docs,source:redirected.href,landing:url.href,customer,title};
           }
           problems.push(u.pathname+" — на странице отсутствуют файлы");
