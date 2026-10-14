@@ -537,6 +537,25 @@ async def offline_audit(ns,reg):
                                "evidence":body[max(0,pos-90):pos+len(phrase)+130],
                                "legal_basis":"Постановление Правительства РФ № 1875, пункт 4",
                                "reason":"Проверить документальное основание, применимость к конкретному лоту и редакцию акта на дату закупки"})
+    # An exception is not automatically applicable when product identity,
+    # procurement date or documentary proof is missing.
+    if notice is not None:
+        regime_nodes=[node for node in notice.iter()
+                      if tag(node).casefold() in ("prohibitionnationalregime",
+                        "restrictionnationalregime","preferencenationalregime")
+                      and str(node.text or "").strip().lower()=="true"]
+        if regime_nodes:
+            product_codes=sorted({str(node.text).strip() for node in notice.iter()
+                 if tag(node).casefold() in ("okpd2","okpd2code","okpdcode")
+                 and node.text})
+            if not product_codes:
+                checks.append({"code":"national_regime_missing_product_classification",
+                               "status":"check",
+                               "title":"Нельзя установить применимость исключения без ОКПД2",
+                               "document":"Официальный XML извещения",
+                               "evidence":"В XML выявлены признаки национального режима, код ОКПД2 не извлечён",
+                               "legal_basis":"Постановление Правительства РФ № 1875",
+                               "reason":"Уточнить ОКПД2 по позициям лота и перечни на дату публикации"})
     # Structured clarification/cancellation events: compare calendar dates
     # only. Holiday-sensitive statutory conclusions require an authoritative
     # production calendar and are deliberately held for legal review.
