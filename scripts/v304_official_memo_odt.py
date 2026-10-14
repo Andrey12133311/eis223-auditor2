@@ -332,7 +332,8 @@ def _render_odt(template,p,findings,organization,fields):
        organization.rstrip(".")+".")
     if len(paras)>31 and not _text(paras[30]).strip() and not _text(paras[31]).strip():
         body.remove(paras[31])
-    _format_memo_body(node,body,paras)
+    # Final typography is applied after filling metadata by v321 formatter.
+    # Do not flatten ODF spans here: text:s/tab data would be lost.
     # The source document ID is another official memo's registration number.
     # It is not a valid identifier for the newly created draft.
     for para in body.iter("{"+TX+"}p"):
