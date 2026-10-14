@@ -126,7 +126,7 @@ SCRIPT='''<script id="v302-modern-js">
   return '<ul class="v302-results">'+items.slice(0,35).map(p=>
     '<li><span><a href="/check-new/'+encodeURIComponent(p.reg_number)+'">'+escape(p.reg_number)+'</a>'+
     '<small> · '+escape(p.title||p.customer||'Документы ЕИС')+'</small>'+
-    '<small> · НМЦД: '+escape(money(p))+'</small></span>'+
+    '<small> · Стоимость закупки: '+escape(window.eis223PriceText?window.eis223PriceText(p):money(p))+'</small></span>'+
     '<span>Обработано документов: '+Number(p.documents_checked||0)+' · Нарушений: <b>'+
     Number(p.violations||0)+'</b></span></li>').join('')+'</ul>';
  }
