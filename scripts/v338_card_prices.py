@@ -39,6 +39,11 @@ def initialize(ns):
             CREATE TABLE IF NOT EXISTS v338_price_requests(
               reg TEXT PRIMARY KEY,created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS v338_price_rechecks(
+              reg TEXT PRIMARY KEY,state TEXT NOT NULL DEFAULT 'pending',
+              changed_at TEXT NOT NULL, checked_at TEXT,
+              result TEXT NOT NULL DEFAULT ''
+            );
         """)
     finally:db.close()
 
@@ -90,6 +95,9 @@ def save_card_price(ns,reg,price,amount,kind,label,source):
                       "price_label":label,"evidence_page":source}
                 db.execute("UPDATE purchases SET card_fields_json=? WHERE reg_number=?",
                            (json.dumps(card,ensure_ascii=False),reg))
+        if existing:
+            db.execute("""INSERT OR IGNORE INTO v338_price_rechecks(reg,state,changed_at)
+                          VALUES(?,'pending',?)""",(reg,_now()))
         db.commit()
         return {"updated":bool(updated),"conflict":False,"saved":True}
     except:
@@ -106,9 +114,13 @@ def price_summary(ns):
         known=db.execute("SELECT COUNT(*) FROM v338_card_price").fetchone()[0]
         conflicted=db.execute("SELECT COUNT(*) FROM v338_card_price WHERE conflict=1").fetchone()[0]
         requested=db.execute("SELECT COUNT(*) FROM v338_price_requests").fetchone()[0]
+        pending=db.execute("SELECT COUNT(*) FROM v338_price_rechecks WHERE state='pending'").fetchone()[0]
+        rechecked=db.execute("SELECT COUNT(*) FROM v338_price_rechecks WHERE state='completed'").fetchone()[0]
         return {"purchases":total,"missing_price_fields":missing,
                 "official_cards_captured":known,"price_conflicts_require_review":conflicted,
-                "bridge_backfill_jobs_submitted":requested}
+                "bridge_backfill_jobs_submitted":requested,
+                "price_triggered_legal_rechecks_pending":pending,
+                "price_triggered_legal_rechecks_completed":rechecked}
     finally:db.close()
 
 def enqueue_missing_prices(ns,limit=8):
@@ -190,5 +202,40 @@ def install(ns):
                     print("V338 CARD_PRICE_BACKFILL_FAILED "+type(exc).__name__,flush=True)
                 await asyncio.sleep(300)
         ns["_v338_card_price_worker"]=asyncio.create_task(worker())
+        async def recheck_after_card_price():
+            # Finish the current full-database re-audit before rechecking
+            # individual procurements whose official EIS price just arrived.
+            await asyncio.sleep(90)
+            from v332_all_procurements_audit import progress,inspect_one
+            while True:
+                try:
+                    run=await asyncio.to_thread(progress,ns)
+                    if run.get("status")=="finished":
+                        db=ns["conn"]()
+                        try:
+                            reg_row=db.execute("""SELECT reg FROM v338_price_rechecks
+                                    WHERE state='pending' ORDER BY changed_at LIMIT 1""").fetchone()
+                        finally:db.close()
+                        if reg_row:
+                            reg=str(reg_row[0])
+                            lock=ns.get("lock")
+                            if lock is None:raise RuntimeError("Audit lock unavailable")
+                            async with lock:
+                                state,summary=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
+                            db=ns["conn"]()
+                            try:
+                                db.execute("""UPDATE v338_price_rechecks
+                                    SET state=?,checked_at=?,result=?
+                                    WHERE reg=?""",("completed" if state=="completed" else "failed",
+                                                   _now(),json.dumps(summary,ensure_ascii=False)[:800],reg))
+                                db.commit()
+                            finally:db.close()
+                            print(f"V338 PRICE_LEGAL_RECHECK reg={reg} state={state} "
+                                  f"new_findings={summary.get('new_findings',0)}",flush=True)
+                except Exception as exc:
+                    print(f"V338 PRICE_LEGAL_RECHECK_ERROR {type(exc).__name__}: "
+                          f"{str(exc)[:130]}",flush=True)
+                await asyncio.sleep(60)
+        ns["_v338_price_rechecks_worker"]=asyncio.create_task(recheck_after_card_price())
     print("V338 EIS_CARD_PRICE_READY typed_values=True official_browser_only=True "
           "backfill_behind_manual=True",flush=True)
