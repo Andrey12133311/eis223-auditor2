@@ -72,6 +72,47 @@ def official_notice(reg):
     return None
 
 
+# Federal five-day working calendar based on Labour Code art. 112 and
+# Government transfer decrees 1314 (2024), 1335 (2025), 1466 (2026).
+# Regional non-working days are outside this federal calendar.
+def federal_workday(day):
+    from datetime import date, timedelta
+    if day.year not in (2024,2025,2026):
+        return None
+    holiday={(1,d) for d in range(1,9)}
+    holiday.update({(2,23),(3,8),(5,1),(5,9),(6,12),(11,4)})
+    closed={
+        2024:{"2024-04-29","2024-04-30","2024-05-10","2024-12-30","2024-12-31"},
+        2025:{"2025-05-02","2025-05-08","2025-06-13","2025-11-03","2025-12-31"},
+        2026:{"2026-01-09","2026-12-31"},
+    }
+    working_saturdays={
+        2024:{"2024-04-27","2024-11-02","2024-12-28"},
+        2025:{"2025-11-01"},
+        2026:set(),
+    }
+    iso=day.isoformat()
+    if iso in working_saturdays[day.year]:return True
+    if iso in closed[day.year] or (day.month,day.day) in holiday:return False
+    if day.weekday()>=5:return False
+    # Holiday on a weekend moves to the next weekday, except January 1-8.
+    for month,daynum in ((2,23),(3,8),(5,1),(5,9),(6,12),(11,4)):
+        holiday_day=date(day.year,month,daynum)
+        if holiday_day.weekday()<5:continue
+        replacement=holiday_day+timedelta(days=1)
+        while replacement.weekday()>=5 or (replacement.month,replacement.day) in holiday:
+            replacement+=timedelta(days=1)
+        if day==replacement:return False
+    return True
+
+def federal_workdays_between(start,end):
+    from datetime import timedelta
+    if start.year not in (2024,2025,2026) or end.year not in (2024,2025,2026):
+        return None
+    if end<start or (end-start).days>3660:return None
+    return sum(federal_workday(start+timedelta(days=i))
+               for i in range(1,(end-start).days+1))
+
 def stored_purchase(ns,reg):
     db=ns["conn"]()
     try:
@@ -427,17 +468,17 @@ async def offline_audit(ns,reg):
         if not request_day or not answer_day or not closing:continue
         if request_day>closing or answer_day<request_day:continue
         if (closing-request_day).days>3660 or (answer_day-request_day).days>3660:continue
-        weekdays_before=sum((request_day+timedelta(days=n)).weekday()<5
-                            for n in range(1,(closing-request_day).days+1))
+        weekdays_before=federal_workdays_between(request_day,closing)
+        if weekdays_before is None:continue
         if weekdays_before<3:continue
         # Holiday calendars and legally transferred workdays may differ from weekdays.
-        elapsed_weekdays=sum((request_day+timedelta(days=n)).weekday()<5
-                             for n in range(1,(answer_day-request_day).days+1))
+        elapsed_weekdays=federal_workdays_between(request_day,answer_day)
+        if elapsed_weekdays is None:continue
         if elapsed_weekdays>3:
             checks.append({"code":"clarification_three_workdays_review","status":"check",
                 "title":"Возможное нарушение срока размещения разъяснения",
                 "document":"Сведения ЕИС об изменениях и разъяснениях",
-                "evidence":f"Запрос: {request_day}; публикация: {answer_day}; рабочих дней без праздников: {elapsed_weekdays}",
+                "evidence":f"Запрос: {request_day}; публикация: {answer_day}; рабочих дней по федеральному календарю: {elapsed_weekdays}",
                 "legal_basis":"223-ФЗ, статья 3.2, часть 3",
                 "reason":"Проверить производственный календарь, дату получения запроса и действующую редакцию извещения"})
     for event in (public.get("cancellations") or []) if isinstance(public.get("cancellations"),list) else []:
