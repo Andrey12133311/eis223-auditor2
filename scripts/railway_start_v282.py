@@ -40,6 +40,7 @@ import v303_mobile_fixes
 import v311_verified_customer
 import v311_customer_backfill
 import v314_eis_metadata
+import v324_fas_practice
 import v315_verified_reaudit
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
@@ -72,6 +73,7 @@ def main():
     v294_eis_bridge.install(vars(entry))
     v295_eis_originals.install(vars(entry))
     v299_browser_intake.install(vars(entry))
+    v324_fas_practice.install(vars(entry))
     v298_eis_only.install(vars(entry))
     v300_violation_ui.install(vars(entry))
     v301_search_jobs.install(vars(entry))
