@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "335"; // recover price blocks, inline labels and missing NMCD
+  const COLLECTOR_VERSION = "338"; // official EIS card prices: NMCD, max value, subject cost
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -486,31 +486,89 @@
     }
     return candidates;
   }
-  function priceFromDocument(doc,reg){
-    if(!doc || !new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(doc.body?.textContent||doc.textContent||""))
-      return "";
-    const raw=valueByLabel(doc,[
-      /^начальн(?:ая|ой|ую)\s*\(?максимальн(?:ая|ой|ую)\)?\s*цен(?:а|ы|у)\s*договора(?:\s*\(цена лота\))?$/i,
-      /^начальн(?:ая|ой|ую)\s*цен(?:а|ы|у)\s*договора$/i,
-      /^нмцд$/i,
-      /^начальная\s*\(максимальная\)\s*цена$/i
-    ]);
-    const clean=String(raw||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()
-      .replace(/\s*Российский рубль\s*$/i," ₽");
-    if(!/^\d[\d ]{0,18}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|рублей|рубля|рубль|RUB)?$/i.test(clean))
-      return "";
-    return clean;
+  // Never infer the contract's initial price from its award, unit cost,
+  // spreadsheet page number or a different lot. Use labeled EIS-card fields.
+  function cardPriceFromDocument(doc,reg){
+    if(!doc||!new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(
+        doc.body?.textContent||doc.textContent||""))return null;
+    const groups=[
+      {kind:"nmcd",pattern:/^(?:начальн\w*\s*\(?максимальн\w*\)?\s*цен\w*(?:\s+договора)?|начальн\w*\s+цен\w*\s+договора|нмцд|начальная\s*\(максимальная\)\s*цена)$/i},
+      {kind:"maximum_contract_value",pattern:/^максимальн\w*\s+значени\w*\s+цен\w*\s+договора$/i},
+      {kind:"subject_cost",pattern:/^(?:стоимост\w*\s+предмет\w*\s+закупк\w*|стоимост\w*\s+закупк\w*)$/i}
+    ];
+    const amount=raw=>{
+      const clean=String(raw||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()
+        .replace(/\s*(?:Российский рубль|Российских рублей)\s*$/i," ₽");
+      if(!/^\d[\d ]{0,18}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|рублей|рубля|рубль|RUB)?$/i.test(clean))return "";
+      const n=Number(clean.replace(/(?:₽|руб\.?|рублей|рубля|рубль|RUB)/gi,"")
+           .replace(/\s/g,"").replace(",","."));
+      return Number.isFinite(n)&&n>=0&&n<=1e15?clean:"";
+    };
+    const selectors=".common-text__title,.section__title,.registry-entry__body-title,"+
+      ".registry-entry__body-item-title,.price-block__title,.data-block__title,"+
+      ".blockInfo__label,.common-text__label,dt,label,th,td";
+    for(const group of groups){
+      const candidates=[];
+      for(const node of doc.querySelectorAll(selectors)){
+        const raw=(node.textContent||"").replace(/\s+/g," ").trim();
+        if(raw.length>200)continue;
+        const inline=raw.match(/^([^:：]{1,100})\s*[:：]\s*(.+)$/);
+        const label=(inline?inline[1]:raw).replace(/[:：]\s*$/,"").trim();
+        if(!group.pattern.test(label))continue;
+        const hits=[];
+        if(inline)hits.push(inline[2]);
+        for(const n of [node.nextElementSibling,...(node.parentElement?.querySelectorAll(
+          ".common-text__value,.section__info,.registry-entry__body-value,"+
+          ".registry-entry__body-item-value,.blockInfo__value,.price-block__value,"+
+          ".data-block__value,dd,td,.section__value,.value")||[])]){
+          if(n&&n!==node&&!n.contains(node)&&!node.contains(n)){
+            const t=(n.textContent||"").replace(/\s+/g," ").trim();
+            if(t.length<=120)hits.push(t);
+          }
+        }
+        // Nested labels sometimes contain the sole value as a sibling text node.
+        if(!hits.length){
+          const t=(node.parentElement?.textContent||"").replace(/\s+/g," ").trim();
+          if(t.startsWith(raw)&&t.length<140)hits.push(t.slice(raw.length).trim().replace(/^[:：-]/,""));
+        }
+        for(const rawValue of hits){
+          const value=amount(rawValue);
+          if(value){candidates.push({price:value,price_kind:group.kind,price_label:label});break}
+        }
+      }
+      // A sole explicit label with one unambiguous value may appear in EIS
+      // plain-text mobile layouts (on a separate line, not a DOM <value>).
+      if(!candidates.length){
+        const lines=(doc.body?.innerText||"").split(/\n/).map(s=>s.trim()).filter(Boolean);
+        for(let j=0;j<lines.length;j++){
+          const inline=lines[j].match(/^([^:：]{1,100})\s*[:：]\s*(.+)$/);
+          const label=(inline?inline[1]:lines[j]).replace(/[:：]\s*$/,"").trim();
+          if(!group.pattern.test(label))continue;
+          const val=amount(inline?inline[2]:(lines[j+1]||""));
+          if(val)candidates.push({price:val,price_kind:group.kind,price_label:label});
+          if(candidates.length>12)break;
+        }
+      }
+      const unique=[...new Set(candidates.map(v=>Number(v.price.replace(/[^0-9,.]/g,"").replace(",","."))))];
+      if(unique.length===1 && candidates.length)return candidates[0];
+      if(unique.length>1){
+        log(reg,"разные цены лотов на карточке ЕИС — без подмены общей НМЦД");
+        return null;
+      }
+    }
+    return null;
   }
   async function reportOfficialPrice(reg,source,doc){
-    const price=priceFromDocument(doc,reg);
-    if(!price)return;
+    const item=cardPriceFromDocument(doc,reg);
+    if(!item)return;
     try{
-      const result=await api("/api/v322/eis223/price","POST",{
-        reg_number:reg,source_page:source,price
+      const result=await api("/api/v338/eis223/card-price","POST",{
+        reg_number:reg,source_page:source,...item
       });
-      if(result.accepted)log(reg,"НМЦД подтверждена карточкой ЕИС");
+      if(result.accepted)log(reg,"Цена подтверждена карточкой ЕИС:",
+                           item.price_kind,item.price,result.conflict?"расхождение":"");
     }catch(e){
-      log(reg,"не удалось сохранить НМЦД:",String(e.message).slice(0,110));
+      log(reg,"не удалось сохранить цену ЕИС:",String(e.message).slice(0,110));
     }
   }
   async function reportOfficialBuyer(reg,source,customer,title){
