@@ -55,7 +55,12 @@ def run():
         assert review["matching_documentary_excerpt_groups"]==1
         db=conn()
         with db:
-            db.execute("UPDATE checks SET evidence='06.10.2026' WHERE document='same.docx'")
+            db.execute("UPDATE checks SET document='same.docx; Карточка закупки' WHERE document='same.docx'")
+        db.close()
+        assert compare_same_titles(conn)["matching_documentary_excerpt_groups"]==1
+        db=conn()
+        with db:
+            db.execute("UPDATE checks SET evidence='06.10.2026' WHERE document LIKE 'same.docx%'")
         db.close()
         review=compare_same_titles(conn)
         assert review["groups_requiring_evidence_review"]==1
