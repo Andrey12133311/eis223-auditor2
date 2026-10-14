@@ -41,7 +41,9 @@ import v311_verified_customer
 import v311_customer_backfill
 import v314_eis_metadata
 import v324_fas_practice
-import v315_verified_reaudit
+import v330_amendments_223
+import v331_broad_legal
+import v332_all_procurements_audit
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
 def main():
@@ -74,6 +76,8 @@ def main():
     v295_eis_originals.install(vars(entry))
     v299_browser_intake.install(vars(entry))
     v324_fas_practice.install(vars(entry))
+    v330_amendments_223.install(vars(entry))
+    v331_broad_legal.install(vars(entry))
     v298_eis_only.install(vars(entry))
     v300_violation_ui.install(vars(entry))
     v301_search_jobs.install(vars(entry))
@@ -85,7 +89,8 @@ def main():
     v311_verified_customer.install(vars(entry))
     v311_customer_backfill.install(vars(entry))
     v314_eis_metadata.install(vars(entry))
-    v315_verified_reaudit.install(vars(entry))
+    # Supersede folder-only v315, which cannot examine partial uploads.
+    v332_all_procurements_audit.install(vars(entry))
     try:
         v312_archive_selftest.run()
     except Exception as exc:
