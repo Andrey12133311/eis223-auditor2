@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "318"; // buyer metadata from actual EIS labels/cards
+  const COLLECTOR_VERSION = "320"; // validated archived cards and correct link regex
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -312,12 +312,12 @@
       for(const element of exactCard.querySelectorAll("a[href],[onclick],[data-href],[data-url]")){
         for(const key of ["href","onclick","data-href","data-url"]){
           const raw=element.getAttribute(key)||"";
-          const match=raw.match(/(?:https?:\\/\\/zakupki\\.gov\\.ru)?\\/(?:223\\/purchase\\/public\\/purchase\\/info|epz\\/order\\/notice\\/notice223)\\/(?:documents|common-?info)\\.html\\?[^"'<>\\s)]+/i);
+          const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/(?:documents|common-?info)\.html\?[^"'<>\s)]+/i);
           if(!match)continue;
           try{
             const candidate=new URL(match[0].replace(/&amp;/gi,"&"),docBase);
             if(candidate.origin!==SITE||!officialNoticeId(candidate))continue;
-            candidate.pathname=candidate.pathname.replace(/\\/(?:documents|commoninfo)\\.html$/,"/common-info.html");
+            candidate.pathname=candidate.pathname.replace(/\/(?:documents|commoninfo)\.html$/,"/common-info.html");
             const verified=officialCardUrl(candidate.href,reg,INFO_PAGES,true);
             if(verified&&!seen.has(verified.href)){
               seen.add(verified.href);output.push(verified.href);
@@ -457,7 +457,13 @@
         // Even if EIS renders an older regNumber-only documents link, do not
         // follow it: it caused repeated false 404s.
         if(!claim||claim.key!==trusted.key||claim.value!==trusted.value)return;
-      }else if(claim)return;
+      }else if(claim){
+        // A verified regNumber-based official card may link to a noticeId
+        // documents tab. Accept this explicit card link, never fabricate a
+        // documents.html?regNumber URL (which produces EIS 404).
+        const exact=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)");
+        if(!verifiedCard||!exact.test(landing.body?.textContent||""))return;
+      }
       if(!nums.length&&!claim)return;
       seen.add(url.href);candidates.push(url.href);
     }
@@ -536,6 +542,33 @@
     // displays it; dynamically read the official card route instead.
     let verifiedSearchDoc=searchDoc;
     let validatedSearchLinks=actualCardLinks(verifiedSearchDoc,reg);
+    let directLanding=null;
+    if(!validatedSearchLinks.length){
+      // Older closed notices may be outside the default public-search window.
+      // Verify the *actual returned card* before trusting its regNumber route.
+      const directPaths=[
+        "/epz/order/notice/notice223/common-info.html?regNumber="+encodeURIComponent(reg),
+        "/223/purchase/public/purchase/info/common-info.html?regNumber="+encodeURIComponent(reg)
+      ];
+      for(const directPath of directPaths){
+        try{
+          const page=await eisHtml(directPath);
+          const url=officialCardUrl(page.__eis223_source_url||SITE+directPath,
+            reg,INFO_PAGES,true);
+          const exact=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)");
+          if(url && exact.test(page.body?.textContent||"")){
+            validatedSearchLinks=[url.href];
+            directLanding=page;
+            log(reg,"проверена архивная карточка ЕИС:",url.pathname);
+            break;
+          }
+          problems.push("Карточка ЕИС не подтвердила точный номер");
+        }catch(e){
+          if(e.backoff)throw e;
+          problems.push("Архивная карточка ЕИС: "+String(e.message).slice(0,100));
+        }
+      }
+    }
     if(!validatedSearchLinks.length){
       // Manual jobs have no search-result page. Obtain an actual noticeId
       // by searching the EIS registry number, rather than guessing URLs.
@@ -554,8 +587,9 @@
       }
     }
     if(!validatedSearchLinks.length){
-      throw new Error("Не найдена реальная ссылка на карточку ЕИС по "+reg+
-        ". Ошибочный маршрут documents.html?regNumber не используется.");
+      throw new Error("Не найдена подтверждённая карточка ЕИС по "+reg+
+        ". Проверены архивная карточка и поиск: "+
+        problems.slice(-3).join(" | ").slice(0,140));
     }
     const verifiedLinkSet=new Set(validatedSearchLinks);
     const urls=validatedSearchLinks;
@@ -565,7 +599,10 @@
       const url=officialCardUrl(raw,reg,INFO_PAGES,verifiedLinkSet.has(raw));
       if(!url)continue;
       let landing;
-      try{landing=await eisHtml(url.pathname+url.search)}
+      try{
+        landing=directLanding&&directLanding.__eis223_source_url===url.href
+          ? directLanding : await eisHtml(url.pathname+url.search);
+      }
       catch(e){
         if(e.backoff)throw e;
         problems.push(url.pathname+": "+String(e.message).slice(0,75));
