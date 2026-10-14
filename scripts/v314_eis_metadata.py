@@ -57,6 +57,7 @@ def valid_inn(value):
 
 def company(value):
     s = compact(value).strip(" |:;,")
+    s = re.sub(r"^(?:наименование\s*\(\s*полное\s*и\s*сокращ[её]нное\s*\)|полное\s+наименование|наименование\s+заказчика)\s*[:：-]\s*", "", s, flags=re.I)
     s = STOP_NAME.split(s, maxsplit=1)[0].strip(" |:;,")
     s = re.sub(r"\(далее\s*[-–—]\s*([^)]*)\)",r"(\1)",s,flags=re.I)
     # The full and abbreviated names may share a cell. Keep the full name
