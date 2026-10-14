@@ -38,6 +38,33 @@ def field(parent,name):
     return (el.text or "").strip() if el is not None else ""
 
 
+def verified_xml_nmcd(notice):
+    """Read only explicit starting-price fields from validated EIS SOAP XML.
+
+    This value is never inferred from an executed contract, lot unit price,
+    or maximum-looking number. Different lot prices are left unresolved.
+    """
+    if notice is None:return ""
+    from v311_verified_customer import _verified_money
+    tags={"initialSum","initialMaxPrice","initialMaximumPrice",
+          "initialContractPrice","initialMaximumContractPrice"}
+    candidates={}
+    for node in notice.iter():
+        if tag(node) not in tags:continue
+        values=[]
+        if (node.text or "").strip():values.append(node.text)
+        for child in list(node):
+            if tag(child) in ("value","sum","amount","price") and (child.text or "").strip():
+                values.append(child.text)
+        for value in values[:2]:
+            try:
+                price,number=_verified_money(value)
+                candidates[round(number,2)]=price
+            except ValueError:
+                continue
+    return next(iter(candidates.values())) if len(candidates)==1 else ""
+
+
 def official_notice(reg):
     """Read XML only from a validated, persisted official EIS SOAP archive."""
     folder=data_root()/"eis223_official_archive_inbox"/reg
@@ -212,8 +239,9 @@ async def offline_audit(ns,reg):
     # official SOAP lot, validated manifest and stored purchase lack NMCD.
     from v311_verified_customer import read_verified_price
     verified_price=await asyncio.to_thread(read_verified_price,ns,reg)
-    price=(field(lot_data,"initialSum") or public.get("price")
-           or str(previous.get("price") or "") or verified_price.get("price") or "")
+    price=(field(lot_data,"initialSum") or verified_xml_nmcd(notice)
+           or public.get("price") or str(previous.get("price") or "")
+           or verified_price.get("price") or "")
     num=ns.get("price_num",lambda x:None)(price)
     p={"reg":reg,
        "title":reg_name,
