@@ -282,7 +282,9 @@ def persist(ns,reg,findings,checks):
             title=str(f.get("title") or "")[:500]
             if not code or not title:continue
             found=c.execute("""SELECT 1 FROM findings WHERE reg_number=?
-                AND code=? AND kind='violation' LIMIT 1""",(reg,code)).fetchone()
+                AND kind='violation'
+                AND (code=? OR LOWER(TRIM(title))=LOWER(TRIM(?)))
+                LIMIT 1""",(reg,code,title)).fetchone()
             if found:continue
             c.execute("""INSERT INTO findings
                 (reg_number,code,kind,title,law,law_url,evidence,note,
@@ -303,10 +305,16 @@ def persist(ns,reg,findings,checks):
             document=str(ck.get("document") or "")[:255]
             # Same type of legal check in the same original should not
             # repeatedly inflate the checklist on each redeploy.
-            found=c.execute("""SELECT 1 FROM checks
-                WHERE reg_number=? AND field_path=? AND item=?
-                  AND COALESCE(document,'')=?
-                LIMIT 1""",(reg,path,item,document)).fetchone()
+            if status=="violation":
+                found=c.execute("""SELECT 1 FROM checks
+                    WHERE reg_number=? AND status='violation'
+                      AND LOWER(TRIM(item))=LOWER(TRIM(?))
+                    LIMIT 1""",(reg,item)).fetchone()
+            else:
+                found=c.execute("""SELECT 1 FROM checks
+                    WHERE reg_number=? AND field_path=? AND item=?
+                      AND COALESCE(document,'')=?
+                    LIMIT 1""",(reg,path,item,document)).fetchone()
             if found:continue
             c.execute("""INSERT INTO checks
                 (reg_number,scope,item,status,evidence,source,source_url,
