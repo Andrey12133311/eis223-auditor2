@@ -370,6 +370,7 @@ async def offline_audit(ns,reg):
         answer_day=event_day(event.get("publication_date") or event.get("publicationDate"))
         if not request_day or not answer_day or not closing:continue
         if request_day>closing or answer_day<request_day:continue
+        if (closing-request_day).days>3660 or (answer_day-request_day).days>3660:continue
         weekdays_before=sum((request_day+timedelta(days=n)).weekday()<5
                             for n in range(1,(closing-request_day).days+1))
         if weekdays_before<3:continue
