@@ -42,7 +42,7 @@ def run():
     assert len(found)==1 and "5%" in found[0]["title"],found
     allowed=original("Обеспечение заявки 4 % от НМЦД.")
     assert security_findings(expensive,[expensive_price,allowed])[0]==[]
-    measure=original("К участию допускается только участник, имеющий офис на территории региона.")
+    measure=original("Участник должен иметь юридический адрес на территории субъекта.")
     review=deeper_checks(common,[measure])
     assert len(review)>=1 and all(x["status"]=="check" for x in review),review
     assert all(x.get("evidence") and x.get("law") and x.get("source_url") for x in review)
