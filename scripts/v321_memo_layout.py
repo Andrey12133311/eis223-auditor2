@@ -59,8 +59,8 @@ def _style(root):
         "{"+ST+"}family":"paragraph",
         "{"+ST+"}parent-style-name":"Standard"})
     ET.SubElement(style,"{"+ST+"}paragraph-properties",{
-        "{"+FO+"}text-align":"left",
-        # Left alignment prevents LibreOffice from stretching gaps between words.
+        "{"+FO+"}text-align":"justify",
+        # The memo body is justified; signature and address blocks keep template styles.
         "{"+ST+"}justify-single-word":"false",
         "{"+FO+"}text-indent":"1.25cm",
         "{"+FO+"}margin-left":"0cm",
