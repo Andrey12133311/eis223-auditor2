@@ -75,6 +75,15 @@ def _match_amount(part):
     if not number.is_finite() or number<0 or number>Decimal("1000000000000000"):
         return None
     tail=segment[found.end():]
+    # A date (14.10.2026), paragraph (2.1.3) or document-list item
+    # (4. Recommended form...) is not a monetary field.
+    if re.match(r"^\s*[.,]\d",tail):return None
+    if tail.strip() and not re.match(
+        r"^\s*(?:₽|руб(?:\b|\.)|RUB\b|Российск\w*\s+рубл\w*|"
+        r"\([^)]{1,220}\)\s*руб|(?:тыс\.?|млн\.?|миллион\w*)\s*руб|"
+        r"[,;]?\s*(?:в\s+том\s+числе\s+НДС|с\s+НДС|без\s+НДС|включая\s+НДС)|"
+        r"[|;]*\s*$|\.\s*$)",tail,re.I):
+        return None
     if re.match(r"^\s*(?:%|процент|дн(?:я|ей)|рабоч|календарн|стать|пункт)",tail,re.I):
         return None
     scale=re.match(r"^\s*(тыс\.?|млн\.?|миллион\w*)\s*(?:₽|руб)",tail,re.I)
@@ -111,6 +120,10 @@ def prices_in_text(text):
             before=line[max(0,hit.start()-105):hit.start()]
             if UNSUITABLE.search(before) or NOTE_ONLY.search(before):continue
             after=line[hit.end():hit.end()+480]
+            if re.search(r"\bдата\b.*(?:подготов|обоснован)",before,re.I):continue
+            if (re.search(r"\b(?:обоснован[а-яё]*|расч[её]т[а-яё]*)\s*[«\"]?\s*$",before,re.I)
+                and not re.search(r"(?:₽|руб(?:ль|ля|лей|\.)|RUB\b)",after[:160],re.I)):
+                continue
             suffix=FIELD_SUFFIX.match(after)
             if suffix:after=after[suffix.end():]
             # An EIS notice may put the NMCD label and the sum in adjacent

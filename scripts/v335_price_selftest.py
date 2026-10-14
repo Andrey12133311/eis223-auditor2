@@ -40,6 +40,10 @@ def run():
     assert prices_in_text('Начальная (максимальная) цена договора не должна превышать 7 млн. рублей')==[]
     assert prices_in_text('Начальная (максимальная) цена договора: 4 рабочих дня')==[]
     assert prices_in_text('НМЦД: -100 руб.')==[]
+    assert prices_in_text('Дата подготовки обоснования НМЦД:14.10.2026')==[]
+    assert prices_in_text('3. Обоснование НМЦД; 4. Рекомендуемая форма заявки участника закупки;')==[]
+    assert prices_in_text('14. ОБОСНОВАНИЕ НАЧАЛЬНОЙ (МАКСИМАЛЬНОЙ) ЦЕНЫ ДОГОВОРА 25')==[]
+    assert prices_in_text('НМЦД\n2.1. Обоснование цены')==[]
     assert verified_nmcd([doc('НМЦД: 100 руб.'),doc('НМЦД: 200 руб.')]).get('price_conflict')
     assert _verified_money('1\u202f234\u00a0567,89 Российский рубль')[1]==1234567.89
     assert _verified_money(0)[1]==0
