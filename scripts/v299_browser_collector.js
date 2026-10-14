@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "338"; // official EIS card prices: NMCD, max value, subject cost
+  const COLLECTOR_VERSION = "340"; // robust official EIS-card monetary field extraction
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -492,17 +492,23 @@
     if(!doc||!new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(
         doc.body?.textContent||doc.textContent||""))return null;
     const groups=[
-      {kind:"nmcd",pattern:/^(?:начальн\w*\s*\(?максимальн\w*\)?\s*цен\w*(?:\s+договора)?|начальн\w*\s+цен\w*\s+договора|нмцд|начальная\s*\(максимальная\)\s*цена)$/i},
+      {kind:"nmcd",pattern:/^(?:начальн\w*\s*\(?максимальн\w*\)?\s*цен\w*(?:\s+договора)?|начальн\w*\s+цен\w*\s+договора|нмцд|начальная\s*\(максимальная\)\s*цена)(?:\s*\(цена\s+лота\))?$/i},
       {kind:"maximum_contract_value",pattern:/^максимальн\w*\s+значени\w*\s+цен\w*\s+договора$/i},
-      {kind:"subject_cost",pattern:/^(?:стоимост\w*\s+предмет\w*\s+закупк\w*|стоимост\w*\s+закупк\w*)$/i}
+      {kind:"subject_cost",pattern:/^(?:стоимост\w*\s+предмет\w*\s+(?:закупк\w*|договора)|стоимост\w*\s+закупк\w*|сумма\s+закупк\w*)$/i}
     ];
     const amount=raw=>{
-      const clean=String(raw||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()
+      const clean=String(raw||"").replace(/[\u00a0\u202f]/g," ")
+        .replace(/\s+/g," ").trim()
         .replace(/\s*(?:Российский рубль|Российских рублей)\s*$/i," ₽");
-      if(!/^\d[\d ]{0,18}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|рублей|рубля|рубль|RUB)?$/i.test(clean))return "";
-      const n=Number(clean.replace(/(?:₽|руб\.?|рублей|рубля|рубль|RUB)/gi,"")
-           .replace(/\s/g,"").replace(",","."));
-      return Number.isFinite(n)&&n>=0&&n<=1e15?clean:"";
+      // Text and table-cell layouts used by EIS may spell out roubles
+      // and kopecks, or put a written-number parenthesis between them.
+      const m=clean.match(/^(\d[\d ]{0,18}(?:[.,]\d{1,2})?)(?:\s*\([^)]{1,180}\))?\s*(?:₽|руб(?:ль|ля|лей|\.)?|RUB)?(?:\s*(\d{1,2})\s*коп(?:еек|ейки|ейка|\.))?$/i);
+      if(!m)return "";
+      const number=Number(m[1].replace(/\s/g,"").replace(",","."));
+      if(!Number.isFinite(number)||number<0||number>1e15)return "";
+      const final=number+(m[2]&&!/[.,]/.test(m[1])?Number(m[2])/100:0);
+      if(!Number.isFinite(final)||final>1e15)return "";
+      return final.toFixed(2);
     };
     const selectors=".common-text__title,.section__title,.registry-entry__body-title,"+
       ".registry-entry__body-item-title,.price-block__title,.data-block__title,"+
