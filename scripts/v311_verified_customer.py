@@ -58,7 +58,12 @@ def _name(value):
     alpha=[c for c in value if c.isalpha()]
     if alpha and sum(c.isupper() for c in alpha)>=int(.85*len(alpha)):
         abbreviations=("ООО","ПАО","АО","ОАО","ЗАО","ФГУП","ФГБУ",
-                       "ФБУЗ","ГБУ","МБУ","МУП","АНО","ФГБОУ")
+                       "ФБУЗ","ГБУ","МБУ","МУП","АНО","ФГБОУ",
+                       "ГАУЗ","ГАУ","КГАУ","ГБУЗ","ГУП")
+        # An abbreviated legal name is already correctly cased (e.g.
+        # ГАУЗ АО «АОКБ»); sentence casing would corrupt both abbreviations.
+        if len(value)<80 and re.match(r"^(?:"+"|".join(abbreviations)+r")\b",value):
+            return value
         safe=value.lower()
         safe=safe[0].upper()+safe[1:]
         safe=re.sub(r"«([а-яё])",lambda m:"«"+m[1].upper(),safe)
@@ -226,6 +231,7 @@ def install(ns):
             name=_name(data.get("customer"))
             inn=str(data.get("customer_inn") or "").strip()
             source=str(data["source_page"]).strip()
+            title=" ".join(str(data.get("title") or "").split())[:800]
         except (ValueError,TypeError,KeyError,AttributeError) as exc:
             raise HTTPException(422,"Неверные данные заказчика") from exc
         if not REG.fullmatch(reg) or not name or not _official_source(source,reg):
@@ -234,6 +240,9 @@ def install(ns):
             raise HTTPException(422,"Неверный ИНН заказчика")
         try:
             updated=await asyncio.to_thread(_apply,ns,reg,name,inn,source)
+            if title:
+                from v299_browser_intake import _apply_customer
+                await asyncio.to_thread(_apply_customer,ns,{"reg_number":reg,"title":title})
         except ValueError as exc:
             raise HTTPException(409,str(exc)) from exc
         return {"accepted":True,"customer_verified":True,"customer":name,

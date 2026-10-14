@@ -213,6 +213,17 @@ async def offline_audit(ns,reg):
     # Show incomplete intake as waiting, never as an audited original.
     if not docs:raise ValueError("No readable original files have been uploaded from EIS")
 
+    # Public EIS manifests from older collectors may contain only a status
+    # instead of the subject and no buyer. Read explicit buyer fields from
+    # the verified originals before analysis and the first database save.
+    from v314_eis_metadata import from_documents, subject
+    from v311_verified_customer import _name
+    metadata=await asyncio.to_thread(from_documents,reg,docs)
+    if metadata:
+        if not _name(p["customer"]):p["customer"]=metadata.get("customer") or ""
+        if not p["customer_inn"]:p["customer_inn"]=metadata.get("customer_inn") or ""
+        if not subject(p["title"]):p["title"]=metadata.get("title") or p["title"]
+
     card={
        "status":"partial",
        "error":"Публичная карточка не перечитана с сервера; использованы официальный XML ЕИС и оригиналы",
@@ -226,6 +237,7 @@ async def offline_audit(ns,reg):
                   "price_num":p["price_num"]},
        "discovery":"getDocsIP, RI223, official-browser-bridge",
     }
+    if metadata:card["metadata_evidence"]={"source":"official_eis_document",**metadata}
     detail={
        "registrationNumber":reg,
        "purchaseName":p["title"],
@@ -262,6 +274,11 @@ async def offline_audit(ns,reg):
        "api_fields":list(detail.items()),
     }
     await asyncio.to_thread(save,p,docs,findings,checks,payload)
+    if metadata:
+        # Older save implementations omit customer_inn; retain the verified
+        # value and source after saving without replacing docs or findings.
+        from v314_eis_metadata import apply_metadata
+        await asyncio.to_thread(apply_metadata,ns,reg,metadata)
     checked=sum(d.get("status")=="checked" for d in docs)
     print(f"V298 OFFLINE_AUDIT reg={reg} documents={len(docs)} checked={checked} findings={len(findings)} checks={len(checks)} remote_requests=0",flush=True)
     return {"reg":reg,"documents":len(docs),"checked_documents":checked,

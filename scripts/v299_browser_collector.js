@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "313"; // authoritative modern notice223 documents
+  const COLLECTOR_VERSION = "314"; // buyer metadata from actual EIS labels/cards
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -135,19 +135,8 @@
     return [...numbers].filter(x => NUMBER.test(x)).slice(0,30);
   }
   function searchTitle(doc,reg) {
-    if(!doc)return "";
-    for(const a of doc.querySelectorAll("a[href]")) {
-      if(!(a.getAttribute("href")||"").includes("regNumber="+reg))continue;
-      const block=a.closest(".search-registry-entry-block,.registry-entry,article,tr");
-      const node=block?.querySelector(".registry-entry__body-title,.registry-entry__header-mid__title,.registry-entry__body-value,h2,h3");
-      const title=titleFromDocument(block,reg);
-      if(title)return title;
-      const value=(node?.textContent||"").split(/\s+/).join(" ").trim();
-      if(value && value.length>12 && value.length<=800 &&
-         !/^(?:подача заявок|приём заявок|извещение|заказчик|номер закупки|наименование закупки)$/i.test(value) &&
-         !/^[0-9]+$/.test(value))return value;
-    }
-    return "";
+    const block=searchResultCard(doc,reg);
+    return titleFromDocument(block,reg);
   }
   // Only certified public EIS file references are accepted. Reconstruct a
   // canonical URL from the exact 32-hex UID found in the official HTML.
@@ -304,16 +293,23 @@
     if(!root)return "";
     const labeled=root.querySelectorAll(".common-text__title,.section__title,"+
       ".registry-entry__body-title,.registry-entry__body-item-title,dt,label,th,"+
-      ".section__attrib,.attachment__text");
+      ".section__attrib,.attachment__text,.blockInfo__label,.common-text__label,"+
+      "td,.title");
     for(const label of labeled){
-      const title=(label.textContent||"").replace(/\s+/g," ").trim().toLowerCase();
+      const title=(label.textContent||"").replace(/\s+/g," ").trim()
+        .replace(/\s*:\s*$/,"").toLowerCase();
+      if(title.length>180)continue;
       if(!patterns.some(p=>p.test(title)))continue;
-      let value=label.parentElement?.querySelector(
-          ".common-text__value,.section__info,.registry-entry__body-value,"+
-          ".registry-entry__body-item-value,dd,td,.section__value");
-      if(!value)value=label.nextElementSibling;
-      const name=(value?.textContent||"").replace(/\s+/g," ").trim();
-      if(name&&name.toLowerCase()!==title&&name.length<500)return name;
+      const values=".common-text__value,.section__info,.registry-entry__body-value,"+
+        ".registry-entry__body-item-value,.registry-entry__body-href,"+
+        ".blockInfo__value,dd,td,.section__value,.value";
+      const candidates=[label.nextElementSibling,
+        ...label.parentElement?.querySelectorAll(values)||[]];
+      for(const value of candidates){
+        if(!value||value===label||value.contains(label)||label.contains(value))continue;
+        const name=(value.textContent||"").replace(/\s+/g," ").trim();
+        if(name&&name.toLowerCase()!==title&&name.length<=800)return name;
+      }
     }
     return "";
   }
@@ -323,10 +319,11 @@
     // EIS pages may show BOTH buyer and procurement organiser. The organiser
     // is not necessarily the buyer (notably procurement 32616280442).
     for(const section of doc.querySelectorAll(
-      "section,.common-text,.row,.blockInfo__section")){
-      const caption=(section.querySelector(".common-text__caption,.blockInfo__title")?.textContent||"")
+      "section,.common-text,.row,.blockInfo,.blockInfo__section,.section,fieldset")){
+      const caption=(section.querySelector(".common-text__caption,.blockInfo__title,"+
+        ".section__caption,.section__header,h2,h3,legend")?.textContent||"")
         .replace(/\s+/g," ").trim().toLowerCase();
-      if(!/(?:сведения о заказчике|^заказчик$|заказчики по лоту)/i.test(caption))
+      if(!/^(?:сведения о заказчике|информация о заказчике|заказчик|заказчики по лоту)(?:\s|$)/i.test(caption))
         continue;
       name=valueByLabel(section,[/^наименование организации/i,/^полное наименование/i,
              /^заказчик$/i,/^наименование заказчика/i])||name;
@@ -342,14 +339,22 @@
     name=name.replace(/\s+/g," ").trim().slice(0,400);
     if(/^(?:уточняем|заказчик уточняется|не указан|не найден|сведения отсутствуют)/i.test(name))
       name="";
+    if(!/[А-Яа-яЁёA-Za-z]/.test(name))name="";
     const match=String(inn).replace(/[^0-9]/g,"").match(/^(?:[0-9]{10}|[0-9]{12})$/);
     return {name,inn:match?match[0]:""};
   }
   function searchResultCard(doc,reg){
     if(!doc)return null;
+    const exact=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)");
+    // Modern results link by numeric noticeId. Correlate the visible registry
+    // number inside ONE result block rather than requiring regNumber in href.
+    for(const block of doc.querySelectorAll(
+      ".search-registry-entry-block,.registry-entry,article,.registry-entry__form")){
+      if(exact.test(block.textContent||""))return block;
+    }
     for(const a of doc.querySelectorAll("a[href]")){
       const href=a.getAttribute("href")||"";
-      if(!href.includes("regNumber="+reg))continue;
+      if(!href.includes("regNumber="+reg)&&!exact.test(a.textContent||""))continue;
       return a.closest(".search-registry-entry-block,.registry-entry,article,tr,"+
         ".registry-entry__form,.search-registry-entry-block__form");
     }
@@ -362,7 +367,7 @@
   function titleFromDocument(doc,reg){
     if(!doc)return "";
     const title=valueByLabel(doc,[/^наименование закупки$/i,/^предмет закупки$/i,
-                                  /^объект закупки$/i]);
+                                  /^объект закупки$/i,/^наименование объекта закупки$/i]);
     if(title&&title.length>9&&!/^(?:подача заявок|извещение)/i.test(title))
       return title.slice(0,800);
     return "";
