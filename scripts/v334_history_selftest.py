@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from fastapi import FastAPI
-from v334_findings_ledger import install, summary
+from v334_findings_ledger import install, summary, compare_same_titles
 
 def run():
     with tempfile.TemporaryDirectory() as folder:
@@ -15,8 +15,8 @@ def run():
         db=conn()
         db.executescript("""
           CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,violations INT);
-          CREATE TABLE findings(id INTEGER PRIMARY KEY,reg_number TEXT,kind TEXT,title TEXT,law TEXT,document TEXT,evidence TEXT);
-          CREATE TABLE checks(id INTEGER PRIMARY KEY,reg_number TEXT,status TEXT,item TEXT,document TEXT,evidence TEXT);
+          CREATE TABLE findings(id INTEGER PRIMARY KEY,reg_number TEXT,kind TEXT,title TEXT,law TEXT,document TEXT,evidence TEXT,source_url TEXT);
+          CREATE TABLE checks(id INTEGER PRIMARY KEY,reg_number TEXT,status TEXT,item TEXT,document TEXT,evidence TEXT,law TEXT,source_url TEXT);
           INSERT INTO purchases VALUES('32616448060',2);
           INSERT INTO findings(reg_number,kind,title,law,document,evidence)
            VALUES('32616448060','violation','Срок разъяснений','223-ФЗ','a.docx','05.10.2026');
@@ -43,5 +43,21 @@ def run():
         assert report["changed_rechecks"]==1
         ns["save"]({"reg":"32616448060"})
         assert summary(conn)["changed_rechecks"]==1
+        db=conn()
+        with db:
+            db.execute("""INSERT INTO findings(reg_number,kind,title,law,document,evidence)
+            VALUES('32616448060','violation','Срок разъяснений','223-ФЗ','same.docx','05.10.2026')""")
+            db.execute("""INSERT INTO checks(reg_number,status,item,law,document,evidence)
+            VALUES('32616448060','violation','Срок разъяснений','223-ФЗ','same.docx','05.10.2026')""")
+        db.close()
+        review=compare_same_titles(conn)
+        assert review["shared_procurement_issue_groups"]==1
+        assert review["matching_documentary_excerpt_groups"]==1
+        db=conn()
+        with db:
+            db.execute("UPDATE checks SET evidence='06.10.2026' WHERE document='same.docx'")
+        db.close()
+        review=compare_same_titles(conn)
+        assert review["groups_requiring_evidence_review"]==1
         print("V334_HISTORY_SELFTEST_OK pre_recheck_saved=2 no_auto_reactivation=True",flush=True)
 if __name__=="__main__":run()
