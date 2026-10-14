@@ -49,6 +49,7 @@ import v334_findings_ledger
 import v335_price_recovery
 import v336_legal_matrix
 import v338_card_prices
+import v340_price_display
 import v337_all_legal_categories
 import v339_fact_comparison
 import v312_archive_selftest
@@ -105,6 +106,7 @@ def main():
     v334_findings_ledger.install(vars(entry))
     v335_price_recovery.install(vars(entry))
     v338_card_prices.install(vars(entry))
+    v340_price_display.install(vars(entry))
     try:
         v312_archive_selftest.run()
     except Exception as exc:
