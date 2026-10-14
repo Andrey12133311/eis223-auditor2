@@ -208,7 +208,12 @@ async def offline_audit(ns,reg):
     start=field(notice,"applSubmisionStartDate")[:10] or public.get("submission_start","")[:10]
     end=field(notice,"submissionCloseDateTime")[:10] or public.get("submission_end","")[:10]
     published=field(notice,"publicationDateTime") or public.get("published","")
-    price=field(lot_data,"initialSum") or public.get("price") or str(previous.get("price") or "")
+    # Official-card price is supplementary verified evidence, used only when
+    # official SOAP lot, validated manifest and stored purchase lack NMCD.
+    from v311_verified_customer import read_verified_price
+    verified_price=await asyncio.to_thread(read_verified_price,ns,reg)
+    price=(field(lot_data,"initialSum") or public.get("price")
+           or str(previous.get("price") or "") or verified_price.get("price") or "")
     num=ns.get("price_num",lambda x:None)(price)
     p={"reg":reg,
        "title":reg_name,
@@ -216,7 +221,8 @@ async def offline_audit(ns,reg):
        "customer_inn":customer_inn,
        "method":field(notice,"purchaseCodeName") or previous.get("method") or "",
        "price":price,
-       "price_num":num if num is not None else previous.get("price_num"),
+       "price_num":num if num is not None else (previous.get("price_num")
+                     if previous.get("price_num") is not None else verified_price.get("price_num")),
        "published":published or previous.get("published_at") or "",
        "submission_start":start or previous.get("submission_start") or "",
        "submission_end":end or previous.get("submission_end") or "",
