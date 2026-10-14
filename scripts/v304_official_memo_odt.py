@@ -232,9 +232,9 @@ def _memo_body_format(body,paragraphs):
     return style_ns,fo_ns
 
 def _clean_memo_fragment(value):
-    text=str(value or "").replace("\\r"," ").replace("\\n"," ").replace("\\t"," ")
-    text=re.sub(r"[\\u200b\\u200e\\u200f\\ufeff]","",text)
-    return re.sub(r"\\s+"," ",text).strip()
+    text=str(value or "").replace("\r"," ").replace("\n"," ").replace("\t"," ")
+    text=re.sub(r"[\u200b\u200e\u200f\ufeff]","",text)
+    return re.sub(r"\s+"," ",text).strip()
 
 def _format_memo_body(node,body,paragraphs):
     """Apply a dedicated paragraph style; keep all original template metadata."""
