@@ -46,7 +46,7 @@ def run():
     pstyle=next(x for x in document.findall(".//{"+ST+"}style")
                 if x.get("{"+ST+"}name")==STYLE_NAME)
     properties=pstyle.find("{"+ST+"}paragraph-properties")
-    assert properties.get("{"+FO+"}text-align")=="left"
+    assert properties.get("{"+FO+"}text-align")=="justify"
     assert pstyle.find("{"+ST+"}text-properties").get("{"+FO+"}font-size")=="14pt"
     para_texts=["".join(p.itertext()) for p in document.findall(".//{"+TX+"}p")]
     assert any("Второе подтверждённое нарушение" in p for p in para_texts)
@@ -89,7 +89,7 @@ def run():
         finally:
             if old is None:os.environ.pop("EIS223_DATA_DIR",None)
             else:os.environ["EIS223_DATA_DIR"]=old
-    print("V323 MEMO_NMCD_MANUAL_SELFTEST_OK odt_left=True real_price=True real_original_proof=True",flush=True)
+    print("V323 MEMO_NMCD_MANUAL_SELFTEST_OK odt_justified=True real_price=True real_original_proof=True",flush=True)
 
 
 if __name__=="__main__":
