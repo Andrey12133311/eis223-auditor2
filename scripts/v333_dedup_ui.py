@@ -208,7 +208,10 @@ def install(ns):
                     return JSONResponse(obj,headers={"Cache-Control":"no-store"})
                 except (ValueError,TypeError):
                     return Response(body,status_code=200,media_type="application/json")
-            if "opendocument" in ctype and "text" in ctype and "memo/" not in path:
+            dispo=response.headers.get("content-disposition","").lower()
+            is_odt=("opendocument" in ctype and "text" in ctype) or (
+                ".odt" in dispo or path.lower().endswith(".odt"))
+            if is_odt and "memo/" not in path:
                 binary=b"".join([part async for part in response.body_iterator])
                 try:filtered=blank_inspection_comments(binary)
                 except (ValueError,KeyError,zipfile.BadZipFile,ET.ParseError):
