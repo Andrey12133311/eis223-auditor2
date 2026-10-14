@@ -344,6 +344,7 @@ def install(ns):
         try:version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:version=0
         if version<313:
+            print(f"V299 COLLECTOR_OUTDATED version={version} required=313 action=update_browser_collector",flush=True)
             raise HTTPException(426,"Требуется обновлённый загрузчик ЕИС v313")
         raw=await request.body()
         if len(raw)>1500:raise HTTPException(413,"Heartbeat too large")
