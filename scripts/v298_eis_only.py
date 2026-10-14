@@ -283,8 +283,11 @@ async def offline_audit(ns,reg):
     def as_day(value):
         try:return date.fromisoformat(str(value or "")[:10])
         except ValueError:return None
-    opening=as_day(p.get("submission_start"))
-    closing=as_day(p.get("submission_end"))
+    def safe_day(value):
+        result=as_day(value)
+        return result if result and 2000<=result.year<=2100 else None
+    opening=safe_day(p.get("submission_start"))
+    closing=safe_day(p.get("submission_end"))
     if opening and closing and closing<opening:
         checks.append({"code":"submission_dates_conflict","status":"check",
                        "title":"Несоответствие дат подачи заявок",
