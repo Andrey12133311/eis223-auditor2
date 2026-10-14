@@ -14,6 +14,7 @@ from datetime import datetime,timezone
 import json
 import re
 import sqlite3
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit,parse_qs
 
 from fastapi import HTTPException,Request
@@ -23,6 +24,7 @@ REG=re.compile(r"^3\d{10}$")
 INN=re.compile(r"^(?:\d{10}|\d{12})$")
 CARD_PATHS=frozenset((
     "/223/purchase/public/purchase/info/common-info.html",
+    "/223/purchase/public/purchase/info/commoninfo.html",
     "/epz/order/notice/notice223/common-info.html",
     "/223/purchase/public/purchase/info/documents.html",
     "/epz/order/notice/notice223/documents.html",
@@ -91,6 +93,13 @@ def _initialize(ns):
         );
         CREATE INDEX IF NOT EXISTS idx_v311_verified_inn
           ON v311_verified_buyers(inn);
+        CREATE TABLE IF NOT EXISTS v322_verified_prices(
+          reg TEXT PRIMARY KEY,
+          price TEXT NOT NULL,
+          price_num REAL NOT NULL,
+          evidence_page TEXT NOT NULL,
+          captured_at TEXT NOT NULL
+        );
         """)
         stamp=datetime.now(timezone.utc).isoformat()
         for reg,item in CONFIRMED.items():
@@ -208,6 +217,64 @@ def _apply(ns,reg,name,inn,source):
         raise
     finally:db.close()
 
+def _verified_money(value):
+    """Accept an unambiguous amount, never a guess from procurement title."""
+    raw=" ".join(str(value or "").replace("\u00a0"," ").split())
+    if not raw or len(raw)>110:
+        raise ValueError("НМЦД отсутствует или слишком длинная")
+    if re.search(r"(?:не установ|формула|диапазон|за единиц|не определ)",raw,re.I):
+        raise ValueError("Отсутствует конкретная НМЦД")
+    pattern=r"([0-9][0-9 ]{0,18}(?:[.,][0-9]{1,2})?)"
+    match=re.fullmatch(r"\\s*"+pattern+r"\\s*(?:₽|руб\\.?|рублей)?\\s*",raw,re.I)
+    if not match:
+        raise ValueError("НМЦД не является одной конкретной суммой")
+    normalized=match.group(1).replace(" ","").replace(",",".")
+    try:amount=Decimal(normalized)
+    except InvalidOperation as exc:raise ValueError("НМЦД не распознана") from exc
+    if not amount.is_finite() or amount<0 or amount>Decimal("1000000000000000"):
+        raise ValueError("НМЦД вне допустимого диапазона")
+    return normalized,float(amount)
+
+
+def read_verified_price(ns,reg):
+    if not REG.fullmatch(str(reg)):return {}
+    db=_db(ns)
+    try:
+        row=db.execute("SELECT price,price_num,evidence_page FROM v322_verified_prices WHERE reg=?",(reg,)).fetchone()
+        return dict(row) if row else {}
+    except sqlite3.OperationalError:
+        return {}
+    finally:db.close()
+
+
+def _save_verified_price(ns,reg,price,amount,source):
+    db=_db(ns)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        stamp=datetime.now(timezone.utc).isoformat()
+        db.execute("""
+          INSERT INTO v322_verified_prices(reg,price,price_num,evidence_page,captured_at)
+          VALUES(?,?,?,?,?)
+          ON CONFLICT(reg) DO UPDATE SET
+            price=excluded.price,price_num=excluded.price_num,
+            evidence_page=excluded.evidence_page,captured_at=excluded.captured_at
+        """,(reg,price,amount,source,stamp))
+        # No procurement row is created merely from a price. If a verified
+        # purchase already exists, fill only missing price fields.
+        updated=db.execute("""
+          UPDATE purchases SET price=?,price_num=?
+          WHERE reg_number=? AND (price IS NULL OR TRIM(price)='')
+                            AND price_num IS NULL
+        """,(price,amount,reg)).rowcount
+        db.commit()
+        print(f"V322 VERIFIED_NMCD reg={reg} stored=True row_updated={bool(updated)}",flush=True)
+        return bool(updated)
+    except:
+        if db.in_transaction:db.rollback()
+        raise
+    finally:db.close()
+
+
 def install(ns):
     app=ns["app"]
 
@@ -247,6 +314,30 @@ def install(ns):
             raise HTTPException(409,str(exc)) from exc
         return {"accepted":True,"customer_verified":True,"customer":name,
                 "updated":updated,"metadata_source":"official_eis_card"}
+
+    @app.post("/api/v322/eis223/price")
+    async def verified_eis_price(request:Request):
+        auth(request)
+        if request.headers.get("origin")!="https://zakupki.gov.ru":
+            raise HTTPException(403,"Нужна официальная вкладка ЕИС")
+        try:version=int(request.headers.get("x-eis223-collector-version") or 0)
+        except ValueError:version=0
+        if version<323:
+            raise HTTPException(426,"Для передачи НМЦД требуется браузерный мост v323")
+        raw=await request.body()
+        if len(raw)>1300:raise HTTPException(413,"Слишком большой ответ")
+        try:
+            data=json.loads(raw)
+            reg=str(data["reg_number"]).strip()
+            source=str(data["source_page"]).strip()
+            price,amount=_verified_money(data.get("price"))
+        except (ValueError,TypeError,KeyError,AttributeError) as exc:
+            raise HTTPException(422,"Неверные сведения о НМЦД из ЕИС") from exc
+        if not REG.fullmatch(reg) or not _official_source(source,reg):
+            raise HTTPException(422,"Источник НМЦД не является подтверждённой карточкой ЕИС")
+        updated=await asyncio.to_thread(_save_verified_price,ns,reg,price,amount,source)
+        return {"accepted":True,"reg_number":reg,"price":price,
+                "updated_existing":updated,"source":"official_eis_card"}
 
     @app.get("/api/v311/customer/{reg}")
     async def verified_status(reg:str):
