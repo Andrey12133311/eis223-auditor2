@@ -312,6 +312,47 @@ async def offline_audit(ns,reg):
                     "evidence":body[max(0,offset-65):offset+len(phrase)+65],
                     "legal_basis":"223-ФЗ, статья 3.2, часть 25",
                     "reason":"Не квалифицировать как установленное обеспечение заявки без прямого условия"})
+    # Article 4(8): only flag discrepancies when the original expressly
+    # labels its own submission deadline. Never infer from arbitrary dates.
+    import re as _legal_re
+    for doc in docs:
+        if doc.get("status")!="checked":continue
+        body=" ".join(str(doc.get("text") or "").split())
+        if not body or not closing:continue
+        matches=list(_legal_re.finditer(
+            r"(?:окончани[ея] срока подачи заявок|прием заявок заканчивается)"
+            r"[^\\n.;]{0,100}?(\\d{2}[.]\\d{2}[.]\\d{4})",body,_legal_re.I))
+        for match in matches[:2]:
+            try:
+                from datetime import datetime as _legal_datetime
+                doc_day=_legal_datetime.strptime(match.group(1),"%d.%m.%Y").date()
+            except ValueError:continue
+            if doc_day==closing:continue
+            checks.append({"code":"notice_document_deadline_mismatch",
+                           "status":"check",
+                           "title":"Несоответствие срока подачи заявок в документации и извещении",
+                           "document":doc.get("name") or "",
+                           "evidence":match.group(0),
+                           "notice_date":str(closing),
+                           "document_date":str(doc_day),
+                           "legal_basis":"223-ФЗ, статья 4, часть 8",
+                           "reason":"Проверить действующую редакцию документации и изменения ЕИС"})
+    # National-regime flags in the official notice are evidence requiring
+    # product-code and exception analysis, not proof of infringement.
+    if notice is not None:
+        flags=[]
+        for node in notice.iter():
+            key=tag(node).casefold()
+            if key in ("prohibitionnationalregime","restrictionnationalregime",
+                       "preferencenationalregime") and str(node.text or "").strip().lower()=="true":
+                flags.append(key)
+        if flags:
+            checks.append({"code":"national_regime_eis_flags","status":"check",
+                           "title":"Проверить условия национального режима",
+                           "document":"Официальное извещение ЕИС (XML)",
+                           "evidence":", ".join(sorted(set(flags))),
+                           "legal_basis":"223-ФЗ, статья 3.1-4",
+                           "reason":"Сверить коды товаров, действующий нормативный акт и исключения"})
     annotate=ns.get("annotate")
     if callable(annotate):
         await asyncio.to_thread(annotate,reg,docs,findings,checks)
