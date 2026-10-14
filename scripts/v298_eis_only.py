@@ -99,6 +99,7 @@ def federal_workday(day):
     for month,daynum in ((2,23),(3,8),(5,1),(5,9),(6,12),(11,4)):
         holiday_day=date(day.year,month,daynum)
         if holiday_day.weekday()<5:continue
+        if day.year==2025 and (month,daynum) in ((2,23),(3,8)):continue
         replacement=holiday_day+timedelta(days=1)
         while replacement.weekday()>=5 or (replacement.month,replacement.day) in holiday:
             replacement+=timedelta(days=1)
