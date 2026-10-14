@@ -356,7 +356,7 @@ def reconcile(ns):
     try:
         rows = db.execute("""SELECT reg_number FROM purchases
             WHERE customer IS NULL OR TRIM(customer)='' OR LOWER(customer) LIKE '%уточня%'
-                OR customer_inn IS NULL OR TRIM(customer_inn)='' OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок','прием заявок','статус закупки')
+                OR LOWER(customer) LIKE 'наименование (полное и сокращ%' OR customer_inn IS NULL OR TRIM(customer_inn)='' OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок','прием заявок','статус закупки')
             ORDER BY last_seen DESC LIMIT 2000""").fetchall()
     finally:
         db.close()
