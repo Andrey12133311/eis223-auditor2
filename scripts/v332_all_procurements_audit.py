@@ -22,7 +22,8 @@ from v295_eis_originals import allowed_documents, saved_document, root, uid_from
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 
-CAMPAIGN="2026-10-14-full-evidence-and-price-v338"
+CAMPAIGN="2026-10-14-only-985-main-facts-v339"
+DASHBOARD_MAX=985
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
 FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
@@ -38,6 +39,28 @@ def connect(ns):
     c=ns["conn"]()
     c.execute("PRAGMA busy_timeout=25000")
     return c
+
+def dashboard_regs(ns):
+    """Freeze the actual automatic main-page membership, not the whole DB.
+
+    Matches /api/v257/dashboard without user-entered filters: its EIS
+    verified set, excluding ONLY explicit manually entered purchase numbers.
+    Never pulls in purchases outside the list, nor manufactures records to
+    reach 985 when fewer are currently visible.
+    """
+    getter=ns.get("_verified_set235")
+    if not callable(getter):
+        raise RuntimeError("Main-page verified membership unavailable; refusing global audit")
+    verified={str(v) for v in getter()}
+    c=connect(ns)
+    try:
+        rows=c.execute("""SELECT p.reg_number FROM purchases p
+            WHERE p.reg_number NOT IN
+                  (SELECT reg FROM v319_manual_inputs)
+            ORDER BY p.last_seen DESC,p.reg_number DESC""").fetchall()
+    finally:c.close()
+    return [str(row[0]) for row in rows if str(row[0]) in verified][:DASHBOARD_MAX]
+
 
 def initialize(ns):
     c=connect(ns)
@@ -77,8 +100,14 @@ def initialize(ns):
                 (campaign,created_at,baseline_purchases,baseline_checked_documents,
                  baseline_violations) VALUES(?,?,?,?,?)""",
                 (CAMPAIGN,now(),p,d,v))
-            c.execute("""INSERT OR IGNORE INTO v332_audit_queue(campaign,reg)
-                SELECT ?,reg_number FROM purchases""",(CAMPAIGN,))
+            # Freeze only the purchases actually shown in the AUTOMATIC main
+            # list. Do not run the remaining hundreds in the general database.
+            main_regs=dashboard_regs(ns)
+            c.executemany("""INSERT OR IGNORE INTO v332_audit_queue(campaign,reg)
+                VALUES(?,?)""",((CAMPAIGN,reg) for reg in main_regs))
+            print("V339 MAIN_985_SCOPE locked="+str(len(main_regs))+
+                  " max="+str(DASHBOARD_MAX)+" total_database="+str(p),
+                  flush=True)
         # Resume interrupted work, but never rerun a finished procurement just
         # because Railway redeployed a new code revision.
         c.execute("""UPDATE v332_audit_queue
@@ -116,7 +145,7 @@ def progress(ns):
             "verified_EIS_documents_in_completed":int(sums[3]),
             "new_evidence_based_findings":int(sums[4]),
             "new_legal_review_items":int(sums[5]),
-            "note":"Review of available local content; unavailable items do not count as reviewed."
+            "note":"Fixed subset: up to 985 purchases from the main automatic list; only locally available original texts are legally analysed. Missing documents are not declared violation-free."
         }
     finally:c.close()
 
@@ -503,6 +532,6 @@ def install(ns):
             status=await asyncio.to_thread(progress,ns)
             print("V332 CAMPAIGN_FINISHED "+json.dumps(status,ensure_ascii=False),flush=True)
         asyncio.create_task(work())
-    print("V332 FULL_LEGAL_QUEUE_READY all_database_purchases=True "
+    print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=985 "
           "partial_originals=True local_files=True no_deletions=True "
           "evidence_only=True",flush=True)
