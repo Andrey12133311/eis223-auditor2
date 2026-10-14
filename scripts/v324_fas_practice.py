@@ -232,6 +232,12 @@ def install(ns):
         output=list(base_analyze(p,docs))
         cases=_cases(p,docs)
         definitive=[v for v in cases if v["classification"]=="violation"]
+        if p.get("reg")=="32616324151" or cases:
+            print(f"V324 FAS_EVIDENCE reg={p.get('reg')} "
+                  f"sme_confirmed={any(c.get('scope') for c in cases)} "
+                  f"agreements={len(cases)} verified_extra_documents={len(definitive)} "
+                  f"review_only={sum(c['classification']!='violation' for c in cases)}",
+                  flush=True)
         if definitive:
             # Avoid multiple historic archive revisions inflating counts:
             # same legal issue is represented once per procurement.
@@ -243,7 +249,10 @@ def install(ns):
     def build_checks(p,detail,card,docs):
         output=list(base_checks(p,detail,card,docs))
         cases=_cases(p,docs)
-        candidates=[x for x in cases if x["classification"]!="violation"]
+        # An established extra-document finding supersedes an ambiguous
+        # agreement warning for the same procurement.
+        candidates=[x for x in cases if x["classification"]!="violation"] if not any(
+            x["classification"]=="violation" for x in cases) else []
         if candidates:
             output.append(_check(candidates[0]))
         return output
