@@ -1,0 +1,200 @@
+"""Non-destructive findings history and audit-counter reconciliation.
+
+Legacy save() replaces findings and checks wholesale on each recheck. Preserve
+evidence BEFORE any replacement and expose prior results as review candidates,
+never as newly confirmed violations.
+"""
+from __future__ import annotations
+import hashlib
+import json
+import re
+import sqlite3
+from functools import wraps
+from fastapi import HTTPException
+
+REG = re.compile(r"^[0-9]{10,20}$")
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS v334_violation_history (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ reg_number TEXT NOT NULL,
+ record_type TEXT NOT NULL,
+ fingerprint TEXT NOT NULL,
+ first_saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ payload_json TEXT NOT NULL,
+ UNIQUE(reg_number,record_type,fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_v334_hist_reg ON v334_violation_history(reg_number);
+CREATE TABLE IF NOT EXISTS v334_recheck_changes (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ reg_number TEXT NOT NULL,
+ checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ before_count INTEGER NOT NULL,
+ after_count INTEGER NOT NULL,
+ missing_count INTEGER NOT NULL,
+ new_count INTEGER NOT NULL,
+ missing_fingerprints_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v334_changes_reg ON v334_recheck_changes(reg_number);
+"""
+
+def _records(db,reg=None):
+    result=[]
+    for kind,table,where in (
+        ("finding","findings","kind='violation'"),
+        ("check","checks","status='violation'"),
+    ):
+        query="SELECT * FROM "+table+" WHERE "+where
+        values=()
+        if reg is not None:
+            query+=" AND reg_number=?"
+            values=(reg,)
+        for row in db.execute(query,values):
+            record={key:row[key] for key in row.keys() if key!="id"}
+            number=str(record.get("reg_number") or "")
+            if not REG.fullmatch(number):
+                continue
+            payload=json.dumps(record,ensure_ascii=False,sort_keys=True,default=str)
+            fingerprint=hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            result.append((number,kind,fingerprint,payload))
+    return result
+
+def snapshot(connect,reg=None):
+    db=connect()
+    try:
+        db.row_factory=sqlite3.Row
+        db.execute("BEGIN IMMEDIATE")
+        current=_records(db,reg)
+        db.executemany("""INSERT OR IGNORE INTO v334_violation_history
+            (reg_number,record_type,fingerprint,payload_json)
+            VALUES(?,?,?,?)""",current)
+        db.commit()
+        return {(kind,digest) for _,kind,digest,_ in current}
+    except BaseException:
+        if db.in_transaction:
+            db.rollback()
+        raise
+    finally:
+        db.close()
+
+def _track(connect,reg,before,after):
+    disappeared=before-after
+    added=after-before
+    if not disappeared and not added:
+        return
+    db=connect()
+    try:
+        with db:
+            db.execute("""INSERT INTO v334_recheck_changes
+                (reg_number,before_count,after_count,missing_count,new_count,missing_fingerprints_json)
+                VALUES(?,?,?,?,?,?)""",
+                (reg,len(before),len(after),len(disappeared),len(added),
+                 json.dumps(sorted(k+":"+v for k,v in disappeared),ensure_ascii=False)))
+    finally:
+        db.close()
+    if disappeared:
+        print("V334 HISTORY_PRESERVED reg="+reg+
+              " disappeared_or_altered="+str(len(disappeared))+
+              " new_or_altered="+str(len(added)),flush=True)
+
+def summary(connect):
+    db=connect()
+    try:
+        db.row_factory=sqlite3.Row
+        def scalar(sql):
+            return int(db.execute(sql).fetchone()[0] or 0)
+        findings=scalar("SELECT COUNT(*) FROM findings WHERE kind='violation'")
+        checks=scalar("SELECT COUNT(*) FROM checks WHERE status='violation'")
+        return {
+            "purchase_counter":scalar("SELECT COALESCE(SUM(violations),0) FROM purchases"),
+            "purchases":scalar("SELECT COUNT(*) FROM purchases"),
+            "findings_rows":findings,
+            "violation_check_rows":checks,
+            "raw_rows_before_cross_table_review":findings+checks,
+            "archived_finding_versions":scalar("SELECT COUNT(*) FROM v334_violation_history WHERE record_type='finding'"),
+            "archived_check_versions":scalar("SELECT COUNT(*) FROM v334_violation_history WHERE record_type='check'"),
+            "changed_rechecks":scalar("SELECT COUNT(*) FROM v334_recheck_changes WHERE missing_count>0"),
+            "same_title_extra_rows_not_proven_duplicates":scalar("""SELECT COALESCE(SUM(n-1),0) FROM
+                (SELECT COUNT(*) n FROM findings WHERE kind='violation'
+                 GROUP BY reg_number,LOWER(TRIM(title)) HAVING COUNT(*)>1)"""),
+            "note":"Archive stores past source rows for review, not established current violations."
+        }
+    finally:
+        db.close()
+
+def install(ns):
+    connect=ns["conn"]
+    app=ns["app"]
+    existing_save=ns.get("save")
+    if not callable(existing_save):
+        raise RuntimeError("V334: original save() unavailable")
+    db=connect()
+    try:
+        db.executescript(SCHEMA)
+        db.commit()
+    finally:
+        db.close()
+    # Snapshot before any on_startup re-audit and before potentially
+    # destructive legacy save(). Fail startup closed if persistence fails.
+    snapshot(connect)
+    print("V334 BASELINE "+json.dumps(summary(connect),ensure_ascii=False),flush=True)
+
+    if not getattr(existing_save,"__v334_protected__",False):
+        @wraps(existing_save)
+        def protected_save(*args,**kwargs):
+            p=args[0] if args else kwargs.get("p")
+            reg=str(p.get("reg") or "") if isinstance(p,dict) else ""
+            if not REG.fullmatch(reg):
+                return existing_save(*args,**kwargs)
+            before=snapshot(connect,reg)
+            result=existing_save(*args,**kwargs)
+            after=snapshot(connect,reg)
+            _track(connect,reg,before,after)
+            return result
+        protected_save.__v334_protected__=True
+        ns["save"]=protected_save
+
+    @app.get("/api/v334/violation-ledger/summary",include_in_schema=False)
+    def ledger_summary():
+        return summary(connect)
+
+    @app.get("/api/v334/violation-ledger/changes",include_in_schema=False)
+    def ledger_changes(limit:int=50):
+        db=connect()
+        try:
+            db.row_factory=sqlite3.Row
+            rows=db.execute("""SELECT reg_number,checked_at,before_count,
+                after_count,missing_count,new_count FROM v334_recheck_changes
+                ORDER BY id DESC LIMIT ?""",(min(max(1,limit),100),)).fetchall()
+            return {"items":[dict(r) for r in rows]}
+        finally:
+            db.close()
+
+    @app.get("/api/v334/violation-ledger/purchase/{reg}",include_in_schema=False)
+    def ledger_purchase(reg:str,limit:int=150):
+        if not REG.fullmatch(reg):
+            raise HTTPException(422,"Некорректный номер закупки")
+        db=connect()
+        try:
+            db.row_factory=sqlite3.Row
+            active={(k,d) for _,k,d,_ in _records(db,reg)}
+            rows=db.execute("""SELECT record_type,fingerprint,first_saved_at,payload_json
+                FROM v334_violation_history WHERE reg_number=?
+                ORDER BY id DESC LIMIT ?""",(reg,min(max(1,limit),300))).fetchall()
+            items=[]
+            for row in rows:
+                old=json.loads(row["payload_json"])
+                items.append({"record_type":row["record_type"],
+                    "currently_present":(row["record_type"],row["fingerprint"]) in active,
+                    "first_saved_at":row["first_saved_at"],
+                    "title":old.get("title") or old.get("item") or "",
+                    "law":old.get("law") or "",
+                    "document":old.get("document") or "",
+                    "evidence":old.get("evidence") or "",
+                    "source_url":old.get("source_url") or "",
+                    "status":"historical_review" if (row["record_type"],row["fingerprint"]) not in active
+                             else "active_record"})
+            return {"reg_number":reg,"items":items,
+                "note":"Historical records require verification before restoring as confirmed violations."}
+        finally:
+            db.close()
+    print("V334_LEDGER_READY non_destructive=True",flush=True)
