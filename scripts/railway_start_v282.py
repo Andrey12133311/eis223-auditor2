@@ -50,6 +50,7 @@ import v335_price_recovery
 import v336_legal_matrix
 import v338_card_prices
 import v337_all_legal_categories
+import v339_fact_comparison
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
 def main():
@@ -86,6 +87,7 @@ def main():
     v331_broad_legal.install(vars(entry))
     v336_legal_matrix.install(vars(entry))
     v337_all_legal_categories.install(vars(entry))
+    v339_fact_comparison.install(vars(entry))
     v298_eis_only.install(vars(entry))
     v300_violation_ui.install(vars(entry))
     v301_search_jobs.install(vars(entry))
