@@ -25,7 +25,8 @@ class FeatureTests(unittest.TestCase):
             CREATE TABLE findings(reg_number TEXT,kind TEXT,code TEXT,title TEXT);
             CREATE TABLE requests_v233(reg TEXT PRIMARY KEY,lane TEXT,status TEXT,requested_at TEXT);
             CREATE TABLE document_priorities_v233(reg TEXT PRIMARY KEY,lane TEXT,requested_at TEXT);
-            CREATE TABLE customer_purchases_v233(inn TEXT,reg TEXT);""")
+            CREATE TABLE customer_purchases_v233(inn TEXT,reg TEXT);
+            CREATE TABLE v301_inn_purchases(inn TEXT,reg TEXT,found_at TEXT);""")
             c.execute("""INSERT INTO purchases(reg_number,customer,title,source,customer_inn,org_form,price_num,last_seen,documents_found,documents_checked,violations,risks)
               VALUES('32610000001','Auto','Automatic','api','1234567890','ООО',5000,'2026',2,2,1,0)""")
             c.execute("""INSERT INTO purchases(reg_number,customer,title,source,customer_inn,org_form,price_num,last_seen,documents_found,documents_checked,violations,risks)
@@ -48,7 +49,7 @@ class FeatureTests(unittest.TestCase):
                 self.assertEqual(m.json()['total'],1)
                 self.assertEqual(m.json()['items'][0]['reg_number'],'32610000002')
                 types=await c.get('/api/v257/violation-types')
-                self.assertEqual(types.json()['items'][0]['code'],'CLAR-LATE')
+                self.assertEqual(types.json()['items'][0]['code'],'title:Нарушение срока разъяснения')
                 self.assertEqual((await c.get('/manual-purchases')).status_code,200)
                 self.assertEqual((await c.get('/api/v257/purchase-extra/32610000001')).status_code,200)
         asyncio.run(task())
@@ -59,12 +60,16 @@ class FeatureTests(unittest.TestCase):
                 self.assertEqual((await c.post('/api/v257/manual/32610000003')).status_code,409)
         asyncio.run(task())
     def test_new_manual_request_appears_without_restart(self):
-        # A manual check submitted through the older homepage is NOT in the
-        # V257 registry yet. It must nevertheless be visible immediately.
+        # A lane label alone is no longer evidence of a number submission.
+        # Explicitly registering the older form still makes it visible now.
         with sqlite3.connect(self.db_file) as c:
             c.execute("INSERT INTO requests_v233 VALUES('32610000001','manual','pending','2026-10-11')")
         async def task():
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url="http://test") as cl:
+                before=await cl.get('/api/v257/manual')
+                self.assertEqual(before.json()['total'],1)
+                registered=await cl.post('/api/v257/manual/32610000001')
+                self.assertEqual(registered.status_code,200,registered.text)
                 r=await cl.get('/api/v257/manual')
                 self.assertEqual(r.status_code,200,r.text)
                 self.assertEqual(r.json()['total'],2)

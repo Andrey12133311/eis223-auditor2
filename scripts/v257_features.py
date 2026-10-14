@@ -9,15 +9,16 @@ from contextlib import contextmanager
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from v319_manual_inputs import MANUAL_SOURCE_SQL,ensure_schema,migrate_legacy_inputs,record_input
 
 MANUAL_PAGE = r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Самостоятельные проверки · 223-ФЗ</title><style>
 body{margin:0;font:15px system-ui;background:#f6f7f5;color:#24342a}header{background:#203b32;color:white;padding:22px max(20px,5vw)}main{max-width:1180px;margin:auto;padding:24px}nav{display:flex;gap:10px;flex-wrap:wrap}a{color:#1e6659}header a{color:#e9faf5}button,input{font:inherit;padding:10px;border:1px solid #aebbb1;border-radius:7px}button{cursor:pointer;background:#276f59;color:#fff}.card{padding:16px;background:white;border:1px solid #dce4dd;border-radius:10px;margin:12px 0}small{color:#657169}#notice{min-height:28px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #e5e9e5;text-align:left;padding:12px}td{vertical-align:top}@media(max-width:700px){table,thead,tbody,tr,td{display:block}thead{display:none}td{border:0;padding:5px}tr{padding:10px;border-bottom:1px solid #dde2dd}}
 </style></head><body><header><h1>Самостоятельные проверки закупок</h1><nav><a href="/">Автоматические закупки</a><a href="/manual-purchases">Самостоятельные проверки</a><a href="/manual-documents">Проверка собственных документов</a></nav></header><main><section class="card"><h2>Проверить по номеру ЕИС</h2><form id="start"><input id="reg" aria-label="Номер закупки ЕИС" required inputmode="numeric" pattern="[0-9]{10,20}" placeholder="Номер закупки ЕИС"><button>Поставить на проверку</button></form><p id="notice" role="status"></p></section><section class="card"><h2>Введённые вручную закупки</h2><p>Список сохраняется отдельно от общей очереди, в том числе пока документ ожидает источник.</p><table><thead><tr><th>Номер / заказчик</th><th>Проверка</th><th>Документы / результат</th><th>Карточка</th></tr></thead><tbody id="rows"><tr><td>Загрузка…</td></tr></tbody></table><p id="page"></p><button id="more" type="button">Показать ещё</button></section></main><script>
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let offset=0,total=0;
 async function api(url,opt){const r=await fetch(url,{cache:'no-store',...opt});const d=await r.json();if(!r.ok)throw Error(d.detail||r.status);return d}
-async function load(){const d=await api('/api/v257/manual?offset='+offset+'&limit=80');total=d.total;const labels={pending:'В очереди',running:'Идёт проверка',waiting:'Ожидает источник',saved:'Проверено',completed:'Завершено',failed:'Ошибка'};const rows=d.items.map(p=>'<tr><td><b>'+esc(p.reg_number)+'</b><br>'+esc(p.customer||'Заказчик уточняется')+'<br><small>'+esc(p.title||'Карточка загружается')+'</small></td><td>'+esc(labels[p.manual_status]||p.manual_status||'В очереди')+'<br><small>'+esc(p.requested_at||'')+'</small></td><td>'+Number(p.documents_checked||0)+' / '+Number(p.documents_found||0)+'<br>Нарушений: '+Number(p.violations||0)+' · рисков: '+Number(p.risks||0)+'</td><td><a href="/check-new/'+encodeURIComponent(p.reg_number)+'">Карточка проверки</a></td></tr>').join('');if(offset===0)$('rows').textContent='';$('rows').insertAdjacentHTML('beforeend',rows||'<tr><td>Ручных проверок пока нет</td></tr>');$('page').textContent='Показано '+Math.min(offset+d.items.length,total)+' из '+total;$('more').hidden=offset+d.items.length>=total}
-$('start').onsubmit=async e=>{e.preventDefault();const reg=$('reg').value.trim();if(!/^\d{10,20}$/.test(reg))return;$('notice').textContent='Проверка запускается…';try{await api('/api/v204/retry/'+reg,{method:'POST'});await api('/api/v257/manual/'+reg,{method:'POST'});$('notice').innerHTML='Закупка '+esc(reg)+' добавлена. <a href="/check-new/'+reg+'">Открыть проверку</a>';offset=0;await load()}catch(err){$('notice').textContent='Ошибка: '+err.message}};
-$('more').onclick=()=>{offset+=80;load().catch(e=>$('page').textContent=e.message)};load().catch(e=>$('page').textContent='Не удалось загрузить список: '+e.message);setInterval(()=>{if(!document.hidden){offset=0;load().catch(()=>{})}},30000);
+async function load(){const d=await api('/api/v257/manual?offset='+offset+'&limit=80');total=d.total;const labels={queued:'В очереди',leased:'ЕИС получает документы',done:'Поиск выполнен',partial:'Загружено частично',error:'Ошибка получения',deferred:'Ожидает повтор',pending:'В очереди',running:'Идёт проверка',waiting:'Ожидает источник',saved:'Проверено',completed:'Завершено',failed:'Ошибка'};const rows=d.items.map(p=>'<tr><td><b>'+esc(p.reg_number)+'</b><br>'+esc(p.customer||'Заказчик уточняется')+'<br><small>'+esc(p.title||'Карточка загружается')+'</small></td><td>'+esc(labels[p.manual_status]||p.manual_status||'В очереди')+'<br><small>'+esc(p.requested_at||'')+'</small></td><td>'+Number(p.documents_checked||0)+' / '+Number(p.documents_found||0)+'<br>Нарушений: '+Number(p.violations||0)+' · рисков: '+Number(p.risks||0)+'</td><td><a href="/check-new/'+encodeURIComponent(p.reg_number)+'">Карточка проверки</a></td></tr>').join('');if(offset===0)$('rows').textContent='';$('rows').insertAdjacentHTML('beforeend',rows||'<tr><td>Ручных проверок пока нет</td></tr>');$('page').textContent='Показано '+Math.min(offset+d.items.length,total)+' из '+total;$('more').hidden=offset+d.items.length>=total}
+$('start').onsubmit=async e=>{e.preventDefault();const reg=$('reg').value.trim();if(!/^\d{10,20}$/.test(reg))return;$('notice').textContent='Проверка запускается…';try{await api('/api/v301/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'reg',value:reg})});$('notice').innerHTML='Закупка '+esc(reg)+' добавлена. <a href="/check-new/'+reg+'">Открыть проверку</a>';offset=0;await load()}catch(err){$('notice').textContent='Ошибка: '+err.message}};
+window.addEventListener('eis223:manual-input',()=>{offset=0;load().catch(e=>$('page').textContent=e.message)});$('more').onclick=()=>{offset+=80;load().catch(e=>$('page').textContent=e.message)};load().catch(e=>$('page').textContent='Не удалось загрузить список: '+e.message);setInterval(()=>{if(!document.hidden){offset=0;load().catch(()=>{})}},30000);
 </script></body></html>'''
 
 SCRIPT = r'''<script id="v257-ui">(()=>{'use strict';
@@ -37,13 +38,6 @@ NEW_FILTER = "$('forms').querySelectorAll('input:checked').forEach(x=>p.append('
 OLD_DASHBOARD = "api('/api/v204/dashboard?'+filters())"
 NEW_DASHBOARD = "api('/api/v257/dashboard?'+filters())"
 
-MANUAL_SOURCE_SQL = """SELECT reg,MAX(requested_at) requested_at FROM (
- SELECT reg,requested_at FROM v257_manual_registry
- UNION ALL SELECT reg,COALESCE(requested_at,CURRENT_TIMESTAMP) FROM requests_v233 WHERE lane='manual'
- UNION ALL SELECT reg,COALESCE(requested_at,CURRENT_TIMESTAMP) FROM document_priorities_v233 WHERE lane='manual'
- UNION ALL SELECT reg_number AS reg,COALESCE(last_seen,CURRENT_TIMESTAMP) FROM purchases WHERE source='manual'
-) GROUP BY reg"""
-
 def _html_patch(body: str) -> str:
     # This is the existing procurement total across all pages, not a new metric.
     body=body.replace('<small>Закупок по фильтру</small>','<small>Закупки</small>')
@@ -62,16 +56,15 @@ def install(ns:dict)->None:
         finally:c.close()
     def setup():
         with db() as c:
+            migrate_legacy_inputs(c)
             c.execute('CREATE TABLE IF NOT EXISTS v257_manual_registry(reg TEXT PRIMARY KEY,requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)')
             c.execute('CREATE INDEX IF NOT EXISTS v257_manual_order ON v257_manual_registry(requested_at DESC)')
-            tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'requests_v233' in tables:
-                c.execute("INSERT OR IGNORE INTO v257_manual_registry(reg,requested_at) SELECT reg,COALESCE(requested_at,CURRENT_TIMESTAMP) FROM requests_v233 WHERE lane='manual'")
-            if 'document_priorities_v233' in tables:
-                c.execute("INSERT OR IGNORE INTO v257_manual_registry(reg,requested_at) SELECT reg,COALESCE(requested_at,CURRENT_TIMESTAMP) FROM document_priorities_v233 WHERE lane='manual'")
-            c.execute("INSERT OR IGNORE INTO v257_manual_registry(reg) SELECT reg_number FROM purchases WHERE source='manual'")
             c.execute('CREATE INDEX IF NOT EXISTS v257_purchase_inn ON purchases(customer_inn)')
             c.execute('CREATE INDEX IF NOT EXISTS v257_findings_code ON findings(kind,code,reg_number)')
+    # EIS-only mode disables the legacy startup hook. The display table must
+    # nevertheless exist before any dashboard or manual-list request.
+    with db() as c:
+        ensure_schema(c)
     @app.on_event('startup')
     async def on_start():
         await asyncio.to_thread(setup)
@@ -159,19 +152,22 @@ def install(ns:dict)->None:
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
         with db() as c:
             total=c.execute('SELECT COUNT(*) FROM ('+MANUAL_SOURCE_SQL+')').fetchone()[0]
+            has_jobs=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v301_search_jobs'").fetchone()
+            job_join=' LEFT JOIN v301_search_jobs sj ON sj.id=r.job_id ' if has_jobs else ''
+            status="COALESCE(sj.status,j.status,'В очереди')" if has_jobs else "COALESCE(j.status,'В очереди')"
             records=c.execute("""SELECT r.reg AS reg_number,r.requested_at,p.customer,p.title,p.documents_found,
-             p.documents_checked,p.violations,p.risks,COALESCE(j.status,'В очереди') manual_status
+             p.documents_checked,p.violations,p.risks,"""+status+""" manual_status
              FROM ("""+MANUAL_SOURCE_SQL+""") r LEFT JOIN purchases p ON p.reg_number=r.reg
              LEFT JOIN requests_v233 j ON j.reg=r.reg AND j.lane='manual'
-             ORDER BY r.requested_at DESC,r.reg DESC LIMIT ? OFFSET ?""",(limit,offset)).fetchall()
+             """+job_join+" ORDER BY r.requested_at DESC,r.reg DESC LIMIT ? OFFSET ?",(limit,offset)).fetchall()
         return {'total':total,'items':[dict(r) for r in records]}
     @app.post('/api/v257/manual/{reg}',include_in_schema=False)
     def register_manual(reg:str):
-        if not re.fullmatch(r'\d{10,20}',reg):raise HTTPException(400,'Некорректный номер закупки')
+        if not re.fullmatch(r'3[0-9]{10}',reg):raise HTTPException(400,'Некорректный номер закупки')
         with db() as c:
             row=c.execute("SELECT reg FROM requests_v233 WHERE reg=? AND lane='manual'",(reg,)).fetchone()
             if not row:raise HTTPException(409,'Сначала запустите самостоятельную проверку')
-            c.execute('INSERT OR IGNORE INTO v257_manual_registry(reg) VALUES(?)',(reg,))
+            record_input(c,reg,provenance='legacy_number_field')
         return {'reg':reg,'saved':True}
     @app.get('/api/v257/purchase-extra/{reg}',include_in_schema=False)
     def extra(reg:str):

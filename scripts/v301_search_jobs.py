@@ -13,6 +13,7 @@ import time
 from datetime import datetime,timezone
 from fastapi import HTTPException,Request
 from v295_eis_originals import auth,allowed_documents,saved_document,root
+from v319_manual_inputs import migrate_legacy_inputs,record_input
 
 REG=re.compile(r"^3[0-9]{10}$")
 INN=re.compile(r"^(?:[0-9]{10}|[0-9]{12})$")
@@ -100,7 +101,9 @@ def _init(ns):
                 "INSERT OR IGNORE INTO v313_migrations(marker,migrated_at)"
                 " VALUES ('repair_404_noticeId',?)",(_utc(),))
             print(f"V313 NOTICE_ID_RECHECK_QUEUED count={queued_rechecks}",flush=True)
+        migrated=migrate_legacy_inputs(db)
         db.commit()
+        print(f"V319 MANUAL_INPUTS_READY migrated={migrated} discovery_is_manual=False",flush=True)
         if repaired:
             print(f"V308 RETRY_OLD_404_BACKLOG jobs={repaired}",flush=True)
     finally:db.close()
@@ -123,7 +126,7 @@ def _local_results(ns,kind,target):
         return [dict(r) for r in rows]
     finally:db.close()
 
-def _enqueue(ns,kind,target,page=1,priority=10,parent_id=""):
+def _enqueue(ns,kind,target,page=1,priority=10,parent_id="",user_input=False):
     now=_utc()
     db=_db(ns)
     try:
@@ -133,6 +136,10 @@ def _enqueue(ns,kind,target,page=1,priority=10,parent_id=""):
             "AND status IN ('queued','leased','deferred') ORDER BY created_at DESC LIMIT 1",
             (kind,target,page)).fetchone()
         if old:
+            # The user may enter a number already queued by an INN search.
+            # Reuse the download work, but retain this explicit submission.
+            if user_input and kind=="reg":
+                record_input(db,target,job_id=old["id"],requested_at=now)
             db.commit()
             return dict(old),False
         active=db.execute(
@@ -147,12 +154,8 @@ def _enqueue(ns,kind,target,page=1,priority=10,parent_id=""):
             "(id,kind,target,page,status,priority,created_at,updated_at,parent_id) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (identifier,kind,target,page,"queued",priority,now,now,parent_id))
-        if kind=="reg":
-            # Retain independent manual procurement history.
-            try:
-                db.execute("INSERT OR IGNORE INTO v257_manual_registry(reg) VALUES(?)",(target,))
-            except sqlite3.OperationalError:
-                pass
+        if user_input and kind=="reg":
+            record_input(db,target,job_id=identifier,requested_at=now)
         db.commit()
         row=db.execute("SELECT * FROM v301_search_jobs WHERE id=?",(identifier,)).fetchone()
         print(f"V301 SEARCH_QUEUED kind={kind} target={target} page={page}",flush=True)
@@ -176,16 +179,8 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         valid=[]
         for reg in (regs if isinstance(regs,list) else [])[:40]:
             if isinstance(reg,str) and REG.fullmatch(reg) and reg not in valid:valid.append(reg)
-        if row["kind"]=="inn" and valid:
-            # Search filters in EIS may be ignored or not returned in
-            # the HTML. Discovery by itself does NOT prove buyer INN.
-            # v311 independently records the buyer from the official card.
-            try:
-                db.executemany(
-                    "INSERT OR IGNORE INTO v257_manual_registry(reg) VALUES(?)",
-                    [(r,) for r in valid])
-            except sqlite3.OperationalError:
-                pass
+        # INN results stay in the discovery/download queue. They never
+        # enter the history of registry numbers submitted through the field.
         now=_utc()
         nb=int(time.time())+min(1800,max(60,defer)) if status=="deferred" else 0
         effective="queued" if status=="deferred" else status
@@ -316,7 +311,7 @@ def install(ns):
                         print(f"V301 LOCAL_RECHECK reg={value} status={ret.get('status')}",flush=True)
             except Exception as exc:
                 print(f"V301 RECHECK_FALLBACK reg={value} {type(exc).__name__}",flush=True)
-        job,created=await asyncio.to_thread(_enqueue,ns,kind,value,1,0)
+        job,created=await asyncio.to_thread(_enqueue,ns,kind,value,1,0,"",kind=="reg")
         if local_recheck:
             job=await asyncio.to_thread(
                 _finish,ns,job["id"],"done",

@@ -144,6 +144,7 @@ SCRIPT='''<script id="v302-modern-js">
     const r=await req('/api/v301/search',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({kind,value})});
+    if(kind==='reg')window.dispatchEvent(new Event('eis223:manual-input'));
     if(i!==seq)return;
     notice('<strong>Запрос '+escape(value)+' поставлен в приоритетную очередь.</strong> '+
       (r.bridge?.active?'Мост ЕИС активен, загрузка начнётся в ближайшие секунды.':
