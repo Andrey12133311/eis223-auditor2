@@ -175,6 +175,16 @@ def verified_price(p,docs):
             observed=_decimal(match.group("amount"))
             if observed is not None and observed==expected_value:
                 return (observed,d,match)
+    # The authenticated EIS card has its own verified browser-source
+    # provenance. Only the explicit NMCD price kind can confirm this value,
+    # not a maximum/subject-cost field from an unrelated lot.
+    official=p.get("verified_price_source")
+    if isinstance(official,dict) and official.get("kind")=="nmcd":
+        from v311_verified_customer import _official_source
+        card_value=money(official.get("price"))
+        if (card_value and card_value[1]==expected[1] and
+            _official_source(official.get("source"),str(p.get("reg") or ""))):
+            return (expected_value,{"name":"Карточка ЕИС — подтверждённая НМЦД"},None)
     return None
 
 def security_findings(p,docs):
