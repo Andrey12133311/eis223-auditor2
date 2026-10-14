@@ -25,6 +25,20 @@ def run():
     assert "не более 5 млн" in found[0]["title"]
     assert found[0]["document"]=="Документация.docx"
     assert found[0]["kind"]=="violation"
+    # Numeric NMCD captured directly from a verified official EIS card can
+    # independently corroborate an explicit bid security clause.
+    card_price={**common,"verified_price_source":{
+        "kind":"nmcd",
+        "price":"4000000.00",
+        "source":"https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=32616233661"
+    }}
+    assert len(security_findings(card_price,[bid])[0])==1
+    different_kind={**card_price,"verified_price_source":{
+        **card_price["verified_price_source"],"kind":"subject_cost"}}
+    assert security_findings(different_kind,[bid])[0]==[]
+    different_reg={**card_price,"verified_price_source":{
+        **card_price["verified_price_source"],"source":card_price["verified_price_source"]["source"].replace("32616233661","32616471929")}}
+    assert security_findings(different_reg,[bid])[0]==[]
     no_bidding=original("Обеспечение исполнения договора в размере 150 000 рублей.")
     assert security_findings(common,[price,no_bidding])[0]==[]
     neg=original("Обеспечение заявки не требуется. Обеспечение исполнения договора 100 000 рублей.")
