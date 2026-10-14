@@ -29,32 +29,77 @@ def issue_key(title):
     return re.sub(r"[^a-z0-9а-я]+","",value)
 
 
+def _proof(value):
+    """Normalize printed wrappers without dropping the underlying source text."""
+    s=str(value or "").casefold().replace("ё","е").replace("\xa0"," ")
+    s=re.sub(r"файл\s*/\s*источник\s*:[^;\n]{0,220};\s*фрагмент\s*:\s*","",s,flags=re.I)
+    # A payment provision is an episode: keep the full numeric deadline and
+    # starting event, but not unrelated headings around the excerpt.
+    clause=re.search(
+        r"(?:расчет\s+производится|оплат[аыуе]\s+производится|"
+        r"оплата\s+осуществляется)[\s\S]{0,500}?"
+        r"(?:\d{1,3}\s+(?:рабочих|календарных)\s+дн\w*)"
+        r"[\s\S]{0,220}",s,re.I)
+    if clause:s=clause.group(0).split("|",1)[0]
+    return re.sub(r"\s+"," ",s).strip(" \t\n.;,")
+
+
+def _different_fact(a,b):
+    """Don't collapse independent deadlines, amounts, or dated occurrences."""
+    date=re.compile(r"\b(?:\d{2}[.]\d{2}[.]20\d{2}|20\d{2}-\d{2}-\d{2})\b")
+    days=re.compile(r"\b\d+\s+(?:рабочих|календарных)\s+дн\w*")
+    percent=re.compile(r"\b\d+(?:[,.]\d+)?\s*%")
+    for pat in (date,days,percent):
+        aa=set(pat.findall(a));bb=set(pat.findall(b))
+        if aa and bb and aa!=bb:return True
+    return False
+
+
+def _same_finding(a,b,field):
+    ta=issue_key(a.get(field) or a.get("item") or a.get("code"))
+    tb=issue_key(b.get(field) or b.get("item") or b.get("code"))
+    if not ta or ta!=tb:return False
+    # Distinct legal bases, documents, source URLs and real locations cannot
+    # be hidden merely because the violation title is shared.
+    for attr in ("status","kind","law","legal_basis","document","source_url","location"):
+        x=str(a.get(attr) or "").strip().casefold()
+        y=str(b.get(attr) or "").strip().casefold()
+        if x and y and x!=y:return False
+    ea=_proof(a.get("evidence"));eb=_proof(b.get("evidence"))
+    if not ea or not eb:return ea==eb and bool(str(a.get("code") or a.get("field_path") or "").strip()) and bool(str(b.get("code") or b.get("field_path") or "").strip())
+    if _different_fact(ea,eb):return False
+    if ea==eb:return True
+    short,long=sorted((ea,eb),key=len)
+    if len(short)>=70 and short in long:return True
+    # Truncated UI snippets can begin a few chars apart. Require a long
+    # common quote, not just a similar label or the same number of days.
+    import difflib
+    match=difflib.SequenceMatcher(None,ea[:1600],eb[:1600],autojunk=False).find_longest_match()
+    return match.size>=125 and match.size>=.70*len(short)
+
+
 def collapse(items,field="title",violation_only=False):
     answer=[]
-    positions={}
     for item in items:
         if not isinstance(item,dict):
             answer.append(item)
             continue
-        if violation_only and item.get("status") not in ("violation",):
+        if violation_only and item.get("status")!="violation":
             answer.append(item)
             continue
-        # Never merge separate events merely because they share a heading.
-        # A different document, statutory norm or excerpt is distinct proof.
-        key=(
-            issue_key(item.get(field) or item.get("item") or item.get("code")),
-            str(item.get("document") or "").strip().casefold(),
-            str(item.get("source_url") or "").strip().casefold(),
-            str(item.get("law") or item.get("legal_basis") or "").strip().casefold(),
-            str(item.get("location") or "").strip().casefold(),
-            re.sub(r"\s+"," ",str(item.get("evidence") or "").strip().casefold()),
-        )
-        if not key[0]:
+        found=next((i for i,existing in enumerate(answer)
+                    if isinstance(existing,dict) and _same_finding(existing,item,field)),None)
+        if found is None:
             answer.append(item)
-            continue
-        if key not in positions:
-            positions[key]=len(answer)
-            answer.append(item)
+        else:
+            # Retain the best documented representation of the SAME proof.
+            old=answer[found]
+            def quality(obj):
+                return (sum(bool(obj.get(k)) for k in
+                            ("document","source_url","law","location","note"))*1000
+                        +min(len(str(obj.get("evidence") or "")),1500))
+            if quality(item)>quality(old):
+                answer[found]=item
     return answer
 
 
@@ -146,22 +191,56 @@ function cleanup(){
     const count=(heading.textContent||'').match(/\d+/)?.[0];
     heading.textContent='Нарушения'+(count?': '+count:'');
  }
- // Result cards are sometimes duplicated independently of the canonical API.
- const results=[...document.querySelectorAll('h2,h3')].find(h=>
+ // The legacy check-card renderer sometimes prints the same legal clause
+ // several times with different wrappers ("Файл/источник" vs raw excerpt).
+ // Compare the actual obligation, not the whole node text. This only changes
+ // visible cards; source rows and original documents remain untouched.
+ const main=document.querySelector('main')||document.body;
+ const results=[...main.querySelectorAll('h2,h3')].find(h=>
     /^Результаты проверки$/i.test((h.textContent||'').trim()));
- if(!results)return;
- const parent=results.closest('section,.card,article')||results.parentElement;
- if(!parent)return;
- const candidates=[...parent.querySelectorAll('article,.finding,.result-item,[style*="border-left"]')];
- const unique=new Set();
- candidates.forEach(node=>{
-    const lead=node.querySelector('h3,h4,h5,strong,b');
-    const name=lead?.textContent?.trim()||'';
-    if(!name||norm(name)==='нарушение'||name.length<9)return;
-    // Distinct evidence cannot be hidden based on a shared legal heading.
-    const key=norm(name)+'|'+norm(node.textContent||'');
-    if(unique.has(key))node.remove();else unique.add(key);
- });
+ const root=results?.closest('section,.card,article')||main;
+ const candidates=[...root.querySelectorAll('article,.finding,.result-item,[style*="border-left"]')];
+ const extra=[...main.querySelectorAll('article,.finding,.result-item,[style*="border-left"]')];
+ // Some legacy layouts put the heading and cards in adjacent containers.
+ const all=[...new Set([...candidates,...extra])].filter(n=>
+   n.isConnected&&/^\/check-new\//.test(location.pathname));
+ const unique=new Map();
+ const compact=s=>String(s||'').toLowerCase().replace(/ё/g,'е')
+   .replace(/\s+/g,' ').trim();
+ function evidenceKey(body){
+   body=compact(body).replace(/файл\s*\/\s*источник\s*:[^;]{0,220};\s*фрагмент\s*:\s*/gi,'');
+   const pos=body.search(/(?:расчет производится|оплата производится|оплата осуществляется)/i);
+   if(pos>=0){
+      let part=body.slice(pos,pos+460).split('|',1)[0];
+      const end=part.match(/(?:рабочих|календарных)\s+дн\w*[\s\S]{0,130}?(?:приемк\w*|приёмк\w*|подписани\w*|поставк\w*)[^.]*\./);
+      if(end)part=part.slice(0,end.index+end[0].length);
+      return norm(part);
+   }
+   return norm(body);
+ }
+ for(const node of all){
+   const lead=node.querySelector('h3,h4,h5,strong,b');
+   if(!lead)continue;
+   const title=compact(lead.textContent);
+   if(title.length<12 || title==='нарушение')continue;
+   const contents=compact(node.textContent||'');
+   if(!contents.includes('нарушение')&&!contents.includes('требует проверки'))continue;
+   // Ignore broad containers that include several separately titled findings.
+   if(node.querySelectorAll('h3,h4,h5').length>1)continue;
+   const proof=evidenceKey(contents);
+   if(proof.length<65)continue;
+   const numbers=(contents.match(/\b\d+\s+(?:рабочих|календарных)\s+дн\w*/g)||[]).join('|');
+   const key=norm(title)+'|'+numbers+'|'+proof.slice(0,500);
+   const prev=unique.get(key);
+   if(prev){
+      // Preserve the version with more provenance in its visible text.
+      if(/файл\s*\/\s*источник/i.test(contents)&&
+         !/файл\s*\/\s*источник/i.test(prev.textContent||'')){
+        prev.remove();unique.set(key,node);
+      }else node.remove();
+   }else unique.set(key,node);
+ }
+
 }
 let scheduled=false;
 new MutationObserver(()=>{
