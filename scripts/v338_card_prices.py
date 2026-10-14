@@ -142,7 +142,7 @@ def enqueue_missing_prices(ns,limit=8):
                     WHERE p.documents_checked>0
                     AND (p.price_num IS NULL OR TRIM(COALESCE(p.price,''))='')
                     AND (r.reg IS NULL OR
-                         (r.attempts<3 AND r.created_at<datetime('now','-6 hours')))
+                         (r.attempts<3 AND strftime('%s',r.created_at)<strftime('%s','now','-6 hours')))
                     ORDER BY p.last_seen DESC LIMIT ?""",(min(8,limit),)).fetchall()
     finally:db.close()
     queued=0
