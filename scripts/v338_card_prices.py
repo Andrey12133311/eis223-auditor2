@@ -17,9 +17,9 @@ from v311_verified_customer import REG,_official_source,_verified_money
 from v335_price_recovery import money,update_price
 
 KINDS={
-    "nmcd":re.compile(r"^(?:начальн\w*\s*\(?максимальн\w*\)?\s*цен\w*(?:\s+договора)?|начальн\w*\s+цен\w*\s+договора|нмцд|начальная\s*\(максимальная\)\s*цена)$",re.I),
+    "nmcd":re.compile(r"^(?:начальн\w*\s*\(?максимальн\w*\)?\s*цен\w*(?:\s+договора)?|начальн\w*\s+цен\w*\s+договора|нмцд|начальная\s*\(максимальная\)\s*цена)(?:\s*\(цена\s+лота\))?$",re.I),
     "maximum_contract_value":re.compile(r"^максимальн\w*\s+значени\w*\s+цен\w*\s+договора$",re.I),
-    "subject_cost":re.compile(r"^(?:стоимост\w*\s+предмет\w*\s+закупк\w*|стоимост\w*\s+закупк\w*)$",re.I),
+    "subject_cost":re.compile(r"^(?:стоимост\w*\s+предмет\w*\s+(?:закупк\w*|договора)|стоимост\w*\s+закупк\w*|сумма\s+закупк\w*)$",re.I),
 }
 LABELS={"nmcd":"НМЦД","maximum_contract_value":"Максимальная цена договора",
         "subject_cost":"Стоимость предмета закупки"}
