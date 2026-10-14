@@ -556,6 +556,22 @@ async def offline_audit(ns,reg):
                                "evidence":"В XML выявлены признаки национального режима, код ОКПД2 не извлечён",
                                "legal_basis":"Постановление Правительства РФ № 1875",
                                "reason":"Уточнить ОКПД2 по позициям лота и перечни на дату публикации"})
+    # Decree 1875 p.5(a): absence of Russian production must be supported by
+    # a Minpromtorg permit issued before procurement, not just a statement.
+    for doc in docs:
+        if doc.get("status")!="checked":continue
+        body=" ".join(str(doc.get("text") or "").casefold().split())
+        claim="отсутствие на территории российской федерации производства"
+        if claim not in body:continue
+        permit=bool(re.search(r"(?:разрешени[ея] минпромторга|разрешени[ея] на закупку иностранного товара)",body))
+        checks.append({"code":"national_regime_minpromtorg_permit_review",
+                       "status":"check",
+                       "title":"Проверить разрешение Минпромторга для исключения",
+                       "document":doc.get("name") or "",
+                       "evidence":("Упоминание разрешения найдено" if permit else
+                                   "В документе не обнаружено упоминание разрешения"),
+                       "legal_basis":"Постановление Правительства РФ № 1875, пункт 5, подпункт а",
+                       "reason":"Проверить оригинал разрешения, дату выдачи до начала закупки и позицию приложения № 1"})
     # Structured clarification/cancellation events: compare calendar dates
     # only. Holiday-sensitive statutory conclusions require an authoritative
     # production calendar and are deliberately held for legal review.
