@@ -86,13 +86,22 @@ def _match_amount(part):
 def prices_in_text(text):
     source=str(text or "")[:600000].replace("\xa0"," ")
     candidates=[]
-    for line in source.splitlines():
-        line=" ".join(line.split())
+    lines=[" ".join(line.split()) for line in source.splitlines()]
+    for index,line in enumerate(lines):
         if not line or len(line)>2000:continue
         for hit in LABEL.finditer(line):
             before=line[max(0,hit.start()-105):hit.start()]
             if UNSUITABLE.search(before) or NOTE_ONLY.search(before):continue
             after=line[hit.end():hit.end()+280]
+            # An EIS notice may put the NMCD label and the sum in adjacent
+            # DOCX table cells; accept a directly following monetary cell only.
+            if not after.strip(" \t:;|=,-–—()") and index+1<len(lines):
+                next_line=lines[index+1].lstrip(" :;|=,-–—()")
+                if (not LABEL.search(next_line) and
+                    re.match(r"^\d[\d \u00a0,.]*",next_line) and
+                    (re.search(r"(?:₽|руб(?:ль|ля|лей|\.)|коп(?:ейки|\.))",next_line,re.I)
+                     or re.fullmatch(r"\d[\d \u00a0,.]*",next_line))):
+                    after=": "+next_line[:270]
             if NOT_ACTUAL.search(after[:95]):continue
             # Prices in procurement documents are structured as a labeled
             # cell or clear "НМЦД: <amount>" field. A mere prose mention of
