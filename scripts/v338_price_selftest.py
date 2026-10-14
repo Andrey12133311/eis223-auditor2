@@ -69,10 +69,15 @@ def run():
         from datetime import datetime,timezone
         db=conn()
         db.execute("""CREATE TABLE v301_search_jobs(status TEXT)""")
+        db.execute("""CREATE TABLE v332_audit_queue(campaign TEXT,reg TEXT)""")
+        from v332_all_procurements_audit import CAMPAIGN
+        db.execute("INSERT INTO v332_audit_queue VALUES(?,?)",(CAMPAIGN,"32616471930"))
         db.execute("""INSERT INTO purchases(reg_number,documents_checked)
                       VALUES('32616471930',1)""")
         db.execute("""INSERT INTO purchases(reg_number,documents_checked)
                       VALUES('32616471931',0)""")
+        db.execute("""INSERT INTO purchases(reg_number,documents_checked)
+                      VALUES('32616471932',1)""")
         db.commit();db.close()
         calls=[]
         original=v301_search_jobs._enqueue
