@@ -153,9 +153,13 @@ def compare_same_titles(connect,limit=100):
         def norm(x):
             return re.sub(r"\s+"," ",str(x or "").casefold().replace("ё","е")).strip()
         def same(a,b):
-            doc_a,doc_b=norm(a.get("document")),norm(b.get("document"))
+            # A legacy check can name multiple sources as
+            # "name.docx; Карточка закупки". Split on the delimiter so
+            # a true shared original can be compared on its exact name.
+            docs_a={norm(x) for x in str(a.get("document") or "").split(";") if norm(x)}
+            docs_b={norm(x) for x in str(b.get("document") or "").split(";") if norm(x)}
             url_a,url_b=norm(a.get("source_url")),norm(b.get("source_url"))
-            shared_document=bool((doc_a and doc_a==doc_b) or
+            shared_document=bool((docs_a & docs_b) or
                                  (url_a and url_a==url_b))
             x,y=norm(a.get("evidence")),norm(b.get("evidence"))
             same_excerpt=bool(x and y and (x==y or
