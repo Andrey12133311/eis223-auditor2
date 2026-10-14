@@ -319,6 +319,20 @@ async def offline_audit(ns,reg):
         if not _name(p["customer"]):p["customer"]=metadata.get("customer") or ""
         if not p["customer_inn"]:p["customer_inn"]=metadata.get("customer_inn") or ""
         if not subject(p["title"]):p["title"]=metadata.get("title") or p["title"]
+        # Before the audit is saved, recover the missing numeric NMCD from a
+        # hash-verified original notice. Never infer it from the winner's price.
+        if (not str(p.get("price") or "").strip() or
+            str(p.get("price")).strip() in ("—","-","нет данных","не установлена")):
+            if metadata.get("price_num") is not None:
+                p["price"]=metadata["price"]
+                p["price_num"]=metadata["price_num"]
+        elif p.get("price_num") is None and metadata.get("price_num") is not None:
+            try:
+                from v311_verified_customer import _verified_money
+                if _verified_money(p["price"])[1]==metadata["price_num"]:
+                    p["price_num"]=metadata["price_num"]
+            except ValueError:
+                pass
 
     card={
        "status":"partial",
