@@ -8,7 +8,7 @@ import tempfile
 from fastapi import FastAPI
 from v311_verified_customer import _initialize,_save_verified_price,_verified_money
 from v324_official_price import prices_in_text,verified_nmcd
-from v335_price_recovery import price_changes,repair_cached,install,patch_html,card_price_html
+from v335_price_recovery import price_changes,repair_cached,install,patch_html,card_price_html,cached_evidence
 from v299_browser_intake import _known
 
 REG='32616471929'
@@ -30,6 +30,10 @@ def run():
     result=verified_nmcd([doc(notice)])
     assert result['price_num']==41081.60,result
     assert '41 081' in result['evidence'] and '60 коп' in result['evidence']
+    stored={'price':'41081.60','price_source_url':URL,'price_evidence':result['evidence']}
+    assert cached_evidence({'card_fields_json':json.dumps({'metadata_evidence':{'customer':'ООО «Заказчик»'},'price_evidence':stored})},None)==stored
+    stale={**stored,'price':'14.10','price_evidence':'Дата подготовки обоснования НМЦД:14.10.2026'}
+    assert cached_evidence({'card_fields_json':json.dumps({'price_evidence':stale})},None)=={}
     wrapped=('|7. |Начальная (максимальная) |41 081 (Сорок одна тысяча |\n'
              '|   |цена договора (цена лота)|восемьдесят один) руб. 60 коп. |')
     assert verified_nmcd([doc(wrapped)])['price_num']==41081.60

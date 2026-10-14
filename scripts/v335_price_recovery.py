@@ -105,13 +105,16 @@ def cached_evidence(p,verified):
                         "source_url":verified.get("evidence_page","")}
     try:
         card=json.loads(p.get("card_fields_json") or "{}")
-        item=card.get("metadata_evidence") or {}
-        if (item.get("source")=="official_eis_document" and
-            uid_from_url(item.get("price_source_url") or "")):
-            from v324_official_price import prices_in_text
-            parsed=money(item.get("price"))
-            if parsed and any(number==parsed[1] for _,number,_ in prices_in_text(item.get("price_evidence"))):
-                return item
+        for key in ('price_evidence','metadata_evidence'):
+            item=card.get(key) or {}
+            if (isinstance(item,dict) and
+                (item.get("source")=="official_eis_document" or
+                 (key=='price_evidence' and item.get('source') is None)) and
+                uid_from_url(item.get("price_source_url") or "")):
+                from v324_official_price import prices_in_text
+                parsed=money(item.get("price"))
+                if parsed and any(number==parsed[1] for _,number,_ in prices_in_text(item.get("price_evidence"))):
+                    return item
     except (ValueError,TypeError,AttributeError):pass
     return {}
 
