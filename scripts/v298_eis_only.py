@@ -101,6 +101,19 @@ async def offline_audit(ns,reg):
         except (OSError,ValueError,TypeError) as exc:
             raise ValueError("Neither EIS SOAP XML nor public EIS manifest available") from exc
 
+    # A verified SOAP notice may coexist with browser-captured clarification
+    # and cancellation events. Validate its registry number before merging.
+    if notice is not None:
+        try:
+            manifest_path=data_root()/"eis223_public_browser_intake"/reg/"manifest.json"
+            manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (isinstance(manifest,dict) and
+                manifest.get("source")=="public_eis_223_browser" and
+                manifest.get("reg_number")==reg):
+                public={key:manifest[key] for key in ("clarifications","cancellations")
+                        if isinstance(manifest.get(key),list)}
+        except (OSError,ValueError,TypeError):
+            pass
     previous=await asyncio.to_thread(stored_purchase,ns,reg)
     lot=direct(direct(notice,"lots"),"lot")
     lot_data=direct(lot,"lotData")
