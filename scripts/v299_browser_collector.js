@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "317"; // buyer metadata from actual EIS labels/cards
+  const COLLECTOR_VERSION = "318"; // buyer metadata from actual EIS labels/cards
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -298,7 +298,7 @@
       for(const element of card.querySelectorAll("a[href],[onclick],[data-href],[data-url]")){
         for(const key of ["href","onclick","data-href","data-url"]){
           const raw=element.getAttribute(key)||"";
-          const match=raw.match(/(?:https?:\\/\\/zakupki\\.gov\\.ru)?\\/(?:223\\/purchase\\/public\\/purchase\\/info|epz\\/order\\/notice\\/notice223)\\/common-?info\\.html\\?[^"'<>\\s)]+/i);
+          const match=raw.match(/(?:https?:\/\/zakupki\.gov\.ru)?\/(?:223\/purchase\/public\/purchase\/info|epz\/order\/notice\/notice223)\/common-?info\.html\?[^"'<>\s)]+/i);
           const found=officialCardUrl(match?match[0]:raw,reg,INFO_PAGES,true,docBase);
           if(found&&!seen.has(found.href)){seen.add(found.href);output.push(found.href);}
         }
