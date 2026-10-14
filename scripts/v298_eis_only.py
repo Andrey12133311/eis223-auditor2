@@ -353,6 +353,46 @@ async def offline_audit(ns,reg):
                            "evidence":", ".join(sorted(set(flags))),
                            "legal_basis":"223-ФЗ, статья 3.1-4",
                            "reason":"Сверить коды товаров, действующий нормативный акт и исключения"})
+    # Structured clarification/cancellation events: compare calendar dates
+    # only. Holiday-sensitive statutory conclusions require an authoritative
+    # production calendar and are deliberately held for legal review.
+    from datetime import timedelta
+    def event_day(value):
+        if isinstance(value,dict):
+            for key in ("date","created","request_date","requestDate",
+                        "publicationDate","published","published_at"):
+                if value.get(key):return as_day(value[key])
+            return None
+        return as_day(value)
+    for event in (public.get("clarifications") or []) if isinstance(public.get("clarifications"),list) else []:
+        if not isinstance(event,dict):continue
+        request_day=event_day(event.get("request_date") or event.get("requestDate"))
+        answer_day=event_day(event.get("publication_date") or event.get("publicationDate"))
+        if not request_day or not answer_day or not closing:continue
+        if request_day>closing:continue
+        weekdays_before=sum((request_day+timedelta(days=n)).weekday()<5
+                            for n in range(1,(closing-request_day).days+1))
+        if weekdays_before<3:continue
+        elapsed_weekdays=sum((request_day+timedelta(days=n)).weekday()<5
+                             for n in range(1,(answer_day-request_day).days+1))
+        if elapsed_weekdays>3:
+            checks.append({"code":"clarification_three_workdays_review","status":"check",
+                "title":"Возможное нарушение срока размещения разъяснения",
+                "document":"Сведения ЕИС об изменениях и разъяснениях",
+                "evidence":f"Запрос: {request_day}; публикация: {answer_day}; рабочих дней без праздников: {elapsed_weekdays}",
+                "legal_basis":"223-ФЗ, статья 3.2, часть 3",
+                "reason":"Проверить производственный календарь, дату получения запроса и действующую редакцию извещения"})
+    for event in (public.get("cancellations") or []) if isinstance(public.get("cancellations"),list) else []:
+        if not isinstance(event,dict):continue
+        decision=event_day(event.get("decision_date") or event.get("decisionDate"))
+        published_day=event_day(event.get("publication_date") or event.get("publicationDate"))
+        if decision and published_day and published_day!=decision:
+            checks.append({"code":"cancellation_publication_review","status":"check",
+                "title":"Возможное несвоевременное размещение решения об отмене",
+                "document":"Протокол отмены / сведения ЕИС",
+                "evidence":f"Решение: {decision}; размещение: {published_day}",
+                "legal_basis":"223-ФЗ, статья 3.2, часть 6",
+                "reason":"Сверить официальный протокол, время и основания отмены"})
     annotate=ns.get("annotate")
     if callable(annotate):
         await asyncio.to_thread(annotate,reg,docs,findings,checks)
