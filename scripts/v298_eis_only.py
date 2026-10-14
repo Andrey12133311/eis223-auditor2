@@ -515,6 +515,28 @@ async def offline_audit(ns,reg):
                                       "; ОКПД2: "+(", ".join(codes[:20]) if codes else "не указан"),
                            "legal_basis":"223-ФЗ, статья 3.1-4",
                            "reason":"Сопоставить нормативный акт, код товара и применимые исключения"})
+    # 1875 exception screening: positive documentary clues trigger review,
+    # not automatic exemption. A claim alone is not proof of applicability.
+    if notice is not None:
+        exceptions=(
+            ("prior_contract","исполнения договора, заключенного до 1 января 2025"),
+            ("defence_repair","ремонта, модернизации, технического обслуживания вооружения"),
+            ("special_investment","специального инвестиционного контракта"),
+            ("no_domestic_equivalent","отсутствие на территории российской федерации производства"),
+        )
+        for doc in docs:
+            if doc.get("status")!="checked":continue
+            body=" ".join(str(doc.get("text") or "").casefold().split())
+            for key,phrase in exceptions:
+                pos=body.find(phrase)
+                if pos<0:continue
+                checks.append({"code":"national_regime_exception_"+key,
+                               "status":"check",
+                               "title":"Проверить заявленное исключение национального режима",
+                               "document":doc.get("name") or "",
+                               "evidence":body[max(0,pos-90):pos+len(phrase)+130],
+                               "legal_basis":"Постановление Правительства РФ № 1875, пункт 4",
+                               "reason":"Проверить документальное основание, применимость к конкретному лоту и редакцию акта на дату закупки"})
     # Structured clarification/cancellation events: compare calendar dates
     # only. Holiday-sensitive statutory conclusions require an authoritative
     # production calendar and are deliberately held for legal review.
