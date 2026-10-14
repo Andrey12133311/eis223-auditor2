@@ -170,7 +170,7 @@ def compare_same_titles(connect,limit=100):
         items=[]
         for key in sorted(left.keys()&right.keys()):
             matched=any(same(a,b) for a in left[key] for b in right[key])
-            items.append({
+            record={
                 "reg_number":key[0],
                 "issue":left[key][0]["title"],
                 "finding_rows":len(left[key]),
@@ -179,7 +179,15 @@ def compare_same_titles(connect,limit=100):
                                   "evidence_review_required"),
                 "finding_documents":sorted({str(r.get("document") or "") for r in left[key]})[:5],
                 "check_documents":sorted({str(r.get("document") or "") for r in right[key]})[:5]
-            })
+            }
+            if not matched:
+                # Only ambiguous pairs are output for expert review. Do not
+                # expose every procurement's complete document contents.
+                record["finding_proofs"]=[{"law":r.get("law"),"evidence":str(r.get("evidence") or "")[:360]}
+                                           for r in left[key][:3]]
+                record["check_proofs"]=[{"law":r.get("law"),"evidence":str(r.get("evidence") or "")[:360]}
+                                         for r in right[key][:4]]
+            items.append(record)
         matched=sum(x["classification"]=="matching_documentary_excerpt" for x in items)
         return {"shared_procurement_issue_groups":len(items),
                 "matching_documentary_excerpt_groups":matched,
