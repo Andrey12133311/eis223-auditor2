@@ -104,12 +104,23 @@ def summary(connect):
             return int(db.execute(sql).fetchone()[0] or 0)
         findings=scalar("SELECT COUNT(*) FROM findings WHERE kind='violation'")
         checks=scalar("SELECT COUNT(*) FROM checks WHERE status='violation'")
+        # These are diagnostic groups, not a legal determination: multiple
+        # incidents can legitimately share one short heading.
+        from v333_dedup_ui import issue_key
+        fgroup={(str(r[0]),issue_key(r[1])) for r in db.execute(
+            "SELECT reg_number,title FROM findings WHERE kind='violation'")
+            if issue_key(r[1])}
+        cgroup={(str(r[0]),issue_key(r[1])) for r in db.execute(
+            "SELECT reg_number,item FROM checks WHERE status='violation'")
+            if issue_key(r[1])}
         return {
             "purchase_counter":scalar("SELECT COALESCE(SUM(violations),0) FROM purchases"),
             "purchases":scalar("SELECT COUNT(*) FROM purchases"),
             "findings_rows":findings,
             "violation_check_rows":checks,
             "raw_rows_before_cross_table_review":findings+checks,
+            "same_title_groups_across_tables":len(fgroup & cgroup),
+            "issue_title_groups_in_both_tables":len(fgroup | cgroup),
             "archived_finding_versions":scalar("SELECT COUNT(*) FROM v334_violation_history WHERE record_type='finding'"),
             "archived_check_versions":scalar("SELECT COUNT(*) FROM v334_violation_history WHERE record_type='check'"),
             "changed_rechecks":scalar("SELECT COUNT(*) FROM v334_recheck_changes WHERE missing_count>0"),
