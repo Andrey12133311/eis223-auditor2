@@ -345,15 +345,16 @@ def install(ns):
         auth(request)
         if request.headers.get("origin")!="https://zakupki.gov.ru":
             raise HTTPException(403,"Доступно только официальной вкладке ЕИС")
-        # Old browser code always requests /223/purchase/... (HTTP 404) and
-        # would immediately exhaust the repaired queue. Require hot restart
-        # with version 308 before handing out any new work.
+        # Manual EIS lookup requires the v320 client: previous v318 code
+        # shipped an invalid JavaScript regex and couldn't run correctly.
+        # Keep the general browser intake untouched so existing collectors
+        # can still download original files until they are restarted.
         try:
             version=int(request.headers.get("x-eis223-collector-version") or "0")
         except ValueError:
             version=0
-        if version<313:
-            raise HTTPException(426,"Обновлён загрузчик ЕИС. Перезапустите код моста (v313) в браузере.")
+        if version<320:
+            raise HTTPException(426,"Для самостоятельного поиска нужен обновлённый браузерный мост v320. Перезапустите загрузчик во вкладке ЕИС.")
         job=await asyncio.to_thread(_claim,ns)
         return {"job":{k:job[k] for k in ("id","kind","target","page","attempts")} if job else None,
                 "poll_seconds":8}
@@ -363,6 +364,12 @@ def install(ns):
         auth(request)
         if request.headers.get("origin")!="https://zakupki.gov.ru":
             raise HTTPException(403,"Доступно только официальной вкладке ЕИС")
+        try:
+            version=int(request.headers.get("x-eis223-collector-version") or "0")
+        except ValueError:
+            version=0
+        if version<320:
+            raise HTTPException(426,"Отчёт старой версии моста отклонён; запустите v320")
         raw=await request.body()
         if len(raw)>2400:raise HTTPException(413,"Слишком много данных")
         try:
