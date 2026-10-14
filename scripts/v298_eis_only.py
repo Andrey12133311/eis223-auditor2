@@ -72,6 +72,41 @@ def official_notice(reg):
     return None
 
 
+def official_notice_revisions(reg):
+    """Read every distinct verified notice XML revision, without remote calls."""
+    folder=data_root()/"eis223_official_archive_inbox"/reg
+    revisions={}
+    if not folder.is_dir():return []
+    for receipt_path in sorted(folder.glob("*.json"),reverse=True)[:250]:
+        try:
+            receipt=json.loads(receipt_path.read_text(encoding="utf-8"))
+            if receipt.get("reg_number")!=reg or receipt.get("source")!="official_eis_soap_archive":continue
+            sha=receipt.get("archive_sha256","")
+            if not re.fullmatch("[0-9a-f]{64}",sha):continue
+            archive=folder/(sha+".zip")
+            if not archive.is_file() or archive.stat().st_size>15*1024*1024:continue
+            with zipfile.ZipFile(archive) as z:
+                for entry in receipt.get("notices",[])[:50]:
+                    if entry.get("reg_number")!=reg:continue
+                    name=entry.get("xml_filename","")
+                    if name not in z.namelist() or z.getinfo(name).file_size>15*1024*1024:continue
+                    xml=z.read(name)
+                    digest=hashlib.sha256(xml).hexdigest()
+                    if digest!=entry.get("xml_sha256") or digest in revisions:continue
+                    if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():continue
+                    root=ET.fromstring(xml)
+                    if tag(root)!="purchaseNotice":continue
+                    data=next((x for x in root.iter() if tag(x)=="purchaseNoticeData"),None)
+                    if data is None or field(data,"registrationNumber")!=reg:continue
+                    revisions[digest]={"sha256":digest,
+                        "publication":field(data,"publicationDateTime"),
+                        "submission_end":field(data,"submissionCloseDateTime"),
+                        "submission_start":field(data,"applSubmisionStartDate")}
+        except (OSError,ValueError,TypeError,KeyError,zipfile.BadZipFile,ET.ParseError):
+            continue
+    return list(revisions.values())
+
+
 # Federal five-day working calendar based on Labour Code art. 112 and
 # Government transfer decrees 1314 (2024), 1335 (2025), 1466 (2026).
 # Regional non-working days are outside this federal calendar.
@@ -428,6 +463,18 @@ async def offline_audit(ns,reg):
                            "evidence":body[max(0,pos-80):pos+len(phrase)+100],
                            "legal_basis":"223-ФЗ, статья 3.1-4",
                            "reason":"Сопоставить с XML ЕИС, кодом ОКПД2, датой и исключениями"})
+    # Revisions are source-backed and deduplicated by actual XML SHA256.
+    revisions=await asyncio.to_thread(official_notice_revisions,reg)
+    if len(revisions)>1:
+        deadlines={v["submission_end"][:10] for v in revisions if v["submission_end"]}
+        if len(deadlines)>1:
+            checks.append({"code":"eis_notice_revision_deadline_change",
+                           "status":"check",
+                           "title":"Срок подачи заявок менялся в редакциях ЕИС",
+                           "document":"Официальные XML-редакции извещения",
+                           "evidence":"; ".join(sorted(deadlines)),
+                           "legal_basis":"223-ФЗ, статья 4",
+                           "reason":"Сопоставить действующую редакцию и даты публикации изменений"})
     # National regime: compare the same explicit clause across the notice
     # and verified originals. Absence alone is not an infringement.
     if notice is not None:
