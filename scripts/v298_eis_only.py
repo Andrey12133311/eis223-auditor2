@@ -184,8 +184,13 @@ def stored_purchase(ns,reg):
     finally:db.close()
 
 
-async def offline_audit(ns,reg):
-    """Use only local official XML and saved original bytes, no remote I/O."""
+async def offline_audit(ns,reg,collect_only=False):
+    """Use only local official XML and saved original bytes, no remote I/O.
+
+    collect_only=True is for the comprehensive local-document legal sweep:
+    return verified source documents without saving, removing, or replacing
+    any existing database rows, findings, or original bytes.
+    """
     if not REG.fullmatch(reg):raise ValueError("Invalid official registry number")
     allowed=allowed_documents(reg)
     if not allowed:raise ValueError("Verified EIS XML has no documents")
@@ -387,6 +392,12 @@ async def offline_audit(ns,reg):
        "submissionEnd":p["submission_end"],
        "source":"official_eis_getDocsIP",
     }
+    if collect_only:
+        return {"p":p,"docs":docs,"card":card,"detail":detail,
+                "originals_expected":len(allowed),
+                "originals_received":sum(bool(saved_document(reg,uid))
+                                         for uid in allowed),
+                "source":"verified_official_eis_locals"}
     analyze=ns.get("analyze")
     build_checks=ns.get("build_checks")
     save=ns.get("save")
