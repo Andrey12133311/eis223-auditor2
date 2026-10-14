@@ -10,8 +10,15 @@ def run():
        {"title":"Срок разъяснений ограничен раньше допустимого срока","evidence":"2026-10-06"},
        {"title":"Соответствие срока разъяснений актуальному сроку подачи заявок","evidence":"2026-10-06"}]
     result=collapse(x)
-    assert len(result)==2
-    assert result[0]["evidence"]=="abc longer"
+    # Same heading is NOT enough to merge different evidence.
+    assert len(result)==3
+    assert result[0]["evidence"]=="abc"
+    assert result[1]["evidence"]=="abc longer"
+    assert len(collapse([
+        {"title":"Срок разъяснений","document":"a.docx","evidence":"2026-10-06"},
+        {"title":"Срок разъяснений","document":"b.docx","evidence":"2026-10-06"},
+        {"title":"Срок разъяснений","document":"a.docx","evidence":"2026-10-06"},
+    ]))==2
     assert issue_key(x[2]["title"])==issue_key(x[3]["title"])
     root=ET.Element("{urn:oasis:names:tc:opendocument:xmlns:office:1.0}document-content")
     table=ET.SubElement(root,"{"+ODF_TABLE+"}table")
@@ -37,7 +44,7 @@ def run():
         columns=list(row.findall("{"+ODF_TABLE+"}table-cell"))
         assert list(columns[0].iter("{"+ODF_TEXT+"}p"))[0].text.startswith("Вопрос")
         assert list(columns[1].iter("{"+ODF_TEXT+"}p"))[0].text is None
-    print("V333 QUALITY_SELFTEST_OK dedup=2 comments_blank=True",flush=True)
+    print("V333 QUALITY_SELFTEST_OK dedup_distinct_evidence=True comments_blank=True",flush=True)
 
 if __name__=="__main__":
     run()
