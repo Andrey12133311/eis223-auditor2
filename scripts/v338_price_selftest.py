@@ -62,6 +62,46 @@ def run():
         assert db.execute("SELECT status FROM checks").fetchone()[0]=="check"
         db.close()
         assert price_summary(ns)["price_conflicts_require_review"]==1
+        # Missing real card prices get a bounded, six-hour-spaced retry,
+        # rather than disappearing from the backfill queue after one failure.
+        import v301_search_jobs
+        from v338_card_prices import enqueue_missing_prices
+        from datetime import datetime,timezone
+        db=conn()
+        db.execute("""CREATE TABLE v301_search_jobs(status TEXT)""")
+        db.execute("""INSERT INTO purchases(reg_number,documents_checked)
+                      VALUES('32616471930',1)""")
+        db.execute("""INSERT INTO purchases(reg_number,documents_checked)
+                      VALUES('32616471931',0)""")
+        db.commit();db.close()
+        calls=[]
+        original=v301_search_jobs._enqueue
+        try:
+            def fake_enqueue(ns,kind,target,*args):
+                calls.append(target)
+                return ({"target":target},True)
+            v301_search_jobs._enqueue=fake_enqueue
+            assert enqueue_missing_prices(ns)==1,calls
+            assert enqueue_missing_prices(ns)==0,calls
+            for attempt in (2,3):
+                db=conn()
+                db.execute("""UPDATE v338_price_requests
+                  SET created_at=datetime('now','-7 hours')
+                  WHERE reg='32616471930'""")
+                db.commit();db.close()
+                assert enqueue_missing_prices(ns)==1,(attempt,calls)
+            db=conn()
+            db.execute("""UPDATE v338_price_requests
+                  SET created_at=datetime('now','-7 hours')
+                  WHERE reg='32616471930'""")
+            attempts=db.execute("""SELECT attempts FROM v338_price_requests
+                    WHERE reg='32616471930'""").fetchone()[0]
+            db.commit();db.close()
+            assert attempts==3
+            assert enqueue_missing_prices(ns)==0,calls
+            assert calls==["32616471930"]*3
+        finally:
+            v301_search_jobs._enqueue=original
         print("V338_CARD_PRICE_SELFTEST_OK direct_card=True typed_cost=True "
               "same_idempotent=True divergent_preserved=True nmcd_separation=True",flush=True)
 
