@@ -22,8 +22,28 @@ UNSUITABLE=re.compile(
     r"стоимост\w*\s+единиц\w*|начальн\w*\s+цен\w*\s+единиц\w*|"
     r"общ\w*\s+стоимост\w*\s+договора|стоимост\w*\s+контракт\w*)",re.I,
 )
-AMOUNT=re.compile(r"(?<!\d)(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,15}|\d{1,3})"
-                  r"(?:[,.]\d{1,2})?\s*(?:₽|руб(?:\.|лей|ля|ль)?)?(?!\d)",re.I)
+# Whole-rouble text and spreadsheet numerical values are both supported. EIS
+# originals often store "394633.3333333333" (Excel floating-point) or
+# "394 633 (прописью) рубля 33 копейки" (information card).
+from decimal import Decimal,InvalidOperation,ROUND_HALF_UP
+AMOUNT=re.compile(
+    r"(?<!\d)(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,15}|\d{1,3})"
+    r"(?:[,.]\d{1,18})?(?!\d)",re.I,
+)
+RUBLE_KOPEKS=re.compile(
+    r"руб(?:ль|ля|лей|\.)\s*(\d{1,2})\s*коп(?:ейк[аи]|еек|\.?)",
+    re.I
+)
+NOTE_ONLY=re.compile(
+    r"(?:обосновани\w*\s+начальн\w*|начальн\w*\s+цен\w*\s+единиц\w*|"
+    r"когда\s+начальн\w*|"
+    r"при\s+условии\s+что\s+начальн\w*)",re.I,
+)
+NOT_ACTUAL=re.compile(
+    r"(?:не\s+превыша\w*|менее\s+чем|более\s+чем|"
+    r"в\s+случае|может\s+составля\w*|"
+    r"не\s+подлеж\w*\s+определени\w*)",re.I,
+)
 
 def _verified(doc):
     if not isinstance(doc,dict) or doc.get("status")!="checked":return False
@@ -34,36 +54,57 @@ def _verified(doc):
             and bool(uid_from_url(meta.get("source_url") or "")))
 
 def _match_amount(part):
-    # Avoid treating a 223-FZ number or a date as a starting price.
-    for candidate in AMOUNT.finditer(part[:130]):
-        value=candidate.group(0).strip()
-        if re.search(r"(?:\b20\d{2}\b|223)\s*[-./]\s*\d",value):continue
-        try:return _verified_money(value)
-        except ValueError:continue
-    return None
+    # A legitimate value follows a label/column delimiter immediately.
+    text=str(part or "")[:300]
+    prefix=re.match(
+        r"^\s*(?:(?:[:;|=,\-–—()])\s*|руб(?:\.|лей|ля|ль)\s*|"
+        r"Российск\w*\s+рубл\w*\s*)*",
+        text,re.I)
+    start=prefix.end() if prefix else 0
+    segment=text[start:].lstrip()
+    found=AMOUNT.match(segment)
+    if not found:return None
+    digits=found.group(0).replace("\u00a0"," ").replace(" ","").replace(",",".")
+    try:number=Decimal(digits)
+    except InvalidOperation:return None
+    if not number.is_finite() or number<0 or number>Decimal("1000000000000000"):
+        return None
+    # Written kopeks within the same labeled monetary cell, e.g.
+    # "394 633 (Триста...) рубля 33 копейки".
+    if "." not in digits:
+        tail=segment[found.end():]
+        kop=RUBLE_KOPEKS.search(tail[:220])
+        if kop and re.search(r"^\s*(?:\([^)]{1,180}\)\s*)?руб",tail,re.I):
+            number+=Decimal(int(kop.group(1)))/Decimal(100)
+        elif kop and tail.lstrip().startswith("("):
+            number+=Decimal(int(kop.group(1)))/Decimal(100)
+    number=number.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
+    if number==0 and not re.match(r"^0(?:[.,]0+)?\s*(?:₽|руб)",segment,re.I):
+        return None
+    return f"{number:.2f}",float(number)
 
 def prices_in_text(text):
     source=str(text or "")[:600000].replace("\xa0"," ")
     candidates=[]
-    # Label/value table cells from DOCX and OCR'ed PDFs.  The strict short
-    # window never merges an unrelated lot amount several paragraphs away.
     for line in source.splitlines():
         line=" ".join(line.split())
-        if not line or len(line)>1300:continue
+        if not line or len(line)>2000:continue
         for hit in LABEL.finditer(line):
-            before=line[max(0,hit.start()-45):hit.start()]
-            if UNSUITABLE.search(before):continue
-            after=line[hit.end():hit.end()+130].lstrip(" :;|=-\u2013")
-            if re.match(r"(?:предусмотрен|указывает|обосновани\w*|не\s+установлен)",after,re.I):
+            before=line[max(0,hit.start()-105):hit.start()]
+            if UNSUITABLE.search(before) or NOTE_ONLY.search(before):continue
+            after=line[hit.end():hit.end()+280]
+            if NOT_ACTUAL.search(after[:95]):continue
+            # Prices in procurement documents are structured as a labeled
+            # cell or clear "НМЦД: <amount>" field. A mere prose mention of
+            # initial pricing followed by a number of days/law sections isn't.
+            field=re.match(r"^\s*(?:[,;:|=\-–—()]|руб\.?|"
+                           r"Российск\w*\s+рубл\w*)",after,re.I)
+            if not field and not re.match(r"^\s*\d",after):
                 continue
             result=_match_amount(after)
             if result is not None:
                 price,number=result
-                # Prices < 10 are usually table numbering, and "0" needs an
-                # explicit currency to be distinguished from section indexes.
-                if number==0 and not re.match(r"^0(?:[.,]00)?\s*(?:₽|руб)",after,re.I):
-                    continue
-                candidates.append((price,number,line[max(0,hit.start()-45):hit.end()+130][:220]))
+                candidates.append((price,number,line[max(0,hit.start()-80):hit.end()+240][:350]))
     return candidates
 
 def verified_nmcd(docs):
