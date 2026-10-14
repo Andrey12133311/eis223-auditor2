@@ -268,15 +268,16 @@ def apply_metadata(ns, reg, metadata):
             return False
         p = dict(row)
         changes = {}
-        name = _name(metadata.get("customer"))
-        if name and not _name(p.get("customer")):
+        name = company(metadata.get("customer")) or _name(metadata.get("customer"))
+        if name and (not _name(p.get("customer")) or
+                     compact(p.get("customer")).casefold().startswith("наименование (полное и сокращ")):
             changes["customer"] = name
             if callable(ns.get("org_form")):
                 changes["org_form"] = ns["org_form"](name)
         same = compact(p.get("customer")).casefold() == compact(name).casefold()
         if name and ("customer" in changes or same):
             inn = valid_inn(metadata.get("customer_inn"))
-            if inn and not p.get("customer_inn"):
+            if inn and not valid_inn(p.get("customer_inn")):
                 changes["customer_inn"] = inn
             # Official card evidence remains authoritative; keep document provenance.
             db.execute("""INSERT INTO v311_verified_buyers
@@ -355,8 +356,8 @@ def reconcile(ns):
     try:
         rows = db.execute("""SELECT reg_number FROM purchases
             WHERE customer IS NULL OR TRIM(customer)='' OR LOWER(customer) LIKE '%уточня%'
-                OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок')
-            ORDER BY last_seen DESC LIMIT 500""").fetchall()
+                OR customer_inn IS NULL OR TRIM(customer_inn)='' OR title IS NULL OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок','прием заявок','статус закупки')
+            ORDER BY last_seen DESC LIMIT 2000""").fetchall()
     finally:
         db.close()
     corrected = 0
