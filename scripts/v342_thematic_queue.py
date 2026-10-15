@@ -255,7 +255,7 @@ def install(ns):
   c=db(ns)
   try:
    c.execute("PRAGMA busy_timeout=1500")
-   b=c.execute("SELECT id FROM thematic_batches WHERE id=?",(batch,)).fetchone()
+   b=c.execute("SELECT id,categories FROM thematic_batches WHERE id=?",(batch,)).fetchone()
    if not b:raise HTTPException(404,"Проверка не найдена")
    findings=c.execute("SELECT category,title,law,evidence FROM thematic_findings WHERE batch_id=? AND reg=? ORDER BY rowid",(batch,reg)).fetchall()
    item=c.execute("SELECT status,detail FROM thematic_items WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
@@ -264,6 +264,18 @@ def install(ns):
    customer=escape(str(p["customer"] or "")) if p and "customer" in p.keys() else ""
   finally:c.close()
   printable=request.query_params.get("print")=="1"
+  if not printable:
+   # Use the exact same reusable read-only card renderer, layout and controls
+   # as /check-new/{reg}. Thematic results stay in a separate durable panel.
+   from v343_fast_cards import read as read_card,render as render_card
+   audit=read_card(ns,reg)
+   themed={"batch":batch,"state":str(item["status"]),
+           "detail":str(item["detail"] or ""),
+           "categories":json.loads(b["categories"]),
+           "category_labels":CATEGORIES,
+           "findings":[dict(f) for f in findings]}
+   return HTMLResponse(render_card(reg,audit,thematic=themed),
+       headers={"Cache-Control":"no-store","X-Audit-Card":"shared-thematic-v346"})
   rows="".join("<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'><h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORIES.get(f["category"],f["category"])))+"</p><p><b>Правовое основание:</b> "+escape(str(f["law"] or "Не указано"))+"</p><p style='white-space:pre-wrap'><b>Установленные обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>" for f in findings)
   title="Служебная записка — проект" if printable else "Карточка тематической проверки"
   notice="<p><b>Проект для юридической проверки:</b> сведения необходимо сверить с оригиналами ЕИС до подписания.</p>" if printable else ""
