@@ -140,6 +140,12 @@ def _request_missing_originals(ns,results):
         return 0
     from v299_browser_intake import _scan_status
     from v301_search_jobs import _bridge,_enqueue
+    conn=_open(ns)
+    try:
+        if not conn.execute("""SELECT 1 FROM sqlite_master WHERE
+                type='table' AND name='v301_search_jobs'""").fetchone():
+            return 0
+    finally:conn.close()
     monitor=_scan_status()
     live=_bridge(ns)
     if not monitor.get("browser_collector_active") or not live.get("active"):
