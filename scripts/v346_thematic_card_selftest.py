@@ -65,10 +65,10 @@ def run():
         assert shared.STYLE in page and shared.STYLE in main
         assert 'class="panel"' in page and 'class="grid"' in page
         assert '<h2>Нарушения: 1</h2>' in page
-        assert 'Нарушения общей проверки: 1' in page
+        assert '<section class="panel"><h2>Нарушения общей проверки' not in page
         assert 'Нарушение тематического направления' in page
-        assert 'Общее нарушение' in page
-        assert 'Требует проверки' in page
+        assert 'Общее нарушение' not in page
+        assert 'Требует проверки' not in page
         assert 'Документы ЕИС (1)' in page
         assert 'Извещение.pdf' in page
         assert '/thematic#'+BATCH in page
