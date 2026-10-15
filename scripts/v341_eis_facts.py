@@ -156,21 +156,22 @@ def document_facts(docs):
                 pairs.append([compact(m[1]), compact(m[2]) or compact(lines[i+1] if i+1 < len(lines) else ""), line])
             elif i+1 < len(lines):
                 pairs.append([compact(line), compact(lines[i+1]), line+" "+lines[i+1]])
-        # Structured cards often use "Срок подачи заявок" as a section
-        # heading and put start/end dates on subsequent lines.
+        # Dates must be explicitly labelled; never infer from unrelated dates.
         for i, line in enumerate(lines):
-            if re.search(r"срок(?:и|а)?\\s+(?:подачи|при[её]ма)\\s+заявок", line, re.I):
-                segment = " ".join(lines[i:i+5])[:900]
-                for key, marker in (("submission_start", r"(?:начал[оа]|с)\\s*(?:подачи|при[её]ма)?"),
-                                    ("submission_end", r"(?:окончани[ея]|до)\\s*(?:подачи|при[её]ма)?")):
-                    match = re.search(marker+r"\\s*[:：–—-]?\\s*(?P<date>"+DATE_TOKEN+r")", segment, re.I)
-                    if match:
-                        parsed_date = parse_day(match["date"])
-                        if parsed_date:
-                            candidates.setdefault(key, {})[parsed_date.isoformat()] = {
-                                "value": parsed_date.isoformat(), "document": doc.get("name"),
-                                "source_url": (doc.get("meta") or {}).get("source_url"),
-                                "evidence": compact(match[0])[:650], "source": "official_eis_document"}
+            if not re.search(r"срок(?:и|а)?\\s+(?:подачи|при[её]ма)\\s+заявок", line, re.I):
+                continue
+            segment = " ".join(lines[i:i+5])[:900]
+            for key, marker in (("submission_start", r"(?:начал[оа]|с)\\s*(?:подачи|при[её]ма)?"),
+                                ("submission_end", r"(?:окончани[ея]|до)\\s*(?:подачи|при[её]ма)?")):
+                match = re.search(marker+r"\\s*[:：–—-]?\\s*(?P<date>"+DATE_TOKEN+r")", segment, re.I)
+                if not match:
+                    continue
+                parsed_date = parse_day(match["date"])
+                if parsed_date:
+                    candidates.setdefault(key, {})[parsed_date.isoformat()] = {
+                        "value": parsed_date.isoformat(), "document": doc.get("name"),
+                        "source_url": (doc.get("meta") or {}).get("source_url"),
+                        "evidence": compact(match[0])[:650], "source": "official_eis_document"}
         for label, value, excerpt in pairs:
             key = None
             parsed = None
