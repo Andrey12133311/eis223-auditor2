@@ -163,9 +163,9 @@ def render(reg,data,thematic=None):
     nav=('<nav><a href="/">Все закупки</a><a href="/manual-purchases">Самостоятельные проверки</a>'
          '<a href="/thematic">Тематические проверки</a></nav>')
     if thematic:
-        nav='<nav><a href="/thematic#'+esc(thematic["batch"])+
+        nav=('<nav><a href="/thematic#'+esc(thematic["batch"])+
             '">← К тематической очереди</a><a href="/check-new/'+esc(reg)+
-            '">Общая карточка проверки</a><a href="/">Все закупки</a></nav>'
+            '">Общая карточка проверки</a><a href="/">Все закупки</a></nav>')
     thematic_html=render_thematic_panel(reg,thematic)
     actions='<p><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>' if violation else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
     checked='<p class="meta">'+str(len(reviews))+' вопросов требуют дополнительной юридической проверки.</p>'
