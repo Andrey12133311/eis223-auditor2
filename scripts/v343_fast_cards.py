@@ -76,12 +76,24 @@ def read(ns,reg):
         c.close()
 
 def detail_block(item, kind, title, law, evidence, document, source, link):
+    supporting=(item or {}).get("supporting_sources") or []
+    extra=""
+    if len(supporting)>1:
+        labels=[]
+        for origin in supporting[:20]:
+            name=origin.get("document") or "Оригинал ЕИС"
+            target=source_link(origin.get("url"),name)
+            if target and target not in labels:labels.append(target)
+        if labels:
+            extra='<p class="meta"><b>Подтверждения в оригиналах ЕИС:</b> '+(
+                '; '.join(labels))+'</p>'
     return ('<article class="'+kind+'"><h3>'+esc(title or "Нарушение")+'</h3>'
       +('<p><b>Правовое основание:</b> '+esc(law)+'</p>' if law else '')
       +('<p class="evidence"><b>Обстоятельства и доказательства:</b> '+esc(evidence)+'</p>' if evidence else '')
       +('<p class="meta">Документ: '+esc(document)+'</p>' if document else '')
       +('<p>'+source_link(source,"Оригинал ЕИС")+'</p>' if source_link(source,"Оригинал ЕИС") else '')
       +('<p>'+source_link(link,"Норма права")+'</p>' if source_link(link,"Норма права") else '')
+      +extra
       +'</article>')
 
 def render_thematic_panel(reg,thematic):
