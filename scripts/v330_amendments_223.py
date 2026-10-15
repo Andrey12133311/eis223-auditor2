@@ -247,7 +247,12 @@ def install(ns):
         new,_=evaluation(p,docs)
         if str(p.get("reg"))=="32616233661" or new:
             print(f"V330 ART4_11 reg={p.get('reg')} proved={len(new)}",flush=True)
-        return old+new
+        for item in new:
+            if not any(x.get("kind")=="violation" and x.get("code")==item.get("code")
+                       and tuple(re.findall(DATE_RX,x.get("evidence") or ""))==tuple(re.findall(DATE_RX,item.get("evidence") or ""))
+                       for x in old):
+                old.append(item)
+        return old
     wrapped_analyze.__art4_11_v330__=True
     @wraps(checks)
     def wrapped_checks(p,detail,card,docs):
