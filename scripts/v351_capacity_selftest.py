@@ -49,7 +49,7 @@ async def file_concurrency():
             "File "+str(i) for i in range(8)]
         assert 1<parallel[1]<=4,parallel
         assert all(x["status"]=="checked" for x in result)
-        assert all(x["meta"]["source"]!="existing_local_unverified" for x in result)
+        assert all(x["meta"].get("source")!="existing_local_unverified" for x in result)
         return parallel[1]
 
 def more_verified_purchases():
