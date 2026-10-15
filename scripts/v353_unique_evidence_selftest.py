@@ -21,11 +21,15 @@ def run():
     sign=original("Итоговый протокол.pdf","Дата подписания итогового протокола: 06.10.2026")
     post=original("Публикация итогового протокола.pdf",
         "Дата размещения итогового протокола в ЕИС: 13.10.2026")
+    post["url"]=EIS.replace("A"*32,"B"*32)
+    post["meta"]["source_url"]=post["url"]
     found=cross_doc_protocols(p,[sign,post])
     assert len(found)==1,found
     assert found[0]["code"]=="223-4-12-PROTOCOL-CROSS-DOC-LATE"
     assert "2026-10-09" in found[0]["evidence"]
     assert not cross_doc_protocols(p,[sign,post,{**post}])
+    # Reusing one EIS receipt under two filenames is not independent proof.
+    assert not cross_doc_protocols(p,[sign,original(post["name"],post["text"])])
     assert not cross_doc_protocols(p,[sign,original(post["name"],post["text"],False)])
     assert not cross_doc_protocols(p,[sign,original("Протокол рассмотрения.pdf",
          "Дата размещения протокола рассмотрения в ЕИС: 13.10.2026")])
