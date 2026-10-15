@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date,datetime
+from datetime import date,datetime,timedelta
+from v298_eis_only import federal_workday
 from functools import wraps
 from urllib.parse import urlsplit
 
@@ -147,10 +148,17 @@ def evaluation(p,docs):
         pairs.add(key)
         if decided and published:
             delta=(published-decided).days
-            if delta>3 and 0<delta<=365:
+            due=decided+timedelta(days=3)
+            workday=federal_workday(due)
+            if workday is False:
+                for _ in range(14):
+                    due+=timedelta(days=1)
+                    workday=federal_workday(due)
+                    if workday is not False:break
+            if workday is not None and published>due and 0<delta<=365:
                 detail=(f"Решение об изменении: {decided.isoformat()}; "
                         f"публикация изменений в ЕИС: {published.isoformat()}; "
-                        f"прошло {delta} календарных дней. "
+                        f"крайний день размещения: {due.isoformat()}; прошло {delta} календарных дней. "
                         f"Источник: {event.get('publication_evidence') or event.get('source')}; "
                         f"решение: {event.get('decision_evidence') or 'подтверждённые данные ЕИС'}.")
                 findings.append({
@@ -172,8 +180,10 @@ def evaluation(p,docs):
     for event in events:
         published=event.get("publication_date")
         if not published:continue
-        deadline=event.get("submission_end") or day(p.get("submission_end"))
-        if not deadline:continue
+        # A current card deadline can belong to an earlier or later revision.\n        # Only the deadline attached to this specific EIS change is admissible.\n        deadline=event.get("submission_end")
+        if not deadline:
+            reviews.append({"reason":"Не подтверждён срок подачи заявок именно после данного изменения", "event":event})
+            continue
         # Any deadline before publication cannot satisfy the half-term rule
         # regardless of a procurement regulation duration.
         remaining=(deadline-published).days
