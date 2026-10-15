@@ -101,7 +101,8 @@ def initialize(ns):
             c.execute("ALTER TABLE v332_audit_queue ADD COLUMN audit_revision TEXT NOT NULL DEFAULT ''")
         if "last_doc_id" not in columns:
             c.execute("ALTER TABLE v332_audit_queue ADD COLUMN last_doc_id INTEGER NOT NULL DEFAULT 0")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_v332_docs_version ON docs(reg_number,id)")
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():
+            c.execute("CREATE INDEX IF NOT EXISTS idx_v332_docs_version ON docs(reg_number,id)")
         p=c.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
         d=c.execute("SELECT COALESCE(SUM(documents_checked),0) FROM purchases").fetchone()[0]
         v=c.execute("SELECT COALESCE(SUM(violations),0) FROM purchases").fetchone()[0]
@@ -207,6 +208,8 @@ def refresh_changed(ns):
     """Queue only newly supported rules or actually added local documents."""
     c=connect(ns)
     try:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():
+            return 0
         c.execute("BEGIN IMMEDIATE")
         c.execute("""UPDATE v332_audit_queue
             SET state='pending',error='Новая редакция методики или новые оригиналы ЕИС'
