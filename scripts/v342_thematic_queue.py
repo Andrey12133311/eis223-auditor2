@@ -184,6 +184,24 @@ def install(ns):
    c.execute("UPDATE thematic_batches SET status=? WHERE id=?",("stopped",batch));c.commit()
   finally:c.close()
   return {"id":batch,"status":"stopped"}
+ @app.delete("/api/thematic/{batch}")
+ async def delete_thematic(batch:str):
+  if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
+  c=db(ns)
+  try:
+   c.execute("BEGIN IMMEDIATE")
+   row=c.execute("SELECT id FROM thematic_batches WHERE id=?",(batch,)).fetchone()
+   if not row:raise HTTPException(404,"Очередь не найдена")
+   c.execute("UPDATE thematic_batches SET status='stopped' WHERE id=?",(batch,))
+   c.execute("DELETE FROM thematic_findings WHERE batch_id=?",(batch,))
+   c.execute("DELETE FROM thematic_items WHERE batch_id=?",(batch,))
+   c.execute("DELETE FROM thematic_batches WHERE id=?",(batch,))
+   c.commit()
+  except Exception:
+   c.rollback()
+   raise
+  finally:c.close()
+  return {"id":batch,"deleted":True}
  @app.get("/api/thematic/history")
  async def thematic_history():
   c=db(ns)
