@@ -58,12 +58,13 @@ def run():
           CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT);
           CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,status TEXT,local_path TEXT);
           CREATE TABLE v332_audit_queue(campaign TEXT,reg TEXT,state TEXT,updated_at TEXT,
+               last_doc_id INTEGER NOT NULL DEFAULT 0,audit_revision TEXT NOT NULL DEFAULT '',
                PRIMARY KEY(campaign,reg));
         """)
         ready="32615969056"; waiting="32616432604"
         c.executemany("INSERT INTO purchases VALUES(?,?)",[(ready,"ООО Готовые документы"),(waiting,"АО Нет документов")])
         c.execute("INSERT INTO docs VALUES(1,?,'checked','/data/eis/local.pdf')",(ready,))
-        c.executemany("INSERT INTO v332_audit_queue VALUES(?,?,'pending','')",
+        c.executemany("INSERT INTO v332_audit_queue(campaign,reg,state,updated_at) VALUES(?,?,'pending','')",
                       [(audit.CAMPAIGN,ready),(audit.CAMPAIGN,waiting)])
         c.commit();c.close()
         main_ns={"conn":connection}
@@ -73,6 +74,15 @@ def run():
         c=connection()
         assert c.execute("SELECT COUNT(*) FROM v332_audit_queue WHERE state='running'").fetchone()[0]==2
         c.close()
+        audit.mark(main_ns,ready,"completed")
+        audit.mark(main_ns,waiting,"no_readable_documents")
+        assert audit.refresh_changed(main_ns)==0
+        c=connection()
+        c.execute("INSERT INTO docs VALUES(2,?,'checked','/data/eis/second.pdf')",(ready,))
+        c.commit();c.close()
+        assert audit.refresh_changed(main_ns)==1
+        assert audit.claim_next(main_ns)==ready
+        assert audit.claim_next(main_ns) is None
     original_eval=legal.evaluate
     count=[0]
     def evaluate_once(p,docs):
