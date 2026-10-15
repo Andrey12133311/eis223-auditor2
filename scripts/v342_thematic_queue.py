@@ -41,7 +41,7 @@ async def tick(ns):
    rows=c.execute("SELECT reg_number FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
    for r in rows:
     c.execute("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",(b["id"],r[0],now()))
-   pending=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status='queued' LIMIT 5",(b["id"],)).fetchall()
+   pending=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status='queued' LIMIT 20",(b["id"],)).fetchall()
    for p in pending:
     reg=p["reg"]
     try:
@@ -61,7 +61,7 @@ async def tick(ns):
     c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
    # Mark complete only after the EIS original-review worker confirms completion.
    from v295_eis_originals import root
-   submitted=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status=? LIMIT 200",(b["id"],"submitted")).fetchall()
+   submitted=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status=? LIMIT 500",(b["id"],"submitted")).fetchall()
    for item in submitted:
     reg=item["reg"]
     try:
