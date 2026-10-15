@@ -77,6 +77,43 @@ def _reclaim_regenerable_cache():
         target=base/"eis223_extracted_text_cache_v347"
         if free_before>=512*1024*1024:
             return
+        # Remove only abandoned atomic-write scratch files, never receipts,
+        # manifests, SQLite, stored originals or completed audit documents.
+        # A crash can leave sizable .incoming-* files after upload failure.
+        import time
+        found=0
+        reclaimed=0
+        threshold=time.time()-24*3600
+        for dirname in ("eis223_official_originals",
+                        "eis223_official_archive_inbox",
+                        "eis223_public_browser_intake"):
+            subtree=base/dirname
+            if not subtree.is_dir() or subtree.is_symlink():
+                continue
+            try:
+                for candidate in subtree.rglob(".incoming-*"):
+                    if found>=10000:
+                        break
+                    try:
+                        if candidate.is_symlink() or not candidate.is_file():
+                            continue
+                        stat=candidate.stat()
+                        if stat.st_mtime>=threshold:
+                            continue
+                        candidate.unlink()
+                        found+=1
+                        reclaimed+=stat.st_size
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        if found:
+            print("V355_ABANDONED_UPLOADS_RECLAIM files="+str(found)+
+                  " bytes="+str(reclaimed)+
+                  " originals_untouched=True findings_untouched=True",flush=True)
+        free_before=shutil.disk_usage(base).free
+        if free_before>=512*1024*1024:
+            return
         if target.is_symlink() or not target.is_dir() or target.resolve().parent!=base:
             print("V354_DISK_LOW no_regenerable_text_cache free="+str(free_before),flush=True)
             return

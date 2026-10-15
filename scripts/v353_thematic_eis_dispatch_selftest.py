@@ -107,6 +107,15 @@ def run():
         matching={x["reg"]:x for x in info["items"]}
         for reg in (REG1,REG2,REG3):
             assert "очереди загрузчика" in matching[reg]["detail"],matching
+        # Saturated evidence storage must be called out, not shown as a disconnected loader.
+        thematic.WORKER_STATE["last_eis_dispatch"]=0
+        with patch.object(thematic,"storage_health",return_value={
+             "blocked":True,"low":True,"free_mb":2,"reserve_mb":64}):
+            assert worker._request_missing_originals(ns)==0
+            stalled=thematic.overview(ns,B1)
+            assert stalled["storage"]["blocked"]
+            assert any("Хранилище Railway заполнено" in x["detail"]
+                       for x in stalled["items"] if x["status"]=="waiting_originals")
         print("V353_THEME_EIS_SELFTEST_OK stale_scan_live_bridge=True "
               "background_queue=True no_triplication=True offline_prequeue=True "
               "manual_isolated=True accurate_wait_status=True")

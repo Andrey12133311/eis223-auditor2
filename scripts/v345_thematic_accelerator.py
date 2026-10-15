@@ -139,6 +139,10 @@ def _request_missing_originals(ns,results=()):
     clock=time.time()
     if clock-original.WORKER_STATE.get("last_eis_dispatch",0)<30:
         return 0
+    if original.storage_health()["blocked"]:
+        original.WORKER_STATE["bridge_download_status"]="Нет места для заданий ЕИС; сохранённые оригиналы не удаляются"
+        original.WORKER_STATE["last_eis_dispatch"]=clock
+        return 0
     from v299_browser_intake import _scan_status
     from v301_search_jobs import _bridge,_enqueue,MAX_QUEUE
     conn=_open(ns)
@@ -232,6 +236,9 @@ def _request_missing_originals(ns,results=()):
     return made
 
 async def faster_tick(ns):
+    if original.storage_health()["blocked"]:
+        original.WORKER_STATE["last_error"]="Недостаточно места на диске Railway для сохранения проверок"
+        return
     items=await asyncio.to_thread(_prepare,ns)
     original.WORKER_STATE["last_batch_size"]=len(items)
     if not items:
