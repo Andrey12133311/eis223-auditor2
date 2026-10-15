@@ -450,26 +450,23 @@ def persist(ns,reg,findings,checks):
     c=connect(ns)
     try:
         c.execute("BEGIN IMMEDIATE")
+        from v353_episode_guard import distinct_new
+        # Read both legal tables once. The UI and persistence use documentary
+        # episode identity, never just a shared rule code / title.
+        previous=[dict(row) for row in c.execute("""
+            SELECT code,title,law,evidence,document,source_url
+              FROM findings WHERE reg_number=? AND kind='violation'
+            UNION ALL
+            SELECT field_path AS code,item AS title,law,evidence,document,source_url
+              FROM checks WHERE reg_number=? AND status='violation'
+            """,(reg,reg)).fetchall()]
         new_f=new_c=0
         for f in findings:
             if not isinstance(f,dict) or f.get("kind")!="violation":continue
             code=str(f.get("code") or "")[:100]
             title=str(f.get("title") or "")[:500]
             if not code or not title:continue
-            prior=c.execute("""SELECT evidence FROM findings WHERE reg_number=?
-                AND kind='violation'
-                AND (code=? OR LOWER(TRIM(title))=LOWER(TRIM(?)))
-                """,(reg,code,title)).fetchall()
-            dated_code=code.startswith(("223-3.2-3-CLARIFICATION-", "223-4-12-PROTOCOL-",
-                                       "223-3.2-6-CANCELLATION-", "223-4-11-"))
-            def event_dates(evidence):
-                from v341_eis_facts import DATE_TOKEN,parse_day
-                dates=(parse_day(m[0]) for m in re.finditer(DATE_TOKEN,str(evidence or ""),re.I))
-                return tuple(sorted({d.isoformat() for d in dates if d}))
-            dates=event_dates(f.get("evidence")) if dated_code else ()
-            if prior and (not dates or any(not event_dates(row[0]) or
-                                          event_dates(row[0])==dates for row in prior)):
-                continue
+            if not distinct_new(f,previous):continue
             c.execute("""INSERT INTO findings
                 (reg_number,code,kind,title,law,law_url,evidence,note,
                  document,source_url,location,match_text)
@@ -479,6 +476,7 @@ def persist(ns,reg,findings,checks):
                     str(f.get("note") or "")[:3000],f.get("document"),f.get("source_url"),
                     f.get("location"),f.get("match_text")))
             new_f+=1
+            previous.append({**f,"code":code,"title":title})
         for ck in checks:
             if not isinstance(ck,dict):continue
             status=ck.get("status")
@@ -490,10 +488,10 @@ def persist(ns,reg,findings,checks):
             # Same type of legal check in the same original should not
             # repeatedly inflate the checklist on each redeploy.
             if status=="violation":
-                found=c.execute("""SELECT 1 FROM checks
-                    WHERE reg_number=? AND status='violation'
-                      AND LOWER(TRIM(item))=LOWER(TRIM(?))
-                    LIMIT 1""",(reg,item)).fetchone()
+                # A confirmed checklist violation can be a separately dated
+                # act despite sharing its title with an earlier checklist row.
+                # It must not reproduce a finding already stored for this act.
+                found=not distinct_new({**ck,"title":item},previous)
             else:
                 found=c.execute("""SELECT 1 FROM checks
                     WHERE reg_number=? AND field_path=? AND item=?
@@ -509,6 +507,8 @@ def persist(ns,reg,findings,checks):
                     str(ck.get("note") or "")[:3000],ck.get("law"),
                     ck.get("law_url"),ck.get("location")))
             new_c+=1
+            if status=="violation":
+                previous.append({**ck,"title":item,"code":path})
         if new_f or new_c:
             counts=c.execute("""SELECT
               (SELECT COUNT(*) FROM findings WHERE reg_number=? AND kind='violation')
