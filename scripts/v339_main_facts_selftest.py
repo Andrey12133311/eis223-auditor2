@@ -22,10 +22,10 @@ def run():
             c.row_factory=sqlite3.Row
             return c
         db=conn()
-        db.executescript("""CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,last_seen TEXT);
+        db.executescript("""CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,last_seen TEXT,customer TEXT);
                            CREATE TABLE v319_manual_inputs(reg TEXT PRIMARY KEY);""")
         regs=[str(32600000000+x) for x in range(1,1301)]
-        db.executemany("INSERT INTO purchases VALUES(?,?)",((reg,str(i).zfill(5)) for i,reg in enumerate(regs)))
+        db.executemany("INSERT INTO purchases VALUES(?,?,?)",((reg,str(i).zfill(5),"ООО Тестовый заказчик") for i,reg in enumerate(regs)))
         db.execute("INSERT INTO v319_manual_inputs VALUES(?)",(regs[-1],))
         db.commit();db.close()
         ns={"conn":conn,"_verified_set235":lambda:set(regs)}
