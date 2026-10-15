@@ -85,7 +85,7 @@ def evaluate(p, docs):
             deadline = day(p.get("submission_end") or p.get("deadline"))
             due, latest = shifted(received, 3), shifted(deadline, -3)
             snippet = " ".join(text[max(0, min(request.start(), peers[0].start())-60):max(request.end(), peers[0].end())+70].split())
-            if not competitive or not due or not latest or received > latest or published < received:
+            if not competitive or not received or not published or not deadline or not due or not latest or received > latest or published < received:
                 checks.append(review(doc, "v341-clarification-applicability", "Проверить обязанность и срок ответа на запрос разъяснений",
                                      snippet, "223-ФЗ, ст. 3.2 ч. 3", request))
                 continue
@@ -100,11 +100,11 @@ def evaluate(p, docs):
             start, end = day(signed[0]["date"]), day(published[0]["date"])
             # Civil Code art. 193 moves a last day that is non-working to
             # the following working day; apply it before alleging a delay.
-            due = start+timedelta(days=3)
-            working = federal_workday(due)
+            due = start+timedelta(days=3) if start else None
+            working = federal_workday(due) if due else None
             if working is False:
                 due = shifted(due, 1)
-            if due and working is not None and end > due and (end-start).days < 365:
+            if start and end and due and working is not None and end > due and 0 <= (end-start).days < 365:
                 findings.append(finding(doc, "223-4-12-PROTOCOL-PUBLICATION-LATE",
                     "Протокол размещён в ЕИС с нарушением срока публикации", "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
                     f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signed[0][0]}; {published[0][0]}",
