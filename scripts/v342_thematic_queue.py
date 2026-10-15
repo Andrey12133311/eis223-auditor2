@@ -238,11 +238,12 @@ def install(ns):
    return {"batches":[dict(r) for r in rows]}
   finally:c.close()
  @app.get("/thematic/card/{batch}/{reg}")
- async def thematic_card(batch:str,reg:str,request:Request):
+ def thematic_card(batch:str,reg:str,request:Request):
   from html import escape
   if not re.fullmatch("[0-9a-f]{24}",batch) or not re.fullmatch("3[0-9]{10}",reg):raise HTTPException(400,"Некорректный номер")
   c=db(ns)
   try:
+   c.execute("PRAGMA busy_timeout=1500")
    b=c.execute("SELECT id FROM thematic_batches WHERE id=?",(batch,)).fetchone()
    if not b:raise HTTPException(404,"Проверка не найдена")
    findings=c.execute("SELECT category,title,law,evidence FROM thematic_findings WHERE batch_id=? AND reg=? ORDER BY rowid",(batch,reg)).fetchall()
