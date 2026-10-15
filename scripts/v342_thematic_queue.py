@@ -162,9 +162,13 @@ def install(ns):
   if origin and not origin.startswith(("https://web-production-1c2ea.up.railway.app","http://localhost:")):raise HTTPException(403,"Неверный источник")
   raw=await request.body()
   if len(raw)>2000:raise HTTPException(413,"Слишком большой запрос")
-  try:cats=json.loads(raw)["categories"]
+  try:
+   payload=json.loads(raw)
+   cats=payload["categories"]
+   forms=payload.get("legal_forms",list(LEGAL_FORMS))
   except (ValueError,KeyError,TypeError):raise HTTPException(422,"Некорректный запрос")
   if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORIES) or any(x not in CATEGORIES for x in cats):raise HTTPException(422,"Некорректные категории")
+  if not isinstance(forms,list) or not forms or len(forms)>len(LEGAL_FORMS) or any(not isinstance(x,str) or x not in LEGAL_FORMS for x in forms):raise HTTPException(422,"Некорректные организационно-правовые формы")
   identifier=secrets.token_hex(12);c=db(ns)
   try:
    if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
