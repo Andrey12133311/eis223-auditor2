@@ -508,6 +508,23 @@ async def inspect_one(ns,reg):
 
 def install(ns):
     app=ns["app"]
+    boot_scope=None
+    def owns_boot_review(reg):
+        nonlocal boot_scope
+        if boot_scope is None:
+            c=connect(ns)
+            try:
+                try:
+                    boot_scope={str(row[0]) for row in c.execute(
+                        "SELECT reg FROM v332_audit_queue WHERE campaign=?",(CAMPAIGN,))}
+                except Exception:
+                    boot_scope=set()
+            finally:
+                c.close()
+            if not boot_scope:
+                boot_scope=set(dashboard_regs(ns))
+        return str(reg) in boot_scope
+    ns["_v332_owns_boot_review"]=owns_boot_review
     @app.get("/api/v332/legal-audit/progress")
     async def audit_progress():
         return await asyncio.to_thread(progress,ns)

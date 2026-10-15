@@ -365,6 +365,12 @@ def install(ns):
                 for folder in sorted(source_dir.iterdir())[:500]:
                     if folder.is_dir() and REG.fullmatch(folder.name):
                         try:
+                            # A persistent snapshot campaign owns these
+                            # saved originals. Do not queue hundreds of
+                            # duplicate boot jobs ahead of that campaign.
+                            owns=ns.get("_v332_owns_boot_review")
+                            if callable(owns) and owns(folder.name):
+                                continue
                             state=enqueue_review(folder.name)
                             if state.get("status")=="completed":
                                 asyncio.create_task(reconcile_rows_after_lock(folder.name))

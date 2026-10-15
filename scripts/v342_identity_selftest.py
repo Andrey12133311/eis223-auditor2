@@ -132,6 +132,13 @@ def run():
         selected=dashboard_regs(ns)
         assert DASHBOARD_MAX==1253 and len(selected)==1253
         assert regs[-1] not in selected and REG not in selected
+        from v332_all_procurements_audit import install as install_campaign
+        install_campaign(ns)
+        assert ns["_v332_owns_boot_review"](selected[0])
+        assert not ns["_v332_owns_boot_review"](regs[-1])
+        assert not ns["_v332_owns_boot_review"](REG)
+        ns["_verified_set235"]=lambda:[]
+        assert ns["_v332_owns_boot_review"](selected[0])
     print("V342_IDENTITY_SELFTEST_OK unicode_repair=True missing_inn_retry=True exact_1253_scope=True "
           "dated_events_persisted=True sme_scope_verified=True",flush=True)
 

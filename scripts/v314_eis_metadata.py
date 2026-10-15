@@ -443,3 +443,31 @@ def install(ns):
     @app.get("/api/v314/customer-metadata/status")
     async def metadata_status():
         return status
+
+    @app.get("/api/v342/metadata-evidence/{reg}",include_in_schema=False)
+    async def metadata_evidence(reg:str):
+        from fastapi import HTTPException
+        from v332_all_procurements_audit import existing,stored_docs,is_official
+        if not REG.fullmatch(reg):
+            raise HTTPException(400,"Неверный номер закупки")
+        try:
+            purchase,rows=await asyncio.to_thread(existing,ns,reg)
+        except LookupError:
+            raise HTTPException(404,"Закупка не найдена")
+        rows.sort(key=lambda row:0 if re.search(
+            r"извещени|документаци|информационн.*карт",row.get("name") or "",re.I) else 1)
+        docs,unreadable=await stored_docs(ns,reg,rows[:12])
+        evidence=[]
+        for doc in docs:
+            if not is_official(doc):
+                continue
+            body=str(doc.get("text") or "")
+            excerpts=[]
+            for pattern in (r"\bИНН\b",r"(?:предмет|наименование|объект)\s+(?:закупки|договора)",
+                            r"(?:наименование\s+заказчика|заказчик\s*[:|])"):
+                for match in list(re.finditer(pattern,body,re.I))[:4]:
+                    excerpts.append(body[max(0,match.start()-50):match.end()+500])
+            evidence.append({"document":doc.get("name"),"source_url":(doc.get("meta") or {}).get("source_url"),
+                             "extracted":parse_text(body),"labelled_excerpts":excerpts})
+        return {"reg_number":reg,"current":{k:purchase.get(k) for k in ("customer","customer_inn","title")},
+                "documents":evidence,"unreadable":unreadable,"source":"receipt_verified_EIS_originals"}
