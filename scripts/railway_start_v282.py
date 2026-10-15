@@ -52,6 +52,7 @@ import v338_card_prices
 import v340_price_display
 import v341_eis_facts
 import v341_precise_legal
+import v342_thematic_queue
 import v337_all_legal_categories
 import v339_fact_comparison
 import v312_archive_selftest
@@ -111,6 +112,7 @@ def main():
     v340_price_display.install(vars(entry))
     v341_eis_facts.install(vars(entry))
     v341_precise_legal.install(vars(entry))
+    v342_thematic_queue.install(vars(entry))
     try:
         v312_archive_selftest.run()
     except Exception as exc:
