@@ -88,7 +88,8 @@ def render_thematic_panel(reg,thematic):
     """Reuse the same panels and finding cards used by the main audit view."""
     if not thematic:return ""
     batch=thematic["batch"]
-    rows=thematic.get("findings",[])
+    from v333_dedup_ui import collapse
+    rows=collapse(thematic.get("findings",[]))
     labels=thematic.get("category_labels") or {}
     selected=thematic.get("categories") or []
     state=thematic.get("state") or "queued"
@@ -125,25 +126,21 @@ def render_thematic_panel(reg,thematic):
 
 def render(reg,data,thematic=None):
     p,findings,checks,docs,ftotal,ctotal,dtotal=data
-    seen=set()
-    violation=[]
-    for f in findings:
-        title=f.get('title') or f.get('code') or 'Нарушение'
-        evidence=f.get('evidence') or ''
-        signature=('f',str(f.get('code') or title).lower(),str(evidence).strip().lower())
-        if signature in seen: continue
-        seen.add(signature)
-        violation.append(detail_block(f,'legal',title,f.get('law'),evidence,f.get('document'),f.get('source_url'),f.get('law_url')))
-    for c in checks:
-        if c['status']!='violation':continue
-        title=c.get('item') or 'Нарушение'
-        evidence=c.get('evidence') or ''
-        signature=('c',str(title).lower(),str(evidence).strip().lower())
-        if signature in seen:continue
-        seen.add(signature)
-        violation.append(detail_block(c,'legal',title,c.get('law'),evidence,c.get('document'),c.get('source_url'),c.get('law_url')))
-    reviews=[x for x in checks if x.get('status')=='check']
-    status=(("Нарушения общей проверки: " if thematic else "Подтверждённые нарушения: ")+str(ftotal+ctotal))
+    from v333_dedup_ui import collapse
+    # Both independent tables may describe the SAME documented legal event.
+    # Reconcile by title, law, document and substantive proof, not by the
+    # source row's code or a different start of the quoted excerpt.
+    candidates=[dict(f) for f in findings]
+    candidates.extend({**c, "title":c.get("item") or "Нарушение"}
+                      for c in checks if c.get("status")=="violation")
+    unique=collapse(candidates,field="title")
+    violation=[detail_block(item,"legal",item.get("title"),item.get("law"),
+          item.get("evidence"),item.get("document"),item.get("source_url"),
+          item.get("law_url")) for item in unique]
+    reviews=collapse([dict(x) for x in checks if x.get("status")=="check"],field="item")
+    # Display counts must agree with the number of distinct cards. Historical
+    # findings and checks remain untouched and available in the ledger.
+    status=(("Нарушения общей проверки: " if thematic else "Подтверждённые нарушения: ")+str(len(violation)))
     basic=''
     if p:
         keys=[
@@ -179,7 +176,9 @@ def render(reg,data,thematic=None):
     if dtotal>len(docs):docs_html+='<p class="meta">Показаны последние '+str(len(docs))+' из '+str(dtotal)+' документов.</p>'
     if not docs:docs_html='<p>Оригиналы документов пока не сохранены.</p>'
     if ftotal+ctotal>len(violation):
-        notes='<p class="meta">Повторяющиеся записи свёрнуты для отображения; исходные данные и доказательства сохранены.</p>'
+        notes=('<p class="meta">Уникальных правовых эпизодов: '+str(len(violation))+
+               '. Исходных подтверждённых записей: '+str(ftotal+ctotal)+
+               '. Повторы объединены только в интерфейсе; доказательства сохранены в базе.</p>')
     else:notes=''
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'
      '<meta name="viewport" content="width=device-width,initial-scale=1">'
