@@ -209,7 +209,11 @@ def evaluation(p,docs):
                 if candidates>=5:break
     unique={}
     for f in findings:
-        unique.setdefault((f["code"],f.get("source_url"),str(f["evidence"])[:100]),f)
+        # A single amendment may appear in both EIS history and its original.
+        # Keep distinct dated legal events; do not count copies as violations.
+        dates=tuple(re.findall(DATE_RX,f.get("evidence") or ""))
+        key=(f["code"],dates) if dates else (f["code"],f.get("source_url"),f.get("match_text"))
+        unique.setdefault(key,f)
     return list(unique.values()),reviews[:15]
 
 def review_check(item):
@@ -243,7 +247,13 @@ def install(ns):
         new,_=evaluation(p,docs)
         if str(p.get("reg"))=="32616233661" or new:
             print(f"V330 ART4_11 reg={p.get('reg')} proved={len(new)}",flush=True)
-        return old+new
+        for item in new:
+            if not any(x.get("kind")=="violation" and x.get("code")==item.get("code")
+                       and tuple(re.findall(DATE_RX,x.get("evidence") or ""))
+                       and tuple(re.findall(DATE_RX,x.get("evidence") or ""))==tuple(re.findall(DATE_RX,item.get("evidence") or ""))
+                       for x in old):
+                old.append(item)
+        return old
     wrapped_analyze.__art4_11_v330__=True
     @wraps(checks)
     def wrapped_checks(p,detail,card,docs):
