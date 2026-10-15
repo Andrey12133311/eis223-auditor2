@@ -52,6 +52,11 @@ def init(ns):
   CREATE TABLE IF NOT EXISTS thematic_findings(batch_id TEXT,reg TEXT,category TEXT,title TEXT,law TEXT,evidence TEXT, UNIQUE(batch_id,reg,category,title,evidence));""")
   if "legal_forms" not in {x[1] for x in c.execute("PRAGMA table_info(thematic_batches)")}:
    c.execute("ALTER TABLE thematic_batches ADD COLUMN legal_forms TEXT NOT NULL DEFAULT '[\"ООО\",\"АО\",\"ПАО\",\"ОАО\",\"ЗАО\"]'")
+  evidence_cols={x[1] for x in c.execute("PRAGMA table_info(thematic_findings)")}
+  for col in ("code","document","source_url","law_url"):
+   if col not in evidence_cols:
+    c.execute("ALTER TABLE thematic_findings ADD COLUMN "+col+" TEXT NOT NULL DEFAULT ''")
+  c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_evidence_by_purchase ON thematic_findings(batch_id,reg)")
   c.commit()
  finally:c.close()
 def now():return datetime.now(timezone.utc).isoformat()
@@ -148,7 +153,11 @@ async def independent_review(ns,reg,categories):
       "title":str(f.get("title") or "")[:500],
       "law":str(f.get("law") or "")[:500],
       "evidence":str(f.get("evidence") or "")[:3000],
-      "category":category
+      "category":category,
+      "code":str(f.get("code") or "")[:150],
+      "document":str(f.get("document") or "")[:255],
+      "source_url":str(f.get("source_url") or "")[:2000],
+      "law_url":str(f.get("law_url") or "")[:1000]
     })
  # This only changes new presentation/persistence, never deletes historical
  # thematic results. Different dated acts and documentary sources stay distinct.
@@ -172,7 +181,13 @@ def overview(ns,batch):
    "contract":r"договор|контракт|оплат",
    "notices":r"извещени|публикац",
    "evaluation":r"оценк|критери|балл"}
-  matches=[{"reg":r["reg"],"title":r["title"],"categories":[r["category"]],"law":r["law"],"evidence":r["evidence"] or ""} for r in c.execute("SELECT reg,title,category,law,evidence FROM thematic_findings WHERE batch_id=? ORDER BY rowid DESC LIMIT 500",(batch,)).fetchall()]
+  from v333_dedup_ui import collapse
+  raw=[dict(r) for r in c.execute("SELECT reg,title,category,law,evidence,code,document,source_url,law_url FROM thematic_findings WHERE batch_id=? ORDER BY rowid DESC LIMIT 750",(batch,)).fetchall()]
+  unique=[]
+  for reg in dict.fromkeys(f["reg"] for f in raw):
+   unique.extend(collapse([f for f in raw if f["reg"]==reg]))
+  matches=[{"reg":r["reg"],"title":r["title"],"categories":[r["category"]],
+            "law":r["law"],"evidence":r["evidence"] or ""} for r in unique[:500]]
   items=[{"reg":r["reg"],"status":r["status"],"detail":r["detail"],"updated_at":r["updated_at"]} for r in c.execute("SELECT reg,status,detail,updated_at FROM thematic_items WHERE batch_id=? ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'retry' THEN 1 WHEN 'waiting_originals' THEN 2 ELSE 3 END,updated_at DESC LIMIT 200",(batch,)).fetchall()]
   try:
    from v301_search_jobs import _bridge
@@ -290,7 +305,7 @@ def install(ns):
    c.execute("PRAGMA busy_timeout=1500")
    b=c.execute("SELECT id,categories FROM thematic_batches WHERE id=?",(batch,)).fetchone()
    if not b:raise HTTPException(404,"Проверка не найдена")
-   findings=c.execute("SELECT category,title,law,evidence FROM thematic_findings WHERE batch_id=? AND reg=? ORDER BY rowid",(batch,reg)).fetchall()
+   findings=c.execute("SELECT category,title,law,evidence,code,document,source_url,law_url FROM thematic_findings WHERE batch_id=? AND reg=? ORDER BY rowid",(batch,reg)).fetchall()
    item=c.execute("SELECT status,detail FROM thematic_items WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
    if not item:raise HTTPException(404,"Закупка не найдена в тематической проверке")
    p=c.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
