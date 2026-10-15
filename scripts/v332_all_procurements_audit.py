@@ -204,17 +204,15 @@ def claim_next(ns):
         row=c.execute("""SELECT q.reg FROM v332_audit_queue q
             JOIN purchases p ON p.reg_number=q.reg
             WHERE q.campaign=? AND q.state='pending'
+            AND EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg
+                AND COALESCE(d.local_path,'')<>'' AND d.status='checked')
             AND (p.customer LIKE 'ООО %' OR p.customer LIKE 'АО %'
                  OR p.customer LIKE 'ПАО %' OR p.customer LIKE 'ОАО %'
                  OR p.customer LIKE 'ЗАО %'
                  OR p.customer LIKE 'Общество с ограниченной ответственностью%'
                  OR p.customer LIKE 'Акционерное общество%'
                  OR p.customer LIKE 'Публичное акционерное общество%')
-            ORDER BY CASE WHEN EXISTS(
-              SELECT 1 FROM docs d WHERE d.reg_number=q.reg
-                AND COALESCE(d.local_path,'')<>'' AND d.status='checked'
-            ) THEN 0 ELSE 1 END,
-            CASE q.reg WHEN '32616233661' THEN 0
+            ORDER BY CASE q.reg WHEN '32616233661' THEN 0
              WHEN '32616324151' THEN 1
              WHEN '32616287360' THEN 2 ELSE 3 END,
             q.reg LIMIT 1""",(CAMPAIGN,)).fetchone()
@@ -701,7 +699,7 @@ def install(ns):
                 await asyncio.gather(*(worker(i+1) for i in range(GENERAL_WORKERS)))
                 state=await asyncio.to_thread(progress,ns)
                 print("V332 CAMPAIGN_FINISHED "+json.dumps(state,ensure_ascii=False),flush=True)
-                await asyncio.sleep(90)
+                await asyncio.sleep(30)
                 new=await asyncio.to_thread(add_new_verified,ns)
                 refreshed=await asyncio.to_thread(refresh_changed,ns)
                 if refreshed or new:
