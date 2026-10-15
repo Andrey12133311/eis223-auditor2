@@ -48,7 +48,7 @@ def init(ns):
   PRIMARY KEY(batch_id,reg));
   CREATE TABLE IF NOT EXISTS thematic_findings(batch_id TEXT,reg TEXT,category TEXT,title TEXT,law TEXT,evidence TEXT, UNIQUE(batch_id,reg,category,title,evidence));""")
   if "legal_forms" not in {x[1] for x in c.execute("PRAGMA table_info(thematic_batches)")}:
-   c.execute("ALTER TABLE thematic_batches ADD COLUMN legal_forms TEXT NOT NULL DEFAULT ?",(json.dumps(list(LEGAL_FORMS)),))
+   c.execute("ALTER TABLE thematic_batches ADD COLUMN legal_forms TEXT NOT NULL DEFAULT '[\"ООО\",\"АО\",\"ПАО\",\"ОАО\",\"ЗАО\"]'")
   c.commit()
  finally:c.close()
 def now():return datetime.now(timezone.utc).isoformat()
