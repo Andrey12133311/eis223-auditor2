@@ -21,6 +21,10 @@ ANSWER = r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публ
 SIGNED = r"(?:дата\s+подписания\s+(?:итогового\s+)?протокола|протокол\s+подписан)"
 PROTOCOL_PUBLISHED = r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:итогового\s+)?протокола(?:\s+в\s+ЕИС)?|протокол\s+(?:размещ[её]н|опубликован)\s+в\s+ЕИС)"
 COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)", re.I)
+CANCEL_DECISION = r"(?:дата\\s+(?:принятия\\s+)?решения\\s+об\\s+отмене\\s+закупки|решение\\s+об\\s+отмене\\s+закупки\\s+принято)"
+CANCEL_POSTED = r"(?:дата\\s+(?:размещения|публикации)\\s+(?:извещения|решения)\\s+об\\s+отмене\\s+закупки(?:\\s+в\\s+ЕИС)?|(?:извещение|решение)\\s+об\\s+отмене\\s+закупки\\s+размещено)"
+SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\\s+субъект[ыа-я\\s]{0,35}малого\\s+и\\s+среднего\\s+предпринимательства|участниками\\s+которо[йго]+\\s+могут\\s+быть\\s+только\\s+субъект",re.I)
+PAYMENT_DAYS = re.compile(r"(?:оплата|расч[её]т[ыа]?|оплат[уы])[^.\\n]{0,240}?(?:в\\s+течение|не\\s+позднее|срок\\s+оплаты\\s+составляет)\\s*(?P<days>\\d{1,3})\\s*(?:\\([^)]{0,40}\\)\\s*)?рабочих\\s+дн",re.I)
 
 
 def shifted(date, count):
@@ -97,6 +101,35 @@ def evaluate(p, docs):
                     "Разъяснение опубликовано позднее трёх рабочих дней после поступления запроса",
                     "223-ФЗ, ст. 3.2 ч. 3",
                     f"Запрос получен {received}; крайний день ответа {due}; опубликован {published}; окончание подачи {deadline}. {snippet}", request))
+        # Memo-derived rule: cancellation decision must be published on
+        # the same calendar date (223-FZ art. 3.2(6)).
+        cancel_decisions, cancel_posts = matches(CANCEL_DECISION,text), matches(CANCEL_POSTED,text)
+        if len(cancel_decisions)==len(cancel_posts)==1:
+            decided, posted = day(cancel_decisions[0]["date"]), day(cancel_posts[0]["date"])
+            if decided and posted and 0 < (posted-decided).days < 365:
+                findings.append(finding(doc,"223-3.2-6-CANCELLATION-POSTED-LATE",
+                    "Решение об отмене конкурентной закупки размещено не в день принятия",
+                    "223-ФЗ, ст. 3.2 ч. 6",
+                    f"Решение об отмене принято {decided}; размещено в ЕИС {posted}.",
+                    cancel_decisions[0]))
+        elif cancel_decisions or cancel_posts:
+            checks.append(review(doc,"v341-cancellation-date-chain",
+                "Сверить дату решения об отмене с датой публикации в ЕИС",
+                f"Дат решений: {len(cancel_decisions)}; дат публикаций: {len(cancel_posts)}.",
+                "223-ФЗ, ст. 3.2 ч. 6",(cancel_decisions or cancel_posts)[0]))
+        # Memo-derived SME payment term: only explicit exclusive SME scope
+        # and contractual payment terms; not general legal quotations.
+        sme_scope = bool(SME_EXCLUSIVE.search(str(p.get("method") or "")))
+        if sme_scope:
+            for payment in list(PAYMENT_DAYS.finditer(text))[:15]:
+                days = int(payment["days"])
+                snippet = text[max(0,payment.start()-100):payment.end()+110]
+                if days>7 and re.search(r"акт[а-я-]*\\s+(?:сдачи[-–]приемки|при[её]мки)|договор[а-я]*|услуг[аи]?|товар[а-я]*",snippet,re.I):
+                    findings.append(finding(doc,"1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS",
+                        "В закупке только для субъектов МСП установлен срок оплаты свыше семи рабочих дней",
+                        "Постановление Правительства РФ № 1352, Положение, п. 28",
+                        f"Условие об оплате: {days} рабочих дней. {snippet}",payment,
+                        "https://www.consultant.ru/document/cons_doc_LAW_172683/"))
         # Protocol signing and EIS publication must each be explicitly named.
         signed, published = matches(SIGNED, text), matches(PROTOCOL_PUBLISHED, text)
         # Pair multiple protocol events only when each signature/publication
