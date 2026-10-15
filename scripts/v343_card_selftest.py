@@ -36,7 +36,7 @@ INSERT INTO docs VALUES(1,'32615969056','Оригинал.pdf','notice','checked
         middleware=FastCardASGI(inner,ns)
         await middleware({"type":"http","method":"GET","path":"/check-new/32615969056"},recv,send)
         assert messages[0]["status"]==200
-        assert b"X-Audit-Card" in str(messages[0]["headers"]).encode()
+        assert b"x-audit-card" in str(messages[0]["headers"]).lower().encode()
         assert b"32615969056" in messages[1]["body"]
         messages.clear()
         await middleware({"type":"http","method":"GET","path":"/health"},recv,send)
