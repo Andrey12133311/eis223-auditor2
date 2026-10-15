@@ -57,15 +57,16 @@ async def tick(ns):
  try:
   batches=c.execute("SELECT * FROM thematic_batches WHERE status='active'").fetchall()
   for b in batches:
+   chosen=set(json.loads(b["legal_forms"]))
    # Existing and newly ingested EIS purchases are automatically added.
    rows=c.execute("SELECT reg_number,customer FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
    for r in rows:
-    if business_company(r["customer"]):
+    if customer_form(r["customer"]) in chosen:
      c.execute("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",(b["id"],r["reg_number"],now()))
    # Remove previously queued non-company purchases from active thematic campaigns.
    c.execute("DELETE FROM thematic_items WHERE batch_id=? AND reg IN (SELECT reg_number FROM purchases WHERE COALESCE(customer,'')='')",(b["id"],))
    for row in c.execute("SELECT t.reg,p.customer FROM thematic_items t JOIN purchases p ON p.reg_number=t.reg WHERE t.batch_id=?",(b["id"],)).fetchall():
-    if not business_company(row["customer"]):
+    if customer_form(row["customer"]) not in chosen:
      c.execute("DELETE FROM thematic_items WHERE batch_id=? AND reg=?",(b["id"],row["reg"]))
    pending=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status='queued' LIMIT 20",(b["id"],)).fetchall()
    for p in pending:
@@ -132,7 +133,7 @@ def overview(ns,batch):
    bridge=_bridge(ns)
   except Exception:
    bridge={"active":False,"queued":None}
-  return {"bridge":bridge,"id":batch,"categories":cats,"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
+  return {"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><p><button id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="out">Выберите категории</div></main><script>
