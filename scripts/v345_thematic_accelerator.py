@@ -126,6 +126,64 @@ def _persist(ns,results):
         c.commit()
     finally:c.close()
 
+def _request_missing_originals(ns,results):
+    """Reserve a FEW real EIS download jobs for the existing browser bridge.
+
+    No server-side EIS scraping. Never records user_input=True, so automatic
+    thematic discovery cannot pollute the manual-submissions tab.
+    """
+    waiting=list(dict.fromkeys(item["reg"] for item,state,_,_ in results
+                               if state=="waiting_originals"))
+    if not waiting:return 0
+    now=time.time()
+    if now-original.WORKER_STATE.get("last_eis_dispatch",0)<90:
+        return 0
+    from v299_browser_intake import _scan_status
+    from v301_search_jobs import _bridge,_enqueue
+    monitor=_scan_status()
+    live=_bridge(ns)
+    if not monitor.get("browser_collector_active") or not live.get("active"):
+        original.WORKER_STATE["bridge_download_status"]="Ожидается активный загрузчик ЕИС"
+        return 0
+    conn=_open(ns)
+    try:
+        pending=conn.execute("""SELECT COUNT(*) FROM v301_search_jobs
+            WHERE status IN ('queued','leased','deferred')
+              AND parent_id LIKE 'thematic-%'""").fetchone()[0]
+        budget=min(4,max(0,16-pending))
+        if not budget:return 0
+        ready=[]
+        for reg in waiting:
+            if len(ready)>=budget:break
+            last=conn.execute("""SELECT created_at FROM v301_search_jobs
+                WHERE kind='reg' AND target=?
+                ORDER BY created_at DESC LIMIT 1""",(reg,)).fetchone()
+            if last:
+                try:elapsed=now-datetime.fromisoformat(last["created_at"]).timestamp()
+                except (ValueError,TypeError):elapsed=0
+                if elapsed<600:continue
+            ready.append(reg)
+    finally:conn.close()
+    count=0
+    for reg in ready:
+        try:
+            job,created=_enqueue(ns,"reg",reg,page=1,priority=6,
+                                 parent_id="thematic-auto",user_input=False)
+            if created:
+                count+=1
+        except Exception as e:
+            print("V352 THEME_EIS_QUEUE_DELAY "+type(e).__name__,flush=True)
+            break
+    original.WORKER_STATE["last_eis_dispatch"]=now
+    original.WORKER_STATE["bridge_download_status"]=(
+        "Запросы на оригиналы ЕИС направлены загрузчику" if count else
+        "Ожидается ответ загрузчика ЕИС")
+    if count:
+        print("V352 THEME_EIS_QUEUED count="+str(count)+
+              " manual_priority_preserved=True",flush=True)
+    return count
+
+
 async def faster_tick(ns):
     items=await asyncio.to_thread(_prepare,ns)
     original.WORKER_STATE["last_batch_size"]=len(items)
@@ -133,6 +191,10 @@ async def faster_tick(ns):
     sem=asyncio.Semaphore(MAX_CONCURRENT)
     results=await asyncio.gather(*(_one(ns,item,sem) for item in items))
     await asyncio.to_thread(_persist,ns,results)
+    try:
+        await asyncio.to_thread(_request_missing_originals,ns,results)
+    except Exception as exc:
+        print("V352 THEME_EIS_DISPATCH_ERROR "+type(exc).__name__,flush=True)
     original.WORKER_STATE["processed_total"]=original.WORKER_STATE.get("processed_total",0)+len(results)
 
 def install(ns):
