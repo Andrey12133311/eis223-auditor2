@@ -7,6 +7,9 @@ from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+WORKER_TASK=None
+WORKER_STATE={"last_cycle_at":None,"last_cycle_finished_at":None,"last_error":None}
+
 CATEGORIES={
 "dates":"Сроки подачи заявок, изменений и разъяснений",
 "docs":"Извещение и документация",
@@ -72,16 +75,14 @@ async def tick(ns):
    for p in pending:
     reg=p["reg"]
     try:
-     from v295_eis_originals import allowed_documents,saved_document
-     originals=allowed_documents(reg)
-     if not originals or not all(saved_document(reg,uid) for uid in originals):
-      state="waiting_originals";detail="Ожидаются подтверждённые оригиналы ЕИС"
-     else:
-      state,findings=await independent_review(ns,reg,json.loads(b["categories"]))
-      detail="Независимая тематическая проверка"
-      if state=="completed":
-       for f in findings:
-        c.execute("INSERT OR IGNORE INTO thematic_findings(batch_id,reg,category,title,law,evidence) VALUES(?,?,?,?,?,?)",(b["id"],reg,f["category"],f["title"],f.get("law"),f.get("evidence")))
+     # The server reviews verified original documents even when browser EIS intake is offline.
+     state,findings=await independent_review(ns,reg,json.loads(b["categories"]))
+     detail={"completed":"Проверено по сохранённым оригиналам ЕИС",
+             "waiting_originals":"Ожидаются доступные оригиналы ЕИС",
+             "excluded_company":"Форма заказчика не соответствует выборке"}.get(state,"Тематическая проверка")
+     if state=="completed":
+      for f in findings:
+       c.execute("INSERT OR IGNORE INTO thematic_findings(batch_id,reg,category,title,law,evidence) VALUES(?,?,?,?,?,?)",(b["id"],reg,f["category"],f["title"],f.get("law"),f.get("evidence")))
     except Exception as e:
      state="retry";detail=type(e).__name__
     c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
@@ -97,7 +98,7 @@ async def independent_review(ns,reg,categories):
  if not business_company(p.get("customer")):return "excluded_company",[]
  docs,unreadable=await stored_docs(ns,reg,rows)
  verified=[d for d in docs if is_official(d)]
- if not verified or unreadable:return "waiting_originals",[]
+ if not verified:return "waiting_originals",[]
  findings,_=await asyncio.to_thread(evaluate,p,verified)
  mapping={"dates":r"разъяснен|срок|изменен","protocols":r"отмен|протокол","sme":r"мсп","contract":r"оплат|договор"}
  selected=[]
@@ -134,14 +135,15 @@ def overview(ns,batch):
    bridge=_bridge(ns)
   except Exception:
    bridge={"active":False,"queued":None}
-  return {"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
+  worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
+  return {"worker":worker,"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><h2>Организационно-правовые формы заказчиков</h2><p>Выберите одну или несколько форм. По умолчанию выбраны все хозяйственные общества.</p><div id="forms"></div><p><button id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="out">Выберите категории</div></main><script>
 const categories=__CATEGORIES__,legalForms=__LEGAL_FORMS__;const formsBox=document.querySelector("#forms");for(const [id,title] of Object.entries(legalForms)){const label=document.createElement("label"),check=document.createElement("input");check.type="checkbox";check.value=id;check.checked=true;label.append(check,document.createTextNode(" "+id+" — "+title));formsBox.append(label)}const box=document.querySelector('#cats');
 for(const [id,title] of Object.entries(categories)){let l=document.createElement('label'),i=document.createElement('input');i.type='checkbox';i.value=id;l.append(i,document.createTextNode(' '+title));box.append(l)}
 document.querySelector('#start').onclick=async()=>{const cats=[...box.querySelectorAll('input:checked')].map(x=>x.value);if(!cats.length)return alert('Выберите категорию');const forms=[...formsBox.querySelectorAll('input:checked')].map(x=>x.value);if(!forms.length)return alert('Выберите организационно-правовую форму');const r=await fetch('/api/thematic/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({categories:cats,legal_forms:forms})});const j=await r.json();if(!r.ok)return alert(j.detail||r.status);location.hash=j.id;refresh();history()};
-async function history(){const r=await fetch('/api/thematic/history');if(!r.ok)return;const j=await r.json(),box=document.querySelector('#history');box.replaceChildren();for(const b of j.batches||[]){const p=document.createElement('p'),a=document.createElement('a');a.href='#'+b.id;a.textContent=new Date(b.created_at).toLocaleString('ru-RU')+' — закупок: '+b.purchases+'; нарушений: '+b.violations+'; '+(b.status==='active'?'в работе':'остановлена');a.onclick=(ev)=>{ev.preventDefault();location.hash=b.id;refresh()};p.append(a);const del=document.createElement('button');del.textContent='Удалить очередь';del.style.cssText='margin-left:12px;background:#a52a2a;padding:7px 10px';del.onclick=async()=>{if(!confirm('Удалить эту тематическую очередь и все её сохранённые результаты? Это действие нельзя отменить.'))return;const resp=await fetch('/api/thematic/'+encodeURIComponent(b.id),{method:'DELETE'});if(!resp.ok){alert('Не удалось удалить очередь');return}if(location.hash==='#'+b.id){window.history.replaceState(null,'',location.pathname);document.querySelector('#out').textContent='Выберите очередь из истории'}await history()};p.append(del);box.append(p)}if(!(j.batches||[]).length)box.textContent='История пока пуста'}async function refresh(){if(!location.hash)return;let r=await fetch('/api/thematic/'+encodeURIComponent(location.hash.slice(1)));let j=await r.json();const out=document.querySelector('#out');out.replaceChildren();if(!r.ok){out.textContent=j.detail||'Ошибка получения очереди';return}const names={queued:'В очереди',submitted:'Передано на проверку',completed:'Проверено',waiting_originals:'Ожидаются оригиналы ЕИС',waiting_engine:'Ожидается обработчик',retry:'Повторная попытка'};const heading=document.createElement('p');heading.textContent='Статус: '+(j.status==='active'?'Работает':'Остановлена');out.append(heading);const bridge=document.createElement('p');bridge.textContent='Мост ЕИС: '+(j.bridge?.active?'подключён':'нет активного загрузчика')+'; очередь запросов: '+(j.bridge?.queued??'неизвестно');out.append(bridge);for(const [key,num] of Object.entries(j.counts||{})){const line=document.createElement('p');line.textContent=(names[key]||key)+': '+num;out.append(line)}const stop=document.createElement('button');stop.textContent='Остановить проверку';stop.disabled=j.status!=='active';stop.onclick=async()=>{if(!confirm('Остановить тематическую проверку?'))return;await fetch('/api/thematic/'+encodeURIComponent(j.id)+'/stop',{method:'POST'});refresh()};out.append(stop);const qh=document.createElement('h3');qh.textContent='Закупки в тематической проверке';out.append(qh);const table=document.createElement('table');table.style.cssText='width:100%;border-collapse:collapse';for(const p of j.items||[]){const tr=document.createElement('tr');for(const value of [p.reg,names[p.status]||p.status,p.detail||'']){const td=document.createElement('td');td.style.cssText='border-bottom:1px solid #ddd;padding:7px';td.textContent=value;tr.append(td)}const a=document.createElement('a');a.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(p.reg);a.textContent='Карточка проверки';const td=document.createElement('td');td.append(a);tr.append(td);table.append(tr)}out.append(table);const h=document.createElement('h3');h.textContent='Подтверждённые нарушения по выбранным категориям';out.append(h);const findings=j.confirmed_matching_findings||[];if(!findings.length){const p=document.createElement('p');p.textContent='Подтверждённых нарушений пока нет';out.append(p)}for(const f of findings){const item=document.createElement('article');item.style.cssText='border-left:4px solid #b91c1c;background:#fff5f5;margin:12px 0;padding:12px';const strong=document.createElement('strong');strong.textContent=f.reg+' — '+f.title;item.append(strong);const detail=document.createElement('p');detail.textContent=f.evidence||'';item.append(detail);if(f.law){const law=document.createElement('p');law.textContent='Правовое основание: '+f.law;item.append(law)}const card=document.createElement('a');card.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(f.reg);card.textContent='Карточка проверки и служебная записка';item.append(card);out.append(item)}}
+async function history(){const r=await fetch('/api/thematic/history');if(!r.ok)return;const j=await r.json(),box=document.querySelector('#history');box.replaceChildren();for(const b of j.batches||[]){const p=document.createElement('p'),a=document.createElement('a');a.href='#'+b.id;a.textContent=new Date(b.created_at).toLocaleString('ru-RU')+' — закупок: '+b.purchases+'; нарушений: '+b.violations+'; '+(b.status==='active'?'в работе':'остановлена');a.onclick=(ev)=>{ev.preventDefault();location.hash=b.id;refresh()};p.append(a);const del=document.createElement('button');del.textContent='Удалить очередь';del.style.cssText='margin-left:12px;background:#a52a2a;padding:7px 10px';del.onclick=async()=>{if(!confirm('Удалить эту тематическую очередь и все её сохранённые результаты? Это действие нельзя отменить.'))return;const resp=await fetch('/api/thematic/'+encodeURIComponent(b.id),{method:'DELETE'});if(!resp.ok){alert('Не удалось удалить очередь');return}if(location.hash==='#'+b.id){window.history.replaceState(null,'',location.pathname);document.querySelector('#out').textContent='Выберите очередь из истории'}await history()};p.append(del);box.append(p)}if(!(j.batches||[]).length)box.textContent='История пока пуста'}async function refresh(){if(!location.hash)return;let r=await fetch('/api/thematic/'+encodeURIComponent(location.hash.slice(1)));let j=await r.json();const out=document.querySelector('#out');out.replaceChildren();if(!r.ok){out.textContent=j.detail||'Ошибка получения очереди';return}const names={queued:'В очереди',submitted:'Передано на проверку',completed:'Проверено',waiting_originals:'Ожидаются оригиналы ЕИС',waiting_engine:'Ожидается обработчик',retry:'Повторная попытка'};const heading=document.createElement('p');heading.textContent='Статус: '+(j.status==='active'?'Работает':'Остановлена');out.append(heading);const bridge=document.createElement('p');bridge.textContent='Проверка сохранённых оригиналов: '+(j.worker?.active?'серверный обработчик работает':'серверный обработчик недоступен')+'. Загрузка новых документов ЕИС: '+(j.bridge?.active?'подключена':'не подключена')+'; ожидают загрузки: '+(j.bridge?.queued??'неизвестно');out.append(bridge);for(const [key,num] of Object.entries(j.counts||{})){const line=document.createElement('p');line.textContent=(names[key]||key)+': '+num;out.append(line)}const stop=document.createElement('button');stop.textContent='Остановить проверку';stop.disabled=j.status!=='active';stop.onclick=async()=>{if(!confirm('Остановить тематическую проверку?'))return;await fetch('/api/thematic/'+encodeURIComponent(j.id)+'/stop',{method:'POST'});refresh()};out.append(stop);const qh=document.createElement('h3');qh.textContent='Закупки в тематической проверке';out.append(qh);const table=document.createElement('table');table.style.cssText='width:100%;border-collapse:collapse';for(const p of j.items||[]){const tr=document.createElement('tr');for(const value of [p.reg,names[p.status]||p.status,p.detail||'']){const td=document.createElement('td');td.style.cssText='border-bottom:1px solid #ddd;padding:7px';td.textContent=value;tr.append(td)}const a=document.createElement('a');a.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(p.reg);a.textContent='Карточка проверки';const td=document.createElement('td');td.append(a);tr.append(td);table.append(tr)}out.append(table);const h=document.createElement('h3');h.textContent='Подтверждённые нарушения по выбранным категориям';out.append(h);const findings=j.confirmed_matching_findings||[];if(!findings.length){const p=document.createElement('p');p.textContent='Подтверждённых нарушений пока нет';out.append(p)}for(const f of findings){const item=document.createElement('article');item.style.cssText='border-left:4px solid #b91c1c;background:#fff5f5;margin:12px 0;padding:12px';const strong=document.createElement('strong');strong.textContent=f.reg+' — '+f.title;item.append(strong);const detail=document.createElement('p');detail.textContent=f.evidence||'';item.append(detail);if(f.law){const law=document.createElement('p');law.textContent='Правовое основание: '+f.law;item.append(law)}const card=document.createElement('a');card.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(f.reg);card.textContent='Карточка проверки и служебная записка';item.append(card);out.append(item)}}
 window.addEventListener('hashchange',refresh);setInterval(()=>{refresh();history()},12000);history();refresh();</script></html>""".replace("__CATEGORIES__",json.dumps(CATEGORIES,ensure_ascii=False)).replace("__LEGAL_FORMS__",json.dumps(LEGAL_FORMS,ensure_ascii=False))
 def install(ns):
  init(ns);app=ns["app"]
@@ -248,9 +250,17 @@ def install(ns):
  app.add_middleware(ThemeNav)
  async def worker():
   while True:
+   WORKER_STATE["last_cycle_at"]=now()
+   WORKER_STATE["last_error"]=None
    try:await tick(ns)
-   except Exception as e:print("THEMATIC_TICK_ERROR",type(e).__name__,str(e)[:120],flush=True)
+   except Exception as e:
+    WORKER_STATE["last_error"]=type(e).__name__+": "+str(e)[:120]
+    print("THEMATIC_TICK_ERROR",type(e).__name__,str(e)[:120],flush=True)
+   finally:WORKER_STATE["last_cycle_finished_at"]=now()
    await asyncio.sleep(120)
  @app.on_event("startup")
- async def startup_thematic():asyncio.create_task(worker())
+ async def startup_thematic():
+  global WORKER_TASK
+  if WORKER_TASK is None or WORKER_TASK.done():
+   WORKER_TASK=asyncio.create_task(worker(),name="thematic-audit-worker")
  print("THEMATIC_QUEUE_READY",flush=True)
