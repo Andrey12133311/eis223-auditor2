@@ -12,7 +12,7 @@ import time
 from datetime import datetime,timezone
 import v342_thematic_queue as original
 
-MAX_CONCURRENT=3
+MAX_CONCURRENT=4
 MAX_PER_BATCH=18
 MAX_PER_CYCLE=36
 RECHECK_SECONDS=90
@@ -227,4 +227,4 @@ def install(ns):
     # The v342 worker resolves asyncio.sleep from its original module globals.
     # Its existing loop still waits two minutes; replace the worker's sleep in
     # v342 directly in a separate, bounded code change.
-    print("THEMATIC_FAST_WORKER_READY concurrency=3 per_cycle=36 index_seconds=90",flush=True)
+    print("THEMATIC_FAST_WORKER_READY concurrency=4 per_cycle=36 index_seconds=90",flush=True)
