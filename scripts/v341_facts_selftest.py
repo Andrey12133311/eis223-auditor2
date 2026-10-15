@@ -59,6 +59,13 @@ def run():
     assert parsed["submission_end"]["value"]=="2026-10-22",parsed
     assert parsed["method"]["value"]=="Аукцион в электронной форме"
 
+    # Regression: start and end dates in one EIS section, with line breaks.
+    section = doc("Срок подачи заявок\\nНачало: 14.10.2026 08:00\\nОкончание: 22.10.2026 17:00")
+    section_facts = document_facts([section])
+    assert section_facts["submission_start"]["value"] == "2026-10-14", section_facts
+    assert section_facts["submission_end"]["value"] == "2026-10-22", section_facts
+    assert document_facts([doc(section["text"], trusted=False)]) == {}
+
     with tempfile.TemporaryDirectory(prefix="eis-v341-") as tmp:
         path=Path(tmp)/"db.sqlite"
         def conn():
