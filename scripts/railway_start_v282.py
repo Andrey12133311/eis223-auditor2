@@ -125,6 +125,49 @@ def _reclaim_regenerable_cache():
     except (OSError,ValueError) as exc:
         print("V354_CACHE_RECLAIM_ERROR "+type(exc).__name__,flush=True)
 
+def _guard_disk_full_startup(app):
+    """Preserve read-only access to saved evidence when the /data volume is full.
+
+    Only suppress ENOSPC errors from individual startup migrations. All other
+    failures stay fatal; no data are deleted, overwritten or marked complete.
+    When the volume is expanded, normal startup handlers run again.
+    """
+    import asyncio
+    import inspect
+    import shutil
+    from v295_eis_originals import root
+    try:
+        free=shutil.disk_usage(root()).free
+    except (OSError,ValueError):
+        return
+    if free>=64*1024*1024:
+        return
+    handlers=list(app.router.on_startup)
+    for index,handler in enumerate(handlers):
+        async def safe_startup(fn=handler):
+            try:
+                if inspect.iscoroutinefunction(fn):
+                    await fn()
+                else:
+                    result=await asyncio.to_thread(fn)
+                    if inspect.isawaitable(result):
+                        await result
+            except (OSError,Exception) as exc:
+                # Exception covers sqlite3.OperationalError as well.
+                message=str(exc).lower()
+                if ("database or disk is full" in message or
+                    "no space left on device" in message or
+                    getattr(exc,"errno",None)==28):
+                    print("V355_STARTUP_WRITE_DEFERRED handler="+
+                          getattr(fn,"__name__","unknown")+
+                          " volume_full=True evidence_preserved=True",flush=True)
+                    return
+                raise
+        app.router.on_startup[index]=safe_startup
+    print("V355_READONLY_STARTUP_GUARD handlers="+str(len(handlers))+
+          " free_bytes="+str(free)+
+          " originals_untouched=True",flush=True)
+
 def main():
     _reclaim_regenerable_cache()
     folder,count=restore()
@@ -193,6 +236,7 @@ def main():
         print("V312 ARCHIVE_SELFTEST_FAIL "+type(exc).__name__+": "+str(exc)[:180],flush=True)
     print('V305 BOOT_UI_FIXED memo_format=odt-only filters=canonical card_nav=working',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
+    _guard_disk_full_startup(entry.app)
     if '--verify-only' in sys.argv:return
     # Railway cannot reach EIS SOAP; do not launch repeated network probes.
     import uvicorn
