@@ -33,9 +33,9 @@ MAX_BYTES=25*1024*1024
 MAX_DOC_ROWS=900
 # Bounded across both general and thematic workers; never launch OCR for
 # hundreds of files at once or starve the HTTP service.
-FILE_IO_LIMIT=asyncio.Semaphore(4)
+FILE_IO_LIMIT=asyncio.Semaphore(6)
 FILE_BATCH_SIZE=12
-GENERAL_WORKERS=3
+GENERAL_WORKERS=4
 PRIORITY=["32616233661","32616324151","32616287360"]
 
 def now():
