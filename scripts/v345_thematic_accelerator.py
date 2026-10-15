@@ -126,79 +126,119 @@ def _persist(ns,results):
         c.commit()
     finally:c.close()
 
-def _request_missing_originals(ns,results):
-    """Reserve a FEW real EIS download jobs for the existing browser bridge.
+def _request_missing_originals(ns,results=()):
+    """Enqueue missing thematic originals independently of the legal batch.
 
-    No server-side EIS scraping. Never records user_input=True, so automatic
-    thematic discovery cannot pollute the manual-submissions tab.
+    v301 bridge polling is sufficient proof that the EIS job worker is active.
+    The five-minute discovery collector and the v301 job bridge have distinct
+    heartbeats: requiring BOTH used to strand thematic procurements.
+
+    Bounded queueing also works when both are offline (small waiting backlog),
+    so the next official browser-bridge poll has real tasks to process.
     """
-    waiting=list(dict.fromkeys(item["reg"] for item,state,_,_ in results
-                               if state=="waiting_originals"))
-    if not waiting:return 0
-    now=time.time()
-    if now-original.WORKER_STATE.get("last_eis_dispatch",0)<90:
+    clock=time.time()
+    if clock-original.WORKER_STATE.get("last_eis_dispatch",0)<30:
         return 0
     from v299_browser_intake import _scan_status
-    from v301_search_jobs import _bridge,_enqueue
+    from v301_search_jobs import _bridge,_enqueue,MAX_QUEUE
     conn=_open(ns)
     try:
         if not conn.execute("""SELECT 1 FROM sqlite_master WHERE
-                type='table' AND name='v301_search_jobs'""").fetchone():
+               type='table' AND name='v301_search_jobs'""").fetchone():
+            original.WORKER_STATE["bridge_download_status"]="Очередь загрузчика ЕИС инициализируется"
             return 0
     finally:conn.close()
-    monitor=_scan_status()
-    live=_bridge(ns)
-    if not monitor.get("browser_collector_active") or not live.get("active"):
-        original.WORKER_STATE["bridge_download_status"]="Ожидается активный загрузчик ЕИС"
-        return 0
+    # No network requests to zakupki.gov.ru are made by the server.
+    try:live=_bridge(ns)
+    except Exception:live={"active":False}
+    try:monitor=_scan_status()
+    except Exception:monitor={"browser_collector_active":False}
+    connected=bool(live.get("active") or monitor.get("browser_collector_active"))
     conn=_open(ns)
     try:
-        pending=conn.execute("""SELECT COUNT(*) FROM v301_search_jobs
-            WHERE status IN ('queued','leased','deferred')
-              AND parent_id LIKE 'thematic-%'""").fetchone()[0]
-        budget=min(4,max(0,16-pending))
-        if not budget:return 0
+        queued_thematic=conn.execute("""SELECT COUNT(*) FROM v301_search_jobs
+          WHERE status IN ('queued','leased','deferred')
+            AND parent_id LIKE 'thematic-%'""").fetchone()[0]
+        queued_all=conn.execute("""SELECT COUNT(*) FROM v301_search_jobs
+          WHERE status IN ('queued','leased','deferred')""").fetchone()[0]
+        # Never starve explicit user checks. Queue only a small offline backlog.
+        thematic_cap=20 if connected else 4
+        per_cycle=6 if connected else 2
+        budget=min(per_cycle,max(0,thematic_cap-queued_thematic),
+                   max(0,MAX_QUEUE-queued_all-8))
+        if budget<=0:
+            original.WORKER_STATE["bridge_download_status"]=(
+                "Задания ЕИС ожидают обработки" if queued_thematic else
+                "Общая очередь загрузчика ЕИС заполнена")
+            original.WORKER_STATE["last_eis_dispatch"]=clock
+            return 0
+        # Crucial: scan pending thematic ORIGINALS directly. Never rely on
+        # whichever 36 procurements happened to be legally audited this cycle.
+        waiting=conn.execute("""SELECT t.reg,MIN(t.updated_at) first_waiting
+          FROM thematic_items t JOIN thematic_batches b ON b.id=t.batch_id
+          WHERE b.status='active' AND t.status='waiting_originals'
+            AND NOT EXISTS (
+              SELECT 1 FROM v301_search_jobs j
+              WHERE j.kind='reg' AND j.target=t.reg
+                AND j.status IN ('queued','leased','deferred'))
+          GROUP BY t.reg ORDER BY first_waiting ASC LIMIT 250""").fetchall()
         ready=[]
-        for reg in waiting:
+        for item in waiting:
             if len(ready)>=budget:break
-            last=conn.execute("""SELECT created_at FROM v301_search_jobs
-                WHERE kind='reg' AND target=?
-                ORDER BY created_at DESC LIMIT 1""",(reg,)).fetchone()
+            reg=str(item["reg"])
+            last=conn.execute("""SELECT status,created_at FROM v301_search_jobs
+              WHERE kind='reg' AND target=?
+              ORDER BY created_at DESC LIMIT 1""",(reg,)).fetchone()
             if last:
-                try:elapsed=now-datetime.fromisoformat(last["created_at"]).timestamp()
-                except (ValueError,TypeError):elapsed=0
-                if elapsed<600:continue
+                try:
+                    created=datetime.fromisoformat(last["created_at"]).timestamp()
+                except (TypeError,ValueError):
+                    created=clock
+                # Re-attempt only after sufficient time for an EIS collector
+                # to fetch and verify the files. Never hammer missing URLs.
+                if clock-created<(1800 if last["status"] in ("partial","error","done") else 900):
+                    continue
+                daily=conn.execute("""SELECT COUNT(*) FROM v301_search_jobs
+                  WHERE kind='reg' AND target=? AND created_at>=?""",
+                  (reg,datetime.fromtimestamp(clock-86400,timezone.utc).isoformat())).fetchone()[0]
+                if daily>=5:continue
             ready.append(reg)
     finally:conn.close()
-    count=0
+    made=0
     for reg in ready:
         try:
-            job,created=_enqueue(ns,"reg",reg,page=1,priority=6,
-                                 parent_id="thematic-auto",user_input=False)
-            if created:
-                count+=1
+            _,created=_enqueue(ns,"reg",reg,page=1,priority=7,
+                               parent_id="thematic-auto",user_input=False)
+            if created:made+=1
         except Exception as e:
-            print("V352 THEME_EIS_QUEUE_DELAY "+type(e).__name__,flush=True)
+            print("V353 THEME_EIS_QUEUE_DELAY "+type(e).__name__+
+                  " "+str(e)[:120],flush=True)
             break
-    original.WORKER_STATE["last_eis_dispatch"]=now
+    original.WORKER_STATE["last_eis_dispatch"]=clock
     original.WORKER_STATE["bridge_download_status"]=(
-        "Запросы на оригиналы ЕИС направлены загрузчику" if count else
-        "Ожидается ответ загрузчика ЕИС")
-    if count:
-        print("V352 THEME_EIS_QUEUED count="+str(count)+
-              " manual_priority_preserved=True",flush=True)
-    return count
-
+        "Задания на оригиналы ЕИС поставлены: "+str(made) if made else
+        "Задания ЕИС уже ожидают обработки или повторного запроса")
+    if made:
+        print("V353 THEME_EIS_QUEUED count="+str(made)+
+              " bridge_active="+str(connected)+
+              " pending_total="+str(queued_all)+
+              " no_manual_records=True",flush=True)
+    return made
 
 async def faster_tick(ns):
     items=await asyncio.to_thread(_prepare,ns)
     original.WORKER_STATE["last_batch_size"]=len(items)
-    if not items:return
+    if not items:
+        # Missing originals are dispatched even when no legal recheck is due.
+        try:await asyncio.to_thread(_request_missing_originals,ns)
+        except Exception as exc:
+            print("V353 THEME_EIS_DISPATCH_ERROR "+type(exc).__name__,flush=True)
+        return
     sem=asyncio.Semaphore(MAX_CONCURRENT)
     results=await asyncio.gather(*(_one(ns,item,sem) for item in items))
     await asyncio.to_thread(_persist,ns,results)
     try:
-        await asyncio.to_thread(_request_missing_originals,ns,results)
+        await asyncio.to_thread(_request_missing_originals,ns)
     except Exception as exc:
         print("V352 THEME_EIS_DISPATCH_ERROR "+type(exc).__name__,flush=True)
     original.WORKER_STATE["processed_total"]=original.WORKER_STATE.get("processed_total",0)+len(results)
