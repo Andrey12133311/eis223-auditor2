@@ -31,6 +31,11 @@ FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
           ".ods",".xml",".txt",".csv"}
 MAX_BYTES=25*1024*1024
 MAX_DOC_ROWS=900
+# Bounded across both general and thematic workers; never launch OCR for
+# hundreds of files at once or starve the HTTP service.
+FILE_IO_LIMIT=asyncio.Semaphore(4)
+FILE_BATCH_SIZE=12
+GENERAL_WORKERS=3
 PRIORITY=["32616233661","32616324151","32616287360"]
 
 def now():
@@ -41,7 +46,7 @@ def connect(ns):
     c.execute("PRAGMA busy_timeout=12000")
     return c
 
-def dashboard_regs(ns):
+def dashboard_regs(ns,include_new=False):
     """Freeze the actual automatic main-page membership, not the whole DB.
 
     Matches /api/v257/dashboard without user-entered filters: its EIS
@@ -63,7 +68,8 @@ def dashboard_regs(ns):
             ORDER BY p.last_seen DESC,p.reg_number DESC""").fetchall()
     finally:c.close()
     from v342_thematic_queue import business_company
-    return [str(row[0]) for row in rows if str(row[0]) in verified and business_company(row[1])][:DASHBOARD_MAX]
+    selected=[str(row[0]) for row in rows if str(row[0]) in verified and business_company(row[1])]
+    return selected if include_new else selected[:DASHBOARD_MAX]
 
 
 def initialize(ns):
@@ -119,6 +125,11 @@ def initialize(ns):
             print("V342 MAIN_1253_SCOPE locked="+str(len(main_regs))+
                   " max="+str(DASHBOARD_MAX)+" total_database="+str(p),
                   flush=True)
+        # The first 1,253 remain preserved in this campaign. Expand the same
+        # EIS-verified automatic queue when NEW eligible purchases appear;
+        # manual checks and unverified notices are never admitted.
+        c.commit()
+        add_new_verified(ns,c)
         # Resume interrupted work, but never rerun a finished procurement just
         # because Railway redeployed a new code revision.
         c.execute("""UPDATE v332_audit_queue
@@ -133,6 +144,25 @@ def initialize(ns):
             print("V350 RULE_REVISION_RECHECK queued="+str(refreshed),flush=True)
     finally:c.close()
     return progress(ns)
+
+def add_new_verified(ns,c=None):
+    """Append new, EIS-verified automatic entries; preserve every past status."""
+    regs=dashboard_regs(ns,include_new=True)
+    owns=c is None
+    if owns:c=connect(ns)
+    try:
+        before=c.total_changes
+        c.executemany("INSERT OR IGNORE INTO v332_audit_queue(campaign,reg) VALUES(?,?)",
+                      ((CAMPAIGN,reg) for reg in regs))
+        added=c.total_changes-before
+        c.commit()
+        if added:
+            print("V351 GENERAL_QUEUE_EXPANDED new="+str(added)+
+                  " eligible="+str(len(regs)),flush=True)
+        return added
+    finally:
+        if owns:c.close()
+
 
 def progress(ns):
     c=connect(ns)
@@ -326,57 +356,72 @@ def source_verified(reg,path,digest,meta):
     return info["sha256"]==meta.get("archive_sha256") and digest==meta.get("sha256")
 
 async def stored_docs(ns,reg,rows):
+    """Hash, authenticate and extract in bounded parallel batches.
+
+    All local paths and receipt checks are evaluated individually. Result
+    order is stable, and missing originals remain unreadable, never "OK".
+    Shared semaphore caps concurrency across main and thematic audits.
+    """
     extractor=ns.get("extract_text")
     if not callable(extractor):raise RuntimeError("Document extractor unavailable")
     data_root=root().resolve()
+
+    async def one(row):
+        raw=row.get("local_path")
+        if not raw:return None
+        async with FILE_IO_LIMIT:
+            try:
+                f=Path(raw).resolve(strict=True)
+                if (not f.is_file() or not f.is_relative_to(data_root) or
+                    f.suffix.lower() not in FILE_EXT or
+                    not 0<f.stat().st_size<=MAX_BYTES):
+                    return None
+                def load_hash():
+                    with f.open("rb") as h:
+                        return hashlib.file_digest(h,"sha256").hexdigest()
+                sha=await asyncio.to_thread(load_hash)
+                try:meta=json.loads(row.get("metadata_json") or "{}")
+                except (ValueError,TypeError):meta={}
+                if not isinstance(meta,dict):meta={}
+                if meta.get("sha256") and meta["sha256"]!=sha:return None
+                trusted=await asyncio.to_thread(source_verified,reg,f,sha,meta)
+                meta={**meta,"sha256":sha}
+                if not trusted:
+                    meta["source"]="existing_local_unverified"
+                body=await asyncio.wait_for(
+                    asyncio.to_thread(document_text,f,extractor),timeout=55)
+                body=str(body or "")[:650000]
+                readable=len(body.strip())>=3
+                return {
+                    "name":row.get("name") or f.name,
+                    "url":row.get("url") or "",
+                    "type":row.get("doc_type") or "other",
+                    "published":row.get("published_at") or "",
+                    "meta":meta,"text":body,"local":str(f),"annotated":None,
+                    "status":"checked" if readable else "downloaded_no_text",
+                    "error":None if readable else "Текст не удалось извлечь",
+                    "final_url":row.get("final_url") or row.get("url") or ""
+                }
+            except (FileNotFoundError,NotADirectoryError):
+                # Old stale file paths cannot be audited: skip instead of
+                # producing thousands of repeated exception logs.
+                return None
+            except Exception as exc:
+                print(f"V351 DOC_SKIP reg={reg} type={type(exc).__name__} "
+                      f"file_id={row.get('id')}",flush=True)
+                return None
+
     output=[]
     unreadable=0
-    for row in rows:
-        raw=row.get("local_path")
-        if not raw:
-            unreadable+=1
-            continue
-        try:
-            f=Path(raw).resolve(strict=True)
-            if (not f.is_file() or not f.is_relative_to(data_root) or
-                f.suffix.lower() not in FILE_EXT or
-                not 0<f.stat().st_size<=MAX_BYTES):
+    for start in range(0,len(rows),FILE_BATCH_SIZE):
+        window=rows[start:start+FILE_BATCH_SIZE]
+        results=await asyncio.gather(*(one(row) for row in window))
+        for doc in results:
+            if doc is None:
                 unreadable+=1
-                continue
-            def load_hash():
-                with f.open("rb") as h:return hashlib.file_digest(h,"sha256").hexdigest()
-            sha=await asyncio.to_thread(load_hash)
-            try:meta=json.loads(row.get("metadata_json") or "{}")
-            except (ValueError,TypeError):meta={}
-            if not isinstance(meta,dict):meta={}
-            if meta.get("sha256") and meta["sha256"]!=sha:
-                unreadable+=1
-                continue
-            trusted=await asyncio.to_thread(source_verified,reg,f,sha,meta)
-            meta={**meta,"sha256":sha}
-            if not trusted:
-                # Never let a historical label masquerade as authenticated
-                # original provenance when the receipt check fails.
-                meta["source"]="existing_local_unverified"
-            text=await asyncio.wait_for(
-                asyncio.to_thread(document_text,f,extractor),timeout=55)
-            text=str(text or "")[:650000]
-            readable=len(text.strip())>=3
-            output.append({
-                "name":row.get("name") or f.name,
-                "url":row.get("url") or "",
-                "type":row.get("doc_type") or "other",
-                "published":row.get("published_at") or "",
-                "meta":meta,"text":text,"local":str(f),"annotated":None,
-                "status":"checked" if readable else "downloaded_no_text",
-                "error":None if readable else "Текст не удалось извлечь",
-                "final_url":row.get("final_url") or row.get("url") or ""
-            })
-            if not readable:unreadable+=1
-        except Exception as exc:
-            unreadable+=1
-            print(f"V332 DOC_ERROR reg={reg} type={type(exc).__name__} "
-                  f"file_id={row.get('id')}",flush=True)
+            else:
+                output.append(doc)
+                if doc["status"]!="checked":unreadable+=1
     return output,unreadable
 
 def merge_docs(official,other):
@@ -653,13 +698,15 @@ def install(ns):
                         print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
                     await asyncio.sleep(.05)
             while True:
-                await asyncio.gather(worker(1),worker(2))
+                await asyncio.gather(*(worker(i+1) for i in range(GENERAL_WORKERS)))
                 state=await asyncio.to_thread(progress,ns)
                 print("V332 CAMPAIGN_FINISHED "+json.dumps(state,ensure_ascii=False),flush=True)
                 await asyncio.sleep(90)
+                new=await asyncio.to_thread(add_new_verified,ns)
                 refreshed=await asyncio.to_thread(refresh_changed,ns)
-                if refreshed:
-                    print("V350 NEW_EVIDENCE_RECHECK queued="+str(refreshed),flush=True)
+                if refreshed or new:
+                    print("V351 QUEUE_WAKEUP new="+str(new)+
+                          " new_evidence="+str(refreshed),flush=True)
         asyncio.create_task(work())
     print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
