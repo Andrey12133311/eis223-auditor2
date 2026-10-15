@@ -109,13 +109,19 @@ def evaluate(p, docs):
                     "Протокол размещён в ЕИС с нарушением срока публикации", "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
                     f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signed[0][0]}; {published[0][0]}",
                     signed[0], LAW4))
+    # Use normalized event dates and a stable legal rule to collapse copies
+    # of the same original while retaining distinct dated occurrences.
     seen = set()
     result = []
     for item in findings:
-        key = (item["code"], item["evidence"])
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
+        dates = tuple(re.findall(DATE_TOKEN, item.get("evidence") or "", re.I))
+        if not dates:
+            dates = tuple(re.findall(DATE_TOKEN, item.get("match_text") or "", re.I))
+        key = (item["code"], dates)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
     return result, checks[:25]
 
 
