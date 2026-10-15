@@ -24,16 +24,16 @@ def run():
         db=conn()
         db.executescript("""CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,last_seen TEXT);
                            CREATE TABLE v319_manual_inputs(reg TEXT PRIMARY KEY);""")
-        regs=[str(32600000000+x) for x in range(1,1201)]
+        regs=[str(32600000000+x) for x in range(1,1301)]
         db.executemany("INSERT INTO purchases VALUES(?,?)",((reg,str(i).zfill(5)) for i,reg in enumerate(regs)))
         db.execute("INSERT INTO v319_manual_inputs VALUES(?)",(regs[-1],))
         db.commit();db.close()
         ns={"conn":conn,"_verified_set235":lambda:set(regs)}
         selected=dashboard_regs(ns)
-        assert len(selected)==DASHBOARD_MAX==1135,len(selected)
+        assert len(selected)==DASHBOARD_MAX==1253,len(selected)
         assert regs[-1] not in selected
         assert selected[0]==regs[-2]
-        assert selected[-1]==regs[64]
+        assert selected[-1]==regs[len(regs)-1-DASHBOARD_MAX]
         assert not set(selected).intersection({regs[-1]})
         ns["_verified_set235"]=lambda:set(regs[:5])
         assert len(dashboard_regs(ns))==5
@@ -73,7 +73,7 @@ def run():
                    fact_checks(purchase,{},{"summary":{}},[same]))
     # An unverified example never creates established violations.
     assert all(c["status"]!="violation" for c in fact_checks(purchase,{},{"summary":{}},[doc(text,trusted=False)]))
-    print("V339_MAIN_FACT_SELFTEST_OK exactly_1135=True manual_separate=True "
+    print("V339_MAIN_FACT_SELFTEST_OK exactly_1253=True manual_separate=True "
           "dates=day_only typed_subject_cost=True method_and_inn=True payment_review=True",
           flush=True)
 

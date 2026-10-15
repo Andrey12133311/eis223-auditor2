@@ -348,7 +348,7 @@ async def offline_audit(ns,reg,collect_only=False):
     # the verified originals before analysis and the first database save.
     from v314_eis_metadata import from_documents, subject
     from v311_verified_customer import _name
-    metadata=await asyncio.to_thread(from_documents,reg,docs)
+    metadata=await asyncio.to_thread(from_documents,reg,docs,_name(p.get("customer")))
     if metadata:
         if not _name(p["customer"]):p["customer"]=metadata.get("customer") or ""
         if not p["customer_inn"]:p["customer_inn"]=metadata.get("customer_inn") or ""

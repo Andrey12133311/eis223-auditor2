@@ -16,6 +16,7 @@ import sqlite3
 
 from v295_eis_originals import allowed_documents, saved_document, uid_from_url, root
 from v311_verified_customer import _name
+from v342_identity import valid_inn, subject
 
 LOG = logging.getLogger(__name__)
 REG = re.compile(r"3[0-9]{10}$")
@@ -27,7 +28,7 @@ BUYER_LABEL = re.compile(
     r"^(?:наименование.*?заказчик[а-яё]*|заказчик)"
     r"(?:\s*\([^)]*\))?[\s:]*$", re.I)
 SUBJECT_LABEL = re.compile(
-    r"^(?:наименование (?:объекта )?закупки|предмет закупки|объект закупки)"
+    r"^(?:наименование (?:(?:объекта|предмета) )?закупки|предмет закупки|объект закупки|предмет договора)"
     r"(?:\s*\([^)]*\))?[\s:]*$", re.I)
 INN_LABEL = re.compile(r"\bИНН\s*(?:/\s*КПП\s*)?[:№]?\s*(\d{10,12})(?!\d)", re.I)
 STOP_NAME = re.compile(
@@ -41,20 +42,6 @@ def compact(value):
     return " ".join(str(value or "").replace("\x00", " ").split())
 
 
-def valid_inn(value):
-    s = str(value or "").strip()
-    if not re.fullmatch(r"\d{10}|\d{12}", s) or len(set(s)) == 1:
-        return ""
-    digits = list(map(int, s))
-    check = lambda weights: sum(a*b for a, b in zip(weights, digits)) % 11 % 10
-    if len(s) == 10:
-        ok = check((2, 4, 10, 3, 5, 9, 4, 6, 8)) == digits[9]
-    else:
-        ok = (check((7, 2, 4, 10, 3, 5, 9, 4, 6, 8)) == digits[10] and
-              check((3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8)) == digits[11])
-    return s if ok else ""
-
-
 def company(value):
     s = compact(value).strip(" |:;,")
     s = re.sub(r"^(?:наименование\s*\(\s*полное\s*и\s*сокращ[её]нное\s*\)|полное\s+наименование|наименование\s+заказчика)\s*[:：-]\s*", "", s, flags=re.I)
@@ -64,11 +51,6 @@ def company(value):
     # plus its parenthesized abbreviation, but trim a separate short-name line.
     s = re.split(r"(?<=[»\"])\s+(?=(?:ООО|ПАО|ОАО|ЗАО|ФГБОУ|ГАУЗ)\b)", s)[0]
     return _name(s) if LEGAL.search(s) else ""
-
-
-def subject(value):
-    s = compact(value).strip(" |:;,")[:800]
-    return s if len(s) >= 10 and not STATE_TITLE.fullmatch(s) else ""
 
 
 def buyer_inns(text, name):
@@ -121,6 +103,10 @@ def table_pairs(text):
                 current[1] = line
             continue
         cells = [compact(x) for x in line.strip("|").split("|")]
+        if len(cells) == 1 and re.match(r"^(?:сведения|информация)\s+о\s+", cells[0], re.I):
+            current = [cells[0], "", raw]
+            groups.append(current)
+            continue
         numbered = len(cells) >= 3 and bool(re.fullmatch(r"[\d.]*[.)]?", cells[0]))
         if numbered:
             index, label, value = cells[0], cells[1], " ".join(cells[2:])
@@ -145,6 +131,7 @@ def table_pairs(text):
 def parse_text(text):
     text = str(text or "")[:1_000_000]
     result = {}
+    labelled_inns = set()
     buyer_scope = False
     for label, value, block in table_pairs(text):
         if re.search(r"^(?:сведения|информация) о заказчике", label, re.I):
@@ -162,7 +149,14 @@ def parse_text(text):
         if not result.get("title") and SUBJECT_LABEL.fullmatch(label):
             title = subject(value)
             if title:
-                result.update(title=title, title_evidence=compact(block)[:1000])
+                result.update(title=title, title_evidence=compact(block)[:1000], title_kind="label")
+        if re.fullmatch(r"ИНН\s+заказчика|ИНН(?:\s*/\s*КПП)?", label, re.I):
+            if buyer_scope or re.search(r"заказчика", label, re.I):
+                inn = valid_inn(value)
+                if inn:
+                    labelled_inns.add(inn)
+    if len(labelled_inns) == 1:
+        result["customer_inn"] = next(iter(labelled_inns))
     if not result.get("customer"):
         # Explicit buyer prose, never an arbitrary first legal entity in a file.
         m = re.search(r"(?im)^\s*Заказчик\s*:\s*([^\n]{6,500})", text)
@@ -188,7 +182,7 @@ def parse_text(text):
             if re.match(r"^\s*(?:Поставка|Оказание услуг|Выполнение работ|Закупка)\s+",line,re.I):
                 title = subject(line)
                 if title:
-                    result.update(title=title,title_evidence=compact(line))
+                    result.update(title=title,title_evidence=compact(line),title_kind="cover")
                     break
     return result
 
@@ -219,7 +213,7 @@ def document_text(path, extractor):
     return str(extractor(path) or "")
 
 
-def from_documents(reg, documents):
+def from_documents(reg, documents, known_customer=""):
     """Input is the already hash-verified original list from offline_audit."""
     candidates = []
     for doc in documents:
@@ -230,6 +224,14 @@ def from_documents(reg, documents):
         if not uid_from_url(url):
             continue
         fields = parse_text(doc.get("text", ""))
+        if fields.get("title_kind") == "cover" and not re.search(
+                r"извещени|документаци|информационн.*карт|техническ.*задани",doc.get("name") or "",re.I):
+            fields.pop("title",None)
+            fields.pop("title_evidence",None)
+        if known_customer and not fields.get("customer"):
+            inns = buyer_inns(str(doc.get("text") or ""), known_customer)
+            if len(inns) == 1:
+                fields.update(customer=known_customer, customer_inn=next(iter(inns)))
         if fields:
             candidates.append({**fields, "source_url":url,
                                "document":doc.get("name", ""), "sha256":meta.get("sha256", "")})
@@ -279,12 +281,14 @@ def apply_metadata(ns, reg, metadata):
         p = dict(row)
         changes = {}
         name = company(metadata.get("customer")) or _name(metadata.get("customer"))
-        if name and (not _name(p.get("customer")) or
-                     compact(p.get("customer")).casefold().startswith("наименование (полное и сокращ")):
+        current_name = _name(p.get("customer"))
+        if name and (not current_name or current_name != compact(p.get("customer"))):
             changes["customer"] = name
             if callable(ns.get("org_form")):
                 changes["org_form"] = ns["org_form"](name)
-        same = compact(p.get("customer")).casefold() == compact(name).casefold()
+        identity = lambda value: re.sub(r"[^а-яёa-z0-9]", "", re.sub(
+            r"\s*\([^)]*\)\s*$", "", _name(value)).casefold())
+        same = bool(name and identity(current_name) == identity(name))
         if name and ("customer" in changes or same):
             inn = valid_inn(metadata.get("customer_inn"))
             if inn and not valid_inn(p.get("customer_inn")):
@@ -381,7 +385,13 @@ def stored_metadata(ns, reg):
                          "text":text,"meta":meta})
         except (OSError,ValueError,TypeError,KeyError):
             LOG.warning("Cannot read verified metadata reg=%s doc=%s",reg,d.get("id"))
-    return from_documents(reg,docs)
+    db = ns["conn"]()
+    try:
+        row = db.execute("SELECT customer FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+        known_customer = _name(row[0]) if row else ""
+    finally:
+        db.close()
+    return from_documents(reg,docs,known_customer)
 
 
 def reconcile(ns):
@@ -390,21 +400,13 @@ def reconcile(ns):
         # Bounded rotating batch. Missing prices are common in old records;
         # rescanning thousands of DOCX/PDF originals on every restart can
         # stall Railway readiness and starve the actual legal-audit queue.
-        condition="""customer IS NULL OR TRIM(customer)='' OR
-                LOWER(customer) LIKE '%уточня%' OR
-                LOWER(customer) LIKE 'наименование (полное и сокращ%' OR
-                customer_inn IS NULL OR TRIM(customer_inn)='' OR
-                title IS NULL OR LOWER(TRIM(title)) IN
-                ('подача заявок','приём заявок','прием заявок','статус закупки')
-                OR price_num IS NULL"""
-        total=int(db.execute("SELECT COUNT(*) FROM purchases WHERE "+condition).fetchone()[0])
+        pending = [row for row in db.execute("SELECT reg_number,customer,customer_inn,title,price_num "
+            "FROM purchases ORDER BY last_seen DESC")
+            if not _name(row[1]) or _name(row[1]) != compact(row[1]) or
+            not valid_inn(row[2]) or not subject(row[3]) or row[4] is None]
+        total=len(pending)
         offset=int(ns.get("_v314_metadata_offset") or 0)%max(1,total)
-        rows=db.execute("SELECT reg_number FROM purchases WHERE "+condition+
-                        " ORDER BY last_seen DESC LIMIT 55 OFFSET ?",(offset,)).fetchall()
-        if not rows and total:
-            offset=0
-            rows=db.execute("SELECT reg_number FROM purchases WHERE "+condition+
-                            " ORDER BY last_seen DESC LIMIT 55",()).fetchall()
+        rows=pending[offset:offset+55]
         ns["_v314_metadata_offset"]=(offset+len(rows))%max(1,total)
     finally:
         db.close()

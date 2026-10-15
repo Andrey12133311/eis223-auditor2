@@ -40,4 +40,12 @@ const card=documentOf(`
 const buyer=api.customerFromDocument(card,'32616467075');
 assert.equal(buyer.name,'ГАУ СО «АРЧК»');
 assert.equal(buyer.inn,'6501309746');
-console.log('V314 collector DOM regression: 5 checks passed');
+const paired=documentOf(`<section><h2>Сведения о заказчике</h2>
+ <div><span class="section__title">Наименование (полное) - ПАО «Сахалинэнерго»</span></div>
+ <table><tr><td>ИНН / КПП</td><td>6500000024 / 650101001</td></tr></table>
+ <div><span class="section__title">Предмет закупки</span><span class="section__info">Поставка сервера</span></div>
+ </section>`);
+assert.equal(api.customerFromDocument(paired,'32616422163').name,'ПАО «Сахалинэнерго»');
+assert.equal(api.customerFromDocument(paired,'32616422163').inn,'6500000024');
+assert.equal(api.searchTitle(results,'32616467074'),'Поставка реактивов');
+console.log('V314 collector DOM regression: 8 checks passed');

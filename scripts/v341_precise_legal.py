@@ -12,7 +12,7 @@ from functools import wraps
 
 from v298_eis_only import federal_workday
 from v331_broad_legal import verified
-from v341_eis_facts import DATE_TOKEN, enrich, persist_facts, parse_day as day
+from v341_eis_facts import DATE_TOKEN, enrich, persist_facts, parse_day as day, document_facts
 
 LAW32 = "https://www.consultant.ru/document/cons_doc_LAW_116964/05cd0add21b39d478c8b8af91fb2f2cd80d4a6e8/"
 LAW4 = "https://www.consultant.ru/document/cons_doc_LAW_116964/441d00be62e3224cdc0514cffaf2a26b5b40a1c7/"
@@ -24,7 +24,7 @@ COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:ко�
 CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+закупки|решение\s+об\s+отмене\s+закупки\s+принято)"
 CANCEL_POSTED = r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки(?:\s+в\s+ЕИС)?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+размещено)"
 SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\s+субъект[ыа-я\s]{0,35}малого\s+и\s+среднего\s+предпринимательства|участниками\s+которо[йго]+\s+могут\s+быть\s+только\s+субъект",re.I)
-PAYMENT_DAYS = re.compile(r"(?:оплата|расч[её]т[ыа]?|оплат[уы])[^.\n]{0,240}?(?:в\s+течение|не\s+позднее|срок\s+оплаты\s+составляет)\s*(?P<days>\d{1,3})\s*(?:\([^)]{0,40}\)\s*)?рабочих\s+дн",re.I)
+PAYMENT_DAYS = re.compile(r"(?:оплата|расч[её]т[ыа]?|оплат[уы])[^.;]{0,280}?(?:в\s+течение|не\s+позднее|срок\s+оплаты\s+составляет)\s*(?P<days>\d{1,3})\s*(?:\([^)]{0,40}\)\s*)?рабочих\s+дн",re.I)
 
 
 def shifted(date, count):
@@ -70,6 +70,14 @@ def review(doc, code, title, evidence, law, match):
 def evaluate(p, docs):
     findings, checks = [], []
     competitive = bool(COMPETITIVE.search(str(p.get("method") or "")))
+    sme_proof = (p.get("fact_evidence") or {}).get("sme_only") or {}
+    if not sme_proof:
+        sme_proof = document_facts(docs).get("sme_only") or {}
+    if isinstance(sme_proof.get("value"),bool) and sme_proof.get("source") in (
+            "official_eis_card", "official_eis_document"):
+        sme_scope = sme_proof["value"]
+    else:
+        sme_scope = bool(SME_EXCLUSIVE.search(str(p.get("method") or "")))
     for doc in docs[:650]:
         if not verified(doc):
             continue
@@ -104,27 +112,41 @@ def evaluate(p, docs):
         # Memo-derived rule: cancellation decision must be published on
         # the same calendar date (223-FZ art. 3.2(6)).
         cancel_decisions, cancel_posts = matches(CANCEL_DECISION,text), matches(CANCEL_POSTED,text)
-        if len(cancel_decisions)==len(cancel_posts)==1:
-            decided, posted = day(cancel_decisions[0]["date"]), day(cancel_posts[0]["date"])
+        cancel_pairs = []
+        for index, decision in enumerate(cancel_decisions):
+            stop = cancel_decisions[index+1].start() if index+1 < len(cancel_decisions) else len(text)
+            candidates = [post for post in cancel_posts
+                          if decision.end() <= post.start() < stop
+                          and post.start()-decision.end() <= 1500]
+            if len(candidates) == 1:
+                cancel_pairs.append((decision,candidates[0]))
+        if len(cancel_decisions)==len(cancel_posts)==1 and not cancel_pairs:
+            cancel_pairs=[(cancel_decisions[0],cancel_posts[0])]
+        for decision, publication in cancel_pairs:
+            decided, posted = day(decision["date"]), day(publication["date"])
             if competitive and decided and posted and 0 < (posted-decided).days < 365:
                 findings.append(finding(doc,"223-3.2-6-CANCELLATION-POSTED-LATE",
                     "Решение об отмене конкурентной закупки размещено не в день принятия",
                     "223-ФЗ, ст. 3.2 ч. 6",
                     f"Решение об отмене принято {decided}; размещено в ЕИС {posted}.",
-                    cancel_decisions[0]))
-        elif cancel_decisions or cancel_posts:
+                    decision))
+        if len(cancel_pairs)<len(cancel_decisions) or len(cancel_pairs)<len(cancel_posts):
             checks.append(review(doc,"v341-cancellation-date-chain",
                 "Сверить дату решения об отмене с датой публикации в ЕИС",
                 f"Дат решений: {len(cancel_decisions)}; дат публикаций: {len(cancel_posts)}.",
                 "223-ФЗ, ст. 3.2 ч. 6",(cancel_decisions or cancel_posts)[0]))
         # Memo-derived SME payment term: only explicit exclusive SME scope
         # and contractual payment terms; not general legal quotations.
-        sme_scope = bool(SME_EXCLUSIVE.search(str(p.get("method") or "")))
         if sme_scope:
             for payment in list(PAYMENT_DAYS.finditer(text))[:15]:
                 days = int(payment["days"])
-                snippet = text[max(0,payment.start()-100):payment.end()+110]
-                if days>7 and re.search(r"акт[а-я-]*\\s+(?:сдачи[-–]приемки|при[её]мки)|договор[а-я]*|услуг[аи]?|товар[а-я]*",snippet,re.I):
+                snippet = text[max(0,payment.start()-100):payment.end()+500]
+                # A payment term must run from acceptance. Generic law
+                # quotations and a mere mention of SME support are not scope.
+                acceptance = re.search(r"(?:со?\s+дня|с\s+дат[ыа]|после)\s+"
+                    r"(?:подписания|утверждения)\s+(?:заказчиком\s+|сторонами\s+)?"
+                    r"(?:акта|документа)\s+(?:(?:сдачи[-–]при[её]мки|при[её]мки)|о\s+при[её]мке)",snippet,re.I)
+                if days>7 and acceptance and not re.search(r"например|образец\s+расч[её]та",snippet,re.I):
                     findings.append(finding(doc,"1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS",
                         "В закупке только для субъектов МСП установлен срок оплаты свыше семи рабочих дней",
                         "Постановление Правительства РФ № 1352, Положение, п. 28",

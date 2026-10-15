@@ -45,57 +45,47 @@ def card_from_storage(reg):
     return "",""
 
 def reconcile_buyers(ns):
+    from v311_verified_customer import _name, read_verified
+    from v299_browser_intake import _apply_customer
+    from v342_identity import subject, valid_inn
     db=ns["conn"]()
-    updated=0
     try:
-        db.execute("BEGIN IMMEDIATE")
-        rows=db.execute("""
-            SELECT reg_number,customer,customer_inn
-            FROM purchases
-            WHERE customer IS NULL OR TRIM(customer)=''
-              OR LOWER(customer) LIKE '%уточня%'
-              OR LOWER(customer) LIKE '%не найден%'
-              OR LOWER(customer) LIKE '%не указан%'
-              OR LOWER(customer) LIKE 'наименование (полное и сокращ%'
-              OR customer_inn IS NULL OR TRIM(customer_inn)=''
-            LIMIT 20000
-        """).fetchall()
-        for reg,current,old_inn in rows:
-            verified=db.execute("SELECT name,inn FROM v311_verified_buyers WHERE reg=?",(reg,)).fetchone()
-            if verified and buyer(verified[0]):
-                name,source_inn=buyer(verified[0]),legitimate_inn(verified[1])
-            else:
-                name,source_inn=card_from_storage(reg)
-            inn=source_inn or legitimate_inn(old_inn)
-            if not name and inn:
-                row=db.execute("""
-                    SELECT customer FROM purchases
-                    WHERE customer_inn=? AND LENGTH(TRIM(customer))>6
-                      AND LOWER(customer) NOT LIKE '%уточня%'
-                      AND LOWER(customer) NOT LIKE '%не найден%'
-                      AND LOWER(customer) NOT LIKE '%не указан%'
-                      AND reg_number<>?
-                    ORDER BY last_seen DESC LIMIT 1
-                """,(inn,reg)).fetchone()
-                if row:name=buyer(row[0])
-            if not name:continue
-            if buyer(current) and not PLACEHOLDER.search(str(current)) and not str(current).lower().startswith('наименование (полное и сокращ'):
-                name=buyer(current)
-            db.execute("""
-                UPDATE purchases SET customer=?,
-                    customer_inn=CASE WHEN ?<>'' THEN ? ELSE customer_inn END
-                WHERE reg_number=?
-            """,(name,inn,inn,reg))
-            updated+=1
-        db.commit()
-        print(f"V311 BUYER_RECONCILED corrected={updated} reviewed={len(rows)}",
-              flush=True)
-        return {"reviewed":len(rows),"corrected":updated}
-    except Exception:
-        if db.in_transaction:db.rollback()
-        logger.exception("Customer name reconciliation failed")
-        return {"reviewed":0,"corrected":0}
-    finally:db.close()
+        rows=db.execute("SELECT reg_number,customer,customer_inn,title FROM purchases "
+                        "ORDER BY last_seen DESC LIMIT 20000").fetchall()
+    finally:
+        db.close()
+    updated=reviewed=0
+    for reg,current,old_inn,title in rows:
+        if (_name(current) and _name(current)==current and valid_inn(old_inn) and subject(title)):
+            continue
+        reviewed+=1
+        try:
+            trusted=read_verified(ns,reg)
+            name=_name(trusted.get("name"))
+            inn=valid_inn(trusted.get("inn"))
+            stored_title=""
+            folder=root()/"eis223_public_browser_intake"/reg
+            for filename,source in (("buyer.json","public_eis_223_browser_card"),
+                                    ("manifest.json","public_eis_223_browser")):
+                try:
+                    value=json.loads((folder/filename).read_text(encoding="utf-8"))
+                    if value.get("reg_number")!=reg or value.get("source")!=source:
+                        continue
+                    from v311_verified_customer import _official_source
+                    if not _official_source(value.get("source_page"),reg):
+                        continue
+                    name=name or _name(value.get("customer"))
+                    inn=inn or valid_inn(value.get("customer_inn"))
+                    stored_title=stored_title or subject(value.get("title"))
+                except (OSError,ValueError,TypeError,AttributeError):
+                    continue
+            updated+=bool(_apply_customer(ns,{"reg_number":reg,"customer":name,
+                "customer_inn":inn,"title":stored_title}))
+        except Exception:
+            logger.exception("Customer reconciliation failed reg=%s",reg)
+    print(f"V342 BUYER_RECONCILED corrected={updated} reviewed={reviewed}",flush=True)
+    return {"reviewed":reviewed,"corrected":updated}
+
 
 def install(ns):
     app=ns["app"]

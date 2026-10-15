@@ -48,6 +48,7 @@ def run():
     assert prices_in_text('3. Обоснование НМЦД; 4. Рекомендуемая форма заявки участника закупки;')==[]
     assert prices_in_text('14. ОБОСНОВАНИЕ НАЧАЛЬНОЙ (МАКСИМАЛЬНОЙ) ЦЕНЫ ДОГОВОРА 25')==[]
     assert prices_in_text('НМЦД\n2.1. Обоснование цены')==[]
+    assert prices_in_text('Обеспечение исполнения Договора устанавливается в размере 5 % от начальной максимальной цены Договора– 8 829,89 (восемь тысяч восемьсот двадцать девять) рублей 89 копеек')==[]
     assert verified_nmcd([doc('НМЦД: 100 руб.'),doc('НМЦД: 200 руб.')]).get('price_conflict')
     assert _verified_money('1\u202f234\u00a0567,89 Российский рубль')[1]==1234567.89
     assert _verified_money(0)[1]==0
@@ -87,6 +88,10 @@ def run():
         assert row['price_num']==41081.60 and row['price']=='41081.60'
         assert tuple(db.execute("SELECT status,evidence FROM checks WHERE item='НМЦД'").fetchone())==('ok','41\u00a0081,60 ₽')
         assert json.loads(row['card_fields_json'])['summary']['price_num']==41081.60
+        # Restoring a price does not restore the independently missing INN.
+        assert _known(ns,[REG])[REG]['needs_metadata']
+        from v299_browser_intake import _apply_customer
+        assert _apply_customer(ns,{"reg_number":REG,"customer_inn":"6501309746"})
         assert not _known(ns,[REG])[REG]['needs_metadata']
         # Two independently missing fields were not repaired by the old AND condition.
         db.execute('UPDATE purchases SET price=NULL,price_num=250000 WHERE reg_number=?',(REG,));db.commit();db.close()

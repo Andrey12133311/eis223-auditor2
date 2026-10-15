@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "341"; // Cyrillic labels, typed prices and legal dates
+  const COLLECTOR_VERSION = "342"; // Buyer INN, labelled subjects and Unicode repair
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -340,7 +340,8 @@
       if(title.length>180)continue;
       // EIS sometimes renders "ИНН: 1234567890" in the SAME node.
       const inline=(label.textContent||"").replace(/\s+/g," ").trim();
-      const inlineMatch=inline.match(/^([^:：]{1,110})\s*[:：]\s*(.+)$/);
+      const inlineMatch=inline.match(/^([^:：]{1,110})\s*[:：]\s*(.+)$/)||
+        inline.match(/^(.{1,110}?)\s+[-–—]\s+(.+)$/);
       if(!patterns.some(p=>p.test(title))&&
           !(inlineMatch&&patterns.some(p=>p.test(inlineMatch[1].trim().toLowerCase()))))continue;
       if(inlineMatch&&patterns.some(p=>p.test(inlineMatch[1].trim().toLowerCase()))){
@@ -373,8 +374,9 @@
       if(!/^(?:сведения о заказчике|информация о заказчике|заказчик|заказчики по лоту)(?:\s|$)/i.test(caption))
         continue;
       name=valueByLabel(section,[/^наименование организации/i,/^полное наименование/i,
+             /^наименование\s*\(\s*полное(?:\s*[,и]\s*сокращ[её]нное)?\s*\)$/i,
              /^заказчик$/i,/^наименование заказчика/i])||name;
-      inn=valueByLabel(section,[/^инн$/i,/^инн заказчика/i])||inn;
+      inn=valueByLabel(section,[/^инн(?:\s*\/\s*кпп)?$/i,/^инн заказчика/i])||inn;
       if(!inn){
         const hits=(section.textContent||"").match(/(?:^|[^а-яёa-z])ИНН\s*[:：№]?\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)||[];
         if(hits.length===1)inn=(hits[0].match(/([0-9]{10}|[0-9]{12})/)||[])[1]||"";
@@ -394,17 +396,21 @@
       for(const section of sections){
         const heading=(section.querySelector("h2,h3,legend,.blockInfo__title,.section__header")?.textContent||"").trim();
         if(!/^(?:сведения|информация) о заказчике|^заказчик(?:и по лоту)?$/i.test(heading))continue;
-        const matches=[...section.textContent.matchAll(/(?:^|[^а-яёa-z])ИНН\\s*[:：№]?\\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)];
+        const matches=[...section.textContent.matchAll(/(?:^|[^а-яёa-z])ИНН\s*(?:\/\s*КПП\s*)?[:：№]?\s*([0-9]{10}|[0-9]{12})(?![0-9])/gi)];
         const unique=[...new Set(matches.map(m=>m[1]))];
         if(unique.length===1){inn=unique[0];break;}
       }
     }
     name=name.replace(/\s+/g," ").trim().slice(0,400);
+    name=name.replace(/^(?:наименование\s*(?:организации|заказчика)?\s*(?:\(\s*полное(?:\s*[,и]\s*сокращ[её]нное)?\s*\))?|полное наименование)\s*[:：–—-]\s*/i,"");
     if(/^(?:уточняем|заказчик уточняется|не указан|не найден|сведения отсутствуют)/i.test(name))
       name="";
     if(!/[А-Яа-яЁёA-Za-z]/.test(name))name="";
-    const match=String(inn).replace(/[^0-9]/g,"").match(/^(?:[0-9]{10}|[0-9]{12})$/);
-    return {name,inn:match?match[0]:""};
+    if(/^(?:наименование|полное наименование|сведения о заказчике)(?:\s*\([^)]*\))?$/i.test(name))name="";
+    // Keep INN separate from the adjacent KPP; removing every non-digit
+    // would join both numbers into an invalid 19/21-digit identifier.
+    const match=String(inn).trim().match(/^(?:ИНН\s*[:：]?\s*)?([0-9]{10}|[0-9]{12})(?![0-9])(?:\s*(?:\/|КПП)|\s*$)/i);
+    return {name,inn:match?match[1]:""};
   }
   function searchResultCard(doc,reg){
     if(!doc)return null;
@@ -431,7 +437,7 @@
     if(!doc)return "";
     const title=valueByLabel(doc,[/^наименование закупки$/i,/^предмет закупки$/i,
                                   /^объект закупки$/i,/^наименование объекта закупки$/i]);
-    if(title&&title.length>9&&!/^(?:подача заявок|извещение)/i.test(title))
+    if(title&&title.length>=5&&!/^(?:подача заявок|при[её]м заявок|подведение итогов|рассмотрение заявок|закупка завершена|закупка отменена|извещение)$/i.test(title.trim()))
       return title.slice(0,800);
     return "";
   }
@@ -625,7 +631,7 @@
   async function reportOfficialBuyer(reg,source,customer,title){
     // Buyer's verified official card metadata must not depend on document
     // availability. This call is intentionally separate from original upload.
-    if(!customer?.name)return;
+    if(!customer?.name&&!customer?.inn&&!title)return;
     try{
       const result=await api("/api/v311/eis223/customer","POST",{
         reg_number:reg,source_page:source,
