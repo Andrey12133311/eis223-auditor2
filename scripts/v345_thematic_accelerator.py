@@ -174,14 +174,20 @@ def _request_missing_originals(ns,results=()):
             return 0
         # Crucial: scan pending thematic ORIGINALS directly. Never rely on
         # whichever 36 procurements happened to be legally audited this cycle.
+        cutoff=datetime.fromtimestamp(clock-1800,timezone.utc).isoformat()
+        day_cutoff=datetime.fromtimestamp(clock-86400,timezone.utc).isoformat()
         waiting=conn.execute("""SELECT t.reg,MIN(t.updated_at) first_waiting
           FROM thematic_items t JOIN thematic_batches b ON b.id=t.batch_id
           WHERE b.status='active' AND t.status='waiting_originals'
             AND NOT EXISTS (
               SELECT 1 FROM v301_search_jobs j
               WHERE j.kind='reg' AND j.target=t.reg
-                AND j.status IN ('queued','leased','deferred'))
-          GROUP BY t.reg ORDER BY first_waiting ASC LIMIT 250""").fetchall()
+                AND (j.status IN ('queued','leased','deferred') OR j.created_at>=?))
+            AND (SELECT COUNT(*) FROM v301_search_jobs j
+                 WHERE j.kind='reg' AND j.target=t.reg
+                   AND j.created_at>=?)<5
+          GROUP BY t.reg ORDER BY first_waiting ASC LIMIT 250""",
+          (cutoff,day_cutoff)).fetchall()
         ready=[]
         for item in waiting:
             if len(ready)>=budget:break
