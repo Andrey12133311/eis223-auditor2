@@ -96,24 +96,34 @@ def evaluate(p, docs):
                     f"Запрос получен {received}; крайний день ответа {due}; опубликован {published}; окончание подачи {deadline}. {snippet}", request))
         # Protocol signing and EIS publication must each be explicitly named.
         signed, published = matches(SIGNED, text), matches(PROTOCOL_PUBLISHED, text)
-        if signed and published and (len(signed) != 1 or len(published) != 1):
-            checks.append(review(doc, "v341-protocol-ambiguous",
-                "Сопоставить даты подписания и публикации каждого протокола",
-                f"Обнаружено дат подписания: {len(signed)}; дат публикации: {len(published)}. "
-                "Нельзя автоматически связывать разные протоколы.",
-                "223-ФЗ, ст. 4 ч. 12", signed[0]))
-        elif signed and not published:
-            checks.append(review(doc, "v341-protocol-publication-unconfirmed",
-                "Установить дату размещения подписанного протокола в ЕИС",
-                signed[0].group(0), "223-ФЗ, ст. 4 ч. 12", signed[0]))
-        elif published and not signed:
-            checks.append(review(doc, "v341-protocol-signing-unconfirmed",
-                "Установить дату подписания опубликованного протокола",
-                published[0].group(0), "223-ФЗ, ст. 4 ч. 12", published[0]))
-        if len(signed) == 1 and len(published) == 1:
-            start, end = day(signed[0]["date"]), day(published[0]["date"])
-            # Civil Code art. 193 moves a last day that is non-working to
-            # the following working day; apply it before alleging a delay.
+        # Pair multiple protocol events only when each signature/publication
+        # has a unique local counterpart; never combine different protocols.
+        pairs = []
+        used = set()
+        for signature in signed:
+            candidates = [publication for publication in published
+                          if 0 <= publication.start()-signature.end() <= 900
+                          and not any(signature.end() < other.start() < publication.start()
+                                      for other in signed if other is not signature)
+                          and not any(signature.end() < other.start() < publication.start()
+                                      for other in published if other is not publication)]
+            if len(candidates) == 1 and candidates[0].start() not in used:
+                pairs.append((signature, candidates[0]))
+                used.add(candidates[0].start())
+        if len(signed) == len(published) == 1 and not pairs:
+            # One pair can be distant within a single verified document.
+            pairs = [(signed[0], published[0])]
+            used.add(published[0].start())
+        if len(pairs) < len(signed) or len(pairs) < len(published):
+            anchor = (signed or published)[0] if (signed or published) else None
+            if anchor is not None:
+                checks.append(review(doc, "v341-protocol-ambiguous",
+                    "Сопоставить даты подписания и размещения протоколов в ЕИС",
+                    f"Подписаний: {len(signed)}; публикаций: {len(published)}; "
+                    f"однозначных пар: {len(pairs)}. Остальные события требуют сверки.",
+                    "223-ФЗ, ст. 4 ч. 12", anchor))
+        for signature, publication in pairs:
+            start, end = day(signature["date"]), day(publication["date"])
             due = start+timedelta(days=3) if start else None
             working = federal_workday(due) if due else None
             if working is False:
@@ -121,8 +131,8 @@ def evaluate(p, docs):
             if start and end and due and working is not None and end > due and 0 <= (end-start).days < 365:
                 findings.append(finding(doc, "223-4-12-PROTOCOL-PUBLICATION-LATE",
                     "Протокол размещён в ЕИС с нарушением срока публикации", "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
-                    f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signed[0][0]}; {published[0][0]}",
-                    signed[0], LAW4))
+                    f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signature[0]}; {publication[0]}",
+                    signature, LAW4))
     # Use normalized event dates and a stable legal rule to collapse copies
     # of the same original while retaining distinct dated occurrences.
     seen = set()
