@@ -10,7 +10,7 @@ from v341_eis_facts import (initialize, validate_snapshot, save_snapshot, read_c
 from v341_precise_legal import evaluate, shifted
 from v340_price_display import decorate
 from v336_legal_matrix import security_findings
-from v330_amendments_223 import day
+from v330_amendments_223 import day, evaluation as amendment_evaluation
 
 REG="32616471929"
 SOURCE="https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber="+REG
@@ -143,6 +143,14 @@ def run():
     assert evaluate(p,[doc(protocol["text"],"Копия протокола.docx"),protocol])[0]
     assert len(evaluate(p,[protocol])[0])==1
     assert evaluate(p,[doc(protocol["text"].replace("13.10.2026","12.10.2026"))])[0]==[]
+    # Publication on the next working day after a weekend is timely.
+    amendment=doc('Дата принятия решения о внесении изменений: 08.10.2026\nДата публикации изменений в ЕИС: 12.10.2026')
+    assert amendment_evaluation(p,[amendment])[0]==[]
+    delayed=doc(amendment['text'].replace('12.10.2026','13.10.2026'))
+    assert len(amendment_evaluation(p,[delayed])[0])==1
+    # A stale general-card bid deadline is not proof that a specific
+    # amendment was published after the revised submission deadline.
+    assert not any(x['code']=='223-4-11-CHANGE-AFTER-BID-DEADLINE' for x in amendment_evaluation({**p,'submission_end':'2026-10-01'},[delayed])[0])
     # Explicit SME scope tightens bid security to 2%; a mere legal quote
     # or performance-security requirement must not trigger that result.
     bid=doc("Размер обеспечения заявки: 3 % от НМЦД.")
