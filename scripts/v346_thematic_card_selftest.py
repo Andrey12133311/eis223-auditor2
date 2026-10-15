@@ -64,7 +64,7 @@ def run():
         main=shared.render(REG,shared.read(ns,REG))
         assert shared.STYLE in page and shared.STYLE in main
         assert 'class="panel"' in page and 'class="grid"' in page
-        assert 'Нарушения тематической проверки: 1' in page
+        assert '<h2>Нарушения: 1</h2>' in page
         assert 'Нарушения общей проверки: 1' in page
         assert 'Нарушение тематического направления' in page
         assert 'Общее нарушение' in page
