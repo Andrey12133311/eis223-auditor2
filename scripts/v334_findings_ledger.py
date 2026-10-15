@@ -210,9 +210,17 @@ def install(ns):
         db.commit()
     finally:
         db.close()
-    # Snapshot before any on_startup re-audit and before potentially
-    # destructive legacy save(). Fail startup closed if persistence fails.
-    snapshot(connect)
+    # Snapshot is normally mandatory before any legacy rewriting of findings.
+    # If the EIS volume is exhausted, retain all existing records and allow
+    # read-only pages/diagnostics to start. Protected writes below continue
+    # to fail closed until sufficient capacity is restored.
+    try:
+        snapshot(connect)
+    except sqlite3.OperationalError as exc:
+        if "database or disk is full" not in str(exc).lower():
+            raise
+        print("V354_EVIDENCE_LEDGER_WRITE_DEFERRED volume_full=True "+
+              "existing_evidence_preserved=True",flush=True)
     print("V334 BASELINE "+json.dumps(summary(connect),ensure_ascii=False),flush=True)
     overlap=compare_same_titles(connect,100)
     print("V334 CROSS_TABLE "+json.dumps({k:v for k,v in overlap.items() if k!="items"},ensure_ascii=False),flush=True)
