@@ -72,10 +72,12 @@ def run():
         assert 'Документы ЕИС (1)' in page
         assert 'Извещение.pdf' in page
         assert '/thematic#'+BATCH in page
+        assert 'Общая карточка проверки' not in page
+        assert '>Все закупки</a>' not in page
         assert '/thematic/card/'+BATCH+'/'+REG+'?print=1' in page
         assert 'Извещение подтверждает факт &lt;незаконный&gt;' in page
         assert 'Извещение подтверждает факт <незаконный>' not in page
-        assert '/api/v304/memo/'+REG+'.odt' in page
+        assert '/api/v304/memo/'+REG+'.odt' not in page
         print_request=Request({"type":"http","method":"GET","path":"/thematic/card/"+BATCH+"/"+REG,
                        "query_string":b"print=1","headers":[]})
         document=endpoint(BATCH,REG,print_request)
