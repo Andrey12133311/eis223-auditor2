@@ -61,7 +61,35 @@ import v337_all_legal_categories
 import v339_fact_comparison
 import v312_archive_selftest
 from patch_v291 import patch as patch_v291
+
+def _reclaim_regenerable_cache():
+    """Emergency recovery for a full /data volume.
+
+    Delete ONLY extracted-text cache; never source originals, receipt files,
+    audit SQLite DB, history, findings or generated legal memos. The cache is
+    recreated from original bytes by the extractor when needed.
+    """
+    import shutil
+    base=v295_eis_originals.root()
+    try:
+        base=base.resolve(strict=True)
+        free_before=shutil.disk_usage(base).free
+        target=base/"eis223_extracted_text_cache_v347"
+        if free_before>=512*1024*1024:
+            return
+        if target.is_symlink() or not target.is_dir() or target.resolve().parent!=base:
+            print("V354_DISK_LOW no_regenerable_text_cache free="+str(free_before),flush=True)
+            return
+        shutil.rmtree(target)
+        free_after=shutil.disk_usage(base).free
+        print("V354_CACHE_RECLAIM freed="+str(max(0,free_after-free_before))+
+              " free_after="+str(free_after)+
+              " originals_untouched=True findings_untouched=True",flush=True)
+    except (OSError,ValueError) as exc:
+        print("V354_CACHE_RECLAIM_ERROR "+type(exc).__name__,flush=True)
+
 def main():
+    _reclaim_regenerable_cache()
     folder,count=restore()
     os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_BROWSER_ONLY"
     path=Path(tempfile.gettempdir())/'eis223_v282_private'/'entry.py'
