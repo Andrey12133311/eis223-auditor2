@@ -130,7 +130,7 @@ def run():
         db.execute("INSERT INTO v319_manual_inputs VALUES(?)",(regs[-1],));db.commit();db.close()
         ns["_verified_set235"]=lambda:regs
         selected=dashboard_regs(ns)
-        assert DASHBOARD_MAX==1253 and len(selected)==1253
+        assert DASHBOARD_MAX==1253 and len(selected)==1253,(DASHBOARD_MAX,len(selected))
         assert regs[-1] not in selected and REG not in selected
         from v332_all_procurements_audit import install as install_campaign
         install_campaign(ns)
