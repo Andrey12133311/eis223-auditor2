@@ -47,7 +47,7 @@ async def tick(ns):
     try:
      from v295_eis_originals import allowed_documents,saved_document
      originals=allowed_documents(reg)
-     if not originals or not any(saved_document(reg,uid) for uid in originals):
+     if not originals or not all(saved_document(reg,uid) for uid in originals):
       state="waiting_originals";detail="Ожидаются подтверждённые оригиналы ЕИС"
      else:
       enqueue=ns.get("_v295_enqueue_review")
@@ -95,7 +95,7 @@ def overview(ns,batch):
    "evaluation":r"оценк|критери|балл"}
   matches=[]
   try:
-   rows=c.execute("SELECT f.reg_number,f.title,f.law,f.evidence FROM findings f JOIN thematic_items t ON t.reg=f.reg_number WHERE t.batch_id=? AND f.kind='violation' LIMIT 2000",(batch,)).fetchall()
+   rows=c.execute("SELECT f.reg_number,f.title,f.law,f.evidence FROM findings f JOIN thematic_items t ON t.reg=f.reg_number WHERE t.batch_id=? AND t.status='completed' AND f.kind='violation' LIMIT 2000",(batch,)).fetchall()
    for f in rows:
     text=" ".join(str(f[k] or "") for k in ("title","law"))
     groups=[k for k in cats if re.search(patterns[k],text,re.I)]
