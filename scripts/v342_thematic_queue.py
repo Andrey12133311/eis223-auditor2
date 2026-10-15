@@ -173,7 +173,7 @@ def install(ns):
   try:
    if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
     raise HTTPException(429,"Одновременно допускается не более трёх тематических очередей")
-   c.execute("INSERT INTO thematic_batches(id,categories,created_at) VALUES(?,?,?)",(identifier,json.dumps(sorted(set(cats))),now()));c.commit()
+   c.execute("INSERT INTO thematic_batches(id,categories,created_at,legal_forms) VALUES(?,?,?,?)",(identifier,json.dumps(sorted(set(cats))),now(),json.dumps(sorted(set(forms)),ensure_ascii=False)));c.commit()
   finally:c.close()
   return {"id":identifier,"status":"active"}
  @app.post("/api/thematic/{batch}/stop")
