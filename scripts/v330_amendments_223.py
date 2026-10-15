@@ -212,7 +212,7 @@ def evaluation(p,docs):
         # A single amendment may appear in both EIS history and its original.
         # Keep distinct dated legal events; do not count copies as violations.
         dates=tuple(re.findall(DATE_RX,f.get("evidence") or ""))
-        key=(f["code"],dates)
+        key=(f["code"],dates) if dates else (f["code"],f.get("source_url"),f.get("match_text"))
         unique.setdefault(key,f)
     return list(unique.values()),reviews[:15]
 
@@ -249,6 +249,7 @@ def install(ns):
             print(f"V330 ART4_11 reg={p.get('reg')} proved={len(new)}",flush=True)
         for item in new:
             if not any(x.get("kind")=="violation" and x.get("code")==item.get("code")
+                       and tuple(re.findall(DATE_RX,x.get("evidence") or ""))
                        and tuple(re.findall(DATE_RX,x.get("evidence") or ""))==tuple(re.findall(DATE_RX,item.get("evidence") or ""))
                        for x in old):
                 old.append(item)
