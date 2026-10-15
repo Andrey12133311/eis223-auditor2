@@ -117,7 +117,8 @@ def render_thematic_panel(reg,thematic):
     for item in rows:
         category=labels.get(item.get("category"),item.get("category") or "Без категории")
         block=detail_block(item,"legal",item.get("title"),item.get("law"),
-            item.get("evidence"),None,None,None)
+            item.get("evidence"),item.get("document"),
+            item.get("source_url"),item.get("law_url"))
         result.append(block.replace('<article class="legal">',
               '<article class="legal"><p class="meta">Категория: '+
               esc(category)+'</p>',1))
