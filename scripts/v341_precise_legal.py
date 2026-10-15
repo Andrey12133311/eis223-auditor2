@@ -109,13 +109,19 @@ def evaluate(p, docs):
                     "Протокол размещён в ЕИС с нарушением срока публикации", "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
                     f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signed[0][0]}; {published[0][0]}",
                     signed[0], LAW4))
+    # The same EIS original can be mirrored, renamed or parsed repeatedly.
+    # Identify a legal occurrence by rule and the explicit dated event, not
+    # by document title, whitespace, or a generated evidence paragraph.
     seen = set()
     result = []
     for item in findings:
-        key = (item["code"], item["evidence"])
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
+        date_tokens = tuple(re.findall(DATE_TOKEN, item.get("match_text") or "", re.I))
+        # Preserve separate occurrences with distinct dated evidence.
+        key = (item["code"], date_tokens, " ".join((item.get("match_text") or "").lower().split()))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
     return result, checks[:25]
 
 
