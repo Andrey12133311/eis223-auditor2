@@ -125,7 +125,9 @@ def cross_doc_protocols(p,docs):
     if due is None or end<=due:return []
     before=(sdoc.get("meta") or {}).get("source_url") or sdoc.get("url") or ""
     after=(pdoc.get("meta") or {}).get("source_url") or pdoc.get("url") or ""
-    if not before or not after:return []
+    # Independent originals must have independently identifiable EIS
+    # download receipts, not two aliases of the same uploaded document.
+    if not before or not after or before==after:return []
     return [{
         "code":"223-4-12-PROTOCOL-CROSS-DOC-LATE",
         "kind":"violation",
