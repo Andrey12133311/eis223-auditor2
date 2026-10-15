@@ -7,6 +7,7 @@ used as legal proof on its own. No network, no modification of originals.
 from __future__ import annotations
 import hashlib
 import os
+import tempfile
 from pathlib import Path
 import threading
 from functools import wraps
@@ -29,7 +30,9 @@ def install(ns):
     if getattr(original,"__v347_cache__",False):return
     from v295_eis_originals import root
     data_root=root().resolve()
-    cache_dir=data_root/"eis223_extracted_text_cache_v347"
+    # Reproducible extraction data belongs on ephemeral disk, not the
+    # persistent /data volume reserved for EIS originals and legal evidence.
+    cache_dir=Path(tempfile.gettempdir())/"eis223_extracted_text_cache_v347"
 
     @wraps(original)
     def reusable(source,*args,**kwargs):
