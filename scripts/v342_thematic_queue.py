@@ -59,6 +59,18 @@ async def tick(ns):
     except Exception as e:
      state="retry";detail=type(e).__name__
     c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
+   # Mark complete only after the EIS original-review worker confirms completion.
+   from v295_eis_originals import root
+   submitted=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status=? LIMIT 200",(b["id"],"submitted")).fetchall()
+   for item in submitted:
+    reg=item["reg"]
+    try:
+     receipt=root()/"eis223_official_review_jobs"/(reg+".json")
+     review=json.loads(receipt.read_text(encoding="utf-8"))
+     if review.get("reg_number")==reg and review.get("status")=="completed":
+      c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",("completed","Проверка оригиналов завершена",now(),b["id"],reg))
+    except (OSError,ValueError,TypeError):
+     pass
    # Revisit items after EIS originals arrive, without counting them as reviewed.
    c.execute("UPDATE thematic_items SET status='queued' WHERE batch_id=? AND status IN ('waiting_originals','waiting_engine','retry') AND updated_at<?",(b["id"],datetime.fromtimestamp(time.time()-600,timezone.utc).isoformat()))
   c.commit()
@@ -138,7 +150,7 @@ def install(ns):
    if response.headers.get("content-encoding"):return response
    raw=b"".join([chunk async for chunk in response.body_iterator])
    html=raw.decode("utf-8",errors="replace")
-   html=html.replace("</body>",'<a href="/thematic" style="position:fixed;bottom:16px;right:16px;background:#2466a3;color:white;padding:14px;border-radius:10px;z-index:9999">Тематическая проверка</a><script>document.addEventListener("DOMContentLoaded",()=>{const t=document.querySelector("table");if(t){const hs=[...t.querySelectorAll("thead th")];const idx=hs.findIndex(h=>/^(?:Стоимость закупки|НМЦД)$/i.test(h.textContent.trim()));if(idx>=0){hs[idx].remove();t.querySelectorAll("tbody tr").forEach(tr=>tr.children[idx]?.remove())}}document.querySelectorAll("#min,#max,#price,[name=price_band]").forEach(e=>{e.style.display="none";e.disabled=true});})</script></body>',1)
+   html=html.replace("</body>",'<a href="/thematic" style="position:fixed;bottom:16px;right:16px;background:#2466a3;color:white;padding:14px;border-radius:10px;z-index:9999">Тематическая проверка</a><script>document.addEventListener("DOMContentLoaded",()=>{const t=document.querySelector("table");if(t){const hs=[...t.querySelectorAll("thead th")];const idx=hs.findIndex(h=>/^(?:Стоимость закупки|НМЦД|Результат)$/i.test(h.textContent.trim()));if(idx>=0){hs[idx].remove();t.querySelectorAll("tbody tr").forEach(tr=>tr.children[idx]?.remove())}}document.querySelectorAll("#min,#max,#price,[name=price_band]").forEach(e=>{e.style.display="none";e.disabled=true});})</script></body>',1)
    return HTMLResponse(html,headers={k:v for k,v in response.headers.items() if k.lower() not in ("content-length","content-encoding")})
  app.add_middleware(ThemeNav)
  async def worker():
