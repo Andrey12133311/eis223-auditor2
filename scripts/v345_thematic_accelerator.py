@@ -104,11 +104,22 @@ def _persist(ns,results):
             if not c.execute("SELECT 1 FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone():
                 continue
             if state=="completed":
-                for f in findings:
+                from v333_dedup_ui import collapse,_same_finding
+                previous=[dict(r) for r in c.execute(
+                    """SELECT title,law,evidence,category,code,document,source_url,law_url
+                       FROM thematic_findings WHERE batch_id=? AND reg=?""",
+                    (batch,reg))]
+                for f in collapse(findings):
+                    if any(_same_finding(old,f,"title") for old in previous):
+                        continue
                     c.execute("""INSERT OR IGNORE INTO thematic_findings
-                      (batch_id,reg,category,title,law,evidence)
-                      VALUES(?,?,?,?,?,?)""",
-                      (batch,reg,f["category"],f["title"],f.get("law"),f.get("evidence")))
+                      (batch_id,reg,category,title,law,evidence,
+                       code,document,source_url,law_url)
+                      VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                      (batch,reg,f["category"],f["title"],f.get("law"),f.get("evidence"),
+                       f.get("code") or "",f.get("document") or "",
+                       f.get("source_url") or "",f.get("law_url") or ""))
+                    previous.append(f)
             c.execute("""UPDATE thematic_items SET status=?,detail=?,updated_at=?,
               last_doc_id=?,last_ready_count=? WHERE batch_id=? AND reg=?""",
               (state,detail,original.now(),item["doc_id"],item["ready"],batch,reg))
