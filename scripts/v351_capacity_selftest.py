@@ -115,6 +115,9 @@ def thematic_dedup():
         path=Path(home)/"thematic.db"
         ns={"conn":lambda:connection(path)}
         theme.init(ns)
+        db=connection(path)
+        db.execute("CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,local_path TEXT,status TEXT)")
+        db.commit();db.close()
         fast.install(ns)
         batch="a"*24
         db=connection(path)
