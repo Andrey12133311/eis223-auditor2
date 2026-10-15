@@ -171,6 +171,13 @@ def install(ns):
    c.execute("UPDATE thematic_batches SET status=? WHERE id=?",("stopped",batch));c.commit()
   finally:c.close()
   return {"id":batch,"status":"stopped"}
+ @app.get("/api/thematic/history")
+ async def thematic_history():
+  c=db(ns)
+  try:
+   rows=c.execute("SELECT b.id,b.categories,b.created_at,b.status,COUNT(DISTINCT i.reg) AS purchases,(SELECT COUNT(*) FROM thematic_findings f WHERE f.batch_id=b.id) AS violations FROM thematic_batches b LEFT JOIN thematic_items i ON i.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100").fetchall()
+   return {"batches":[dict(r) for r in rows]}
+  finally:c.close()
  @app.get("/api/thematic/{batch}")
  async def status(batch:str):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
