@@ -152,9 +152,9 @@ def run():
         "Дата размещения протокола в ЕИС: 13.10.2026")
     multi_found,multi_checks=evaluate(p,[multi_protocol])
     assert len(multi_found)==2,(multi_found,multi_checks)
-    ambiguous_protocol=doc("Дата подписания протокола: 01.10.2026\\n"
-        "Дата подписания протокола: 02.10.2026\\n"
-        "Дата размещения протокола в ЕИС: 09.10.2026")
+    ambiguous_protocol=doc("Дата размещения протокола в ЕИС: 09.10.2026\\n"
+        "Дата подписания протокола: 01.10.2026\\n"
+        "Дата подписания протокола: 02.10.2026")
     assert evaluate(p,[ambiguous_protocol])[0]==[]
     assert evaluate(p,[ambiguous_protocol])[1]
     # Publication on the next working day after a weekend is timely.
