@@ -54,12 +54,13 @@ def dashboard_regs(ns):
     verified={str(v) for v in getter()}
     c=connect(ns)
     try:
-        rows=c.execute("""SELECT p.reg_number FROM purchases p
+        rows=c.execute("""SELECT p.reg_number,p.customer FROM purchases p
             WHERE p.reg_number NOT IN
                   (SELECT reg FROM v319_manual_inputs)
             ORDER BY p.last_seen DESC,p.reg_number DESC""").fetchall()
     finally:c.close()
-    return [str(row[0]) for row in rows if str(row[0]) in verified][:DASHBOARD_MAX]
+    from v342_thematic_queue import business_company
+    return [str(row[0]) for row in rows if str(row[0]) in verified and business_company(row[1])][:DASHBOARD_MAX]
 
 
 def initialize(ns):
