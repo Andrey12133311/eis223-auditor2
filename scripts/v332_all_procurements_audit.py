@@ -153,8 +153,8 @@ def progress(ns):
 def next_reg(ns):
     c=connect(ns)
     try:
-        row=c.execute("""SELECT reg FROM v332_audit_queue
-            WHERE campaign=? AND state='pending'
+        row=c.execute("""SELECT q.reg FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
+            WHERE q.campaign=? AND q.state='pending' AND (p.customer LIKE 'ООО %' OR p.customer LIKE 'АО %' OR p.customer LIKE 'ПАО %' OR p.customer LIKE 'ОАО %' OR p.customer LIKE 'ЗАО %' OR p.customer LIKE 'Общество с ограниченной ответственностью%' OR p.customer LIKE 'Акционерное общество%' OR p.customer LIKE 'Публичное акционерное общество%')
             ORDER BY CASE reg
               WHEN '32616233661' THEN 0 WHEN '32616324151' THEN 1
               WHEN '32616287360' THEN 2 ELSE 3 END,reg LIMIT 1""",
