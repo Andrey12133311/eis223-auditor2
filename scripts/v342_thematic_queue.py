@@ -213,13 +213,17 @@ def overview(ns,batch):
       AND target=? ORDER BY created_at DESC LIMIT 1""",
       (itm["reg"],)).fetchone() if has_jobs else None
    if job and job["status"]=="leased":
-    itm["detail"]="Мост ЕИС сейчас получает оригиналы этой закупки"
+    itm["detail"]="Мост ЕИС получает оригиналы закупки"
    elif job and job["status"] in ("queued","deferred"):
-    itm["detail"]="Запрос оригиналов направлен в очередь загрузчика ЕИС"
-   elif not bridge.get("active"):
-    itm["detail"]="Нужен подключённый загрузчик ЕИС; сервер сам файлы не скачивает"
+    itm["detail"]="Задание на оригиналы ЕИС уже находится в очереди загрузчика"
+   elif job and job["status"] in ("done","partial"):
+    itm["detail"]="Предыдущая загрузка закончилась без подтверждённых оригиналов; повторный запрос запланирован"
+   elif job and job["status"]=="error":
+    itm["detail"]="Ошибка предыдущей загрузки ЕИС; повторная попытка будет назначена"
+   elif bridge.get("active"):
+    itm["detail"]="Автоматическая постановка оригиналов в очередь ЕИС выполняется"
    else:
-    itm["detail"]="Ожидается постановка задания на загрузку оригиналов ЕИС"
+    itm["detail"]="Запрос оригиналов ожидает подключения загрузчика ЕИС"
   worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
   return {"worker":worker,"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
