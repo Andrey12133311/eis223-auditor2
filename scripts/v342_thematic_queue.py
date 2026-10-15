@@ -135,6 +135,16 @@ def overview(ns,batch):
    bridge=_bridge(ns)
   except Exception:
    bridge={"active":False,"queued":None}
+  # Browser discovery sends its heartbeat to v299; the v301 heartbeat only tracks manual jobs.
+  # Check both instead of reporting an offline EIS collector when no manual job was claimed.
+  try:
+   from v299_browser_intake import _scan_status
+   collector=_scan_status()
+   bridge["collector_active"]=bool(collector.get("browser_collector_active"))
+   bridge["collector_version"]=collector.get("collector_version")
+   bridge["active"]=bool(bridge.get("active") or bridge["collector_active"])
+  except Exception:
+   bridge["collector_active"]=False
   worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
   return {"worker":worker,"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
