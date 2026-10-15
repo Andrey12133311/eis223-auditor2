@@ -39,7 +39,8 @@ def init(ns):
   CREATE TABLE IF NOT EXISTS thematic_items(
   batch_id TEXT NOT NULL,reg TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',
   detail TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,
-  PRIMARY KEY(batch_id,reg));""")
+  PRIMARY KEY(batch_id,reg));
+  CREATE TABLE IF NOT EXISTS thematic_findings(batch_id TEXT,reg TEXT,category TEXT,title TEXT,law TEXT,evidence TEXT);""")
   c.commit()
  finally:c.close()
 def now():return datetime.now(timezone.utc).isoformat()
