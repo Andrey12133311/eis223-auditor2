@@ -135,6 +135,12 @@ def run():
     assert evaluate(p,[incomplete])[0]==[] and evaluate(p,[incomplete])[1]
     assert shifted(day("2026-10-09"),3)==day("2026-10-14")
     protocol=doc("Дата подписания протокола: 08.10.2026\nДата размещения протокола в ЕИС: 13.10.2026", "Итоговый протокол.docx")
+    # Missing or malformed dates must not crash the entire recheck batch.
+    malformed=doc("Дата подписания протокола: 31.02.2026\nДата размещения протокола в ЕИС: 13.10.2026")
+    assert evaluate(p,[malformed])[0]==[]
+    malformed_answer=doc("Дата поступления запроса разъяснений: 31.02.2026\nДата размещения ответа в ЕИС: 08.10.2026")
+    assert evaluate(p,[malformed_answer])[0]==[]
+    assert evaluate(p,[doc(protocol["text"],"Копия протокола.docx"),protocol])[0]
     assert len(evaluate(p,[protocol])[0])==1
     assert evaluate(p,[doc(protocol["text"].replace("13.10.2026","12.10.2026"))])[0]==[]
     # Explicit SME scope tightens bid security to 2%; a mere legal quote
