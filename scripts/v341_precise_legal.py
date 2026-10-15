@@ -154,7 +154,21 @@ def install(ns):
     def enriched_checks(p, detail, card, docs):
         enrich(ns, p, docs, card, detail)
         _, extra = evaluate(p, docs)
-        return list(build(p, detail, card, docs))+extra
+        combined = list(build(p, detail, card, docs)) + extra
+        seen = set()
+        unique = []
+        for item in combined:
+            if not isinstance(item, dict):
+                unique.append(item)
+                continue
+            dates = tuple(re.findall(DATE_TOKEN, str(item.get('evidence') or ''), re.I))
+            key = (item.get('code'), dates) if dates and item.get('code') else None
+            if key is not None and key in seen:
+                continue
+            if key is not None:
+                seen.add(key)
+            unique.append(item)
+        return unique
 
     enriched_analyze.__v341__ = True
     ns["analyze"], ns["build_checks"] = enriched_analyze, enriched_checks
