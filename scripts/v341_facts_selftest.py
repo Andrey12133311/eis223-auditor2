@@ -47,6 +47,8 @@ def run():
     assert facts["method"]["value"]=="Аукцион в электронной форме",facts
     assert facts["submission_end"]["value"]=="2026-10-22",facts
     assert facts["published"]["value"]=="2026-10-01",facts
+    extra_deadline=doc("Крайний срок подачи заявок: 23.10.2026 17:00")
+    assert document_facts([extra_deadline])["submission_end"]["value"]=="2026-10-23"
     assert document_facts([doc(sample["text"],trusted=False)])=={}
     conflicting=doc(sample["text"].replace("22.10.2026","23.10.2026"),"Документация новая редакция.docx")
     assert "submission_end" not in document_facts([sample,conflicting])
