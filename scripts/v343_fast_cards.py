@@ -159,8 +159,8 @@ def render(reg,data,thematic=None):
     nav=('<nav><a href="/">Все закупки</a><a href="/manual-purchases">Самостоятельные проверки</a>'
          '<a href="/thematic">Тематические проверки</a></nav>')
     if thematic:
-        nav='<nav><a href="/thematic#'+esc(thematic["batch"])+
-            '">← К тематической очереди</a></nav>'
+        nav=('<nav><a href="/thematic#'+esc(thematic["batch"])+
+             '">← К тематической очереди</a></nav>')
     thematic_html=render_thematic_panel(reg,thematic)
     actions='<p><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>' if violation else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
     if thematic:actions=''
