@@ -126,7 +126,7 @@ def run():
         assert persist(ns,REG,same,[]) == (0,0)
         db=conn()
         regs=["3"+str(n).zfill(10) for n in range(1,1261)]
-        db.executemany("INSERT OR IGNORE INTO purchases(reg_number,last_seen) VALUES(?,'2026-10-14')",((v,) for v in regs))
+        db.executemany("INSERT OR IGNORE INTO purchases(reg_number,last_seen,customer) VALUES(?,'2026-10-14','ООО Тестовый заказчик')",((v,) for v in regs))
         db.execute("INSERT INTO v319_manual_inputs VALUES(?)",(regs[-1],));db.commit();db.close()
         ns["_verified_set235"]=lambda:regs
         selected=dashboard_regs(ns)
