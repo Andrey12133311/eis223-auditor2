@@ -72,12 +72,15 @@ def evaluate(p, docs):
         text = str(doc.get("text") or "")[:750000].replace("\xa0", " ")
         requests = matches(REQUEST, text)
         answers = matches(ANSWER, text)
-        for request in requests:
-            # Match only a single response in the same local request section.
-            # Multiple requests/replies require a reliable event identifier.
-            peers = [x for x in answers if abs(x.start()-request.start()) < 1500]
-            nearby_requests = [x for x in requests if abs(x.start()-request.start()) < 1500]
-            if len(peers) != 1 or len(nearby_requests) != 1:
+        for index, request in enumerate(requests):
+            # Resolve repeated clarification events automatically when each
+            # request owns a single reply before the next request begins.
+            # A reply before its request or after another request is ambiguous.
+            next_request = requests[index+1].start() if index+1 < len(requests) else len(text)
+            peers = [x for x in answers
+                     if request.end() <= x.start() < next_request
+                     and x.start()-request.end() <= 1500]
+            if len(peers) != 1:
                 checks.append(review(doc, "v341-clarification-pair", "Сопоставить запрос разъяснений с публикацией ответа",
                                      request[0], "223-ФЗ, ст. 3.2 ч. 3", request))
                 continue
