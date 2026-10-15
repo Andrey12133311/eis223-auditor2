@@ -277,7 +277,8 @@ def install(ns):
   while True:
    WORKER_STATE["last_cycle_at"]=now()
    WORKER_STATE["last_error"]=None
-   try:await tick(ns)
+   # This scan runs many SQLite operations: keep it off the HTTP event loop.
+   try:await asyncio.to_thread(lambda: asyncio.run(tick(ns)))
    except Exception as e:
     WORKER_STATE["last_error"]=type(e).__name__+": "+str(e)[:120]
     print("THEMATIC_TICK_ERROR",type(e).__name__,str(e)[:120],flush=True)
