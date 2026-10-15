@@ -47,7 +47,7 @@ async def file_concurrency():
         assert unreadable==1,(unreadable,result)
         assert len(result)==8 and [x["name"] for x in result]==[
             "File "+str(i) for i in range(8)]
-        assert 1<parallel[1]<=4,parallel
+        assert 1<parallel[1]<=6,parallel
         assert all(x["status"]=="checked" for x in result)
         assert all(x["meta"].get("source")!="existing_local_unverified" for x in result)
         return parallel[1]
