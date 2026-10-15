@@ -70,19 +70,20 @@ def run():
         c.commit();c.close()
         main_ns={"conn":connection}
         assert audit.claim_next(main_ns)==ready
-        assert audit.claim_next(main_ns)==waiting
-        assert audit.claim_next(main_ns) is None
+        assert audit.claim_next(main_ns) is None, "No originals: don't waste a worker slot"
         c=connection()
-        assert c.execute("SELECT COUNT(*) FROM v332_audit_queue WHERE state='running'").fetchone()[0]==2
+        assert c.execute("SELECT COUNT(*) FROM v332_audit_queue WHERE state='running'").fetchone()[0]==1
+        assert c.execute("SELECT state FROM v332_audit_queue WHERE reg=?",(waiting,)).fetchone()[0]=="pending"
         c.close()
         audit.mark(main_ns,ready,"completed")
-        audit.mark(main_ns,waiting,"no_readable_documents")
         assert audit.refresh_changed(main_ns)==0
         c=connection()
         c.execute("INSERT INTO docs VALUES(2,?,'checked','/data/eis/second.pdf')",(ready,))
+        c.execute("INSERT INTO docs VALUES(3,?,'checked','/data/eis/new.pdf')",(waiting,))
         c.commit();c.close()
         assert audit.refresh_changed(main_ns)==1
         assert audit.claim_next(main_ns)==ready
+        assert audit.claim_next(main_ns)==waiting
         assert audit.claim_next(main_ns) is None
     original_eval=legal.evaluate
     count=[0]
@@ -97,7 +98,7 @@ def run():
         legal.shared_evaluate(p,docs,consume=True)
         assert count[0]==1,"Expensive date scan executed twice"
     finally:legal.evaluate=original_eval
-    print("V349_AUDIT_PERFORMANCE_SELFTEST_OK saved_text_reused=True changed_hash_invalidated=True queued_once=True cross_document_verified=True negatives_suppressed=True date_scan_once=True")
+    print("V349_AUDIT_PERFORMANCE_SELFTEST_OK saved_text_reused=True changed_hash_invalidated=True queued_once=True missing_originals_deferred=True cross_document_verified=True negatives_suppressed=True date_scan_once=True")
 
 if __name__=="__main__":
     run()
