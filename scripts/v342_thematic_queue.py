@@ -1,0 +1,120 @@
+"""Isolated, evidence-only thematic queue over EIS procurements.
+No fabricated findings; reuses verified-original legal engine and filters results.
+"""
+import asyncio,json,re,secrets,sqlite3,time
+from datetime import datetime,timezone
+from fastapi import HTTPException,Request
+from fastapi.responses import HTMLResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+CATEGORIES={
+"dates":"Сроки подачи заявок, изменений и разъяснений",
+"docs":"Извещение и документация",
+"national":"Национальный режим",
+"security":"Обеспечение заявки и договора",
+"sme":"Закупки среди МСП",
+"access":"Требования к участникам",
+"protocols":"Протоколы и отмена закупки",
+"contract":"Заключение и исполнение договора",
+"notices":"Сведения извещения",
+"evaluation":"Оценка заявок"}
+def db(ns):
+ c=ns["conn"]();c.row_factory=sqlite3.Row;return c
+def init(ns):
+ c=db(ns)
+ try:
+  c.executescript("""CREATE TABLE IF NOT EXISTS thematic_batches(
+  id TEXT PRIMARY KEY,categories TEXT NOT NULL,created_at TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active');
+  CREATE TABLE IF NOT EXISTS thematic_items(
+  batch_id TEXT NOT NULL,reg TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',
+  detail TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,
+  PRIMARY KEY(batch_id,reg));""")
+  c.commit()
+ finally:c.close()
+def now():return datetime.now(timezone.utc).isoformat()
+def tick(ns):
+ c=db(ns)
+ try:
+  batches=c.execute("SELECT * FROM thematic_batches WHERE status='active'").fetchall()
+  for b in batches:
+   # Existing and newly ingested EIS purchases are automatically added.
+   rows=c.execute("SELECT reg_number FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
+   for r in rows:
+    c.execute("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",(b["id"],r[0],now()))
+   pending=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status='queued' LIMIT 5",(b["id"],)).fetchall()
+   for p in pending:
+    reg=p["reg"]
+    try:
+     from v295_eis_originals import allowed_documents,saved_document
+     originals=allowed_documents(reg)
+     if not originals or not any(saved_document(reg,uid) for uid in originals):
+      state="waiting_originals";detail="Ожидаются подтверждённые оригиналы ЕИС"
+     else:
+      enqueue=ns.get("_v295_enqueue_review")
+      if not callable(enqueue):
+       state="waiting_engine";detail="Обработчик юридической проверки недоступен"
+      else:
+       result=enqueue(reg)
+       state="submitted";detail=str(result.get("status","queued"))[:150]
+    except Exception as e:
+     state="retry";detail=type(e).__name__
+    c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
+   # Revisit items after EIS originals arrive, without counting them as reviewed.
+   c.execute("UPDATE thematic_items SET status='queued' WHERE batch_id=? AND status IN ('waiting_originals','waiting_engine','retry') AND updated_at<?",(b["id"],datetime.fromtimestamp(time.time()-600,timezone.utc).isoformat()))
+  c.commit()
+ finally:c.close()
+def overview(ns,batch):
+ c=db(ns)
+ try:
+  b=c.execute("SELECT * FROM thematic_batches WHERE id=?",(batch,)).fetchone()
+  if not b:raise HTTPException(404,"Очередь не найдена")
+  counts={r[0]:r[1] for r in c.execute("SELECT status,COUNT(*) FROM thematic_items WHERE batch_id=? GROUP BY status",(batch,))}
+  return {"id":batch,"categories":json.loads(b["categories"]),"status":b["status"],"counts":counts}
+ finally:c.close()
+PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><p><button id="start">Начать проверку</button></p><h2>Очередь</h2><div id="out">Выберите категории</div></main><script>
+const categories=__CATEGORIES__;const box=document.querySelector('#cats');
+for(const [id,title] of Object.entries(categories)){let l=document.createElement('label'),i=document.createElement('input');i.type='checkbox';i.value=id;l.append(i,document.createTextNode(' '+title));box.append(l)}
+document.querySelector('#start').onclick=async()=>{const cats=[...box.querySelectorAll('input:checked')].map(x=>x.value);if(!cats.length)return alert('Выберите категорию');const r=await fetch('/api/thematic/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({categories:cats})});const j=await r.json();if(!r.ok)return alert(j.detail||r.status);location.hash=j.id;refresh()};
+async function refresh(){if(!location.hash)return;let r=await fetch('/api/thematic/'+encodeURIComponent(location.hash.slice(1)));let j=await r.json();document.querySelector('#out').textContent=JSON.stringify(j,null,2)}
+setInterval(refresh,12000);refresh();</script></html>""".replace("__CATEGORIES__",json.dumps(CATEGORIES,ensure_ascii=False))
+def install(ns):
+ init(ns);app=ns["app"]
+ @app.get("/thematic")
+ async def page():return HTMLResponse(PAGE)
+ @app.post("/api/thematic/start")
+ async def start(request:Request):
+  origin=request.headers.get("origin")
+  if origin and origin!=str(request.base_url).rstrip("/"):raise HTTPException(403,"Неверный источник")
+  raw=await request.body()
+  if len(raw)>2000:raise HTTPException(413,"Слишком большой запрос")
+  try:cats=json.loads(raw)["categories"]
+  except (ValueError,KeyError,TypeError):raise HTTPException(422,"Некорректный запрос")
+  if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORIES) or any(x not in CATEGORIES for x in cats):raise HTTPException(422,"Некорректные категории")
+  identifier=secrets.token_hex(12);c=db(ns)
+  try:
+   c.execute("INSERT INTO thematic_batches(id,categories,created_at) VALUES(?,?,?)",(identifier,json.dumps(sorted(set(cats))),now()));c.commit()
+  finally:c.close()
+  return {"id":identifier,"status":"active"}
+ @app.get("/api/thematic/{batch}")
+ async def status(batch:str):
+  if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
+  return await asyncio.to_thread(overview,ns,batch)
+ class ThemeNav(BaseHTTPMiddleware):
+  async def dispatch(self,request,call_next):
+   response=await call_next(request)
+   if request.url.path!="/" or response.status_code!=200 or "text/html" not in response.headers.get("content-type",""):return response
+   if response.headers.get("content-encoding"):return response
+   raw=b"".join([chunk async for chunk in response.body_iterator])
+   html=raw.decode("utf-8",errors="replace")
+   html=html.replace("</body>",'<a href="/thematic" style="position:fixed;bottom:16px;right:16px;background:#2466a3;color:white;padding:14px;border-radius:10px;z-index:9999">Тематическая проверка</a><script>document.addEventListener("DOMContentLoaded",()=>{const t=document.querySelector("table");if(t){const hs=[...t.querySelectorAll("thead th")];const idx=hs.findIndex(h=>/^(?:Стоимость закупки|НМЦД)$/i.test(h.textContent.trim()));if(idx>=0){hs[idx].remove();t.querySelectorAll("tbody tr").forEach(tr=>tr.children[idx]?.remove())}}document.querySelectorAll("#min,#max,#price,[name=price_band]").forEach(e=>{e.style.display="none";e.disabled=true});})</script></body>',1)
+   return HTMLResponse(html,headers={k:v for k,v in response.headers.items() if k.lower() not in ("content-length","content-encoding")})
+ app.add_middleware(ThemeNav)
+ async def worker():
+  while True:
+   try:await asyncio.to_thread(tick,ns)
+   except Exception as e:print("THEMATIC_TICK_ERROR",type(e).__name__,str(e)[:120],flush=True)
+   await asyncio.sleep(120)
+ @app.on_event("startup")
+ async def startup_thematic():asyncio.create_task(worker())
+ print("THEMATIC_QUEUE_READY",flush=True)
