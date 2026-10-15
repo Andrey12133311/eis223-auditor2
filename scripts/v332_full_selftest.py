@@ -57,7 +57,7 @@ def test_queue():
         c=conn()
         c.executescript("""
         CREATE TABLE purchases (
-          reg_number TEXT PRIMARY KEY,violations INTEGER DEFAULT 0,
+          reg_number TEXT PRIMARY KEY,customer TEXT DEFAULT 'ООО Тестовый заказчик',violations INTEGER DEFAULT 0,
           documents_checked INTEGER DEFAULT 0,checks_ok INTEGER DEFAULT 0,
           checks_attention INTEGER DEFAULT 0,last_seen TEXT DEFAULT '2026-10-14'
         );
