@@ -37,7 +37,7 @@ def now():
 
 def connect(ns):
     c=ns["conn"]()
-    c.execute("PRAGMA busy_timeout=25000")
+    c.execute("PRAGMA busy_timeout=12000")
     return c
 
 def dashboard_regs(ns):
@@ -152,15 +152,46 @@ def progress(ns):
         }
     finally:c.close()
 
-def next_reg(ns):
+def claim_next(ns):
+    """Atomically reserve an audit row; prefer already downloaded originals."""
     c=connect(ns)
     try:
-        row=c.execute("""SELECT q.reg FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
-            WHERE q.campaign=? AND q.state='pending' AND (p.customer LIKE 'ООО %' OR p.customer LIKE 'АО %' OR p.customer LIKE 'ПАО %' OR p.customer LIKE 'ОАО %' OR p.customer LIKE 'ЗАО %' OR p.customer LIKE 'Общество с ограниченной ответственностью%' OR p.customer LIKE 'Акционерное общество%' OR p.customer LIKE 'Публичное акционерное общество%')
-            ORDER BY CASE reg
-              WHEN '32616233661' THEN 0 WHEN '32616324151' THEN 1
-              WHEN '32616287360' THEN 2 ELSE 3 END,reg LIMIT 1""",
-              (CAMPAIGN,)).fetchone()
+        c.execute("BEGIN IMMEDIATE")
+        row=c.execute("""SELECT q.reg FROM v332_audit_queue q
+            JOIN purchases p ON p.reg_number=q.reg
+            WHERE q.campaign=? AND q.state='pending'
+            AND (p.customer LIKE 'ООО %' OR p.customer LIKE 'АО %'
+                 OR p.customer LIKE 'ПАО %' OR p.customer LIKE 'ОАО %'
+                 OR p.customer LIKE 'ЗАО %'
+                 OR p.customer LIKE 'Общество с ограниченной ответственностью%'
+                 OR p.customer LIKE 'Акционерное общество%'
+                 OR p.customer LIKE 'Публичное акционерное общество%')
+            ORDER BY CASE WHEN EXISTS(
+              SELECT 1 FROM docs d WHERE d.reg_number=q.reg
+                AND COALESCE(d.local_path,'')<>'' AND d.status='checked'
+            ) THEN 0 ELSE 1 END,
+            CASE q.reg WHEN '32616233661' THEN 0
+             WHEN '32616324151' THEN 1
+             WHEN '32616287360' THEN 2 ELSE 3 END,
+            q.reg LIMIT 1""",(CAMPAIGN,)).fetchone()
+        if not row:
+            c.commit()
+            return None
+        reg=str(row[0])
+        c.execute("UPDATE v332_audit_queue SET state='running',updated_at=? WHERE campaign=? AND reg=? AND state='pending'",(now(),CAMPAIGN,reg))
+        assert c.execute("SELECT changes()").fetchone()[0]==1
+        c.commit()
+        return reg
+    except BaseException:
+        if c.in_transaction:c.rollback()
+        raise
+    finally:c.close()
+
+def next_reg(ns):
+    """Read-only queue peek for existing diagnostics."""
+    c=connect(ns)
+    try:
+        row=c.execute("SELECT reg FROM v332_audit_queue WHERE campaign=? AND state='pending' ORDER BY reg LIMIT 1",(CAMPAIGN,)).fetchone()
         return str(row[0]) if row else None
     finally:c.close()
 
@@ -192,7 +223,7 @@ def existing(ns,reg):
         if p is None:raise LookupError("Procurement disappeared from DB")
         rows=[dict(r) for r in c.execute("""SELECT id,name,url,doc_type,published_at,
             local_path,status,metadata_json,final_url FROM docs
-            WHERE reg_number=? ORDER BY id LIMIT ?""",(reg,MAX_DOC_ROWS))]
+            WHERE reg_number=? AND COALESCE(local_path,'')<>'' AND status='checked' ORDER BY id LIMIT ?""",(reg,MAX_DOC_ROWS))]
         return dict(p),rows
     finally:c.close()
 
@@ -540,45 +571,45 @@ def install(ns):
                 base=await asyncio.to_thread(initialize,ns)
                 print("V332 CAMPAIGN_STARTED "+json.dumps(base,ensure_ascii=False),flush=True)
             except Exception as exc:
-                print(f"V332 INIT_FAILED type={type(exc).__name__} "
-                      f"reason={str(exc)[:200]}",flush=True)
+                print("V332 INIT_FAILED type="+type(exc).__name__+
+                      " reason="+str(exc)[:200],flush=True)
                 return
-            index=0
-            while True:
-                reg=await asyncio.to_thread(next_reg,ns)
-                if reg is None:break
-                try:
-                    await asyncio.to_thread(mark,ns,reg,"running")
-                    lock=ns.get("lock")
-                    if lock is None:raise RuntimeError("Application lock unavailable")
-                    async with lock:
+            async def worker(worker_id):
+                index=0
+                while True:
+                    reg=await asyncio.to_thread(claim_next,ns)
+                    if reg is None:break
+                    try:
+                        # EIS originals are already stored; no HTTP/EIS request.
+                        # SQLite serializes writes. Maximum two concurrent runs.
                         state,detail=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
-                    await asyncio.to_thread(mark,ns,reg,state,detail)
-                    index+=1
-                    if state=="completed":
-                        print(f"V332 AUDITED reg={reg} docs={detail['documents_read']}/"
-                              f"{detail['documents_found']} verified={detail['verified_original_documents']} "
-                              f"originals={detail['original_received']}/{detail['original_expected']} "
-                              f"new_findings={detail['new_findings']} new_checks={detail['new_checks']}",
-                              flush=True)
-                    elif index<=4 or index%20==0:
-                        print(f"V332 NO_DOCUMENT_TEXT reg={reg}",flush=True)
-                except asyncio.CancelledError:
-                    await asyncio.to_thread(mark,ns,reg,"pending",
-                                            {"error":"Перезапуск Railway"})
-                    raise
-                except Exception as exc:
-                    index+=1
-                    await asyncio.to_thread(mark,ns,reg,"failed",
-                                            {"error":str(exc)[:300]})
-                    print(f"V332 AUDIT_FAILED reg={reg} "
-                          f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
-                if index%20==0:
-                    state=await asyncio.to_thread(progress,ns)
-                    print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
-                await asyncio.sleep(.12)
-            status=await asyncio.to_thread(progress,ns)
-            print("V332 CAMPAIGN_FINISHED "+json.dumps(status,ensure_ascii=False),flush=True)
+                        await asyncio.to_thread(mark,ns,reg,state,detail)
+                        index+=1
+                        if state=="completed":
+                            print(f"V332 AUDITED reg={reg} worker={worker_id} docs={detail['documents_read']}/"
+                                  f"{detail['documents_found']} verified={detail['verified_original_documents']} "
+                                  f"originals={detail['original_received']}/{detail['original_expected']} "
+                                  f"new_findings={detail['new_findings']} new_checks={detail['new_checks']}",
+                                  flush=True)
+                        elif index<=4 or index%20==0:
+                            print(f"V332 NO_DOCUMENT_TEXT reg={reg}",flush=True)
+                    except asyncio.CancelledError:
+                        await asyncio.to_thread(mark,ns,reg,"pending",
+                                                {"error":"Перезапуск Railway"})
+                        raise
+                    except Exception as exc:
+                        index+=1
+                        await asyncio.to_thread(mark,ns,reg,"failed",
+                                                {"error":str(exc)[:300]})
+                        print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
+                              f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
+                    if index%20==0:
+                        state=await asyncio.to_thread(progress,ns)
+                        print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
+                    await asyncio.sleep(.05)
+            await asyncio.gather(worker(1),worker(2))
+            state=await asyncio.to_thread(progress,ns)
+            print("V332 CAMPAIGN_FINISHED "+json.dumps(state,ensure_ascii=False),flush=True)
         asyncio.create_task(work())
     print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
