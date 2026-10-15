@@ -9,6 +9,27 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from functools import wraps
+from collections import OrderedDict
+from threading import Lock
+
+# The analysis step and checklist step run separately but inspect identical
+# document snapshots. Reuse their exact legal date evaluation once per audit.
+_PAIR_CACHE=OrderedDict()
+_PAIR_LOCK=Lock()
+
+def shared_evaluate(p,docs,consume=False):
+    key=(id(p),id(docs))
+    with _PAIR_LOCK:
+        cached=_PAIR_CACHE.pop(key,None)
+        if cached is not None and cached[0] is p and cached[1] is docs:
+            if not consume:_PAIR_CACHE[key]=cached
+            return cached[2]
+    result=evaluate(p,docs)
+    if not consume:
+        with _PAIR_LOCK:
+            _PAIR_CACHE[key]=(p,docs,result)
+            while len(_PAIR_CACHE)>2:_PAIR_CACHE.popitem(last=False)
+    return result
 
 from v298_eis_only import federal_workday
 from v331_broad_legal import verified
@@ -217,7 +238,7 @@ def install(ns):
         enrich(ns, p, docs)
         persist_facts(ns, p)
         existing = list(analyze(p, docs))
-        extra, _ = evaluate(p, docs)
+        extra, _ = shared_evaluate(p, docs)
         # Deduplicate the same dated legal event even if the EIS original
         # appears with different filenames or in several archive members.
         def event_key(item):
@@ -235,7 +256,7 @@ def install(ns):
     @wraps(build)
     def enriched_checks(p, detail, card, docs):
         enrich(ns, p, docs, card, detail)
-        _, extra = evaluate(p, docs)
+        _, extra = shared_evaluate(p, docs, consume=True)
         combined = list(build(p, detail, card, docs)) + extra
         seen = set()
         unique = []
