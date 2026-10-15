@@ -21,6 +21,14 @@ CATEGORIES={
 COMPANY_FORM=re.compile(r"^\s*(?:ООО|АО|ПАО|ОАО|ЗАО|ОБЩЕСТВО\s+С\s+ОГРАНИЧЕННОЙ\s+ОТВЕТСТВЕННОСТЬЮ|(?:ПУБЛИЧНОЕ\s+)?АКЦИОНЕРНОЕ\s+ОБЩЕСТВО|ЗАКРЫТОЕ\s+АКЦИОНЕРНОЕ\s+ОБЩЕСТВО)\b",re.I)
 def business_company(name):
  return bool(COMPANY_FORM.search(str(name or "").strip().strip('"«»')))
+COMPETITIVE=re.compile(r"конкурс|аукцион|запрос\\s+(?:котировок|предложений)|торги",re.I)
+NONCOMPETITIVE=re.compile(r"единственн(?:ого|ый|ому)\\s+(?:поставщик|подрядчик|исполнитель)|прямая\\s+закупка|неконкурентн",re.I)
+def competitive_kind(method):
+ value=str(method or "").strip()
+ if not value:return {"classification":"unknown","reason":"Способ закупки не указан в подтверждённых данных"}
+ if NONCOMPETITIVE.search(value):return {"classification":"noncompetitive","reason":"В способе закупки явно указана неконкурентная процедура"}
+ if COMPETITIVE.search(value):return {"classification":"competitive","reason":"Указан конкурентный способ закупки; правовую применимость следует сверить с положением о закупке"}
+ return {"classification":"unknown","reason":"Недостаточно сведений для достоверной квалификации"}
 def db(ns):
  c=ns["conn"]();c.row_factory=sqlite3.Row;return c
 def init(ns):
@@ -133,6 +141,16 @@ async function refresh(){if(!location.hash)return;let r=await fetch('/api/themat
 setInterval(refresh,12000);refresh();</script></html>""".replace("__CATEGORIES__",json.dumps(CATEGORIES,ensure_ascii=False))
 def install(ns):
  init(ns);app=ns["app"]
+ @app.get("/api/thematic/classify/{reg}")
+ async def classify(reg:str):
+  if not re.fullmatch(r"3[0-9]{10}",reg):raise HTTPException(422,"Некорректный номер ЕИС")
+  c=db(ns)
+  try:
+   p=c.execute("SELECT method,customer FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+   if not p:raise HTTPException(404,"Закупка не найдена")
+   result=competitive_kind(p["method"])
+   return {"reg_number":reg,"method":p["method"],"business_company":business_company(p["customer"]),**result}
+  finally:c.close()
  @app.get("/thematic")
  async def page():return HTMLResponse(PAGE)
  @app.post("/api/thematic/start")
