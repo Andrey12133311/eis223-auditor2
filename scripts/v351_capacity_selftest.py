@@ -137,7 +137,26 @@ def thematic_dedup():
         assert len(result)==1,result
         assert result[0]["document"]=="Договор.pdf" and result[0]["source_url"]==URL
         assert db.execute("SELECT status FROM thematic_items").fetchone()[0]=="completed"
+        db.execute("""INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence,
+             code,document,source_url) VALUES(?,?,?,?,?,?,?,?,?)""",
+             (batch,REG,a["category"],a["title"],a["law"],b["evidence"],
+              a["code"],a["document"],URL))
+        db.commit()
         db.close()
+        overview=theme.thematic_history_records(ns)
+        assert overview["batches"][0]["stored_rows"]==2
+        assert overview["batches"][0]["violations"]==1,overview
+        # A separately evidenced different legal episode must remain visible.
+        db=connection(path)
+        db.execute("""INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence,
+             code,document,source_url) VALUES(?,?,?,?,?,?,?,?,?)""",
+             (batch,REG,a["category"],a["title"],a["law"],
+              "Расчет производится на основании счета в течение 25 рабочих дней "+
+              "с даты подписания Заказчиком документов о приемке товара.",
+              a["code"],a["document"],URL))
+        db.commit();db.close()
+        updated=theme.thematic_history_records(ns)
+        assert updated["batches"][0]["violations"]==2,updated
 
 async def run():
     parallel=await file_concurrency()
