@@ -100,7 +100,18 @@ async def independent_review(ns,reg,categories):
  verified=[d for d in docs if is_official(d)]
  if not verified:return "waiting_originals",[]
  findings,_=await asyncio.to_thread(evaluate,p,verified)
- mapping={"dates":r"разъяснен|срок|изменен","protocols":r"отмен|протокол","sme":r"мсп","contract":r"оплат|договор"}
+ mapping={
+  "dates":r"разъяснен|срок|дат|изменен|продлен",
+  "docs":r"извещени|документац|техническ|предмет закупки",
+  "national":r"национальн|режим|запрет|1875",
+  "security":r"обеспечени|гаранти",
+  "sme":r"мсп|малого и среднего|1352",
+  "access":r"требовани.{0,25}участник|допуск|квалификац|дискриминац",
+  "protocols":r"отмен|протокол",
+  "contract":r"оплат|договор|контракт",
+  "notices":r"извещени|публикац",
+  "evaluation":r"оценк|критери|балл"
+ }
  selected=[]
  for f in findings:
   if f.get("kind")!="violation":continue
