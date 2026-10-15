@@ -52,6 +52,8 @@ import v338_card_prices
 import v340_price_display
 import v341_eis_facts
 import v341_precise_legal
+import v347_text_cache
+import v348_cross_document_legal
 import v342_thematic_queue
 import v345_thematic_accelerator
 import v343_fast_cards
@@ -114,6 +116,8 @@ def main():
     v340_price_display.install(vars(entry))
     v341_eis_facts.install(vars(entry))
     v341_precise_legal.install(vars(entry))
+    v347_text_cache.install(vars(entry))
+    v348_cross_document_legal.install(vars(entry))
     v342_thematic_queue.install(vars(entry))
     v345_thematic_accelerator.install(vars(entry))
     # Keep this last: a read-only card can now open without the legacy on-demand legal pipeline.
