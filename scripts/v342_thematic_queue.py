@@ -95,7 +95,13 @@ def overview(ns,batch):
    "evaluation":r"оценк|критери|балл"}
   matches=[]
   try:
-   rows=c.execute("SELECT f.reg_number,f.title,f.law,f.evidence FROM findings f JOIN thematic_items t ON t.reg=f.reg_number WHERE t.batch_id=? AND t.status='completed' AND f.kind='violation' LIMIT 2000",(batch,)).fetchall()
+   columns={x[1] for x in c.execute("PRAGMA table_info(findings)")}
+   if not {"reg_number","title","kind"}.issubset(columns):
+    raise sqlite3.OperationalError("findings schema missing")
+   law="f.law" if "law" in columns else "'' AS law"
+   evidence="f.evidence" if "evidence" in columns else "'' AS evidence"
+   query="SELECT f.reg_number,f.title,"+law+","+evidence+" FROM findings f JOIN thematic_items t ON t.reg=f.reg_number WHERE t.batch_id=? AND t.status='completed' AND f.kind='violation' LIMIT 2000"
+   rows=c.execute(query,(batch,)).fetchall()
    for f in rows:
     text=" ".join(str(f[k] or "") for k in ("title","law"))
     groups=[k for k in cats if re.search(patterns[k],text,re.I)]
