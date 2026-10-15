@@ -96,6 +96,20 @@ def evaluate(p, docs):
                     f"Запрос получен {received}; крайний день ответа {due}; опубликован {published}; окончание подачи {deadline}. {snippet}", request))
         # Protocol signing and EIS publication must each be explicitly named.
         signed, published = matches(SIGNED, text), matches(PROTOCOL_PUBLISHED, text)
+        if signed and published and (len(signed) != 1 or len(published) != 1):
+            checks.append(review(doc, "v341-protocol-ambiguous",
+                "Сопоставить даты подписания и публикации каждого протокола",
+                f"Обнаружено дат подписания: {len(signed)}; дат публикации: {len(published)}. "
+                "Нельзя автоматически связывать разные протоколы.",
+                "223-ФЗ, ст. 4 ч. 12", signed[0]))
+        elif signed and not published:
+            checks.append(review(doc, "v341-protocol-publication-unconfirmed",
+                "Установить дату размещения подписанного протокола в ЕИС",
+                signed[0].group(0), "223-ФЗ, ст. 4 ч. 12", signed[0]))
+        elif published and not signed:
+            checks.append(review(doc, "v341-protocol-signing-unconfirmed",
+                "Установить дату подписания опубликованного протокола",
+                published[0].group(0), "223-ФЗ, ст. 4 ч. 12", published[0]))
         if len(signed) == 1 and len(published) == 1:
             start, end = day(signed[0]["date"]), day(published[0]["date"])
             # Civil Code art. 193 moves a last day that is non-working to
