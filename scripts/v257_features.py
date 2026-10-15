@@ -179,6 +179,15 @@ def install(ns:dict)->None:
                 verified.update(str(row[0]) for row in extra)
         verified=sorted(verified)
         if not verified:return {'stats':{'purchases':0,'violations':0,'risks':0,'documents_found':0,'documents_checked':0},'purchases':[],'offset':0,'limit':100}
+        # Source-of-truth is the retained active legal records. The purchase
+        # counter is a denormalized cache and can shrink or become stale after
+        # offline rechecks / duplicate reconciliation.
+        confirmed_count_sql=(
+            "(SELECT COUNT(*) FROM findings f WHERE f.reg_number=p.reg_number "
+            "AND f.kind='violation') + "
+            "(SELECT COUNT(*) FROM checks ck WHERE ck.reg_number=p.reg_number "
+            "AND ck.status='violation')"
+        )
         conditions=['p.reg_number IN ('+','.join('?' for _ in verified)+')']
         if not inn:
             conditions.append('p.reg_number NOT IN (SELECT reg FROM ('+MANUAL_SOURCE_SQL+'))')
@@ -188,7 +197,7 @@ def install(ns:dict)->None:
             forms=[v[:80] for v in forms if v and len(v)<81]
             if forms:conditions.append('p.org_form IN ('+','.join('?' for _ in forms)+')');args.extend(forms)
         kind=(params.get('kind') or params.get('result_kind') or '').strip()
-        if kind in ('violations','violation'):conditions.append('p.violations>0')
+        if kind in ('violations','violation'):conditions.append('('+confirmed_count_sql+')>0')
         if kind in ('risks','risk'):conditions.append('p.risks>0')
         code=(params.get('violation_type') or '').strip()
         if code:
@@ -224,9 +233,20 @@ def install(ns:dict)->None:
         except ValueError:raise HTTPException(400,'Некорректная страница')
         sql=' FROM purchases p WHERE '+' AND '.join(conditions)
         with db() as c:
-            result=c.execute('SELECT COUNT(*) purchases,COALESCE(SUM(violations),0) violations,COALESCE(SUM(risks),0) risks,COALESCE(SUM(documents_found),0) documents_found,COALESCE(SUM(documents_checked),0) documents_checked'+sql,args).fetchone()
-            records=c.execute('SELECT p.*'+sql+' ORDER BY p.last_seen DESC LIMIT ? OFFSET ?',args+[limit,offset]).fetchall()
-        return {'stats':dict(result),'purchases':[dict(r) for r in records],'offset':offset,'limit':limit}
+            result=c.execute('SELECT COUNT(*) purchases,COALESCE(SUM('+confirmed_count_sql+'),0) violations,'
+                'COALESCE(SUM(p.violations),0) legacy_violations_cache,'
+                'COALESCE(SUM(p.risks),0) risks,'
+                'COALESCE(SUM(p.documents_found),0) documents_found,'
+                'COALESCE(SUM(p.documents_checked),0) documents_checked'+sql,args).fetchone()
+            records=c.execute('SELECT p.*,('+confirmed_count_sql+') AS saved_legal_violations'
+                +sql+' ORDER BY p.last_seen DESC LIMIT ? OFFSET ?',args+[limit,offset]).fetchall()
+        items=[]
+        for row in records:
+            item=dict(row)
+            item['violations']=int(item.pop('saved_legal_violations') or 0)
+            items.append(item)
+        return {'stats':dict(result),'purchases':items,'offset':offset,'limit':limit,
+                'count_basis':'active_saved_legal_records','filter_scoped':True}
     @app.get('/api/v257/manual',include_in_schema=False)
     def manual_list(offset:int=0,limit:int=80):
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
