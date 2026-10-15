@@ -135,6 +135,18 @@ def run():
     assert evaluate({**p,"method":"Единственный поставщик"},[late])[0]==[]
     incomplete=doc("Дата поступления запроса разъяснений: 01.10.2026. Запрос не сопоставлен с ответом.")
     assert evaluate(p,[incomplete])[0]==[] and evaluate(p,[incomplete])[1]
+    # Two nearby requests with separately documented responses must be
+    # assessed automatically, not discarded as an ambiguous cluster.
+    separate=doc("Запрос 1\\nДата поступления запроса разъяснений: 01.10.2026\\n"
+        "Дата размещения ответа в ЕИС: 08.10.2026\\n"
+        "Запрос 2\\nДата поступления запроса разъяснений: 02.10.2026\\n"
+        "Дата размещения ответа в ЕИС: 09.10.2026")
+    paired_findings,paired_checks=evaluate(p,[separate])
+    assert len(paired_findings)==2,(paired_findings,paired_checks)
+    ambiguous=doc("Дата поступления запроса разъяснений: 01.10.2026\\n"
+        "Дата размещения ответа в ЕИС: 08.10.2026\\n"
+        "Дата размещения ответа в ЕИС: 09.10.2026")
+    assert evaluate(p,[ambiguous])[0]==[] and evaluate(p,[ambiguous])[1]
     assert shifted(day("2026-10-09"),3)==day("2026-10-14")
     protocol=doc("Дата подписания протокола: 08.10.2026\nДата размещения протокола в ЕИС: 13.10.2026", "Итоговый протокол.docx")
     # Missing or malformed dates must not crash the entire recheck batch.
