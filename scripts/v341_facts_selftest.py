@@ -169,6 +169,20 @@ def run():
         "Дата подписания протокола: 02.10.2026")
     assert evaluate(p,[ambiguous_protocol])[0]==[]
     assert evaluate(p,[ambiguous_protocol])[1]
+    # FAS memo 2026-138872: cancellation posted a day after decision.
+    cancelled=doc("Дата принятия решения об отмене закупки: 19.08.2026\\n"
+        "Дата размещения извещения об отмене закупки в ЕИС: 20.08.2026")
+    assert any(f["code"]=="223-3.2-6-CANCELLATION-POSTED-LATE"
+               for f in evaluate(p,[cancelled])[0])
+    assert not evaluate(p,[doc(cancelled["text"].replace("20.08.2026","19.08.2026"))])[0]
+    # FAS memo 2026-130918: 15 working days in SME-only procurement.
+    sme_payment=doc("Оплата оказанных услуг по договору производится "
+        "в течение 15 рабочих дней с даты подписания акта сдачи-приемки услуг.")
+    sme_method={**p,"method":"Запрос котировок, участниками которого могут быть только субъекты малого и среднего предпринимательства"}
+    assert any(f["code"]=="1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS"
+               for f in evaluate(sme_method,[sme_payment])[0])
+    assert not evaluate(p,[sme_payment])[0]
+    assert not evaluate(sme_method,[doc(sme_payment["text"].replace("15 рабочих","7 рабочих"))])[0]
     # Publication on the next working day after a weekend is timely.
     amendment=doc('Дата принятия решения о внесении изменений: 08.10.2026\nДата публикации изменений в ЕИС: 12.10.2026')
     assert amendment_evaluation(p,[amendment])[0]==[]
