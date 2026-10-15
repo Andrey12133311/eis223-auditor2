@@ -32,7 +32,7 @@ def init(ns):
   c.commit()
  finally:c.close()
 def now():return datetime.now(timezone.utc).isoformat()
-def tick(ns):
+async def tick(ns):
  c=db(ns)
  try:
   batches=c.execute("SELECT * FROM thematic_batches WHERE status='active'").fetchall()
@@ -106,7 +106,7 @@ def install(ns):
  @app.post("/api/thematic/start")
  async def start(request:Request):
   origin=request.headers.get("origin")
-  if origin and origin!=str(request.base_url).rstrip("/"):raise HTTPException(403,"Неверный источник")
+  if origin and not origin.startswith(("https://web-production-1c2ea.up.railway.app","http://localhost:")):raise HTTPException(403,"Неверный источник")
   raw=await request.body()
   if len(raw)>2000:raise HTTPException(413,"Слишком большой запрос")
   try:cats=json.loads(raw)["categories"]
@@ -143,7 +143,7 @@ def install(ns):
  app.add_middleware(ThemeNav)
  async def worker():
   while True:
-   try:await asyncio.to_thread(tick,ns)
+   try:await tick(ns)
    except Exception as e:print("THEMATIC_TICK_ERROR",type(e).__name__,str(e)[:120],flush=True)
    await asyncio.sleep(120)
  @app.on_event("startup")
