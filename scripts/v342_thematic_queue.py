@@ -210,6 +210,27 @@ def install(ns):
    rows=c.execute("SELECT b.id,b.categories,b.created_at,b.status,COUNT(DISTINCT i.reg) AS purchases,(SELECT COUNT(*) FROM thematic_findings f WHERE f.batch_id=b.id) AS violations FROM thematic_batches b LEFT JOIN thematic_items i ON i.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100").fetchall()
    return {"batches":[dict(r) for r in rows]}
   finally:c.close()
+ @app.get("/thematic/card/{batch}/{reg}")
+ async def thematic_card(batch:str,reg:str,request:Request):
+  from html import escape
+  if not re.fullmatch("[0-9a-f]{24}",batch) or not re.fullmatch("3[0-9]{10}",reg):raise HTTPException(400,"Некорректный номер")
+  c=db(ns)
+  try:
+   b=c.execute("SELECT id FROM thematic_batches WHERE id=?",(batch,)).fetchone()
+   if not b:raise HTTPException(404,"Проверка не найдена")
+   findings=c.execute("SELECT category,title,law,evidence FROM thematic_findings WHERE batch_id=? AND reg=? ORDER BY rowid",(batch,reg)).fetchall()
+   item=c.execute("SELECT status,detail FROM thematic_items WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
+   if not item:raise HTTPException(404,"Закупка не найдена в тематической проверке")
+   p=c.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+   customer=escape(str(p["customer"] or "")) if p and "customer" in p.keys() else ""
+  finally:c.close()
+  printable=request.query_params.get("print")=="1"
+  rows="".join("<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'><h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORIES.get(f["category"],f["category"])))+"</p><p><b>Правовое основание:</b> "+escape(str(f["law"] or "Не указано"))+"</p><p style='white-space:pre-wrap'><b>Установленные обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>" for f in findings)
+  title="Служебная записка — проект" if printable else "Карточка тематической проверки"
+  notice="<p><b>Проект для юридической проверки:</b> сведения необходимо сверить с оригиналами ЕИС до подписания.</p>" if printable else ""
+  actions="" if printable else "<p><a href='/thematic#"+batch+"'>← К очереди</a>　<a href='/thematic/card/"+batch+"/"+reg+"?print=1' target='_blank'>Сформировать проект служебной записки / печать в PDF</a></p>"
+  script="<script>window.print()</script>" if printable else ""
+  return HTMLResponse("<!doctype html><html lang='ru'><meta charset='utf-8'><title>"+title+"</title><style>body{font:16px Georgia,serif;max-width:850px;margin:35px auto;padding:20px;color:#203247}h1{font-size:25px}section{break-inside:avoid}a{color:#175e9a}@media print{body{margin:0;max-width:none}a{display:none}}</style><h1>"+title+"</h1>"+actions+"<p><b>Номер закупки ЕИС:</b> "+escape(reg)+"</p><p><b>Заказчик:</b> "+customer+"</p><p><b>Статус:</b> "+escape(str(item["status"]))+"</p>"+notice+(rows or "<p>Подтверждённых нарушений по выбранным категориям пока нет.</p>")+script+"</html>")
  @app.get("/api/thematic/{batch}")
  async def status(batch:str):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
