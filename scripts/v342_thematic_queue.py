@@ -90,37 +90,70 @@ async def tick(ns):
    c.execute("UPDATE thematic_items SET status='queued' WHERE batch_id=? AND status IN ('waiting_originals','waiting_engine','retry') AND updated_at<?",(b["id"],datetime.fromtimestamp(time.time()-600,timezone.utc).isoformat()))
   c.commit()
  finally:c.close()
+def match_legal_category(f,categories):
+ """Classify a documented offence, not an unrelated word in the source."""
+ title=str(f.get("title") or "").casefold().replace("ё","е")
+ code=str(f.get("code") or "").casefold()
+ law=str(f.get("law") or "").casefold()
+ subject=title+" "+code+" "+law
+ patterns={
+   "sme":r"мсп|малого и среднего|1352|sme",
+   "national":r"национальн|режим|запрет|1875|импортозамещ",
+   "security":r"обеспечени|гаранти|security",
+   "protocols":r"протокол|отмен|cancellation|protocol",
+   "dates":r"разъяснен|срок подач|срок размещени|продлен|срок публикац|clarification|amendment",
+   "docs":r"извещени|документац|техническ|предмет закупки|notice",
+   "access":r"участник|допуск|квалификац|дискриминац|access",
+   "evaluation":r"оценк|критери|балл|evaluation",
+   "contract":r"оплат|договор|контракт|payment|contract",
+   "notices":r"публикац|размещени|извещени|notice"
+ }
+ # SME obligations (including the SME payment deadline) belong to the SME
+ # review if requested; a general payment term belongs to contract review.
+ for cat in ("sme","national","security","protocols","dates",
+             "access","evaluation","contract","docs","notices"):
+    if cat in categories and re.search(patterns[cat],subject,re.I):
+       return cat
+ return None
+
 async def independent_review(ns,reg,categories):
  from v332_all_procurements_audit import existing,as_procurement,stored_docs,is_official
- from v341_precise_legal import evaluate
+ from v333_dedup_ui import collapse
  purchase,rows=await asyncio.to_thread(existing,ns,reg)
  p=as_procurement(purchase)
  if not business_company(p.get("customer")):return "excluded_company",[]
  docs,unreadable=await stored_docs(ns,reg,rows)
  verified=[d for d in docs if is_official(d)]
  if not verified:return "waiting_originals",[]
- findings,_=await asyncio.to_thread(evaluate,p,verified)
- mapping={
-  "dates":r"разъяснен|срок|дат|изменен|продлен",
-  "docs":r"извещени|документац|техническ|предмет закупки",
-  "national":r"национальн|режим|запрет|1875",
-  "security":r"обеспечени|гаранти",
-  "sme":r"мсп|малого и среднего|1352",
-  "access":r"требовани.{0,25}участник|допуск|квалификац|дискриминац",
-  "protocols":r"отмен|протокол",
-  "contract":r"оплат|договор|контракт",
-  "notices":r"извещени|публикац",
-  "evaluation":r"оценк|критери|балл"
- }
+ # Run the same evidence-based analyzer as the general queue, including
+ # cross-document clarifications, amendments and the existing legal matrix.
+ analyzer=ns.get("analyze")
+ if not callable(analyzer):raise RuntimeError("Main legal analyzer is unavailable")
+ findings=await asyncio.to_thread(analyzer,p,verified)
+ names={str(d.get("name") or "") for d in verified}
+ urls={str((d.get("meta") or {}).get("source_url") or "")
+       for d in verified}
  selected=[]
- for f in findings:
-  if f.get("kind")!="violation":continue
-  title=str(f.get("title") or "")
-  for cat in categories:
-   if cat in mapping and re.search(mapping[cat],title,re.I):
-    selected.append({"title":title,"law":f.get("law"),"evidence":f.get("evidence"),"category":cat})
-    break
- return "completed",selected
+ for f in findings if isinstance(findings,list) else []:
+    if not isinstance(f,dict) or f.get("kind")!="violation":continue
+    if not str(f.get("law") or "").strip():continue
+    # Provenance requirements are exactly as strict as the main engine:
+    # neither a plausible title nor a local unverified file is enough.
+    if not ((f.get("document") and str(f["document"]) in names) or
+            (f.get("source_url") and str(f["source_url"]) in urls)):
+       continue
+    category=match_legal_category(f,categories)
+    if category is None:continue
+    selected.append({
+      "title":str(f.get("title") or "")[:500],
+      "law":str(f.get("law") or "")[:500],
+      "evidence":str(f.get("evidence") or "")[:3000],
+      "category":category
+    })
+ # This only changes new presentation/persistence, never deletes historical
+ # thematic results. Different dated acts and documentary sources stay distinct.
+ return "completed",collapse(selected)
+
 def overview(ns,batch):
  c=db(ns)
  try:
