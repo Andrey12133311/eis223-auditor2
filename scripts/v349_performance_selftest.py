@@ -59,6 +59,7 @@ def run():
           CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,status TEXT,local_path TEXT);
           CREATE TABLE v332_audit_queue(campaign TEXT,reg TEXT,state TEXT,updated_at TEXT,
                last_doc_id INTEGER NOT NULL DEFAULT 0,audit_revision TEXT NOT NULL DEFAULT '',
+               error TEXT,
                PRIMARY KEY(campaign,reg));
         """)
         ready="32615969056"; waiting="32616432604"
