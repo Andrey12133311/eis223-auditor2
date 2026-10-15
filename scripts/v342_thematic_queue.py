@@ -40,7 +40,7 @@ def init(ns):
   batch_id TEXT NOT NULL,reg TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',
   detail TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,
   PRIMARY KEY(batch_id,reg));
-  CREATE TABLE IF NOT EXISTS thematic_findings(batch_id TEXT,reg TEXT,category TEXT,title TEXT,law TEXT,evidence TEXT);""")
+  CREATE TABLE IF NOT EXISTS thematic_findings(batch_id TEXT,reg TEXT,category TEXT,title TEXT,law TEXT,evidence TEXT, UNIQUE(batch_id,reg,category,title,evidence));""")
   c.commit()
  finally:c.close()
 def now():return datetime.now(timezone.utc).isoformat()
@@ -72,7 +72,7 @@ async def tick(ns):
       detail="Независимая тематическая проверка"
       if state=="completed":
        for f in findings:
-        c.execute("INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence) VALUES(?,?,?,?,?,?)",(b["id"],reg,f["category"],f["title"],f.get("law"),f.get("evidence")))
+        c.execute("INSERT OR IGNORE INTO thematic_findings(batch_id,reg,category,title,law,evidence) VALUES(?,?,?,?,?,?)",(b["id"],reg,f["category"],f["title"],f.get("law"),f.get("evidence")))
     except Exception as e:
      state="retry";detail=type(e).__name__
     c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
@@ -124,7 +124,7 @@ def overview(ns,batch):
    bridge=_bridge(ns)
   except Exception:
    bridge={"active":False,"queued":None}
-  return {"bridge":bridge,"id":batch,"categories":cats,"status":b["status"],"counts":counts,"confirmed_matching_findings":matches[:100],"note":"Результаты отобраны по категориям из подтверждённых нарушений. Полный юридический анализ выполняет основной движок."}
+  return {"bridge":bridge,"id":batch,"categories":cats,"status":b["status"],"counts":counts,"confirmed_matching_findings":matches[:100],"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><p><button id="start">Начать проверку</button></p><h2>Очередь</h2><div id="out">Выберите категории</div></main><script>
