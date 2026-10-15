@@ -54,7 +54,9 @@ def dashboard_regs(ns):
     verified={str(v) for v in getter()}
     c=connect(ns)
     try:
-        rows=c.execute("""SELECT p.reg_number,p.customer FROM purchases p
+        columns={row[1] for row in c.execute('PRAGMA table_info(purchases)')}
+        customer_expr='p.customer' if 'customer' in columns else "'' AS customer"
+        rows=c.execute("""SELECT p.reg_number,"""+customer_expr+""" FROM purchases p
             WHERE p.reg_number NOT IN
                   (SELECT reg FROM v319_manual_inputs)
             ORDER BY p.last_seen DESC,p.reg_number DESC""").fetchall()
