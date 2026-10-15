@@ -19,6 +19,7 @@ from urllib.parse import urlsplit,parse_qs
 
 from fastapi import HTTPException,Request
 from v295_eis_originals import auth
+from v342_identity import customer_label, valid_inn
 
 REG=re.compile(r"^3\d{10}$")
 INN=re.compile(r"^(?:\d{10}|\d{12})$")
@@ -51,7 +52,7 @@ CONFIRMED={
 }
 
 def _name(value):
-    value=" ".join(str(value or "").replace("\x00"," ").split())
+    value=customer_label(value)
     if not 6<=len(value)<=400 or not re.search(r"[А-Яа-яЁёA-Za-z]",value):return ""
     if re.search(r"^(?:уточняем заказчика|заказчик уточняется|уточняется|не указан|нет данных|организация|заказчик|unknown)\b",value,re.I):return ""
     if re.fullmatch(r"[\d\W]+",value):return ""
@@ -295,23 +296,27 @@ def install(ns):
             data=json.loads(raw)
             reg=str(data["reg_number"]).strip()
             name=_name(data.get("customer"))
-            inn=str(data.get("customer_inn") or "").strip()
+            raw_inn=str(data.get("customer_inn") or "").strip()
+            inn=valid_inn(raw_inn)
             source=str(data["source_page"]).strip()
             title=" ".join(str(data.get("title") or "").split())[:800]
         except (ValueError,TypeError,KeyError,AttributeError) as exc:
             raise HTTPException(422,"Неверные данные заказчика") from exc
-        if not REG.fullmatch(reg) or not name or not _official_source(source,reg):
-            raise HTTPException(422,"Нет проверенного имени заказчика из карточки ЕИС")
-        if inn and not INN.fullmatch(inn):
+        from v342_identity import subject
+        title=subject(title)
+        if not REG.fullmatch(reg) or not (name or inn or title) or not _official_source(source,reg):
+            raise HTTPException(422,"Нет проверенных реквизитов из карточки ЕИС")
+        if raw_inn and not inn:
             raise HTTPException(422,"Неверный ИНН заказчика")
         try:
-            updated=await asyncio.to_thread(_apply,ns,reg,name,inn,source)
-            if title:
-                from v299_browser_intake import _apply_customer
-                await asyncio.to_thread(_apply_customer,ns,{"reg_number":reg,"title":title})
+            updated=await asyncio.to_thread(_apply,ns,reg,name,inn,source) if name else False
+            from v299_browser_intake import _apply_customer
+            changed=await asyncio.to_thread(_apply_customer,ns,{"reg_number":reg,
+                "customer":name,"customer_inn":inn,"title":title})
+            updated=updated or changed
         except ValueError as exc:
             raise HTTPException(409,str(exc)) from exc
-        return {"accepted":True,"customer_verified":True,"customer":name,
+        return {"accepted":True,"customer_verified":bool(name),"customer":name,
                 "updated":updated,"metadata_source":"official_eis_card"}
 
     @app.post("/api/v322/eis223/price")

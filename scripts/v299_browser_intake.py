@@ -19,6 +19,7 @@ from v295_eis_originals import (
     REG,EXT,uid_from_url,root,auth,save_atomic,
     allowed_documents,saved_document,
 )
+from v342_identity import subject as _valid_subject, valid_inn
 
 MAX_MANIFEST_BYTES=65536
 MAX_DOCS=100
@@ -141,62 +142,35 @@ def _save_manifest(value):
     return len(value["documents"])
 
 def _real_customer(value):
-    name=str(value or "").strip()
-    if len(name)<5 or len(name)>400:return ""
-    if re.search(r"^(?:уточняем заказчика|заказчик уточняется|уточняется|не указан|нет данных)$",
-                 name,re.I):return ""
-    if name.isdigit() or re.fullmatch(r"[0-9\\s-]+",name):return ""
-    return name
-
-def _valid_subject(value):
-    subject=" ".join(str(value or "").split())[:800]
-    if len(subject)<12 or re.fullmatch(r"[0-9\\W_]+",subject):
-        return ""
-    low=subject.casefold().strip(" .:;-")
-    bad=("подача заявок","приём заявок","прием заявок",
-         "начало подачи заявок","окончание подачи заявок",
-         "прием заявок окончен","приём заявок окончен",
-         "подведение итогов","работа комиссии","статус закупки",
-         "опубликовано","размещено","закупка завершена",
-         "закупка отменена","идёт приём заявок","идет прием заявок")
-    if low in bad or low.startswith(("статус:","статус закупки:",
-         "этап закупки:","прием заявок:","приём заявок:")):
-        return ""
-    return subject
+    from v311_verified_customer import _name
+    return _name(value)
 
 def _apply_customer(ns,value):
     name=_real_customer(value.get("customer"))
-    inn=str(value.get("customer_inn") or "").strip()
-    if not re.fullmatch(r"(?:[0-9]{10}|[0-9]{12})",inn):inn=""
+    inn=valid_inn(value.get("customer_inn"))
     db=ns["conn"]()
     try:
         db.execute("BEGIN IMMEDIATE")
         reg=value["reg_number"]
-        subject=_valid_subject(value.get("title"))
-        if subject:
-            db.execute("""UPDATE purchases SET title=?
-                WHERE reg_number=? AND (title IS NULL OR LENGTH(TRIM(title))<12
-                    OR LOWER(TRIM(title)) IN ('подача заявок','приём заявок',
-                       'прием заявок','статус закупки','подведение итогов',
-                       'закупка завершена','закупка отменена')
-                    OR LOWER(TRIM(title)) LIKE 'статус:%'
-                    OR LOWER(TRIM(title)) LIKE 'статус закупки:%'
-                    OR LOWER(TRIM(title)) LIKE 'этап закупки:%'
-                    OR LOWER(title) LIKE 'закупка №%')""",(subject,reg))
-        if inn:
-            db.execute("""UPDATE purchases SET customer_inn=?
-                WHERE reg_number=? AND (customer_inn IS NULL OR TRIM(customer_inn)='')""",
-                (inn,reg))
-        if name:
-            db.execute(
-              """UPDATE purchases SET customer=?
-                 WHERE reg_number=? AND (customer IS NULL OR TRIM(customer)=''
-                     OR LOWER(customer) LIKE 'уточняем%' OR LOWER(customer) LIKE '%уточняется%'
-                     OR LOWER(customer) IN ('не указан','нет данных'))""",
-              (name,reg))
+        row=db.execute("SELECT title,customer,customer_inn FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+        if row is None:
+            db.commit()
+            return False
+        old_title,old_name,old_inn=row
+        changes={}
+        title=_valid_subject(value.get("title"))
+        if title and not _valid_subject(old_title):changes["title"]=title
+        clean_name=_real_customer(old_name)
+        if name and not clean_name:changes["customer"]=name
+        elif clean_name and clean_name!=old_name:changes["customer"]=clean_name
+        if inn and not valid_inn(old_inn):changes["customer_inn"]=inn
+        if changes:
+            db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in changes)+
+                       " WHERE reg_number=?",(*changes.values(),reg))
         # A submitted search INN is NOT evidence that the retrieved buyer
         # has this INN. Do not copy buyer names between unrelated cards.
         db.commit()
+        return bool(changes)
     except Exception:
         if db.in_transaction:db.rollback()
         raise
@@ -218,12 +192,12 @@ def _known(ns,regs):
         if regs:
             pmarks=",".join("?" for _ in regs)
             rows=db.execute(
-                "SELECT reg_number,documents_checked,customer,title,price,price_num FROM purchases WHERE reg_number IN ("+pmarks+")",
+                "SELECT reg_number,documents_checked,customer,title,price,price_num,customer_inn FROM purchases WHERE reg_number IN ("+pmarks+")",
                 regs).fetchall()
             existing={r[0]:{"checked":int(r[1] or 0),
                             "needs_metadata":not _real_customer(r[2])
-                                or not str(r[3] or "").strip()
-                                or str(r[3] or "").lower().strip()=="подача заявок"
+                                or not _valid_subject(r[3])
+                                or not valid_inn(r[6])
                                 or not (money(r[5]) or money(r[4]))}
                       for r in rows}
         result={}
@@ -270,8 +244,8 @@ def _scan_status():
     return {
         "browser_collector_active":active,
         "collector_version":version,
-        "upgrade_required":version<341,
-        "required_version":341,
+        "upgrade_required":version<342,
+        "required_version":342,
         "card_facts_supported":version>=341,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),

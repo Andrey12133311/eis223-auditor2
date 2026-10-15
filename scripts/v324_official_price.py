@@ -119,6 +119,10 @@ def prices_in_text(text):
         for hit in LABEL.finditer(line):
             before=line[max(0,hit.start()-105):hit.start()]
             if UNSUITABLE.search(before) or NOTE_ONLY.search(before):continue
+            # "5% от начальной максимальной цены договора — 8 829,89"
+            # states the security amount, not NMCD itself.
+            if re.search(r"(?:%|процент\w*)\s*от\s*$",before,re.I):continue
+            if re.search(r"обеспечени\w*.{0,90}\s+от\s*$",before,re.I):continue
             after=line[hit.end():hit.end()+480]
             if re.search(r"\bдата\b.*(?:подготов|обоснован)",before,re.I):continue
             if (re.search(r"\b(?:обоснован[а-яё]*|расч[её]т[а-яё]*)\s*[«\"]?\s*$",before,re.I)

@@ -22,8 +22,8 @@ from v295_eis_originals import allowed_documents, saved_document, root, uid_from
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 
-CAMPAIGN="2026-10-15-main-1135-eis-facts-v341"
-DASHBOARD_MAX=1135
+CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
+DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
 FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
@@ -105,7 +105,7 @@ def initialize(ns):
             main_regs=dashboard_regs(ns)
             c.executemany("""INSERT OR IGNORE INTO v332_audit_queue(campaign,reg)
                 VALUES(?,?)""",((CAMPAIGN,reg) for reg in main_regs))
-            print("V341 MAIN_1135_SCOPE locked="+str(len(main_regs))+
+            print("V342 MAIN_1253_SCOPE locked="+str(len(main_regs))+
                   " max="+str(DASHBOARD_MAX)+" total_database="+str(p),
                   flush=True)
         # Resume interrupted work, but never rerun a finished procurement just
@@ -145,7 +145,7 @@ def progress(ns):
             "verified_EIS_documents_in_completed":int(sums[3]),
             "new_evidence_based_findings":int(sums[4]),
             "new_legal_review_items":int(sums[5]),
-            "note":"Fixed subset: up to 1135 purchases from the main automatic list; source-backed facts and available originals are analysed. Missing documents are not declared violation-free."
+            "note":"Fixed subset: up to 1253 purchases from the main automatic list; source-backed facts and available originals are analysed. Missing documents are not declared violation-free."
         }
     finally:c.close()
 
@@ -199,6 +199,7 @@ def as_procurement(row):
         "reg":reg,
         "title":row.get("title") or ("Закупка № "+reg),
         "customer":row.get("customer") or "",
+        "customer_inn":row.get("customer_inn") or "",
         "method":row.get("method") or "",
         "price":row.get("price") or "",
         "price_num":row.get("price_num"),
@@ -331,11 +332,20 @@ def persist(ns,reg,findings,checks):
             code=str(f.get("code") or "")[:100]
             title=str(f.get("title") or "")[:500]
             if not code or not title:continue
-            found=c.execute("""SELECT 1 FROM findings WHERE reg_number=?
+            prior=c.execute("""SELECT evidence FROM findings WHERE reg_number=?
                 AND kind='violation'
                 AND (code=? OR LOWER(TRIM(title))=LOWER(TRIM(?)))
-                LIMIT 1""",(reg,code,title)).fetchone()
-            if found:continue
+                """,(reg,code,title)).fetchall()
+            dated_code=code.startswith(("223-3.2-3-CLARIFICATION-", "223-4-12-PROTOCOL-",
+                                       "223-3.2-6-CANCELLATION-", "223-4-11-"))
+            def event_dates(evidence):
+                from v341_eis_facts import DATE_TOKEN,parse_day
+                dates=(parse_day(m[0]) for m in re.finditer(DATE_TOKEN,str(evidence or ""),re.I))
+                return tuple(sorted({d.isoformat() for d in dates if d}))
+            dates=event_dates(f.get("evidence")) if dated_code else ()
+            if prior and (not dates or any(not event_dates(row[0]) or
+                                          event_dates(row[0])==dates for row in prior)):
+                continue
             c.execute("""INSERT INTO findings
                 (reg_number,code,kind,title,law,law_url,evidence,note,
                  document,source_url,location,match_text)
@@ -403,10 +413,15 @@ async def inspect_one(ns,reg):
             "submissionEnd":purchase["submission_end"]}
     allowed=await asyncio.to_thread(allowed_documents,reg)
     expected=len(allowed)
-    received=await asyncio.to_thread(
-        lambda:sum(saved_document(reg,uid) is not None for uid in allowed))
+    received_uids=await asyncio.to_thread(
+        lambda:{uid for uid in allowed if saved_document(reg,uid) is not None})
+    received=len(received_uids)
+    other,unreadable=await stored_docs(ns,reg,rows)
+    represented={uid_from_url((d.get("meta") or {}).get("source_url") or "")
+                 for d in other if (d.get("meta") or {}).get("source") in
+                 ("official_eis_original","official_eis_archive_member")}
     official=[]
-    if received:
+    if received_uids-represented:
         try:
             # Pull from REAL, locally saved and receipt-validated originals;
             # it processes every received archive member too.
@@ -422,8 +437,21 @@ async def inspect_one(ns,reg):
         except Exception as exc:
             print(f"V332 OFFICIAL_SOURCE_ERROR reg={reg} "
                   f"type={type(exc).__name__}",flush=True)
-    other,unreadable=await stored_docs(ns,reg,rows)
     docs=merge_docs(official,other)
+    # Repair persisted identity before legal comparison. This also covers
+    # purchases whose originals were imported before the metadata parser.
+    from v314_eis_metadata import from_documents,apply_metadata
+    from v311_verified_customer import _name
+    from v342_identity import subject,valid_inn
+    metadata=await asyncio.to_thread(from_documents,reg,docs,_name(purchase.get("customer")))
+    if metadata:
+        await asyncio.to_thread(apply_metadata,ns,reg,metadata)
+        if not subject(purchase.get("title")) and metadata.get("title"):
+            purchase["title"]=metadata["title"]
+        if not _name(purchase.get("customer")) and metadata.get("customer"):
+            purchase["customer"]=metadata["customer"]
+        if not valid_inn(purchase.get("customer_inn")) and metadata.get("customer_inn"):
+            purchase["customer_inn"]=metadata["customer_inn"]
     readable=[d for d in docs if d.get("status")=="checked" and str(d.get("text") or "").strip()]
     counted=len(readable)
     verified_count=sum(is_official(d) for d in readable)
@@ -532,6 +560,6 @@ def install(ns):
             status=await asyncio.to_thread(progress,ns)
             print("V332 CAMPAIGN_FINISHED "+json.dumps(status,ensure_ascii=False),flush=True)
         asyncio.create_task(work())
-    print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=985 "
+    print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
           "evidence_only=True",flush=True)
