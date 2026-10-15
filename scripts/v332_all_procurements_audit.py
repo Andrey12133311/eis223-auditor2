@@ -23,6 +23,7 @@ from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
+RULE_REVISION="2026-10-15-v350-cross-document-rules"
 DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
@@ -95,6 +96,12 @@ def initialize(ns):
             CREATE INDEX IF NOT EXISTS idx_v332_queue
                 ON v332_audit_queue(campaign,state);
         """)
+        columns={row[1] for row in c.execute("PRAGMA table_info(v332_audit_queue)")}
+        if "audit_revision" not in columns:
+            c.execute("ALTER TABLE v332_audit_queue ADD COLUMN audit_revision TEXT NOT NULL DEFAULT ''")
+        if "last_doc_id" not in columns:
+            c.execute("ALTER TABLE v332_audit_queue ADD COLUMN last_doc_id INTEGER NOT NULL DEFAULT 0")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_v332_docs_version ON docs(reg_number,id)")
         p=c.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
         d=c.execute("SELECT COALESCE(SUM(documents_checked),0) FROM purchases").fetchone()[0]
         v=c.execute("SELECT COALESCE(SUM(violations),0) FROM purchases").fetchone()[0]
@@ -117,6 +124,12 @@ def initialize(ns):
             SET state='pending', error='Возобновлено после перезапуска'
             WHERE campaign=? AND state='running'""",(CAMPAIGN,))
         c.commit()
+        # Re-run finished, documented originals on a new legal revision.
+        # Historical findings/checks remain append-only: no previous legal
+        # records or original documents are removed or downgraded.
+        refreshed=refresh_changed(ns)
+        if refreshed:
+            print("V350 RULE_REVISION_RECHECK queued="+str(refreshed),flush=True)
     finally:c.close()
     return progress(ns)
 
@@ -178,10 +191,36 @@ def claim_next(ns):
             c.commit()
             return None
         reg=str(row[0])
-        c.execute("UPDATE v332_audit_queue SET state='running',updated_at=? WHERE campaign=? AND reg=? AND state='pending'",(now(),CAMPAIGN,reg))
+        c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,
+                     last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
+                     WHERE campaign=? AND reg=? AND state='pending'""",
+                  (now(),reg,CAMPAIGN,reg))
         assert c.execute("SELECT changes()").fetchone()[0]==1
         c.commit()
         return reg
+    except BaseException:
+        if c.in_transaction:c.rollback()
+        raise
+    finally:c.close()
+
+def refresh_changed(ns):
+    """Queue only newly supported rules or actually added local documents."""
+    c=connect(ns)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("""UPDATE v332_audit_queue
+            SET state='pending',error='Новая редакция методики или новые оригиналы ЕИС'
+            WHERE campaign=? AND state IN ('completed','failed','no_readable_documents')
+              AND EXISTS (
+                SELECT 1 FROM docs d WHERE d.reg_number=v332_audit_queue.reg
+                 AND d.status='checked' AND COALESCE(d.local_path,'')<>'')
+              AND (audit_revision<>? OR last_doc_id<
+                  COALESCE((SELECT MAX(d2.id) FROM docs d2
+                            WHERE d2.reg_number=v332_audit_queue.reg),0))""",
+                  (CAMPAIGN,RULE_REVISION))
+        changed=int(c.execute("SELECT changes()").fetchone()[0])
+        c.commit()
+        return changed
     except BaseException:
         if c.in_transaction:c.rollback()
         raise
@@ -210,6 +249,9 @@ def mark(ns,reg,state,details=None):
         for k,v in details.items():
             assignments+=","+k+"=?"
             params.append(v)
+        if state in ("completed","no_readable_documents","failed"):
+            assignments+=",audit_revision=?"
+            params.append(RULE_REVISION)
         params.extend([CAMPAIGN,reg])
         c.execute("UPDATE v332_audit_queue SET "+assignments+
                   " WHERE campaign=? AND reg=?",params)
@@ -607,9 +649,14 @@ def install(ns):
                         state=await asyncio.to_thread(progress,ns)
                         print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
                     await asyncio.sleep(.05)
-            await asyncio.gather(worker(1),worker(2))
-            state=await asyncio.to_thread(progress,ns)
-            print("V332 CAMPAIGN_FINISHED "+json.dumps(state,ensure_ascii=False),flush=True)
+            while True:
+                await asyncio.gather(worker(1),worker(2))
+                state=await asyncio.to_thread(progress,ns)
+                print("V332 CAMPAIGN_FINISHED "+json.dumps(state,ensure_ascii=False),flush=True)
+                await asyncio.sleep(90)
+                refreshed=await asyncio.to_thread(refresh_changed,ns)
+                if refreshed:
+                    print("V350 NEW_EVIDENCE_RECHECK queued="+str(refreshed),flush=True)
         asyncio.create_task(work())
     print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
