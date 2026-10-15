@@ -69,7 +69,28 @@ def overview(ns,batch):
   b=c.execute("SELECT * FROM thematic_batches WHERE id=?",(batch,)).fetchone()
   if not b:raise HTTPException(404,"Очередь не найдена")
   counts={r[0]:r[1] for r in c.execute("SELECT status,COUNT(*) FROM thematic_items WHERE batch_id=? GROUP BY status",(batch,))}
-  return {"id":batch,"categories":json.loads(b["categories"]),"status":b["status"],"counts":counts}
+  cats=json.loads(b["categories"])
+  patterns={
+   "dates":r"срок|дат|разъяснен|продлен|изменен",
+   "docs":r"документац|извещени|техническ|предмет",
+   "national":r"национальн|режим|запрет|1875",
+   "security":r"обеспечени|гаранти",
+   "sme":r"мсп|малого и среднего|1352",
+   "access":r"участник|допуск|квалификац|дискриминац",
+   "protocols":r"протокол|отмен",
+   "contract":r"договор|контракт|оплат",
+   "notices":r"извещени|публикац",
+   "evaluation":r"оценк|критери|балл"}
+  matches=[]
+  try:
+   rows=c.execute("SELECT f.reg_number,f.title,f.law,f.evidence FROM findings f JOIN thematic_items t ON t.reg=f.reg_number WHERE t.batch_id=? AND f.kind='violation' LIMIT 2000",(batch,)).fetchall()
+   for f in rows:
+    text=" ".join(str(f[k] or "") for k in ("title","law"))
+    groups=[k for k in cats if re.search(patterns[k],text,re.I)]
+    if groups:matches.append({"reg":f["reg_number"],"title":f["title"],"categories":groups,"evidence":str(f["evidence"] or "")[:350]})
+  except sqlite3.OperationalError:
+   pass
+  return {"id":batch,"categories":cats,"status":b["status"],"counts":counts,"confirmed_matching_findings":matches[:100],"note":"Результаты отобраны по категориям из подтверждённых нарушений. Полный юридический анализ выполняет основной движок."}
  finally:c.close()
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><p><button id="start">Начать проверку</button></p><h2>Очередь</h2><div id="out">Выберите категории</div></main><script>
