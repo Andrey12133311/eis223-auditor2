@@ -45,6 +45,11 @@ async def tick(ns):
    for r in rows:
     if business_company(r["customer"]):
      c.execute("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",(b["id"],r["reg_number"],now()))
+   # Remove previously queued non-company purchases from active thematic campaigns.
+   c.execute("DELETE FROM thematic_items WHERE batch_id=? AND reg IN (SELECT reg_number FROM purchases WHERE COALESCE(customer,'')='')",(b["id"],))
+   for row in c.execute("SELECT t.reg,p.customer FROM thematic_items t JOIN purchases p ON p.reg_number=t.reg WHERE t.batch_id=?",(b["id"],)).fetchall():
+    if not business_company(row["customer"]):
+     c.execute("DELETE FROM thematic_items WHERE batch_id=? AND reg=?",(b["id"],row["reg"]))
    pending=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status='queued' LIMIT 20",(b["id"],)).fetchall()
    for p in pending:
     reg=p["reg"]
