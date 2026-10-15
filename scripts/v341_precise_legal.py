@@ -106,7 +106,7 @@ def evaluate(p, docs):
         cancel_decisions, cancel_posts = matches(CANCEL_DECISION,text), matches(CANCEL_POSTED,text)
         if len(cancel_decisions)==len(cancel_posts)==1:
             decided, posted = day(cancel_decisions[0]["date"]), day(cancel_posts[0]["date"])
-            if decided and posted and 0 < (posted-decided).days < 365:
+            if competitive and decided and posted and 0 < (posted-decided).days < 365:
                 findings.append(finding(doc,"223-3.2-6-CANCELLATION-POSTED-LATE",
                     "Решение об отмене конкурентной закупки размещено не в день принятия",
                     "223-ФЗ, ст. 3.2 ч. 6",
