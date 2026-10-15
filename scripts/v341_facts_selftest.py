@@ -145,6 +145,18 @@ def run():
     assert evaluate(p,[doc(protocol["text"],"Копия протокола.docx"),protocol])[0]
     assert len(evaluate(p,[protocol])[0])==1
     assert evaluate(p,[doc(protocol["text"].replace("13.10.2026","12.10.2026"))])[0]==[]
+    multi_protocol=doc(
+        "Протокол № 1\\nДата подписания протокола: 01.10.2026\\n"
+        "Дата размещения протокола в ЕИС: 08.10.2026\\n"
+        "Протокол № 2\\nДата подписания протокола: 08.10.2026\\n"
+        "Дата размещения протокола в ЕИС: 13.10.2026")
+    multi_found,multi_checks=evaluate(p,[multi_protocol])
+    assert len(multi_found)==2,(multi_found,multi_checks)
+    ambiguous_protocol=doc("Дата размещения протокола в ЕИС: 09.10.2026\\n"
+        "Дата подписания протокола: 01.10.2026\\n"
+        "Дата подписания протокола: 02.10.2026")
+    assert evaluate(p,[ambiguous_protocol])[0]==[]
+    assert evaluate(p,[ambiguous_protocol])[1]
     # Publication on the next working day after a weekend is timely.
     amendment=doc('Дата принятия решения о внесении изменений: 08.10.2026\nДата публикации изменений в ЕИС: 12.10.2026')
     assert amendment_evaluation(p,[amendment])[0]==[]
