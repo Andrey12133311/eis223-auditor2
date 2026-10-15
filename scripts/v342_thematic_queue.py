@@ -92,6 +92,26 @@ async def tick(ns):
    c.execute("UPDATE thematic_items SET status='queued' WHERE batch_id=? AND status IN ('waiting_originals','waiting_engine','retry') AND updated_at<?",(b["id"],datetime.fromtimestamp(time.time()-600,timezone.utc).isoformat()))
   c.commit()
  finally:c.close()
+async def independent_review(ns,reg,categories):
+ from v332_all_procurements_audit import existing,as_procurement,stored_docs,is_official
+ from v341_precise_legal import evaluate
+ purchase,rows=await asyncio.to_thread(existing,ns,reg)
+ p=as_procurement(purchase)
+ if not business_company(p.get("customer")):return "excluded_company",[]
+ docs,unreadable=await stored_docs(ns,reg,rows)
+ verified=[d for d in docs if is_official(d)]
+ if not verified or unreadable:return "waiting_originals",[]
+ findings,_=await asyncio.to_thread(evaluate,p,verified)
+ mapping={"dates":r"разъяснен|срок|изменен","protocols":r"отмен|протокол","sme":r"мсп","contract":r"оплат|договор"}
+ selected=[]
+ for f in findings:
+  if f.get("kind")!="violation":continue
+  title=str(f.get("title") or "")
+  for cat in categories:
+   if cat in mapping and re.search(mapping[cat],title,re.I):
+    selected.append({"title":title,"law":f.get("law"),"evidence":f.get("evidence"),"category":cat})
+    break
+ return "completed",selected
 def overview(ns,batch):
  c=db(ns)
  try:
