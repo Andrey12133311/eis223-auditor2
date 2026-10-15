@@ -114,9 +114,19 @@ def install(ns):
   if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORIES) or any(x not in CATEGORIES for x in cats):raise HTTPException(422,"Некорректные категории")
   identifier=secrets.token_hex(12);c=db(ns)
   try:
+   if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
+    raise HTTPException(429,"Одновременно допускается не более трёх тематических очередей")
    c.execute("INSERT INTO thematic_batches(id,categories,created_at) VALUES(?,?,?)",(identifier,json.dumps(sorted(set(cats))),now()));c.commit()
   finally:c.close()
   return {"id":identifier,"status":"active"}
+ @app.post("/api/thematic/{batch}/stop")
+ async def stop(batch:str):
+  if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
+  c=db(ns)
+  try:
+   c.execute("UPDATE thematic_batches SET status=? WHERE id=?",("stopped",batch));c.commit()
+  finally:c.close()
+  return {"id":batch,"status":"stopped"}
  @app.get("/api/thematic/{batch}")
  async def status(batch:str):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
