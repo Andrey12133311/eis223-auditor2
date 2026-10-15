@@ -136,12 +136,18 @@ def install(ns):
         persist_facts(ns, p)
         existing = list(analyze(p, docs))
         extra, _ = evaluate(p, docs)
-        # Prefer a pre-existing finding for this same legal occurrence.
+        # Deduplicate the same dated legal event even if the EIS original
+        # appears with different filenames or in several archive members.
+        def event_key(item):
+            dates = tuple(re.findall(DATE_TOKEN, item.get("evidence") or "", re.I))
+            return (item.get("code"), dates) if dates else (
+                item.get("code"), " ".join(str(item.get("match_text") or "").split()))
+        known = {event_key(x) for x in existing if x.get("kind") == "violation"}
         for item in extra:
-            if not any(x.get("kind") == "violation" and x.get("document") == item.get("document")
-                       and (x.get("code") == item["code"] or
-                            (x.get("law") == item["law"] and x.get("match_text") == item["match_text"])) for x in existing):
+            key = event_key(item)
+            if key not in known:
                 existing.append(item)
+                known.add(key)
         return existing
 
     @wraps(build)
