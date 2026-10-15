@@ -48,7 +48,7 @@ def run():
        "category":"contract","law":LAW}],
        "category_labels":{"sme":"МСП","contract":"Договор"}}
     panel=render_thematic_panel(REG,themed)
-    assert "Нарушения тематической проверки: 1" in panel
+    assert "Нарушения: 1" in panel
     assert panel.count('<article class="legal">')==1
     assert html.count("Документы ЕИС")==1
     print("V347_CARD_DEDUP_SELFTEST_OK same_event_one_card=True different_payment_days_retained=True different_documents_retained=True cross_table=True thematic=True")
