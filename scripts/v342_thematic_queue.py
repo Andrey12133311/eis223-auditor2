@@ -207,6 +207,46 @@ def overview(ns,batch):
   worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
   return {"worker":worker,"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
+_HISTORY_COUNT_CACHE={}
+
+def thematic_history_records(ns):
+ """Show unique legal incidents, not repeated saved excerpts, in history."""
+ from v333_dedup_ui import collapse
+ c=db(ns)
+ try:
+  c.execute("PRAGMA busy_timeout=1500")
+  rows=c.execute("""SELECT b.id,b.categories,b.created_at,b.status,
+         COUNT(DISTINCT i.reg) AS purchases,
+         (SELECT COUNT(*) FROM thematic_findings f WHERE f.batch_id=b.id) AS stored_rows
+         FROM thematic_batches b
+         LEFT JOIN thematic_items i ON i.batch_id=b.id
+         GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100""").fetchall()
+  out=[]
+  for row in rows:
+   item=dict(row)
+   batch=item["id"]
+   rev=c.execute("SELECT COALESCE(MAX(rowid),0) FROM thematic_findings WHERE batch_id=?",(batch,)).fetchone()[0]
+   stamp=(int(item["stored_rows"]),int(rev))
+   cached=_HISTORY_COUNT_CACHE.get(batch)
+   if cached and cached[0]==stamp:
+    unique=cached[1]
+   else:
+    grouped={}
+    for f in c.execute("""SELECT reg,category,title,law,evidence,
+                           document,source_url,code,law_url
+                           FROM thematic_findings WHERE batch_id=?""",(batch,)):
+     grouped.setdefault(f["reg"],[]).append(dict(f))
+    unique=sum(len(collapse(group)) for group in grouped.values())
+    _HISTORY_COUNT_CACHE[batch]=(stamp,unique)
+   item["violations"]=unique
+   out.append(item)
+  # Discard counts for deleted campaigns; never change their stored evidence.
+  active={x["id"] for x in out}
+  for key in list(_HISTORY_COUNT_CACHE):
+   if key not in active:_HISTORY_COUNT_CACHE.pop(key,None)
+  return {"batches":out}
+ finally:c.close()
+
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><h2>Организационно-правовые формы заказчиков</h2><p>Выберите одну или несколько форм. По умолчанию выбраны все хозяйственные общества.</p><div id="forms"></div><p><button id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="out">Выберите категории</div></main><script>
 const categories=__CATEGORIES__,legalForms=__LEGAL_FORMS__;const formsBox=document.querySelector("#forms");for(const [id,title] of Object.entries(legalForms)){const label=document.createElement("label"),check=document.createElement("input");check.type="checkbox";check.value=id;check.checked=true;label.append(check,document.createTextNode(" "+id+" — "+title));formsBox.append(label)}const box=document.querySelector('#cats');
@@ -291,11 +331,9 @@ def install(ns):
   return {"id":batch,"deleted":True}
  @app.get("/api/thematic/history")
  async def thematic_history():
-  c=db(ns)
-  try:
-   rows=c.execute("SELECT b.id,b.categories,b.created_at,b.status,COUNT(DISTINCT i.reg) AS purchases,(SELECT COUNT(*) FROM thematic_findings f WHERE f.batch_id=b.id) AS violations FROM thematic_batches b LEFT JOIN thematic_items i ON i.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100").fetchall()
-   return {"batches":[dict(r) for r in rows]}
-  finally:c.close()
+  # Potentially large older evidence sets are scanned outside the HTTP loop,
+  # with cached counts reused on the frequent 12-second dashboard refresh.
+  return await asyncio.to_thread(thematic_history_records,ns)
  @app.get("/thematic/card/{batch}/{reg}")
  def thematic_card(batch:str,reg:str,request:Request):
   from html import escape
