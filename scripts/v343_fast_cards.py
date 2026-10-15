@@ -84,7 +84,46 @@ def detail_block(item, kind, title, law, evidence, document, source, link):
       +('<p>'+source_link(link,"Норма права")+'</p>' if source_link(link,"Норма права") else '')
       +'</article>')
 
-def render(reg,data):
+def render_thematic_panel(reg,thematic):
+    """Reuse the same panels and finding cards used by the main audit view."""
+    if not thematic:return ""
+    batch=thematic["batch"]
+    rows=thematic.get("findings",[])
+    labels=thematic.get("category_labels") or {}
+    selected=thematic.get("categories") or []
+    state=thematic.get("state") or "queued"
+    names={"queued":"В очереди","completed":"Проверено",
+      "waiting_originals":"Ожидаются оригиналы ЕИС",
+      "waiting_engine":"Ожидается обработчик","retry":"Повторная попытка",
+      "excluded_company":"Форма заказчика не соответствует выборке"}
+    result=['<section class="panel" id="thematic-results">',
+      '<h2>Нарушения тематической проверки: '+str(len(rows))+'</h2>',
+      '<div class="grid"><div><b>Состояние проверки:</b> '+esc(names.get(state,state))+
+      '</div><div><b>Выбранные направления:</b> '+
+      esc(', '.join(labels.get(c,c) for c in selected) or "Не указаны")+
+      '</div></div>']
+    if thematic.get("detail"):
+        result.append('<p class="meta">'+esc(thematic["detail"])+'</p>')
+    if rows:
+        result.append('<p><a class="action" href="/thematic/card/'+esc(batch)+'/'+
+          esc(reg)+'?print=1" target="_blank" rel="noopener noreferrer">'+
+          'Проект служебной записки · печать / PDF</a></p>')
+        result.append('<p class="meta">Проект формируется по сохранённым тематическим нарушениям; '+
+          'перед подписанием необходима юридическая сверка с оригиналами ЕИС.</p>')
+    else:
+        result.append('<p>Подтверждённых нарушений по выбранным направлениям пока нет. '+
+          'Закупка может ещё ожидать проверки документов.</p>')
+    for item in rows:
+        category=labels.get(item.get("category"),item.get("category") or "Без категории")
+        block=detail_block(item,"legal",item.get("title"),item.get("law"),
+            item.get("evidence"),None,None,None)
+        result.append(block.replace('<article class="legal">',
+              '<article class="legal"><p class="meta">Категория: '+
+              esc(category)+'</p>',1))
+    result.append('</section>')
+    return ''.join(result)
+
+def render(reg,data,thematic=None):
     p,findings,checks,docs,ftotal,ctotal,dtotal=data
     seen=set()
     violation=[]
@@ -104,7 +143,7 @@ def render(reg,data):
         seen.add(signature)
         violation.append(detail_block(c,'legal',title,c.get('law'),evidence,c.get('document'),c.get('source_url'),c.get('law_url')))
     reviews=[x for x in checks if x.get('status')=='check']
-    status=("Подтверждённые нарушения: "+str(ftotal+ctotal))
+    status=(("Нарушения общей проверки: " if thematic else "Подтверждённые нарушения: ")+str(ftotal+ctotal))
     basic=''
     if p:
         keys=[
@@ -123,6 +162,11 @@ def render(reg,data):
         basic='<p>Карточка закупки пока не сохранена. После получения сведений ЕИС она появится здесь автоматически. Ранее найденные нарушения, если они есть в базе, показаны ниже.</p>'
     nav=('<nav><a href="/">Все закупки</a><a href="/manual-purchases">Самостоятельные проверки</a>'
          '<a href="/thematic">Тематические проверки</a></nav>')
+    if thematic:
+        nav='<nav><a href="/thematic#'+esc(thematic["batch"])+
+            '">← К тематической очереди</a><a href="/check-new/'+esc(reg)+
+            '">Общая карточка проверки</a><a href="/">Все закупки</a></nav>'
+    thematic_html=render_thematic_panel(reg,thematic)
     actions='<p><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>' if violation else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
     checked='<p class="meta">'+str(len(reviews))+' вопросов требуют дополнительной юридической проверки.</p>'
     for x in reviews[:50]:
@@ -139,9 +183,10 @@ def render(reg,data):
     else:notes=''
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'
      '<meta name="viewport" content="width=device-width,initial-scale=1">'
-     '<title>Карточка проверки '+esc(reg)+'</title>'+STYLE+'</head><body>'
-     '<header><h1>Карточка проверки закупки № '+esc(reg)+'</h1></header><main>'+nav
+     '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+'</head><body>'
+     '<header><h1>'+('Карточка тематической проверки № ' if thematic else 'Карточка проверки закупки № ')+esc(reg)+'</h1></header><main>'+nav
      +'<section class="panel"><h2>Сведения о закупке</h2>'+basic+'</section>'
+     +thematic_html
      +'<section class="panel"><h2>'+esc(status)+'</h2>'+actions+notes+
         (''.join(violation) if violation else '<p>Подтверждённых нарушений в сохранённых результатах пока нет. Это не означает, что нарушений не существует.</p>')+'</section>'
      +'<section class="panel"><h2>Требует проверки</h2>'+checked+'</section>'
