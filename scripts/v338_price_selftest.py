@@ -21,7 +21,8 @@ def run():
             CREATE TABLE purchases(
                 reg_number TEXT PRIMARY KEY,
                 price TEXT,price_num REAL,card_fields_json TEXT,
-                documents_checked INTEGER DEFAULT 1,last_seen TEXT
+                documents_checked INTEGER DEFAULT 1,last_seen TEXT,
+                method TEXT,submission_end TEXT
             );
             INSERT INTO purchases(reg_number) VALUES('32616471929');
         """)

@@ -270,7 +270,9 @@ def _scan_status():
     return {
         "browser_collector_active":active,
         "collector_version":version,
-        "upgrade_required":version<313,
+        "upgrade_required":version<341,
+        "required_version":341,
+        "card_facts_supported":version>=341,
         "last_scan":at,
         "last_cycle_status":info.get("status","not_started"),
         "last_error":info.get("error",""),

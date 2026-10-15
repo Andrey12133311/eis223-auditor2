@@ -23,6 +23,7 @@ KINDS={
 }
 LABELS={"nmcd":"НМЦД","maximum_contract_value":"Максимальная цена договора",
         "subject_cost":"Стоимость предмета закупки"}
+from v341_eis_facts import KINDS, LABELS
 
 def _now():return datetime.now(timezone.utc).isoformat()
 
@@ -142,7 +143,9 @@ def enqueue_missing_prices(ns,limit=8):
                     JOIN v332_audit_queue aq ON aq.reg=p.reg_number AND aq.campaign=?
                     LEFT JOIN v338_price_requests r ON r.reg=p.reg_number
                     WHERE p.documents_checked>0
-                    AND (p.price_num IS NULL OR TRIM(COALESCE(p.price,''))='')
+                    AND (p.price_num IS NULL OR TRIM(COALESCE(p.price,''))=''
+                         OR TRIM(COALESCE(p.method,''))=''
+                         OR TRIM(COALESCE(p.submission_end,''))='')
                     AND (r.reg IS NULL OR
                          (r.attempts<3 AND strftime('%s',r.created_at)<strftime('%s','now','-6 hours')))
                     ORDER BY p.last_seen DESC LIMIT ?""",(CAMPAIGN,min(8,limit))).fetchall()
@@ -152,7 +155,7 @@ def enqueue_missing_prices(ns,limit=8):
         reg=str(row["reg_number"])
         if not REG.fullmatch(reg):continue
         try:
-            _enqueue(ns,"reg",reg,1,8,"v338-card-price",False)
+            _enqueue(ns,"reg",reg,1,8,"v341-card-facts",False)
             db=ns["conn"]()
             try:
                 db.execute('''INSERT INTO v338_price_requests(reg,created_at,attempts)
@@ -231,7 +234,7 @@ def install(ns):
                                 state='out_of_scope', checked_at=?,result=?
                                 WHERE state='pending' AND reg NOT IN
                                 (SELECT reg FROM v332_audit_queue WHERE campaign=?)""",
-                                (_now(),"За пределами списка из 985 закупок",CAMPAIGN))
+                                (_now(),"За пределами текущего списка перепроверки",CAMPAIGN))
                             db.commit()
                             reg_row=db.execute("""SELECT reg FROM v338_price_rechecks
                                     WHERE state='pending'

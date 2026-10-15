@@ -201,8 +201,8 @@ def card_price_html(ns,reg):
     p=dict(row)
     try:kind=json.loads(p.get('card_fields_json') or '{}').get('summary',{}).get('price_kind')
     except (ValueError,TypeError,AttributeError):kind=None
-    label=({'maximum_contract_value':'Максимальная цена договора',
-            'subject_cost':'Стоимость предмета закупки'}).get(kind,'НМЦД')
+    from v341_eis_facts import LABELS
+    label=LABELS.get(kind,'Стоимость закупки')
     value=format_money(p.get('price_num') if money(p.get('price_num')) else p.get('price'))
     return '<p id="v335-card-price" class="detailmeta"><b>'+label+':</b> '+html.escape(value)+'</p>'
 

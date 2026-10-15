@@ -22,8 +22,8 @@ from v295_eis_originals import allowed_documents, saved_document, root, uid_from
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 
-CAMPAIGN="2026-10-14-only-985-main-facts-v339"
-DASHBOARD_MAX=985
+CAMPAIGN="2026-10-15-main-1135-eis-facts-v341"
+DASHBOARD_MAX=1135
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
 FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
@@ -46,7 +46,7 @@ def dashboard_regs(ns):
     Matches /api/v257/dashboard without user-entered filters: its EIS
     verified set, excluding ONLY explicit manually entered purchase numbers.
     Never pulls in purchases outside the list, nor manufactures records to
-    reach 985 when fewer are currently visible.
+    reach the requested count when fewer are currently visible.
     """
     getter=ns.get("_verified_set235")
     if not callable(getter):
@@ -105,7 +105,7 @@ def initialize(ns):
             main_regs=dashboard_regs(ns)
             c.executemany("""INSERT OR IGNORE INTO v332_audit_queue(campaign,reg)
                 VALUES(?,?)""",((CAMPAIGN,reg) for reg in main_regs))
-            print("V339 MAIN_985_SCOPE locked="+str(len(main_regs))+
+            print("V341 MAIN_1135_SCOPE locked="+str(len(main_regs))+
                   " max="+str(DASHBOARD_MAX)+" total_database="+str(p),
                   flush=True)
         # Resume interrupted work, but never rerun a finished procurement just
@@ -145,7 +145,7 @@ def progress(ns):
             "verified_EIS_documents_in_completed":int(sums[3]),
             "new_evidence_based_findings":int(sums[4]),
             "new_legal_review_items":int(sums[5]),
-            "note":"Fixed subset: up to 985 purchases from the main automatic list; only locally available original texts are legally analysed. Missing documents are not declared violation-free."
+            "note":"Fixed subset: up to 1135 purchases from the main automatic list; source-backed facts and available originals are analysed. Missing documents are not declared violation-free."
         }
     finally:c.close()
 

@@ -198,6 +198,10 @@ def security_findings(p,docs):
     if not COMPETITIVE.search(str(p.get("method") or "")):
         return finding,checks
     verified_nmcd=verified_price(p,docs)
+    from v324_fas_practice import _sme_scope
+    sme_scope,_=_sme_scope(p,docs)
+    sme_only=bool(sme_scope) or (p.get("sme_only") is True and
+        (p.get("fact_evidence") or {}).get("sme_only",{}).get("source")=="official_eis_card")
     for doc in docs[:MAX_DOCS]:
         if not isinstance(doc,dict) or not verified(doc):continue
         body=str(doc.get("text") or "")[:MAX_TEXT].replace("\xa0"," ")
@@ -238,16 +242,22 @@ def security_findings(p,docs):
             price,price_doc,_=verified_nmcd
             ratio=value if is_percent else value/price*Decimal("100")
             condition=None
+            law="223-ФЗ, ст. 3.2 ч. 27"
+            code="223-3.2-27-BID-SECURITY-LOW-NMCD"
             if price<=Decimal("5000000"):
                 condition="Обеспечение заявки предусмотрено при НМЦД не более 5 млн рублей"
+            elif sme_only and ratio>Decimal("2"):
+                condition="Размер обеспечения заявки превышает 2% НМЦД в закупке только для МСП"
+                law="223-ФЗ, ст. 3 ч. 8; ПП РФ № 1352, п. 23"
+                code="223-SME-BID-SECURITY-OVER-TWO-PERCENT"
             elif ratio>Decimal("5"):
                 condition="Размер обеспечения заявки превышает 5% НМЦД"
+                code="223-3.2-27-BID-SECURITY-OVER-FIVE-PERCENT"
             if not condition:continue
             finding.append({
-                "code":"223-3.2-27-BID-SECURITY-LOW-NMCD" if price<=Decimal("5000000")
-                       else "223-3.2-27-BID-SECURITY-OVER-FIVE-PERCENT",
+                "code":code,
                 "kind":"violation",
-                "title":condition,"law":"223-ФЗ, ст. 3.2 ч. 27",
+                "title":condition,"law":law,
                 "law_url":LAW_URL,
                 "evidence":f"{evidence} НМЦД: {price:,.2f} руб.; "
                            f"обеспечение: {value}{'%' if is_percent else ' руб.'}; "

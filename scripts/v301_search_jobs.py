@@ -237,7 +237,7 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         raise
     finally:db.close()
 
-def _claim(ns):
+def _claim(ns,collector_version=320):
     db=_db(ns)
     now=int(time.time())
     try:
@@ -250,7 +250,8 @@ def _claim(ns):
             "WHERE status='leased' AND lease_until<? AND attempts>=4",(now,))
         row=db.execute(
             "SELECT * FROM v301_search_jobs WHERE status='queued' AND not_before<=? "
-            "ORDER BY priority ASC,created_at ASC LIMIT 1",(now,)).fetchone()
+            "AND (? >= 341 OR COALESCE(parent_id,'') <> 'v341-card-facts') "
+            "ORDER BY priority ASC,created_at ASC LIMIT 1",(now,collector_version)).fetchone()
         if row:
             db.execute(
                 "UPDATE v301_search_jobs SET status='leased',lease_until=?,"
@@ -363,8 +364,11 @@ def install(ns):
             version=0
         if version<320:
             raise HTTPException(426,"Для самостоятельного поиска нужен обновлённый браузерный мост v320. Перезапустите загрузчик во вкладке ЕИС.")
-        job=await asyncio.to_thread(_claim,ns)
-        return {"job":{k:job[k] for k in ("id","kind","target","page","attempts")} if job else None,
+        job=await asyncio.to_thread(_claim,ns,version)
+        result={k:job[k] for k in ("id","kind","target","page","attempts")} if job else None
+        if result:
+            result["metadata_only"]=job.get("parent_id")=="v341-card-facts"
+        return {"job":result,
                 "poll_seconds":8}
 
     @app.post("/api/v301/bridge/report/{job_id}")
@@ -394,7 +398,8 @@ def install(ns):
         job=await asyncio.to_thread(_finish,ns,job_id,status,detail,found,accepted,defer,regs,more)
         # A search report is NOT a finished legal audit. Whenever saved
         # originals are complete, ensure the existing offline review runs.
-        if job["kind"]=="reg" and (found>0 or accepted>0) and status in ("done","partial"):
+        if (job["kind"]=="reg" and job.get("parent_id")!="v341-card-facts"
+                and (found>0 or accepted>0) and status in ("done","partial")):
             try:
                 enqueue=ns.get("_v295_enqueue_review")
                 if callable(enqueue):

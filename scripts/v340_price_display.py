@@ -14,10 +14,11 @@ from v335_price_recovery import money
 TYPES={"nmcd":"НМЦД",
        "maximum_contract_value":"Максимальная цена договора",
        "subject_cost":"Стоимость предмета закупки"}
+from v341_eis_facts import LABELS as TYPES
 PRICE_PATHS={"/api/dashboard","/api/procurements",
              "/api/v204/dashboard","/api/v257/dashboard","/api/v257/manual"}
 
-def _item(reg,row,official,verified):
+def _item(reg,row,official,verified,facts=None):
     result=dict(row)
     existing=money(result.get("price_num")) or money(result.get("price"))
     chosen=existing
@@ -45,6 +46,17 @@ def _item(reg,row,official,verified):
             source=verified.get("evidence_page") or ""
             # Never label an untyped numeric value as subject cost.
             kind=verified.get("price_kind") if verified.get("price_kind") in TYPES else kind
+    prices=(facts or {}).get("prices") or card_json.get("eis_card_prices") or []
+    if prices:
+        from v341_eis_facts import chosen_price
+        selected=chosen_price(prices)
+        if selected:
+            chosen=money(selected["price"])
+            kind=selected["price_kind"]
+            source=(facts or {}).get("source_page") or source
+        else:
+            chosen=None
+            kind=None
     if chosen:
         result["price_num"]=chosen[1]
         result["price"]=chosen[0]
@@ -55,6 +67,8 @@ def _item(reg,row,official,verified):
     result["price_label"]=TYPES.get(result["price_kind"],"Стоимость закупки")
     result["price_source_url"]=source
     result["price_conflict"]=bool(official and official.get("conflict"))
+    result["price_values"]=prices
+    result["price_formula"]=(facts or {}).get("price_formula") or card_json.get("price_formula") or ""
     if result["price_conflict"] and official:
         # Show the actual official card amount separately, not as a silent
         # replacement for a conflicting previously stored amount.
@@ -87,6 +101,13 @@ def decorate(ns,data):
         placeholders=",".join("?" for _ in regs)
         official={}
         verified={}
+        facts={}
+        try:
+            from v311_verified_customer import _official_source
+            for r in db.execute("SELECT reg,payload FROM v341_card_facts WHERE reg IN ("+placeholders+")",regs):
+                item=json.loads(r["payload"])
+                if _official_source(item.get("source_page"),r["reg"]):facts[r["reg"]]=item
+        except (sqlite3.OperationalError,ValueError,TypeError,AttributeError):pass
         try:
             for r in db.execute("SELECT * FROM v338_card_price WHERE reg IN ("+placeholders+")",regs):
                 official[r["reg"]]=dict(r)
@@ -98,7 +119,7 @@ def decorate(ns,data):
         output=[]
         for row in rows:
             reg=str(row.get("reg_number") or row.get("reg") or "")
-            output.append(_item(reg,row,official.get(reg),verified.get(reg)))
+            output.append(_item(reg,row,official.get(reg),verified.get(reg),facts.get(reg)))
         if field=="purchase":data["purchase"]=output[0]
         elif field=="single":data=output[0]
         else:
@@ -121,13 +142,23 @@ function parse(v){
 }
 window.eis223PriceText=function(p){
  const num=parse(p?.price_num)??parse(p?.price);
- if(num===null)return 'Стоимость не указана в полученных данных ЕИС';
+ if(num===null){
+   const prices=Array.isArray(p?.price_values)?p.price_values:[];
+   if(prices.length)return prices.slice(0,5).map(x=>(x.price_label||'Цена')+': '+
+     new Intl.NumberFormat('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2})
+       .format(parse(x.price))+' ₽').join('; ');
+   if(p?.price_formula)return 'Формула цены: '+p.price_formula;
+   return 'Стоимость не указана в полученных данных ЕИС';
+ }
  const kind=p?.price_kind||'';
  const text=new Intl.NumberFormat('ru-RU',{
    minimumFractionDigits:2,maximumFractionDigits:2
  }).format(num)+' ₽';
- const label=kind==='subject_cost'?' (стоимость предмета закупки)':
-   kind==='maximum_contract_value'?' (максимальная цена договора)':'';
+ const labels={subject_cost:'стоимость предмета закупки',
+   maximum_contract_value:'максимальное значение цены договора',
+   contract_price:'цена договора',lot_price:'цена лота',
+   total_unit_prices:'начальная сумма цен единиц',unit_price:'цена единицы'};
+ const label=labels[kind]?' ('+labels[kind]+')':'';
  return text+label+(p?.price_conflict?' · требуется сверка с ЕИС':'');
 };
 // Keep the dynamically added purchase-detail panel consistent with the

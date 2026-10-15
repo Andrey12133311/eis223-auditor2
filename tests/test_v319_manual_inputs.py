@@ -53,6 +53,7 @@ class ManualInputTests(unittest.TestCase):
             # An automatic import has all the old, misleading manual labels.
             db.execute("""INSERT INTO purchases VALUES(?, 'Customer', 'Automatic',
                 'manual', ?, 'ООО', 5000, '2026', 2, 2, 0, 0)""", (AUTO, INN))
+            db.execute("ALTER TABLE purchases ADD COLUMN price TEXT")
             db.execute("INSERT INTO document_priorities_v233 VALUES(?,'manual','2026-10-14')", (AUTO,))
             db.execute("INSERT INTO v257_manual_registry(reg) VALUES(?)", (AUTO,))
             db.execute("INSERT INTO requests_v233 VALUES(?,'manual','saved','2026-10-09')", (LEGACY,))

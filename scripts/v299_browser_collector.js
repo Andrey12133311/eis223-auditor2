@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "340"; // robust official EIS-card monetary field extraction
+  const COLLECTOR_VERSION = "341"; // Cyrillic labels, typed prices and legal dates
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
@@ -488,13 +488,21 @@
   }
   // Never infer the contract's initial price from its award, unit cost,
   // spreadsheet page number or a different lot. Use labeled EIS-card fields.
-  function cardPriceFromDocument(doc,reg){
+  function cardPricesFromDocument(doc,reg){
     if(!doc||!new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)").test(
-        doc.body?.textContent||doc.textContent||""))return null;
+        doc.body?.textContent||doc.textContent||""))return [];
+    const currency=valueByLabel(doc,[/^валюта(?:\s+договора|\s+цены)?$/i]);
+    if(currency&&!/^(?:RUB|RUR|643|₽|российск[а-яё]*\s+рубл[а-яё]*|рубл[а-яё]*)$/i.test(currency.trim()))
+      return [];
     const groups=[
-      {kind:"nmcd",pattern:/^(?:начальн\w*\s*\(?максимальн\w*\)?\s*цен\w*(?:\s+договора)?|начальн\w*\s+цен\w*\s+договора|нмцд|начальная\s*\(максимальная\)\s*цена)(?:\s*\(цена\s+лота\))?$/i},
-      {kind:"maximum_contract_value",pattern:/^максимальн\w*\s+значени\w*\s+цен\w*\s+договора$/i},
-      {kind:"subject_cost",pattern:/^(?:стоимост\w*\s+предмет\w*\s+(?:закупк\w*|договора)|стоимост\w*\s+закупк\w*|сумма\s+закупк\w*)$/i}
+      // JavaScript \w excludes Cyrillic, including with the /u flag.
+      {kind:"nmcd",pattern:/^(?:начальная\s*\(\s*максимальная\s*\)\s*цена(?:\s+договора|\s+контракта)?|начальная\s+максимальная\s+цена(?:\s+договора|\s+контракта)?|начальная\s+цена\s+(?:договора|контракта|лота)|нмц[дк])(?:\s*\(цена\s+лота\))?$/i},
+      {kind:"maximum_contract_value",pattern:/^максимальн[а-яё]*\s+(?:значени[а-яё]*\s+)?цен[а-яё]*\s+договора$/i},
+      {kind:"subject_cost",pattern:/^(?:стоимост[а-яё]*\s+(?:предмет[а-яё]*\s+)?закупк[а-яё]*|стоимост[а-яё]*\s+предмет[а-яё]*\s+договора|сумма\s+закупк[а-яё]*)$/i},
+      {kind:"contract_price",pattern:/^(?:(?:общая\s+)?(?:цена|стоимость|сумма)\s+договора|цена\s+контракта)$/i},
+      {kind:"lot_price",pattern:/^(?:цена|стоимость)\s+лота$/i},
+      {kind:"total_unit_prices",pattern:/^(?:начальная\s*(?:\(\s*максимальная\s*\))?\s*)?сумма\s+цен\s+(?:всех\s+)?единиц(?:\s+(?:товар(?:а|ов)?|работ|услуг)(?:[,\s]+(?:работ|услуг))*)?$/i},
+      {kind:"unit_price",pattern:/^(?:начальная\s*(?:\(\s*максимальная\s*\))?\s*)?(?:цена|стоимость)\s+(?:за\s+единицу|единицы)(?:\s+(?:товара|работы|услуги)(?:[,\s]+(?:работы|услуги))*)?$/i}
     ];
     const amount=raw=>{
       const clean=String(raw||"").replace(/[\u00a0\u202f]/g," ")
@@ -512,14 +520,17 @@
     };
     const selectors=".common-text__title,.section__title,.registry-entry__body-title,"+
       ".registry-entry__body-item-title,.price-block__title,.data-block__title,"+
-      ".blockInfo__label,.common-text__label,dt,label,th,td";
+      ".blockInfo__label,.common-text__label,.section__attrib,.title,dt,label,th,td";
+    const all=[];
+    const labelText=s=>s.replace(/[:：]\s*$/,"").trim()
+      .replace(/\s*\((?:руб\.?|рублей|RUB|с\s+НДС|без\s+НДС)\)\s*$/i,"").trim();
     for(const group of groups){
       const candidates=[];
       for(const node of doc.querySelectorAll(selectors)){
         const raw=(node.textContent||"").replace(/\s+/g," ").trim();
         if(raw.length>200)continue;
         const inline=raw.match(/^([^:：]{1,100})\s*[:：]\s*(.+)$/);
-        const label=(inline?inline[1]:raw).replace(/[:：]\s*$/,"").trim();
+        const label=labelText(inline?inline[1]:raw);
         if(!group.pattern.test(label))continue;
         const hits=[];
         if(inline)hits.push(inline[2]);
@@ -548,31 +559,65 @@
         const lines=(doc.body?.innerText||"").split(/\n/).map(s=>s.trim()).filter(Boolean);
         for(let j=0;j<lines.length;j++){
           const inline=lines[j].match(/^([^:：]{1,100})\s*[:：]\s*(.+)$/);
-          const label=(inline?inline[1]:lines[j]).replace(/[:：]\s*$/,"").trim();
+          const label=labelText(inline?inline[1]:lines[j]);
           if(!group.pattern.test(label))continue;
           const val=amount(inline?inline[2]:(lines[j+1]||""));
           if(val)candidates.push({price:val,price_kind:group.kind,price_label:label});
           if(candidates.length>12)break;
         }
       }
-      const unique=[...new Set(candidates.map(v=>Number(v.price.replace(/[^0-9,.]/g,"").replace(",","."))))];
-      if(unique.length===1 && candidates.length)return candidates[0];
-      if(unique.length>1){
-        log(reg,"разные цены лотов на карточке ЕИС — без подмены общей НМЦД");
-        return null;
-      }
+      const unique=new Map(candidates.map(v=>[v.price,v]));
+      all.push(...unique.values());
     }
-    return null;
+    return all.slice(0,50);
+  }
+  function cardPriceFromDocument(doc,reg){
+    const prices=cardPricesFromDocument(doc,reg);
+    if(!prices.length)return null;
+    const first=prices.filter(x=>x.price_kind===prices[0].price_kind);
+    return first.length===1?first[0]:null;
+  }
+  function cardFactsFromDocument(doc,reg){
+    const exact=new RegExp("(?:^|\\D)"+reg+"(?:\\D|$)");
+    if(!exact.test(doc.body?.textContent||doc.textContent||""))return null;
+    const fields={},field_evidence={};
+    const patterns={
+      method:/^(?:наименование\s+способа\s+закупки|способ(?:\s+осуществления|\s+проведения|\s+размещения)?\s+закупки|форма\s+торгов)$/i,
+      submission_start:/^(?:дата\s+(?:и\s+время\s+)?начала\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок|начало\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок)$/i,
+      submission_end:/^(?:дата\s+(?:и\s+время\s+)?окончания\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок|окончание\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок|срок\s+окончания\s+подачи\s+заявок)$/i,
+      published:/^(?:дата\s+(?:и\s+время\s+)?(?:первоначального\s+)?(?:размещения|публикации)\s+извещения(?:\s+в\s+ЕИС)?|дата\s+публикации\s+закупки)$/i
+    };
+    for(const [key,pattern] of Object.entries(patterns)){
+      const value=valueByLabel(doc,[pattern]);
+      if(!value)continue;
+      if(key==='method'){
+        if(!/(?:конкурс|аукцион|запрос\s+(?:котировок|предложений)|единственного\s+поставщика)/i.test(value))continue;
+        fields[key]=value.slice(0,220);
+      }else{
+        const d=value.match(/20\d{2}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.20\d{2}/);
+        if(!d)continue;
+        const a=d[0].split('.');
+        fields[key]=a.length===3?a[2]+'-'+a[1].padStart(2,'0')+'-'+a[0].padStart(2,'0'):d[0];
+      }
+      field_evidence[key]=key+': '+value.slice(0,650);
+    }
+    const sme=valueByLabel(doc,[/^участниками\s+закупки\s+могут\s+быть\s+только\s+субъекты\s+малого\s+и\s+среднего\s+предпринимательства$/i]);
+    if(/^(?:да|нет)$/i.test(sme.trim())){
+      fields.sme_only=/^да$/i.test(sme.trim());
+      field_evidence.sme_only='Участниками закупки могут быть только субъекты малого и среднего предпринимательства: '+sme;
+    }
+    const price_formula=valueByLabel(doc,[/^формула\s+цены(?:\s+договора)?$/i]);
+    return {prices:cardPricesFromDocument(doc,reg),fields,field_evidence,price_formula};
   }
   async function reportOfficialPrice(reg,source,doc){
-    const item=cardPriceFromDocument(doc,reg);
-    if(!item)return;
+    const item=cardFactsFromDocument(doc,reg);
+    if(!item||(!item.prices.length&&!Object.keys(item.fields).length&&!item.price_formula))return;
     try{
-      const result=await api("/api/v338/eis223/card-price","POST",{
+      const result=await api("/api/v341/eis223/card-facts","POST",{
         reg_number:reg,source_page:source,...item
       });
-      if(result.accepted)log(reg,"Цена подтверждена карточкой ЕИС:",
-                           item.price_kind,item.price,result.conflict?"расхождение":"");
+      if(result.accepted)log(reg,"Поля карточки ЕИС сохранены:",
+                           item.prices.length,"видов цены;",Object.keys(item.fields).length,"полей проверки");
     }catch(e){
       log(reg,"не удалось сохранить цену ЕИС:",String(e.message).slice(0,110));
     }
@@ -593,7 +638,7 @@
       log(reg,"сведения о заказчике пока не сохранены:",String(e.message).slice(0,100));
     }
   }
-  async function discoverFromOfficialCard(reg,searchDoc){
+  async function discoverFromOfficialCard(reg,searchDoc,metadataOnly=false){
     const problems=[];
     const searchCustomer=verifiedSearchCustomer(searchDoc,reg);
     const actualUrl=new URL(location.href);
@@ -626,6 +671,8 @@
         const title=titleFromDocument(document,reg)||searchTitle(searchDoc,reg);
         await reportOfficialBuyer(reg,liveLanding||liveUrl.href,customer,title);
         await reportOfficialPrice(reg,liveUrl.href,document);
+        if(metadataOnly&&INFO_PAGES.has(liveUrl.pathname))
+          return {docs:[],source:liveUrl.href,landing:liveLanding||liveUrl.href,customer,title};
         return {docs,source:liveUrl.href,landing:liveLanding||liveUrl.href,
                 customer,title};
       }
@@ -707,6 +754,7 @@
       // Save the buyer NOW even if every document tab below returns HTTP 404.
       await reportOfficialBuyer(reg,url.href,customer,title);
       await reportOfficialPrice(reg,url.href,landing);
+      if(metadataOnly)return {docs:[],source:url.href,landing:url.href,customer,title};
       const onCard=discoverDocs(landing,reg);
       if(onCard.length)return {docs:onCard,source:url.href,landing:url.href,customer,title};
       for(const target of documentPageCandidates(reg,landing)){
@@ -1006,6 +1054,11 @@
       log("Самостоятельная проверка:",job.kind,job.target,
           job.kind==="inn" ? "страница "+job.page : "");
       if(job.kind==="reg") {
+        if(job.metadata_only){
+          await discoverFromOfficialCard(job.target,null,true);
+          report={status:"done",found:1,accepted:0,
+            detail:"Карточка ЕИС прочитана: виды стоимости, способ и сроки переданы для проверки"};
+        }else{
         // A previously "complete" manifest can be partial: older bridge
         // releases only recognized files with an extension in their title.
         // Re-discover the official tab and its full file list every time
@@ -1025,6 +1078,7 @@
                " вложений ЕИС; остальные остаются в очереди"),
           accepted:uploaded-before,found:outcome.discovered?1:0
         };
+        }
       } else if(job.kind==="inn") {
         const q="/epz/order/extendedsearch/results.html?"+
           new URLSearchParams({
