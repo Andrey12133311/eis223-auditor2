@@ -68,12 +68,11 @@ async def tick(ns):
      if not originals or not all(saved_document(reg,uid) for uid in originals):
       state="waiting_originals";detail="Ожидаются подтверждённые оригиналы ЕИС"
      else:
-      enqueue=ns.get("_v295_enqueue_review")
-      if not callable(enqueue):
-       state="waiting_engine";detail="Обработчик юридической проверки недоступен"
-      else:
-       result=enqueue(reg)
-       state="submitted";detail=str(result.get("status","queued"))[:150]
+      state,findings=await independent_review(ns,reg,json.loads(b["categories"]))
+      detail="Независимая тематическая проверка"
+      if state=="completed":
+       for f in findings:
+        c.execute("INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence) VALUES(?,?,?,?,?,?)",(b["id"],reg,f["category"],f["title"],f.get("law"),f.get("evidence")))
     except Exception as e:
      state="retry";detail=type(e).__name__
     c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
