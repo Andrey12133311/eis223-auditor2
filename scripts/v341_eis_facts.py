@@ -41,7 +41,7 @@ PATTERNS = {
 KINDS = {key: re.compile("^(?:"+pattern+")$", re.I) for key, pattern in PATTERNS.items()}
 PRIORITY = tuple(LABELS)
 DATE_LABELS = {
-    "submission_start": r"(?:дата\s+(?:и\s+время\s+)?начала\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок|начало\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок)",
+    "submission_start": r"(?:дата\s+(?:и\s+время\s+)?начала\s+(?:срока\s+)?(?:подачи|при[её]ма|приема)\s+заявок|начало\s+(?:срока\s+)?(?:подачи|при[её]ма|приема)\s+заявок)",
     "submission_end": r"(?:дата\s+(?:и\s+время\s+)?окончания\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок|окончание\s+(?:срока\s+)?(?:подачи|при[её]ма)\s+заявок|срок\s+окончания\s+подачи\s+заявок)",
     "published": r"(?:дата\s+(?:и\s+время\s+)?(?:первоначального\s+)?(?:размещения|публикации)\s+извещения(?:\s+в\s+ЕИС)?|дата\s+публикации\s+закупки)",
 }
@@ -63,6 +63,12 @@ def compact(value):
 
 def normalize_label(value):
     return re.sub(r"\s*\((?:руб\.?|рублей|RUB|с\s+НДС|без\s+НДС)\)\s*$", "", compact(value), flags=re.I)
+
+
+def date_from_labelled_value(value):
+    """Find an explicit date, never a duration or unrelated document date."""
+    match = re.search(DATE_TOKEN, str(value or ""), re.I)
+    return parse_day(match.group(0)) if match else None
 
 
 def parse_day(value):
@@ -150,6 +156,21 @@ def document_facts(docs):
                 pairs.append([compact(m[1]), compact(m[2]) or compact(lines[i+1] if i+1 < len(lines) else ""), line])
             elif i+1 < len(lines):
                 pairs.append([compact(line), compact(lines[i+1]), line+" "+lines[i+1]])
+        # Structured cards often use "Срок подачи заявок" as a section
+        # heading and put start/end dates on subsequent lines.
+        for i, line in enumerate(lines):
+            if re.search(r"срок(?:и|а)?\\s+(?:подачи|при[её]ма)\\s+заявок", line, re.I):
+                segment = " ".join(lines[i:i+5])[:900]
+                for key, marker in (("submission_start", r"(?:начал[оа]|с)\\s*(?:подачи|при[её]ма)?"),
+                                    ("submission_end", r"(?:окончани[ея]|до)\\s*(?:подачи|при[её]ма)?")):
+                    match = re.search(marker+r"\\s*[:：–—-]?\\s*(?P<date>"+DATE_TOKEN+r")", segment, re.I)
+                    if match:
+                        parsed_date = parse_day(match["date"])
+                        if parsed_date:
+                            candidates.setdefault(key, {})[parsed_date.isoformat()] = {
+                                "value": parsed_date.isoformat(), "document": doc.get("name"),
+                                "source_url": (doc.get("meta") or {}).get("source_url"),
+                                "evidence": compact(match[0])[:650], "source": "official_eis_document"}
         for label, value, excerpt in pairs:
             key = None
             parsed = None
