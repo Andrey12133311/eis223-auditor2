@@ -43,7 +43,8 @@ def install(ns):
             if (not path.is_file() or not path.is_relative_to(data_root)
                 or path.suffix.lower() not in EXTENSIONS or not 0<size<=MAX_ORIGINAL):
                 raise ValueError("Unsupported cache source")
-            sha=hashlib.file_digest(path.open("rb"),"sha256").hexdigest()
+            with path.open("rb") as original_bytes:
+                sha=hashlib.file_digest(original_bytes,"sha256").hexdigest()
             key=hashlib.sha256((CACHE_VERSION+":"+sha).encode()).hexdigest()
         except (OSError,ValueError,TypeError):
             with _guard:_m["skipped"]+=1
