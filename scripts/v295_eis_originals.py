@@ -490,17 +490,14 @@ def install(ns):
         folder=root()/"eis223_official_originals"/reg/uid
         file=folder/(sha+entry["ext"])
         if not file.exists():await asyncio.to_thread(save_atomic,file,data)
-        # Text extraction is diagnostic only. Existing procurement recheck remains authoritative.
+        # Uploads must acknowledge as soon as the original bytes and SHA256
+        # are durably saved. Re-extracting the same PDF/DOCX here used to block
+        # each EIS upload for up to 45 seconds. Offline audit workers extract
+        # text and verify evidence separately; do not claim analysis on upload.
         chars=0
-        if extractor is not None:
-            try:
-                txt=await asyncio.wait_for(asyncio.to_thread(extractor,file),timeout=45)
-                chars=len(str(txt or "").strip())
-            except Exception as e:
-                print("V295 EXTRACTION_ERROR "+type(e).__name__,flush=True)
         receipt={"reg_number":reg,"uid":uid,"sha256":sha,"bytes":size,
             "extension":entry["ext"],"source_url":entry["url"],
-            "extracted_chars":chars,"state":"ready_for_legal_review" if chars>=3 else "downloaded_no_text"}
+            "extracted_chars":chars,"state":"stored_pending_legal_review"}
         await asyncio.to_thread(save_atomic,folder/"receipt.json",
                                 json.dumps(receipt,ensure_ascii=False).encode())
         print(f"V295 ORIGINAL_IMPORTED reg={reg} uid={uid} size={size} chars={chars}",flush=True)
