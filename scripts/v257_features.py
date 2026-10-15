@@ -167,6 +167,17 @@ def install(ns:dict)->None:
         params=request.query_params
         inn=(params.get('inn') or '').strip()
         verified=set(ns['_verified_set235']())
+        # The current intake snapshot is volatile (it can shrink to a few
+        # hundred after the collector rotates pages). Preserve ALL purchases
+        # that already entered the verified automatic audit queue.
+        with db() as c:
+            has_history=c.execute("""SELECT 1 FROM sqlite_master
+                                     WHERE type='table' AND name='v332_audit_queue'""").fetchone()
+            if has_history:
+                from v332_all_procurements_audit import CAMPAIGN
+                verified.update(str(r[0]) for r in c.execute(
+                    "SELECT q.reg FROM v332_audit_queue q JOIN purchases p "
+                    "ON p.reg_number=q.reg WHERE q.campaign=?",(CAMPAIGN,)))
         if inn and re.fullmatch(r'\d{10}|\d{12}',inn):
             # Explicit customer search includes independently checked purchases;
             # do not imply they passed the ordinary automated audit queue.
@@ -179,15 +190,9 @@ def install(ns:dict)->None:
                 verified.update(str(row[0]) for row in extra)
         verified=sorted(verified)
         if not verified:return {'stats':{'purchases':0,'violations':0,'risks':0,'documents_found':0,'documents_checked':0},'purchases':[],'offset':0,'limit':100}
-        # Source-of-truth is the retained active legal records. The purchase
-        # counter is a denormalized cache and can shrink or become stale after
-        # offline rechecks / duplicate reconciliation.
-        confirmed_count_sql=(
-            "(SELECT COUNT(*) FROM findings f WHERE f.reg_number=p.reg_number "
-            "AND f.kind='violation') + "
-            "(SELECT COUNT(*) FROM checks ck WHERE ck.reg_number=p.reg_number "
-            "AND ck.status='violation')"
-        )
+        # Use one reconciler for dashboard counts AND general card findings:
+        # raw COUNT(findings)+COUNT(checks) counts the same violation twice.
+        from v352_dashboard_truth import dashboard_counts
         conditions=['p.reg_number IN ('+','.join('?' for _ in verified)+')']
         if not inn:
             conditions.append('p.reg_number NOT IN (SELECT reg FROM ('+MANUAL_SOURCE_SQL+'))')
@@ -197,7 +202,11 @@ def install(ns:dict)->None:
             forms=[v[:80] for v in forms if v and len(v)<81]
             if forms:conditions.append('p.org_form IN ('+','.join('?' for _ in forms)+')');args.extend(forms)
         kind=(params.get('kind') or params.get('result_kind') or '').strip()
-        if kind in ('violations','violation'):conditions.append('('+confirmed_count_sql+')>0')
+        if kind in ('violations','violation'):
+            conditions.append("""(EXISTS (SELECT 1 FROM findings f WHERE
+                f.reg_number=p.reg_number AND f.kind='violation')
+                OR EXISTS (SELECT 1 FROM checks ck WHERE
+                ck.reg_number=p.reg_number AND ck.status='violation'))""")
         if kind in ('risks','risk'):conditions.append('p.risks>0')
         code=(params.get('violation_type') or '').strip()
         if code:
@@ -233,20 +242,11 @@ def install(ns:dict)->None:
         except ValueError:raise HTTPException(400,'Некорректная страница')
         sql=' FROM purchases p WHERE '+' AND '.join(conditions)
         with db() as c:
-            result=c.execute('SELECT COUNT(*) purchases,COALESCE(SUM('+confirmed_count_sql+'),0) violations,'
-                'COALESCE(SUM(p.violations),0) legacy_violations_cache,'
-                'COALESCE(SUM(p.risks),0) risks,'
-                'COALESCE(SUM(p.documents_found),0) documents_found,'
-                'COALESCE(SUM(p.documents_checked),0) documents_checked'+sql,args).fetchone()
-            records=c.execute('SELECT p.*,('+confirmed_count_sql+') AS saved_legal_violations'
-                +sql+' ORDER BY p.last_seen DESC LIMIT ? OFFSET ?',args+[limit,offset]).fetchall()
-        items=[]
-        for row in records:
-            item=dict(row)
-            item['violations']=int(item.pop('saved_legal_violations') or 0)
-            items.append(item)
-        return {'stats':dict(result),'purchases':items,'offset':offset,'limit':limit,
-                'count_basis':'active_saved_legal_records','filter_scoped':True}
+            stats,items=dashboard_counts(c,sql,args,offset,limit)
+        return {'stats':stats,'purchases':items,'offset':offset,'limit':limit,
+                'count_basis':'unique_saved_legal_episodes',
+                'list_basis':'verified_intake_and_persistent_automatic_queue',
+                'filter_scoped':True}
     @app.get('/api/v257/manual',include_in_schema=False)
     def manual_list(offset:int=0,limit:int=80):
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
