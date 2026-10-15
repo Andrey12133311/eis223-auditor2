@@ -204,6 +204,22 @@ def overview(ns,batch):
    bridge["active"]=bool(bridge.get("active") or bridge["collector_active"])
   except Exception:
    bridge["collector_active"]=False
+  # Surface real EIS transfer progress. Saved documents alone can be
+  # audited offline; missing originals require an active official browser.
+  has_jobs=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v301_search_jobs'").fetchone()
+  for itm in items:
+   if itm["status"]!="waiting_originals":continue
+   job=c.execute("""SELECT status FROM v301_search_jobs WHERE kind='reg'
+      AND target=? ORDER BY created_at DESC LIMIT 1""",
+      (itm["reg"],)).fetchone() if has_jobs else None
+   if job and job["status"]=="leased":
+    itm["detail"]="Мост ЕИС сейчас получает оригиналы этой закупки"
+   elif job and job["status"] in ("queued","deferred"):
+    itm["detail"]="Запрос оригиналов направлен в очередь загрузчика ЕИС"
+   elif not bridge.get("active"):
+    itm["detail"]="Нужен подключённый загрузчик ЕИС; сервер сам файлы не скачивает"
+   else:
+    itm["detail"]="Ожидается постановка задания на загрузку оригиналов ЕИС"
   worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
   return {"worker":worker,"bridge":bridge,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
