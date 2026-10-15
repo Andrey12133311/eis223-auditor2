@@ -76,18 +76,6 @@ async def tick(ns):
     except Exception as e:
      state="retry";detail=type(e).__name__
     c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",(state,detail,now(),b["id"],reg))
-   # Mark complete only after the EIS original-review worker confirms completion.
-   from v295_eis_originals import root
-   submitted=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status=? LIMIT 500",(b["id"],"submitted")).fetchall()
-   for item in submitted:
-    reg=item["reg"]
-    try:
-     receipt=root()/"eis223_official_review_jobs"/(reg+".json")
-     review=json.loads(receipt.read_text(encoding="utf-8"))
-     if review.get("reg_number")==reg and review.get("status")=="completed":
-      c.execute("UPDATE thematic_items SET status=?,detail=?,updated_at=? WHERE batch_id=? AND reg=?",("completed","Проверка оригиналов завершена",now(),b["id"],reg))
-    except (OSError,ValueError,TypeError):
-     pass
    # Revisit items after EIS originals arrive, without counting them as reviewed.
    c.execute("UPDATE thematic_items SET status='queued' WHERE batch_id=? AND status IN ('waiting_originals','waiting_engine','retry') AND updated_at<?",(b["id"],datetime.fromtimestamp(time.time()-600,timezone.utc).isoformat()))
   c.commit()
@@ -130,21 +118,7 @@ def overview(ns,batch):
    "contract":r"договор|контракт|оплат",
    "notices":r"извещени|публикац",
    "evaluation":r"оценк|критери|балл"}
-  matches=[]
-  try:
-   columns={x[1] for x in c.execute("PRAGMA table_info(findings)")}
-   if not {"reg_number","title","kind"}.issubset(columns):
-    raise sqlite3.OperationalError("findings schema missing")
-   law="f.law" if "law" in columns else "'' AS law"
-   evidence="f.evidence" if "evidence" in columns else "'' AS evidence"
-   query="SELECT f.reg_number,f.title,"+law+","+evidence+" FROM findings f JOIN thematic_items t ON t.reg=f.reg_number WHERE t.batch_id=? AND t.status='completed' AND f.kind='violation' LIMIT 2000"
-   rows=c.execute(query,(batch,)).fetchall()
-   for f in rows:
-    text=" ".join(str(f[k] or "") for k in ("title","law"))
-    groups=[k for k in cats if re.search(patterns[k],text,re.I)]
-    if groups:matches.append({"reg":f["reg_number"],"title":f["title"],"categories":groups,"evidence":str(f["evidence"] or "")[:350]})
-  except sqlite3.OperationalError:
-   pass
+  matches=[{"reg":r["reg"],"title":r["title"],"categories":[r["category"]],"evidence":str(r["evidence"] or "")[:350]} for r in c.execute("SELECT reg,title,category,evidence FROM thematic_findings WHERE batch_id=? LIMIT 100",(batch,)).fetchall()]
   try:
    from v301_search_jobs import _bridge
    bridge=_bridge(ns)
