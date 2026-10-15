@@ -326,7 +326,7 @@ def install(ns):
                 verified=await asyncio.to_thread(reconcile_document_rows,reg)
                 checked=(int(verified["checked"]) if verified is not None
                          else int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0)
-                update_review(reg,"completed" if checked>=received else "partial",
+                update_review(reg,"completed" if received>=total and checked>=received else "partial",
                               originals_received=received,checked_documents=checked,
                               findings=result.get("findings") if isinstance(result,dict) else None,
                               deduplicated=bool(verified is not None))
@@ -338,7 +338,7 @@ def install(ns):
 
     def enqueue_review(reg,force=False):
         expected,received=review_counts(reg)
-        if not expected or received<expected:
+        if not expected or received==0:
             return {"reg_number":reg,"status":"waiting_for_originals",
                     "originals_received":received,"originals_expected":expected}
         task=review_jobs.get(reg)
@@ -346,7 +346,7 @@ def install(ns):
             return {**review_state(reg),"originals_expected":expected}
         previous=review_state(reg)
         if (not force and previous.get("status")=="completed"
-            and previous.get("originals_received")==received):
+            and previous.get("originals_received")==received and received>=expected):
             return {**previous,"originals_expected":expected}
         data=update_review(reg,"queued",originals_received=received,
                            originals_expected=expected)
