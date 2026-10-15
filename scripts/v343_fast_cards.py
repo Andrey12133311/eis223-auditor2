@@ -98,7 +98,7 @@ def render_thematic_panel(reg,thematic):
       "waiting_engine":"Ожидается обработчик","retry":"Повторная попытка",
       "excluded_company":"Форма заказчика не соответствует выборке"}
     result=['<section class="panel" id="thematic-results">',
-      '<h2>Нарушения тематической проверки: '+str(len(rows))+'</h2>',
+      '<h2>Нарушения: '+str(len(rows))+'</h2>',
       '<div class="grid"><div><b>Состояние проверки:</b> '+esc(names.get(state,state))+
       '</div><div><b>Выбранные направления:</b> '+
       esc(', '.join(labels.get(c,c) for c in selected) or "Не указаны")+
@@ -128,13 +128,11 @@ def render_thematic_panel(reg,thematic):
 def render(reg,data,thematic=None):
     p,findings,checks,docs,ftotal,ctotal,dtotal=data
     from v333_dedup_ui import collapse
-    # Both independent tables may describe the SAME documented legal event.
-    # Reconcile by title, law, document and substantive proof, not by the
-    # source row's code or a different start of the quoted excerpt.
+    from v352_dashboard_truth import collapse_legal_events
     candidates=[dict(f) for f in findings]
     candidates.extend({**c, "title":c.get("item") or "Нарушение"}
                       for c in checks if c.get("status")=="violation")
-    unique=collapse(candidates,field="title")
+    unique=collapse_legal_events(candidates)
     violation=[detail_block(item,"legal",item.get("title"),item.get("law"),
           item.get("evidence"),item.get("document"),item.get("source_url"),
           item.get("law_url")) for item in unique]
@@ -161,11 +159,11 @@ def render(reg,data,thematic=None):
     nav=('<nav><a href="/">Все закупки</a><a href="/manual-purchases">Самостоятельные проверки</a>'
          '<a href="/thematic">Тематические проверки</a></nav>')
     if thematic:
-        nav=('<nav><a href="/thematic#'+esc(thematic["batch"])+
-            '">← К тематической очереди</a><a href="/check-new/'+esc(reg)+
-            '">Общая карточка проверки</a><a href="/">Все закупки</a></nav>')
+        nav='<nav><a href="/thematic#'+esc(thematic["batch"])+
+            '">← К тематической очереди</a></nav>'
     thematic_html=render_thematic_panel(reg,thematic)
     actions='<p><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>' if violation else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
+    if thematic:actions=''
     checked='<p class="meta">'+str(len(reviews))+' вопросов требуют дополнительной юридической проверки.</p>'
     for x in reviews[:50]:
         checked+=detail_block(x,'review',x.get('item'),x.get('law'),x.get('evidence'),x.get('document'),x.get('source_url'),x.get('law_url'))
@@ -181,15 +179,21 @@ def render(reg,data,thematic=None):
                '. Исходных подтверждённых записей: '+str(ftotal+ctotal)+
                '. Повторы объединены только в интерфейсе; доказательства сохранены в базе.</p>')
     else:notes=''
+    # The thematic card is its own audit. Never append general findings or
+    # general "review" cards underneath the thematic violations.
+    general_section=('' if thematic else
+        '<section class="panel"><h2>'+esc(status)+'</h2>'+actions+notes+
+        (''.join(violation) if violation else
+        '<p>Подтверждённых нарушений в сохранённых результатах пока нет. '
+        'Это не означает, что нарушений не существует.</p>')+'</section>')
+    review_section='' if thematic else '<section class="panel"><h2>Требует проверки</h2>'+checked+'</section>'
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'
      '<meta name="viewport" content="width=device-width,initial-scale=1">'
      '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+'</head><body>'
      '<header><h1>'+('Карточка тематической проверки № ' if thematic else 'Карточка проверки закупки № ')+esc(reg)+'</h1></header><main>'+nav
      +'<section class="panel"><h2>Сведения о закупке</h2>'+basic+'</section>'
      +thematic_html
-     +'<section class="panel"><h2>'+esc(status)+'</h2>'+actions+notes+
-        (''.join(violation) if violation else '<p>Подтверждённых нарушений в сохранённых результатах пока нет. Это не означает, что нарушений не существует.</p>')+'</section>'
-     +'<section class="panel"><h2>Требует проверки</h2>'+checked+'</section>'
+     +general_section+review_section
      +'<section class="panel"><h2>Документы ЕИС ('+str(dtotal)+')</h2>'+docs_html+'</section>'
      +'</main></body></html>')
 
