@@ -18,6 +18,9 @@ CATEGORIES={
 "contract":"Заключение и исполнение договора",
 "notices":"Сведения извещения",
 "evaluation":"Оценка заявок"}
+COMPANY_FORM=re.compile(r"^\s*(?:ООО|АО|ПАО|ОАО|ЗАО|ОБЩЕСТВО\s+С\s+ОГРАНИЧЕННОЙ\s+ОТВЕТСТВЕННОСТЬЮ|(?:ПУБЛИЧНОЕ\s+)?АКЦИОНЕРНОЕ\s+ОБЩЕСТВО|ЗАКРЫТОЕ\s+АКЦИОНЕРНОЕ\s+ОБЩЕСТВО)\b",re.I)
+def business_company(name):
+ return bool(COMPANY_FORM.search(str(name or "").strip().strip('"«»')))
 def db(ns):
  c=ns["conn"]();c.row_factory=sqlite3.Row;return c
 def init(ns):
@@ -38,9 +41,10 @@ async def tick(ns):
   batches=c.execute("SELECT * FROM thematic_batches WHERE status='active'").fetchall()
   for b in batches:
    # Existing and newly ingested EIS purchases are automatically added.
-   rows=c.execute("SELECT reg_number FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
+   rows=c.execute("SELECT reg_number,customer FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
    for r in rows:
-    c.execute("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",(b["id"],r[0],now()))
+    if business_company(r["customer"]):
+     c.execute("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",(b["id"],r["reg_number"],now()))
    pending=c.execute("SELECT reg FROM thematic_items WHERE batch_id=? AND status='queued' LIMIT 20",(b["id"],)).fetchall()
    for p in pending:
     reg=p["reg"]
