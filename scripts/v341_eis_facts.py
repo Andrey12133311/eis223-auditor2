@@ -158,12 +158,12 @@ def document_facts(docs):
                 pairs.append([compact(line), compact(lines[i+1]), line+" "+lines[i+1]])
         # Dates must be explicitly labelled; never infer from unrelated dates.
         for i, line in enumerate(lines):
-            if not re.search(r"срок(?:и|а)?\\s+(?:подачи|при[её]ма)\\s+заявок", line, re.I):
+            if not re.search(r"срок(?:и|а)?\s+(?:подачи|при[её]ма)\s+заявок", line, re.I):
                 continue
             segment = " ".join(lines[i:i+5])[:900]
-            for key, marker in (("submission_start", r"(?:начал[оа]|с)\\s*(?:подачи|при[её]ма)?"),
-                                ("submission_end", r"(?:окончани[ея]|до)\\s*(?:подачи|при[её]ма)?")):
-                match = re.search(marker+r"\\s*[:：–—-]?\\s*(?P<date>"+DATE_TOKEN+r")", segment, re.I)
+            for key, marker in (("submission_start", r"(?:начал[оа]|с)\s*(?:подачи|при[её]ма)?"),
+                                ("submission_end", r"(?:окончани[ея]|до)\s*(?:подачи|при[её]ма)?")):
+                match = re.search(marker+r"\s*[:：–—-]?\s*(?P<date>"+DATE_TOKEN+r")", segment, re.I)
                 if not match:
                     continue
                 parsed_date = parse_day(match["date"])
