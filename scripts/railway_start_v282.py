@@ -56,6 +56,7 @@ import v347_text_cache
 import v348_cross_document_legal
 import v342_thematic_queue
 import v345_thematic_accelerator
+import v356_collector_delivery
 import v343_fast_cards
 import v337_all_legal_categories
 import v339_fact_comparison
@@ -228,6 +229,7 @@ def main():
     v348_cross_document_legal.install(vars(entry))
     v342_thematic_queue.install(vars(entry))
     v345_thematic_accelerator.install(vars(entry))
+    v356_collector_delivery.install(vars(entry))
     # Keep this last: a read-only card can now open without the legacy on-demand legal pipeline.
     v343_fast_cards.install(vars(entry))
     try:
