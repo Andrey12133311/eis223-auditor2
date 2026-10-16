@@ -147,17 +147,26 @@ async def independent_review(ns,reg,categories):
  analyzer=ns.get("analyze")
  if not callable(analyzer):raise RuntimeError("Main legal analyzer is unavailable")
  findings=await asyncio.to_thread(analyzer,p,verified)
- names={str(d.get("name") or "") for d in verified}
- urls={str((d.get("meta") or {}).get("source_url") or "")
+ # Match document provenance robustly: verified originals can be stored
+ # under a local filename while the analyzer cites the EIS display name.
+ import os
+ def norm_name(value):
+    return os.path.basename(str(value or "").replace("\\","/")).strip().casefold()
+ names={norm_name(d.get("name")) for d in verified}
+ names.update(norm_name(d.get("local_path")) for d in verified)
+ names.update(norm_name((d.get("meta") or {}).get("filename")) for d in verified)
+ names.discard("")
+ urls={str((d.get("meta") or {}).get("source_url") or "").strip()
        for d in verified}
+ urls.discard("")
  selected=[]
  for f in findings if isinstance(findings,list) else []:
     if not isinstance(f,dict) or f.get("kind")!="violation":continue
     if not str(f.get("law") or "").strip():continue
     # Provenance requirements are exactly as strict as the main engine:
     # neither a plausible title nor a local unverified file is enough.
-    if not ((f.get("document") and str(f["document"]) in names) or
-            (f.get("source_url") and str(f["source_url"]) in urls)):
+    if not ((f.get("document") and norm_name(f["document"]) in names) or
+            (f.get("source_url") and str(f["source_url"]).strip() in urls)):
        continue
     category=match_legal_category(f,categories)
     if category is None:continue
