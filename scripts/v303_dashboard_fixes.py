@@ -102,6 +102,21 @@ window.addEventListener('click',function(e){
  e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
  reset();
 },true);
+function removePriceColumn(){
+ if(!pageMain())return;
+ const rows=$('rows');
+ if(!rows)return;
+ const table=rows.closest('table')||rows.querySelector('table');
+ if(!table)return;
+ const headings=[...table.querySelectorAll('thead tr:first-child th')];
+ const index=headings.findIndex(th=>/^(?:стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\\s+/g,' ').trim()));
+ if(index<0)return;
+ // Hide only the price column of the main procurement table; leave data and filters intact.
+ for(const tr of table.querySelectorAll('tr')){
+  const cells=[...tr.children].filter(el=>el.matches('th,td'));
+  if(cells[index])cells[index].style.setProperty('display','none','important');
+ }
+}
 function canonicalize(){
  const select=$('v257-violation-type');
  if(!select)return;
@@ -118,13 +133,13 @@ function canonicalize(){
  const legacy=$('manual');if(legacy)legacy.hidden=true;
 }
 function init(){
- canonicalize();
+ canonicalize();removePriceColumn();
  let scheduled=false;
  const root=document.querySelector('main')||document.body;
  if(!root)return;
  new MutationObserver(()=>{
   if(!scheduled){scheduled=true;requestAnimationFrame(()=>{
-    scheduled=false;canonicalize()
+    scheduled=false;canonicalize();removePriceColumn()
   })}
  }).observe(root,{childList:true,subtree:true});
 }
