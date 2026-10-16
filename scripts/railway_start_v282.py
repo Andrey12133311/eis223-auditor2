@@ -58,6 +58,7 @@ import v342_thematic_queue
 import v345_thematic_accelerator
 import v356_collector_delivery
 import v357_storage_guard
+import v358_archive_gc
 import v343_fast_cards
 import v337_all_legal_categories
 import v339_fact_comparison
@@ -172,6 +173,7 @@ def _guard_disk_full_startup(app):
 
 def main():
     _reclaim_regenerable_cache()
+    v358_archive_gc.reclaim(Path(os.environ.get('EIS223_DATA_DIR') or '/data'))
     v357_storage_guard.inspect_disk(os.environ.get('EIS223_DATA_DIR') or '/data')
     folder,count=restore()
     os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_BROWSER_ONLY"
