@@ -109,7 +109,8 @@ function removePriceColumn(){
  const table=rows.closest('table')||rows.querySelector('table');
  if(!table)return;
  const headings=[...table.querySelectorAll('thead tr:first-child th')];
- const indices=headings.map((th,i)=>/^(?:проверка|стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\s+/g,' ').trim())?i:-1).filter(i=>i>=0);
+ for(const th of headings){if((th.textContent||'').trim().toLowerCase()==='проверка')th.textContent='Нарушения';}
+ const indices=headings.map((th,i)=>/^(?:стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\s+/g,' ').trim())?i:-1).filter(i=>i>=0);
  if(!indices.length)return;
  for(const tr of table.querySelectorAll('tr')){
   const cells=[...tr.children].filter(el=>el.matches('th,td'));
