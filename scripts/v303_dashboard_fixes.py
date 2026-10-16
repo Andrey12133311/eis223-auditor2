@@ -116,6 +116,18 @@ function removePriceColumn(){
   for(const index of indices)if(cells[index])cells[index].style.setProperty('display','none','important');
  }
 }
+function removeRepeatedManualSubtitle(){
+ const title=[...document.querySelectorAll('h1,h2,h3')].find(el=>(el.textContent||'').trim()==='Самостоятельные проверки закупок');
+ if(!title)return;
+ const section=title.closest('header,section')||title.parentElement;
+ if(!section)return;
+ for(const el of section.querySelectorAll('p,div,span,h2,h3,h4')){
+  if(el===title||el.contains(title))continue;
+  if((el.textContent||'').trim()==='Самостоятельные проверки' && el.children.length===0){
+   el.style.setProperty('display','none','important');
+  }
+ }
+}
 function canonicalize(){
  const select=$('v257-violation-type');
  if(!select)return;
@@ -132,13 +144,13 @@ function canonicalize(){
  const legacy=$('manual');if(legacy)legacy.hidden=true;
 }
 function init(){
- canonicalize();removePriceColumn();
+ canonicalize();removePriceColumn();removeRepeatedManualSubtitle();
  let scheduled=false;
  const root=document.querySelector('main')||document.body;
  if(!root)return;
  new MutationObserver(()=>{
   if(!scheduled){scheduled=true;requestAnimationFrame(()=>{
-    scheduled=false;canonicalize();removePriceColumn()
+    scheduled=false;canonicalize();removePriceColumn();removeRepeatedManualSubtitle()
   })}
  }).observe(root,{childList:true,subtree:true});
 }
