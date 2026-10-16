@@ -109,9 +109,8 @@ function removePriceColumn(){
  const table=rows.closest('table')||rows.querySelector('table');
  if(!table)return;
  const headings=[...table.querySelectorAll('thead tr:first-child th')];
- const index=headings.findIndex(th=>/^(?:стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\\s+/g,' ').trim()));
+ const index=headings.findIndex(th=>/^(?:проверка|стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\\s+/g,' ').trim()));
  if(index<0)return;
- // Hide only the price column of the main procurement table; leave data and filters intact.
  for(const tr of table.querySelectorAll('tr')){
   const cells=[...tr.children].filter(el=>el.matches('th,td'));
   if(cells[index])cells[index].style.setProperty('display','none','important');
