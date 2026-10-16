@@ -109,11 +109,11 @@ function removePriceColumn(){
  const table=rows.closest('table')||rows.querySelector('table');
  if(!table)return;
  const headings=[...table.querySelectorAll('thead tr:first-child th')];
- const index=headings.findIndex(th=>/^(?:проверка|стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\\s+/g,' ').trim()));
- if(index<0)return;
+ const indices=headings.map((th,i)=>/^(?:проверка|стоимость(?: закупки)?|нмцд|цена(?: договора| закупки)?|нмцк)$/i.test((th.textContent||'').replace(/\s+/g,' ').trim())?i:-1).filter(i=>i>=0);
+ if(!indices.length)return;
  for(const tr of table.querySelectorAll('tr')){
   const cells=[...tr.children].filter(el=>el.matches('th,td'));
-  if(cells[index])cells[index].style.setProperty('display','none','important');
+  for(const index of indices)if(cells[index])cells[index].style.setProperty('display','none','important');
  }
 }
 function canonicalize(){
