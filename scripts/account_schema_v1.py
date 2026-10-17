@@ -154,20 +154,7 @@ CREATE TABLE IF NOT EXISTS account_manager_tasks (
     id UUID PRIMARY KEY,
     manager_id UUID NOT NULL REFERENCES account_users(id),
     user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}$'),
     title TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',
     due_date DATE,
