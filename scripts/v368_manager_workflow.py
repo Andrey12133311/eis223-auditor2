@@ -114,6 +114,9 @@ def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
             db.execute("DELETE FROM account_manager_teams WHERE user_id=%s",(target,))
         db.execute("UPDATE account_users SET role=%s WHERE id=%s",(data.role,target))
         _audit(db,admin,target,"role",target,"set_"+data.role)
+        if row[0] != data.role:
+            from scripts.account_notifications_v1 import enqueue_role_change
+            enqueue_role_change(db,target,data.role,uuid4().hex)
     return {"id":str(target),"role":data.role}
 
 @router.put("/admin/team/{user_id}")
