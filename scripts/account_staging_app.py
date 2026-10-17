@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from scripts.account_api_v1 import router as auth, admin_router
 from scripts.account_workspace_v1 import router as workspace
 from scripts.account_page_routes_v1 import router as pages
+from scripts.account_private_api_v1 import router as private_resources
 from scripts.account_migrations_v1 import initialize_schema
 from scripts.account_asgi_gate_v1 import AccountGateMiddleware
 from scripts.account_api_v1 import connect
@@ -17,6 +18,7 @@ app.include_router(auth)
 app.include_router(admin_router)
 app.include_router(workspace)
 app.include_router(pages)
+app.include_router(private_resources)
 
 
 @app.get("/healthz")
