@@ -59,7 +59,7 @@ def test_cabinet_and_home():
     assert b'/api/thematic/history' in ui
     assert b'eis361-hero' not in ui
     assert '/me/memo-archive' in ui.decode()
-    assert '/account/memos' in MEMOS or 'Мои служебные записки' in MEMOS
+    assert 'Архив служебных записок' in MEMOS and '/me/memo-archive' in MEMOS
     shell = home_shell()
     assert b'eis361-home-style' in shell
     assert b'eis361-home-script' in shell
