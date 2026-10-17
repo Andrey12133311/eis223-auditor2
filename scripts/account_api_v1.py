@@ -58,13 +58,13 @@ def register(data: Credentials, request: Request):
     require_origin(request)
     try:
         email = normalize_email(data.email)
-        encoded = hash_password(data.password)
     except ValueError:
         raise HTTPException(422, "Некорректный адрес почты или пароль")
     with connect() as db:
         allowed = request_allowed(db, request, email, "register")
     if not allowed:
         raise HTTPException(429, "Слишком много попыток. Повторите позже")
+    encoded = hash_password(data.password)
     with connect() as db:
         create_pending_user(db, email, encoded)
     return {"status": "pending", "message": "Заявка ожидает подтверждения администратора"}
