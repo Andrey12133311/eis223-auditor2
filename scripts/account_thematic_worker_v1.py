@@ -3,8 +3,6 @@
 No EIS requests are performed by this module. Call only from a trusted worker,
 never from a user-facing route.
 """
-from datetime import datetime, timezone
-
 
 def claim_next(db):
     """Atomically claim one pending job without blocking another worker."""
@@ -42,3 +40,25 @@ def complete_job(db, user_id, batch_id, reg_number, attempts, success):
         (state,user_id,batch_id,reg_number,attempts),
     ).fetchone()
     return row is not None
+
+
+def requeue_stale(db, max_attempts=3, stale_minutes=30):
+    """Recover abandoned claims with bounded retries.
+
+    Run periodically in a trusted worker transaction. Attempt fencing in
+    complete_job prevents a late worker from finishing a reclaimed attempt.
+    """
+    if not isinstance(max_attempts, int) or max_attempts < 1:
+        raise ValueError("Invalid retry limit")
+    if not isinstance(stale_minutes, int) or stale_minutes < 1:
+        raise ValueError("Invalid stale timeout")
+    rows = db.execute(
+        """UPDATE account_thematic_jobs AS j
+           SET status=CASE WHEN attempts >= %s THEN 'failed' ELSE 'queued' END,
+               finished_at=CASE WHEN attempts >= %s THEN CURRENT_TIMESTAMP ELSE NULL END
+           WHERE j.status='running'
+             AND j.started_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+           RETURNING j.user_id,j.batch_id,j.reg_number,j.status""",
+        (max_attempts,max_attempts,stale_minutes),
+    ).fetchall()
+    return [tuple(row) for row in rows]
