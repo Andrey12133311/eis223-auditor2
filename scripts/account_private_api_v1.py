@@ -182,3 +182,56 @@ def remove_personal_batch_procurement(batch_id: str, reg_number: str, request: R
     if row is None:
         raise HTTPException(404, "Закупка в очереди не найдена")
     return {"removed": True, "batch_id": batch_id, "reg_number": row[0]}
+
+
+@router.post("/thematic-batches/{batch_id}/jobs/{reg_number}", status_code=202)
+def enqueue_personal_audit(batch_id: str, reg_number: str, request: Request, response: Response):
+    """Persist a user-owned audit request; worker execution is not yet connected."""
+    require_origin(request)
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    from scripts.account_workspace_v1 import REG_NUMBER
+    if not _personal_batch_id(batch_id):
+        raise HTTPException(404, "Личная очередь не найдена")
+    if not REG_NUMBER.fullmatch(reg_number):
+        raise HTTPException(422, "Некорректный номер закупки")
+    with connect() as db:
+        if not owns_batch(db, batch_id, owner_id):
+            raise HTTPException(404, "Личная очередь не найдена")
+        row = db.execute(
+            """INSERT INTO account_thematic_jobs(user_id,batch_id,reg_number,status)
+               SELECT user_id,batch_id,reg_number,'queued'
+               FROM account_thematic_procurements
+               WHERE user_id=%s AND batch_id=%s AND reg_number=%s
+               ON CONFLICT DO NOTHING RETURNING status""",
+            (owner_id, batch_id, reg_number),
+        ).fetchone()
+        if row is None:
+            existing = db.execute(
+                """SELECT status FROM account_thematic_jobs
+                   WHERE user_id=%s AND batch_id=%s AND reg_number=%s""",
+                (owner_id, batch_id, reg_number),
+            ).fetchone()
+            if existing is None:
+                raise HTTPException(404, "Закупка не добавлена в личную очередь")
+            status = existing[0]
+        else:
+            status = row[0]
+    return {"batch_id": batch_id, "reg_number": reg_number, "status": status, "execution_started": status != "queued"}
+
+
+@router.get("/thematic-batches/{batch_id}/jobs")
+def list_personal_jobs(batch_id: str, request: Request, response: Response):
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not _personal_batch_id(batch_id):
+        raise HTTPException(404, "Личная очередь не найдена")
+    with connect() as db:
+        if not owns_batch(db, batch_id, owner_id):
+            raise HTTPException(404, "Личная очередь не найдена")
+        rows = db.execute(
+            """SELECT reg_number,status,attempts FROM account_thematic_jobs
+               WHERE user_id=%s AND batch_id=%s ORDER BY created_at DESC LIMIT 500""",
+            (owner_id, batch_id),
+        ).fetchall()
+    return [{"reg_number": r[0], "status": r[1], "attempts": r[2]} for r in rows]
