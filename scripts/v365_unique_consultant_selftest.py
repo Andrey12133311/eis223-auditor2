@@ -111,7 +111,7 @@ def test_thematic_and_main_counts():
                        (batch,'["contract"]',"2026-10-17T12:00:00+00:00","active"))
             for name,doc in (("Нарушен срок оплаты МСП","Договор.pdf"),
                              ("Срок оплаты МСП превышен","Документация.docx"),
-                             ("Нарушен срок оплаты МСП","Копия договора.pdf")):
+                             ("Нарушение срока оплаты МСП","Копия договора.pdf")):
                 db.execute(
                     "INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence,document) "
                     "VALUES (?,?,?,?,?,?,?)",
