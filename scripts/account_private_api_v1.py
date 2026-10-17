@@ -110,3 +110,50 @@ def create_personal_batch(request: Request, response: Response):
             (owner_id, batch_id),
         )
     return {"batch_id": batch_id, "status": "saved", "execution_started": False}
+
+
+def _personal_batch_id(batch_id: str) -> bool:
+    if not batch_id.startswith("personal-") or len(batch_id) != 41:
+        return False
+    try:
+        return UUID(batch_id[9:]).hex == batch_id[9:]
+    except ValueError:
+        return False
+
+
+@router.get("/thematic-batches/{batch_id}/procurements")
+def personal_batch_procurements(batch_id: str, request: Request, response: Response):
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not _personal_batch_id(batch_id):
+        raise HTTPException(404, "Личная очередь не найдена")
+    with connect() as db:
+        if not owns_batch(db, batch_id, owner_id):
+            raise HTTPException(404, "Личная очередь не найдена")
+        rows = db.execute(
+            """SELECT reg_number FROM account_thematic_procurements
+               WHERE user_id=%s AND batch_id=%s ORDER BY created_at DESC LIMIT 500""",
+            (owner_id, batch_id),
+        ).fetchall()
+    return [{"reg_number": row[0]} for row in rows]
+
+
+@router.post("/thematic-batches/{batch_id}/procurements/{reg_number}", status_code=201)
+def add_personal_batch_procurement(batch_id: str, reg_number: str, request: Request, response: Response):
+    require_origin(request)
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not _personal_batch_id(batch_id):
+        raise HTTPException(404, "Личная очередь не найдена")
+    from scripts.account_workspace_v1 import REG_NUMBER
+    if not REG_NUMBER.fullmatch(reg_number):
+        raise HTTPException(422, "Некорректный номер закупки")
+    with connect() as db:
+        if not owns_batch(db, batch_id, owner_id):
+            raise HTTPException(404, "Личная очередь не найдена")
+        db.execute(
+            """INSERT INTO account_thematic_procurements(user_id,batch_id,reg_number)
+               VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (owner_id, batch_id, reg_number),
+        )
+    return {"batch_id": batch_id, "reg_number": reg_number, "saved": True, "execution_started": False}
