@@ -215,20 +215,7 @@ CREATE INDEX IF NOT EXISTS account_manager_actions_recent
 CREATE TABLE IF NOT EXISTS account_case_notes (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}$'),
     finding_key TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL CHECK (length(body) BETWEEN 4 AND 3000),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
