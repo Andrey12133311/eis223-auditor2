@@ -244,6 +244,7 @@ def main():
     print('V305 BOOT_UI_FIXED memo_format=odt-only filters=canonical card_nav=working',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
     if os.environ.get("EIS223_ACCOUNTS_MOUNT","").lower()=="true":
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from scripts.account_production_v1 import install as mount_accounts_to_eis
         mount_accounts_to_eis(entry.app)
     _guard_disk_full_startup(entry.app)
