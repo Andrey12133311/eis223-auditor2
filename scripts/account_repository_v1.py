@@ -29,7 +29,7 @@ def approve_user(db, actor_id, user_id):
     row = db.execute(
         """UPDATE account_users SET status='approved',
            approved_at=CURRENT_TIMESTAMP,approved_by=%s
-           WHERE id=%s AND status='pending' RETURNING id""",
+           WHERE id=%s AND status='pending' AND email_verified_at IS NOT NULL RETURNING id""",
         (actor_id, user_id)
     ).fetchone()
     if row:
