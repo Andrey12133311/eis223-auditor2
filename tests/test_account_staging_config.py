@@ -16,6 +16,12 @@ class StagingConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'identity database'):
                 startup()
 
+    def test_rejects_https_prefix_spoofing(self):
+        env={'EIS223_AUTH_ENFORCE':'true','EIS223_IDENTITY_DATABASE_URL':'postgresql://test','EIS223_PUBLIC_ORIGIN':'https://trusted.example@evil.example'}
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'HTTPS'):
+                startup()
+
     def test_requires_https_origin(self):
         with patch.dict(os.environ, {'EIS223_AUTH_ENFORCE':'true', 'EIS223_IDENTITY_DATABASE_URL':'postgresql://test'}, clear=True):
             with self.assertRaisesRegex(RuntimeError, 'HTTPS'):
