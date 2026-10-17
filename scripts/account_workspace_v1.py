@@ -45,3 +45,29 @@ def remove_procurement(reg_number: str, request: Request):
             (user[0], reg_number)
         )
     return {"deleted": True}
+
+
+@router.get("/thematic-batches")
+def my_thematic_batches(request: Request):
+    """Only return queues explicitly assigned to the authenticated user."""
+    user = current_account(request)
+    with connect() as db:
+        rows = db.execute(
+            """SELECT id, name, status FROM account_thematic_batches
+               WHERE user_id=%s ORDER BY created_at DESC LIMIT 100""",
+            (user[0],),
+        ).fetchall()
+    return [{"id": str(r[0]), "name": r[1], "status": r[2]} for r in rows]
+
+
+@router.get("/memos")
+def my_memos(request: Request):
+    """Only return memo metadata owned by the authenticated user."""
+    user = current_account(request)
+    with connect() as db:
+        rows = db.execute(
+            """SELECT id, title FROM account_memos
+               WHERE user_id=%s ORDER BY created_at DESC LIMIT 100""",
+            (user[0],),
+        ).fetchall()
+    return [{"id": str(r[0]), "title": r[1]} for r in rows]
