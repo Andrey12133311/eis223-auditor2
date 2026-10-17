@@ -580,7 +580,6 @@ function render(){
     };
     actions.append(link);
    }
-   const decision=decisions[item.id];
    if(!decision||decision.status==='returned'){
     const button=document.createElement('button');button.type='button';
     button.textContent=decision?'Повторно на согласование':'Отправить руководителю';
