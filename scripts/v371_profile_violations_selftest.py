@@ -39,6 +39,11 @@ class Elements(HTMLParser):
             if value in self.ids:self.duplicates.append(value)
             self.ids.add(value)
 
+def ElementsFromHTML(content):
+    parser=Elements()
+    parser.feed(content)
+    return parser.ids
+
 
 def names():
     assert full_name("Иванов","Иван","Иванович")=="Иванов Иван Иванович"
@@ -108,6 +113,22 @@ def pages():
     assert "/me/campaign-goals/violations" in render_workbench()
     homepage=site_header("user").decode("utf-8")
     assert "Нарушения тематических проверок" in homepage
+    # Name must load automatically on the authenticated homepage, not only
+    # after the user opens the personal cabinet.
+    for key in ("eis223-topbar-fullname","eis223-topbar-role",
+                "eis223-profile-prompt","eis223-profile-prompt-form",
+                "eis223-profile-save","eis223-owner-fullname"):
+        assert key in ElementsFromHTML(homepage),key
+    assert homepage.rfind("refreshMyName();") > homepage.rfind("refresh();")
+    assert "if(!person.completed&&!profilePromptDismissed)" in homepage
+    assert "showProfileIdentity(person.full_name,person.role)" in homepage
+    assert "method:'PUT',credentials:'same-origin'" in homepage
+    assert "textContent=title" in homepage
+    assert "role=\"dialog\"" in homepage
+    register_markup=login_portal("register")
+    assert "После одобрения администратора эти данные будут видны сразу" in register_markup
+    assert "name=\"last_name\"" in register_markup
+    assert "name=\"first_name\"" in register_markup
     assert "/me/campaign-goals/violations" in homepage
     assert "Результаты тематических проверок" not in homepage or True
 
