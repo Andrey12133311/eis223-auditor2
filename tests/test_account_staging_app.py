@@ -4,7 +4,7 @@ from scripts.account_staging_app import app, application
 
 class AccountStagingAppTests(unittest.TestCase):
     def test_staging_app_has_expected_routes(self):
-        paths = {route.path for route in app.routes}
+        paths = {route.path for route in app.routes if hasattr(route, 'path')}
         for path in (
             "/auth/register", "/auth/login", "/auth/logout", "/auth/me",
             "/admin/accounts/pending", "/admin/accounts/{user_id}/approve",
@@ -17,7 +17,7 @@ class AccountStagingAppTests(unittest.TestCase):
         self.assertIs(application.app, app)
 
     def test_no_legacy_eis_routes_are_added(self):
-        paths = {route.path for route in app.routes}
+        paths = {route.path for route in app.routes if hasattr(route, 'path')}
         self.assertNotIn("/api/thematic/history", paths)
         self.assertNotIn("/api/v301/search", paths)
 
