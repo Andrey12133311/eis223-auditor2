@@ -3,6 +3,8 @@ and the old oversized blue promotional panel cannot return.
 This suite never contacts PostgreSQL, Railway or the EIS and never edits data.
 """
 import asyncio
+import os
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from scripts.account_session_policy_v1 import SESSION_COOKIE, SESSION_MAX_AGE, cookie_options
@@ -72,7 +74,8 @@ def test_login_page_never_autoredirects():
     scope = {"type": "http", "method": "GET", "path": "/account/login",
              "headers": [(b"cookie", b"eis223_session_v2=" + b"x" * 60)]}
     # Even with a cookie, explicitly opening /account/login must show the form.
-    asyncio.run(gate(scope, lambda: None, send))
+    with patch.dict(os.environ, {"EIS223_AUTH_ENFORCE": "true"}):
+        asyncio.run(gate(scope, lambda: None, send))
     assert results[0]["status"] == 200
     assert results[-1]["body"] == b"<html>password</html>"
 
