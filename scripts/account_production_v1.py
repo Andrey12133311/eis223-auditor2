@@ -60,14 +60,14 @@ def shared_read_route(path, method):
 
 
 _ACCOUNT_NAV = (
-    b'<nav data-eis223-account-nav="1" aria-label="Навигация ЕИС Аудитор" '
-    b'style="padding:12px 5%;background:#eef3f8;border-bottom:1px solid #d5e0ec;'
-    b'font:600 14px system-ui;display:flex;gap:20px;flex-wrap:wrap">'
-    b'<a href="/">Общая проверка</a>'
-    b'<a href="/account/login">Войти</a>'
-    b'<a href="/account/register">Регистрация</a>'
-    b'<a href="/account/home">Личный кабинет</a></nav>'
-)
+    '<nav data-eis223-account-nav="1" aria-label="Навигация ЕИС Аудитор" '
+    'style="padding:12px 5%;background:#eef3f8;border-bottom:1px solid #d5e0ec;'
+    'font:600 14px system-ui;display:flex;gap:20px;flex-wrap:wrap">'
+    '<a href="/">Общая проверка</a>'
+    '<a href="/account/login">Войти</a>'
+    '<a href="/account/register">Регистрация</a>'
+    '<a href="/account/home">Личный кабинет</a></nav>'
+).encode("utf-8")
 
 
 def add_account_navigation(html):
