@@ -121,7 +121,7 @@ function show(name){
  currentTab=name;
  document.querySelectorAll(".mgr-tab").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.tab===name)));
  document.querySelectorAll(".mgr-section").forEach(x=>x.classList.toggle("mgr-hidden",x.dataset.section!==name));
- const titles={overview:"Панель управления",tasks:"Поручения и сроки",findings:"Согласование нарушений",thematic:"Тематические проверки подразделения",quality:"Контроль качества",memos:"Служебные записки",team:"Сотрудники",history:"Журнал действий"};
+ const titles={overview:"Панель управления",tasks:"Поручения и сроки",findings:"Согласование нарушений",thematic:"Тематические проверки подразделения",quality:"Контроль качества",memos:"Служебные записки",team:"Сотрудники",reports:"Отчёт руководителя",history:"Журнал действий"};
  $("mgr-title").textContent=titles[name]||"Кабинет руководителя";
  if(name==="findings")fillFindingTarget();
 }
@@ -304,6 +304,49 @@ function renderQuality(){
   root.append(card);
  }
 }
+function reportNumbers(data){
+ const root=$("mgr-report-summary");root.replaceChildren();
+ const lines=[
+  ["Сотрудники",data.employees],
+  ["Самостоятельные проверки",data.manual_checks_started],
+  ["Закупок без повторного подсчёта",data.unique_procurements],
+  ["Завершено проверок",data.verified_legal_reviews],
+  ["Прочитано документов",data.documents_checked],
+  ["Нарушений",data.confirmed_violations],
+  ["Поручения",data.tasks_created],
+  ["Просрочено поручений",data.tasks_overdue],
+  ["Согласовано нарушений",data.finding_decisions?.approved||0],
+  ["Согласовано записок",data.memo_decisions?.approved||0]
+ ];
+ for(const [label,value] of lines){
+  const el=tag("div","mgr-kpi");el.append(tag("small","",label));
+  el.append(tag("strong","",value===null?"—":value));
+  root.append(el);
+ }
+ const rows=[];
+ for(const person of data.per_employee||[]){
+  const tr=tag("tr");
+  tr.append(cell(person.employee),cell(person.manual_checks),cell(person.procurements_reviewed),
+            cell(person.documents_checked),cell(person.confirmed_violations),cell(person.assigned_tasks));
+  rows.push(tr);
+ }
+ mountRows("mgr-report-rows",rows);
+ $("mgr-report-note").textContent=data.metric_note+" "+data.limits;
+ $("mgr-report-status").textContent="Отчёт построен по реальным сохранённым данным.";
+}
+$("mgr-report-form").onsubmit=async event=>{
+ event.preventDefault();
+ const fd=new FormData(event.currentTarget),from=String(fd.get("from")||""),
+  to=String(fd.get("to")||"");
+ if(!from||!to||from>to)return toast("Выберите корректный период");
+ const query="?"+new URLSearchParams({from,to}).toString();
+ const button=$("mgr-report-submit");button.disabled=true;
+ try{
+  reportNumbers(await api("/manager/report"+query));
+  $("mgr-report-csv").href="/manager/report.csv"+query;
+  $("mgr-report-csv").classList.remove("mgr-hidden");
+ }catch(e){toast(e.message)}finally{button.disabled=false}
+};
 function renderHistory(items){
  const rows=[];
  for(const item of items){
@@ -328,12 +371,21 @@ async function loadFindings(){
  if(!employee||!/^3[0-9]{10}$/.test(reg))return toast("Выберите сотрудника и номер закупки ЕИС");
  const data=await api("/manager/findings/"+encodeURIComponent(employee)+"/"+reg);
  const root=$("mgr-finding-items");root.replaceChildren();
+ let personalNotes=[];
+ try{personalNotes=await api("/manager/cases/"+encodeURIComponent(employee)+
+  "/"+encodeURIComponent(reg)+"/notes")}catch(e){/* Notes may be unavailable while evidence loads */}
  $("mgr-finding-note").textContent="Найдено подтверждённых анализатором эпизодов: "+data.findings.length+". Решения руководителя сохраняются отдельно.";
  if(!data.findings.length){root.append(tag("p","mgr-muted","Для этой закупки подтверждённых нарушений пока нет."));return}
  for(const item of data.findings){
   const card=tag("article","mgr-entry");
-  card.append(tag("h3","",item.title),tag("div","mgr-muted","Норма: "+(item.law||"требует уточнения")));
-  const evidence=tag("div","mgr-evidence",item.evidence||"Доказательство отсутствует");
+  card.append(tag("span","mgr-chip","Карточка нарушения"),tag("h3","",item.title),
+   tag("div","mgr-muted","Норма: "+(item.law||"требует уточнения")));
+  const correlated=personalNotes.filter(n=>!n.finding_key||n.finding_key===item.finding_key);
+ for(const note of correlated.slice(0,8)){
+  card.append(tag("div","mgr-quality",
+   "Замечание сотрудника · "+fmt(note.created_at)+": "+note.body));
+ }
+ const evidence=tag("div","mgr-evidence",item.evidence||"Доказательство отсутствует");
   card.append(evidence);
   if(item.document||item.source_url){
    const note=tag("div","mgr-muted","Документ: "+(item.document||"—"));
@@ -399,6 +451,10 @@ async function reload(){
  populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();
  $("mgr-refresh").disabled=false;
 }
+const mgrToday=new Date();
+$("mgr-report-form").elements.namedItem("to").value=mgrToday.toISOString().slice(0,10);
+const mgrPast=new Date(mgrToday.getTime()-29*86400000);
+$("mgr-report-form").elements.namedItem("from").value=mgrPast.toISOString().slice(0,10);
 $("mgr-refresh").onclick=async()=>{const btn=$("mgr-refresh");btn.disabled=true;try{await reload();toast("Сведения обновлены")}finally{btn.disabled=false}};
 $("mgr-history-refresh").onclick=async()=>{
  try{renderHistory(await api("/manager/history"));toast("Журнал актуален")}
@@ -430,6 +486,7 @@ __STYLE__</head><body>
 <button type="button" class="mgr-tab" data-tab="quality" aria-selected="false"><span class="mgr-tab-icon">✓</span>Качество</button>
 <button type="button" class="mgr-tab" data-tab="memos" aria-selected="false"><span class="mgr-tab-icon">▤</span>Записки</button>
 <button type="button" class="mgr-tab" data-tab="team" aria-selected="false"><span class="mgr-tab-icon">♙</span>Сотрудники</button>
+<button type="button" class="mgr-tab" data-tab="reports" aria-selected="false"><span class="mgr-tab-icon">▥</span>Отчёты</button>
 <button type="button" class="mgr-tab" data-tab="history" aria-selected="false"><span class="mgr-tab-icon">◷</span>Журнал действий</button>
 </nav>
 <main class="mgr-work"><div class="mgr-head"><div><h1 id="mgr-title">Панель управления</h1>
@@ -532,6 +589,21 @@ __STYLE__</head><body>
 <th>Учётная запись</th><th>Доступ</th><th>Роль</th><th>Управление</th>
 </tr></thead><tbody id="mgr-admin-rows"></tbody></table></div></div>
 </section>
+<section class="mgr-section mgr-hidden" data-section="reports">
+<div class="mgr-card"><h2>Отчёт подразделения</h2>
+<p>Формируется по реальным заданиям и сохранённым результатам ЕИС без искусственного увеличения показателей.</p>
+<form id="mgr-report-form" class="mgr-form">
+<label>Дата с<input type="date" name="from" required></label>
+<label>Дата по<input type="date" name="to" required></label>
+<button type="submit" class="mgr-primary" id="mgr-report-submit">Сформировать отчёт</button>
+<a id="mgr-report-csv" class="mgr-outline mgr-hidden" href="#" download>Скачать CSV / Excel</a>
+</form>
+<div id="mgr-report-summary" class="mgr-grid"></div>
+<div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
+<th>Сотрудник</th><th>Запуски</th><th>Завершено</th><th>Документы</th><th>Нарушения</th><th>Поручения</th>
+</tr></thead><tbody id="mgr-report-rows"></tbody></table></div>
+<p class="mgr-muted" id="mgr-report-status">Выберите период для отчёта.</p>
+<p class="mgr-muted" id="mgr-report-note"></p></div></section>
 <section class="mgr-section mgr-hidden" data-section="history">
 <div class="mgr-card"><div class="mgr-row"><h2>Журнал управленческих решений</h2>
 <button class="mgr-outline" id="mgr-history-refresh" type="button">Загрузить историю</button></div>
