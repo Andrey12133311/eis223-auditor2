@@ -68,6 +68,10 @@ button:disabled{cursor:wait;opacity:.55}
 .mgr-chip.good{background:#eaf7ef;color:#2b7954;border-color:#d2ebdb}
 .mgr-entry{border:1px solid #e0e8ef;border-radius:10px;padding:15px;margin:10px 0;background:#fff}
 .mgr-entry h3{font-size:14px;color:#214d71;margin:0 0 8px}
+.mgr-goal-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:8px;margin:8px 0}
+.mgr-goal-option{display:flex!important;align-items:center;gap:8px;background:#f5f9fc;border:1px solid #dfe9f0;border-radius:8px;padding:9px 10px;font-size:12px!important;cursor:pointer}
+.mgr-goal-option input{height:17px;width:17px;accent-color:#176397;flex:none}
+.mgr-goal-figures{font-weight:700;color:#205d8b!important;margin:13px 0 5px!important}
 .mgr-entry .mgr-evidence{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;background:#f7fafc;border:1px solid #e6eef4;border-radius:8px;padding:12px;font-size:12px;max-height:250px;overflow:auto}
 .mgr-entry .mgr-evidence small{color:#708799}
 .mgr-warning{font-size:12px;color:#a45d34;background:#fff6ee;border-left:3px solid #cf995b;padding:10px}
@@ -98,7 +102,7 @@ SCRIPT=r"""
 const ROLE=__ROLE__;
 const $=id=>document.getElementById(id);
 const labels={assigned:"Назначено",in_progress:"В работе",submitted:"На согласовании",returned:"Возвращено",completed:"Завершено",cancelled:"Отменено",approved:"Согласовано",rejected:"Отклонено"};
-let cache={tasks:[],team:[],memos:[],alerts:[],thematic:[],quality:null,dashboard:null,users:[]};
+let cache={tasks:[],team:[],memos:[],alerts:[],thematic:[],campaigns:[],options:null,quality:null,dashboard:null,users:[]};
 let currentTab="overview";
 const tag=(name,cls="",value="")=>{const x=document.createElement(name);if(cls)x.className=cls;if(value!==undefined)x.textContent=String(value);return x};
 const status=(s)=>{const text=labels[s]||s||"Неизвестно";const cls=["completed","approved"].includes(s)?"good":["returned","cancelled","rejected"].includes(s)?"bad":["submitted"].includes(s)?"warn":"";return tag("span","mgr-chip "+cls,text)};
@@ -153,7 +157,7 @@ function alerts(data){
  }
 }
 function populateWorkers(){
- const fields=[$("mgr-worker"),$("mgr-finding-worker")];
+ const fields=[$("mgr-worker"),$("mgr-finding-worker"),$("mgr-goal-employee")];
  const team=cache.team.filter(x=>x.role==="user"&&x.status==="approved");
  for(const field of fields){
   const previous=field.value;field.replaceChildren();
@@ -273,6 +277,87 @@ function renderAdmin(){
  }
  mountRows("mgr-admin-rows",rows);
 }
+function renderCampaignOptions(){
+ if(!cache.options)return;
+ function fill(id,values){
+  const root=$(id);if(root.childElementCount)return;
+  for(const [code,name] of Object.entries(values)){
+   const label=tag("label","mgr-goal-option");
+   const check=document.createElement("input");check.type="checkbox";check.value=code;
+   check.checked=["dates","docs","ООО","АО"].includes(code);
+   label.append(check,tag("span","",name));root.append(label);
+  }
+ }
+ fill("mgr-goal-categories",cache.options.categories||{});
+ fill("mgr-goal-forms",cache.options.legal_forms||{});
+}
+function renderCampaigns(){
+ const root=$("mgr-goal-results");root.replaceChildren();
+ const items=cache.campaigns||[];
+ if(!items.length){root.append(tag("p","mgr-muted","Тематических поручений пока нет."));return}
+ for(const item of items){
+  const card=tag("article","mgr-entry");
+  card.append(tag("h3","",item.title),
+   tag("div","mgr-muted","Исполнитель: "+item.employee+" · Формы: "+item.legal_forms.join(", ")),
+   tag("div","mgr-muted",item.category_names.join(", ")));
+  const result=tag("p","mgr-goal-figures",
+   "Подтверждено "+item.actual_violations+" из целевых "+item.target_violations+
+   " · закупок в очереди: "+item.verified_procurements);
+  card.append(result);
+  const progress=document.createElement("progress");progress.max=100;progress.value=item.progress_percent;
+  progress.style.width="100%";progress.setAttribute("aria-label","Выполнение планового показателя");
+  card.append(progress);
+  const state=tag("div","mgr-muted",
+   "Задание: "+(labels[item.status]||item.status)+
+   " · ЕИС: "+item.engine_status+
+   (item.due_date?" · срок "+fmt(item.due_date):""));
+  card.append(state);
+  if(item.overdue)card.append(tag("div","mgr-warning","Срок поручения истёк"));
+  const commands=tag("div","mgr-actions");
+  if(item.status==="setup_failed"||item.status==="preparing")
+   commands.append(action("Повторить запуск","mgr-primary",async()=>{
+    await api("/manager/campaigns/"+item.id+"/retry","POST");
+    toast("Тематическая очередь запущена");await reload();
+   }));
+  if(item.status==="submitted"){
+   commands.append(action("Принять результат","mgr-primary",async()=>{
+    if(!confirm("Завершить проверку по фактическим результатам? Цель не гарантируется."))return;
+    await api("/manager/campaigns/"+item.id+"/decision","POST",{action:"complete",comment:""});
+    await reload();
+   }));
+   commands.append(action("Вернуть на доработку","mgr-outline",async()=>{
+    const comment=prompt("Причина доработки (не менее 5 символов)");
+    if(comment===null)return;
+    await api("/manager/campaigns/"+item.id+"/decision","POST",{action:"return",comment});
+    await reload();
+   }));
+  }
+  if(["active","submitted","setup_failed"].includes(item.status))
+   commands.append(action("Остановить","mgr-danger",async()=>{
+    if(!confirm("Остановить поручение без удаления сохранённых оригиналов?"))return;
+    await api("/manager/campaigns/"+item.id+"/decision","POST",{action:"cancel",comment:""});
+    await reload();
+   }));
+  card.append(commands);root.append(card);
+ }
+}
+$("mgr-goal-form").onsubmit=async event=>{
+ event.preventDefault();const form=event.currentTarget,button=form.querySelector('button[type="submit"]');
+ const picked=id=>[...$(id).querySelectorAll("input:checked")].map(x=>x.value);
+ const categories=picked("mgr-goal-categories"),legal_forms=picked("mgr-goal-forms");
+ const data=Object.fromEntries(new FormData(form).entries());
+ data.categories=categories;data.legal_forms=legal_forms;
+ data.target_violations=Number(data.target_violations);
+ data.due_date=data.due_date||null;
+ if(!categories.length||!legal_forms.length){toast("Отметьте категории и формы заказчиков");return}
+ button.disabled=true;
+ try{
+  const result=await api("/manager/campaigns","POST",data);
+  $("mgr-goal-status").textContent="Поручение создано. Проверка ЕИС: "+result.status;
+  toast("Тематическая проверка запущена");await reload();
+ }catch(e){$("mgr-goal-status").textContent=e.message;toast(e.message)}
+ finally{button.disabled=false}
+};
 function renderThematic(){
  const rows=[];
  for(const item of cache.thematic||[]){
@@ -437,7 +522,7 @@ $("mgr-task-create").onsubmit=async e=>{
 async function reload(){
  const paths=[["dashboard","/manager/dashboard"],["tasks","/manager/tasks"],["team","/manager/team"],
   ["memos","/manager/memos"],["alerts","/manager/alerts"],
-  ["thematic","/manager/thematic"],["quality","/manager/quality"]];
+  ["thematic","/manager/thematic"],["quality","/manager/quality"],["campaigns","/manager/campaigns"],["options","/manager/campaigns/options"]];
  const all=await Promise.allSettled(paths.map(async([key,url])=>[key,await api(url)]));
  for(const a of all){
   if(a.status==="fulfilled")cache[a.value[0]]=a.value[1];
@@ -448,7 +533,7 @@ async function reload(){
  }
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
- populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();
+ populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
  $("mgr-refresh").disabled=false;
 }
 const mgrToday=new Date();
@@ -537,6 +622,24 @@ __STYLE__</head><body>
 <p class="mgr-muted mgr-hidden" id="mgr-task-empty">Поручений пока нет.</p></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="thematic">
+<div class="mgr-card"><h2>Новое тематическое поручение сотруднику</h2>
+<p>Выберите направления проверки, формы заказчиков и целевое число подтверждённых нарушений.
+План не является требованием получить нарушения любой ценой. Проверяются только реальные документы ЕИС.</p>
+<form id="mgr-goal-form" class="mgr-form">
+<label>Исполнитель<select id="mgr-goal-employee" name="assignee_id" required><option value="">Выберите сотрудника</option></select></label>
+<label>Цель: подтверждённых нарушений<input type="number" name="target_violations" min="1" max="10000" value="10" required></label>
+<label class="wide">Название задания<input name="title" minlength="5" maxlength="170" required placeholder="Проверить сроки и документацию заказчиков ООО и АО"></label>
+<div class="wide"><b>Категории нарушений</b><div id="mgr-goal-categories" class="mgr-goal-options"></div></div>
+<div class="wide"><b>Организационно-правовые формы заказчиков</b><div id="mgr-goal-forms" class="mgr-goal-options"></div></div>
+<label>Срок исполнения<input type="date" name="due_date"></label>
+<label class="wide">Пояснение к поручению<textarea name="note" maxlength="1800" placeholder="Укажите область и особенности проверки"></textarea></label>
+<button class="mgr-primary" type="submit">Назначить и запустить тематическую проверку</button>
+</form><p class="mgr-muted" id="mgr-goal-status" role="status"></p>
+</div>
+<div class="mgr-card"><h2>План и фактические результаты</h2>
+<p>Динамика подтягивается из настоящей тематической очереди. Повторы не увеличивают число нарушений.</p>
+<div id="mgr-goal-results"></div>
+</div>
 <div class="mgr-card"><h2>Тематические проверки сотрудников</h2>
 <p>Только реальные запуски ЕИС, закреплённые за сотрудниками подразделения.
 Количество нарушений рассчитывается без повторного подсчёта одинаковых эпизодов.</p>
