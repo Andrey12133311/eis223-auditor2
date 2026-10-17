@@ -39,7 +39,7 @@ def run():
     assert "const counters=[" in html
     assert "get('/me/summary')" in html
     assert "get('/api/thematic/history')" in html
-    assert "get('/me/memos')" in html
+    assert "get('/me/memo-archive')" in html
     assert "eis223-new-batch" not in html
     assert "eis223-hero" not in html
     assert "Независимая аналитическая система" in html
