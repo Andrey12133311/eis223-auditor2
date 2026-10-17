@@ -312,7 +312,41 @@ refresh();
 })();
 </script>""")
 
-ADMIN = page("Заявки пользователей", """
+ADMIN = page("Управление пользователями", """
+<h2>Роли существующих пользователей</h2><p id="role-message" role="status"></p><div id="role-users"></div>
+<script>
+async function loadRoles(){
+ const box=document.getElementById('role-users'),msg=document.getElementById('role-message');
+ try {
+ const r=await fetch('/admin/roles/users',{credentials:'same-origin'});
+ if(!r.ok)throw Error('HTTP '+r.status);
+ const users=await r.json();box.replaceChildren();
+ for(const u of users){
+  const line=document.createElement('p'),name=document.createElement('span');
+  name.textContent=(u.full_name||u.email)+' ('+u.email+', '+u.status+') ';
+  const select=document.createElement('select');
+  for(const [role,label] of [['user','Сотрудник'],['manager','Руководитель'],['admin','Администратор']]){
+   const opt=document.createElement('option');opt.value=role;opt.textContent=label;select.append(opt);
+  }
+  select.value=u.role;select.disabled=u.status!=='approved';
+  const save=document.createElement('button');save.textContent='Сохранить роль';save.disabled=select.disabled;
+  save.onclick=async()=>{
+   save.disabled=true;msg.textContent='Сохранение…';
+   try{
+    const res=await fetch('/admin/roles/users/'+encodeURIComponent(u.id),{
+     method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({role:select.value})});
+    if(!res.ok)throw Error('HTTP '+res.status);
+    msg.textContent='Роль сохранена. Пользователю потребуется войти заново.';await loadRoles();
+   }catch(e){msg.textContent='Не удалось изменить роль: '+e.message;save.disabled=false}
+  };
+  line.append(name,select,save);box.append(line);
+ }
+ }catch(e){msg.textContent='Ошибка загрузки пользователей: '+e.message}
+}
+loadRoles();
+</script>
+
 <h1>Подтверждение новых пользователей</h1><p>Только для администратора. Решения сохраняются в журнале действий.</p>
 <p class="message" id="message" role="status"></p>
 <table><thead><tr><th>Email</th><th>Дата</th><th>Решение</th></tr></thead><tbody id="rows"></tbody></table>
