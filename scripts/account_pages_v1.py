@@ -535,7 +535,7 @@ MEMOS = page("Архив служебных записок", """
 <script>
 (()=>{
 const el=id=>document.getElementById(id);
-let cache=[],busy=false;
+let cache=[],busy=false,decisions={};
 function render(){
  const search=el('memo-search').value.trim(),from=el('memo-from').value,to=el('memo-to').value;
  const data=cache.filter(x=>{
@@ -554,7 +554,10 @@ function render(){
   date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'—';
   const actions=document.createElement('div');actions.className='memo-action';
   if(item.downloadable){
-   state.textContent='Сохранённый ODT';
+   const decision=decisions[item.id];
+   state.textContent='Сохранённый ODT'+
+    (decision?' · '+({submitted:'На согласовании',approved:'Согласована',
+     returned:'На доработке',rejected:'Отклонена'}[decision.status]||decision.status):'');
    for(const fmt of ['odt','pdf']){
     const link=document.createElement('a');link.href='/me/memo-archive/'+encodeURIComponent(item.id)+'/'+fmt;
     link.textContent='Скачать '+fmt.toUpperCase();link.setAttribute('download','memo_'+item.reg_number+'.'+fmt);
@@ -573,6 +576,28 @@ function render(){
      finally{link.style.pointerEvents=''}
     };
     actions.append(link);
+   }
+   const decision=decisions[item.id];
+   if(!decision||decision.status==='returned'){
+    const button=document.createElement('button');button.type='button';
+    button.textContent=decision?'Повторно на согласование':'Отправить руководителю';
+    button.onclick=async()=>{
+      button.disabled=true;
+      try{
+       const response=await fetch('/me/assignments/memo/'+encodeURIComponent(item.id)+'/submit',
+        {method:'POST',credentials:'same-origin'});
+       if(!response.ok){
+        const message=await response.json().catch(()=>({}));
+        throw Error(message.detail||'Не удалось передать записку');
+       }
+       await refresh();el('memo-status').textContent='Записка передана руководителю';
+      }catch(err){el('memo-status').textContent=err.message;button.disabled=false}
+    };
+    actions.append(button);
+   }
+   if(decision&&decision.comment){
+    const note=document.createElement('small');note.textContent=decision.comment;
+    note.className='memo-legacy';actions.append(note);
    }
   }else{
    state.textContent='Старый архив: файл не был сохранён';
@@ -595,7 +620,15 @@ async function refresh(){
   if(r.status===401){location.replace('/account/login');return}
   if(!r.ok)throw Error('Не удалось получить архив');
   const data=await r.json();if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
-  cache=data;render();
+  cache=data;
+  try{
+   const reviews=await fetch('/me/assignments/memos',{credentials:'same-origin',cache:'no-store'});
+   if(reviews.ok){
+     const rows=await reviews.json();
+     decisions=Object.fromEntries(rows.map(x=>[x.id,x]));
+   }
+  }catch{}
+  render();
   el('memo-status').textContent='Архив вашей учётной записи. Доступ к чужим запискам закрыт.';
  }catch(error){el('memo-status').textContent=error.message}
  finally{busy=false}
