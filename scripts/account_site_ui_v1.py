@@ -115,6 +115,33 @@ _STYLE = """
  margin-left:auto;background:#fff!important;color:#995052!important;
  border:1px solid #e6cccf!important}
 .eis223-workspace .eis223-tile li button:hover{background:#fff3f3!important}
+.eis223-more{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:13px}
+.eis223-feature{background:#fff;border:1px solid #dce6ee;border-radius:11px;
+ box-shadow:0 4px 15px #19446308;padding:18px;min-width:0}
+.eis223-feature h3{font-size:15px;color:#234e72;margin:0 0 5px}
+.eis223-feature p{font-size:12px;color:#718696;margin:4px 0 13px;line-height:1.5}
+.eis223-feature ul{padding:0;margin:0;list-style:none;max-height:190px;overflow-y:auto}
+.eis223-feature li{padding:9px 5px;border-bottom:1px solid #e8eef4;
+ display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.eis223-feature li:last-child{border-bottom:0}
+.eis223-feature li strong{display:block;font-size:12px;color:#254e70}
+.eis223-feature li small{display:block;font-size:11px;color:#708597}
+.eis223-feature li button{border:1px solid #cfdeec!important;color:#245d88!important;
+ background:#f1f7fc!important;min-height:31px;font-size:11px;border-radius:7px;padding:6px 10px;
+ cursor:pointer}
+.eis223-feature form{display:grid;grid-template-columns:110px minmax(0,1fr);
+ gap:8px;margin-bottom:12px}
+.eis223-feature input,.eis223-feature select{padding:10px;min-height:40px;border:1px solid #cfdfe9;
+ border-radius:8px;background:#fff;color:#233f52;min-width:0}
+.eis223-feature form button{grid-column:1/-1;min-height:39px;border:1px solid #17618f;
+ background:#17618f;color:white;border-radius:8px;cursor:pointer;font-weight:690}
+.eis223-notification-dot{display:inline-grid;min-width:20px;min-height:20px;
+ padding:2px 4px;place-items:center;border-radius:999px;background:#b94645;color:#fff;
+ font-size:11px;font-weight:760;margin-left:7px}
+.eis223-feature .eis223-note{padding:7px 10px;border-radius:7px;
+ background:#f6fafc;border:1px solid #e4edf2}
+@media(max-width:740px){.eis223-more{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:390px){.eis223-feature form{grid-template-columns:minmax(0,1fr)}}
 .eis223-workspace :is(button,a,input):focus-visible{
  outline:3px solid #86bfdf!important;outline-offset:2px}
 .eis223-tile li.eis223-empty{background:#f7fafc;color:#6c8192;
@@ -156,7 +183,7 @@ def site_header(role="user"):
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
-<button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет</button>
+<button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет <span id="eis223-unread" class="eis223-notification-dot" hidden aria-label="Новые уведомления"></span></button>
 ''' + admin + '''
 <button type="button" id="eis223-logout">Выйти</button>
 <span id="eis223-logout-status" role="status"></span>
@@ -192,11 +219,34 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <a class="eis223-all-checks" href="/account/memos">Посмотреть служебные записки →</a>
 <p role="status" id="eis223-memo-status"></p>
 </div>
+</div>
+<div class="eis223-more">
+<section class="eis223-feature" aria-label="Уведомления по проверкам">
+<h3>Уведомления <span id="eis223-alert-count" class="eis223-notification-dot" hidden></span></h3>
+<p>Новые подтверждённые нарушения и завершение обработки документов. Обновляются при открытии сайта.</p>
+<ul id="eis223-alert-list"><li>Загрузка уведомлений…</li></ul>
+<p class="eis223-note" role="status" id="eis223-alert-status"></p>
+</section>
+<section class="eis223-feature" aria-label="Избранные закупки и заказчики">
+<h3>Избранное</h3>
+<p>Сохраните номер закупки или ИНН заказчика для быстрого доступа.</p>
+<form id="eis223-favorite-form">
+<select name="kind" aria-label="Тип избранного"><option value="procurement">Закупка</option><option value="customer">Заказчик</option></select>
+<input name="key" required inputmode="numeric" placeholder="Номер ЕИС или ИНН" aria-label="Номер ЕИС или ИНН">
+<input name="label" style="grid-column:1/-1" maxlength="130" placeholder="Название (необязательно)" aria-label="Название">
+<button type="submit">Добавить в избранное</button></form>
+<ul id="eis223-favorite-list"><li>Загрузка избранного…</li></ul>
+<p role="status" id="eis223-favorite-status"></p>
+</section>
 </div></section></div>
 <script>
 (()=>{
 const q=id=>document.getElementById(id);
-q('eis223-toggle-cabinet').addEventListener('click',()=>{const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)refresh();});
+q('eis223-toggle-cabinet').addEventListener('click',()=>{
+const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;
+q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));
+if(!panel.hidden){refresh();refreshAlerts();refreshFavorites()}
+});
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
 async function get(url){
 const r=await fetch(url,{credentials:'same-origin',cache:'no-store'});
@@ -206,7 +256,7 @@ if(!r.ok)throw Error('Ошибка загрузки');return await r.json();
 async function refresh(){
 try{
 const [sumResponse,manualResponse,batchResponse,memoResponse]=await Promise.allSettled([
-get('/me/summary'),get('/me/manual-checks'),get('/api/thematic/history'),get('/me/memos')]);
+get('/me/summary'),get('/me/manual-checks'),get('/api/thematic/history'),get('/me/memo-archive')]);
 const summary=sumResponse.status==='fulfilled'?sumResponse.value:{};
 const purchases=manualResponse.status==='fulfilled'&&Array.isArray(manualResponse.value)?
  manualResponse.value:[];
@@ -309,10 +359,102 @@ ml.append(li)}
 for(const memo of memos.slice(0,7)){
  const li=document.createElement('li');const link=document.createElement('a');
  link.href='/account/memos';link.textContent='Закупка № '+memo.reg_number;
- li.append(link);ml.append(li);
+ li.append(link);
+ if(memo.downloadable){
+  for(const format of ['odt','pdf']){
+   const download=document.createElement('a');
+   download.href='/me/memo-archive/'+encodeURIComponent(memo.id)+'/'+format;
+   download.textContent=format.toUpperCase();li.append(download);
+  }
+ }else{
+  const note=document.createElement('small');note.textContent='Файл не сохранён';li.append(note);
+ }
+ ml.append(li);
 }
 }catch{show('eis223-personal-summary','Личные данные временно недоступны. Попробуйте открыть кабинет ещё раз.')}
 }
+
+async function refreshAlerts(){
+ try{
+  const notices=await get('/me/notifications'),ul=q('eis223-alert-list');
+  ul.replaceChildren();
+  const unread=notices.filter(x=>!x.read).length;
+  for(const id of ['eis223-alert-count','eis223-unread']){
+   const indicator=q(id);indicator.hidden=!unread;
+   indicator.textContent=unread>99?'99+':String(unread);
+  }
+  if(!notices.length){const li=document.createElement('li');li.textContent='Новых событий пока нет';ul.append(li)}
+  for(const item of notices.slice(0,20)){
+   const li=document.createElement('li'),body=document.createElement('div');
+   body.className='eis223-check-desc';
+   const title=document.createElement('strong');title.textContent=item.title;
+   const details=document.createElement('small');
+   details.textContent=item.detail+' · '+new Date(item.created_at).toLocaleDateString('ru-RU');
+   body.append(title,details);li.append(body);
+   if(!item.read){
+    const ack=document.createElement('button');ack.type='button';ack.textContent='Прочитано';
+    ack.onclick=async()=>{
+     ack.disabled=true;
+     try{
+      const response=await fetch('/me/notifications/'+encodeURIComponent(item.id)+'/read',
+       {method:'POST',credentials:'same-origin'});
+      if(!response.ok)throw Error();await refreshAlerts();
+     }catch{ack.disabled=false;show('eis223-alert-status','Не удалось обновить уведомление')}
+    };
+    li.append(ack);
+   }ul.append(li);
+  }
+  show('eis223-alert-status','Уведомления только для вашей учётной записи');
+ }catch{show('eis223-alert-status','Уведомления временно недоступны')}
+}
+async function refreshFavorites(){
+ try{
+  const favorites=await get('/me/favorites'),list=q('eis223-favorite-list');
+  list.replaceChildren();
+  if(!favorites.length){const li=document.createElement('li');li.textContent='Ничего не добавлено';list.append(li)}
+  for(const f of favorites){
+   const li=document.createElement('li'),body=document.createElement('div');
+   body.className='eis223-check-desc';
+   const title=document.createElement('strong');
+   title.textContent=(f.kind==='customer'?'Заказчик · ИНН ':'Закупка № ')+f.key;
+   const detail=document.createElement('small');detail.textContent=f.label||'';
+   body.append(title,detail);li.append(body);
+   const link=document.createElement('a');
+   link.href=f.kind==='procurement'?'/check-new/'+encodeURIComponent(f.key):'/';
+   link.textContent=f.kind==='procurement'?'Карточка':'Поиск';
+   li.append(link);
+   const del=document.createElement('button');del.type='button';del.textContent='Убрать';
+   del.onclick=async()=>{
+    del.disabled=true;
+    try{
+     const response=await fetch('/me/favorites/'+encodeURIComponent(f.kind)+'/'+encodeURIComponent(f.key),
+       {method:'DELETE',credentials:'same-origin'});
+     if(!response.ok)throw Error();await refreshFavorites();
+    }catch{del.disabled=false;show('eis223-favorite-status','Не удалось удалить избранное')}
+   };
+   li.append(del);list.append(li);
+  }
+ }catch{show('eis223-favorite-status','Избранное временно недоступно')}
+}
+q('eis223-favorite-form').addEventListener('submit',async event=>{
+ event.preventDefault();const form=event.currentTarget;
+ const data=new FormData(form),kind=String(data.get('kind')||'');
+ const key=String(data.get('key')||'').trim(),label=String(data.get('label')||'').trim();
+ const valid=kind==='procurement'?/^3[0-9]{10}$/.test(key):/^[0-9]{10}([0-9]{2})?$/.test(key);
+ if(!valid)return show('eis223-favorite-status','Укажите корректный номер ЕИС или ИНН');
+ const btn=form.querySelector('button');btn.disabled=true;
+ try{
+  const url='/me/favorites/'+encodeURIComponent(kind)+'/'+encodeURIComponent(key)+
+    '?label='+encodeURIComponent(label);
+  const response=await fetch(url,{method:'POST',credentials:'same-origin'});
+  if(!response.ok)throw Error();form.reset();await refreshFavorites();
+  show('eis223-favorite-status','Добавлено в избранное');
+ }catch{show('eis223-favorite-status','Не удалось сохранить избранное')}
+ finally{btn.disabled=false}
+});
+window.setInterval(()=>{if(!document.hidden)refreshAlerts()},90000);
+refreshAlerts();
+
 q('eis223-logout').addEventListener('click',async()=>{
 const button=q('eis223-logout');button.disabled=true;
 try{
