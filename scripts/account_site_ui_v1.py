@@ -510,9 +510,18 @@ async function refreshCampaignGoals(){
     info.append(warning);
    }
    li.append(info);
-   if(finding.source_url&&/^https:\/\/(?:[a-z0-9-]+\.)?zakupki\.gov\.ru\//i.test(finding.source_url)){
-    const link=document.createElement('a');link.href=finding.source_url;
-    link.textContent='Оригинал ЕИС';link.target='_blank';link.rel='noopener noreferrer';li.append(link);
+   if(finding.source_url){
+    try{
+     const sourceUrl=new URL(finding.source_url);
+     const host=sourceUrl.hostname.toLowerCase();
+     const official=sourceUrl.protocol==='https:'&&
+       (host==='zakupki.gov.ru'||host.endsWith('.zakupki.gov.ru'))&&
+       !sourceUrl.username&&!sourceUrl.password;
+     if(official){
+      const link=document.createElement('a');link.href=sourceUrl.href;
+      link.textContent='Оригинал ЕИС';link.target='_blank';link.rel='noopener noreferrer';li.append(link);
+     }
+    }catch{/* Некорректную ссылку не отображаем */}
    }
    if(finding.law_url&&finding.law_url.startsWith('https://www.consultant.ru/')){
     const law=document.createElement('a');law.href=finding.law_url;
