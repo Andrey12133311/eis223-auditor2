@@ -78,7 +78,7 @@ def check_permissions():
     assert "app.include_router(manager_evidence)" in inspect.getsource(install)
     assert "app.include_router(employee_assignments)" in inspect.getsource(install)
     assert "current_account(request)" in inspect.getsource(manager_page)
-    assert "role" in inspect.getsource(manager_page)
+    assert 'if user[1] not in ("manager", "admin")' in inspect.getsource(manager_page)
 
 
 def check_schema():
