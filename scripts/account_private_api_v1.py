@@ -157,3 +157,28 @@ def add_personal_batch_procurement(batch_id: str, reg_number: str, request: Requ
             (owner_id, batch_id, reg_number),
         )
     return {"batch_id": batch_id, "reg_number": reg_number, "saved": True, "execution_started": False}
+
+
+@router.delete("/thematic-batches/{batch_id}/procurements/{reg_number}")
+def remove_personal_batch_procurement(batch_id: str, reg_number: str, request: Request, response: Response):
+    """Remove only the current owner's procurement from an owned personal queue."""
+    require_origin(request)
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not _personal_batch_id(batch_id):
+        raise HTTPException(404, "Личная очередь не найдена")
+    from scripts.account_workspace_v1 import REG_NUMBER
+    if not REG_NUMBER.fullmatch(reg_number):
+        raise HTTPException(422, "Некорректный номер закупки")
+    with connect() as db:
+        if not owns_batch(db, batch_id, owner_id):
+            raise HTTPException(404, "Личная очередь не найдена")
+        row = db.execute(
+            """DELETE FROM account_thematic_procurements
+               WHERE user_id=%s AND batch_id=%s AND reg_number=%s
+               RETURNING reg_number""",
+            (owner_id, batch_id, reg_number),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Закупка в очереди не найдена")
+    return {"removed": True, "batch_id": batch_id, "reg_number": row[0]}
