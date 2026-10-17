@@ -92,3 +92,52 @@ def unlink(request, batch):
             )
     except Exception as exc:
         raise HTTPException(503, "Не удалось обновить список личных проверок") from exc
+
+
+def _require_admin(request):
+    if not enabled() or request.scope.get("eis223_account_role") != "admin":
+        raise HTTPException(403, "Требуются права администратора")
+    return account_id(request)
+
+
+def already_assigned(request):
+    """For administrator-only one-click adoption of historical unknown-owner runs."""
+    _require_admin(request)
+    try:
+        from scripts.account_api_v1 import connect
+        with connect() as db:
+            rows = db.execute(
+                "SELECT DISTINCT batch_id FROM account_thematic_batches "
+                "WHERE batch_id ~ '^[0-9a-f]{24}$'"
+            ).fetchall()
+        return {row[0] for row in rows}
+    except Exception as exc:
+        raise HTTPException(503, "Не удалось получить историю привязок") from exc
+
+
+def claim_historical(request, batch):
+    """Admin explicitly adopts only a real campaign with no existing owner.
+
+    Transaction-scoped advisory lock prevents two simultaneous admins from
+    assigning the same batch to two different accounts. Nothing is removed
+    from the source EIS database or its evidence records.
+    """
+    owner = _require_admin(request)
+    try:
+        from scripts.account_api_v1 import connect
+        with connect() as db:
+            db.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (batch,))
+            existing = db.execute(
+                "SELECT 1 FROM account_thematic_batches WHERE batch_id=%s LIMIT 1",
+                (batch,)
+            ).fetchone()
+            if existing:
+                raise HTTPException(409, "Эта проверка уже привязана к учётной записи")
+            db.execute(
+                "INSERT INTO account_thematic_batches(user_id,batch_id) VALUES (%s,%s)",
+                (owner, batch)
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, "Не удалось привязать старую проверку") from exc
