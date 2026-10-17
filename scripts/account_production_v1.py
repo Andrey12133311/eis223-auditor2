@@ -182,6 +182,14 @@ def install(app):
 
     @app.on_event("startup")
     def start_identity():
-        with connect() as db:
-            initialize_schema(db)
+        # A temporary PostgreSQL outage must never take down the public
+        # procurement dashboard or the existing EIS audit workers.
+        import logging
+        try:
+            with connect() as db:
+                initialize_schema(db)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Account database unavailable; public EIS audit stays online"
+            )
     return True
