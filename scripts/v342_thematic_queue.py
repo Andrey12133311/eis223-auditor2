@@ -405,6 +405,27 @@ def install(ns):
   # Potentially large older evidence sets are scanned outside the HTTP loop,
   # with cached counts reused on the frequent 12-second dashboard refresh.
   return await asyncio.to_thread(thematic_history_records,ns,ownership.linked_ids(request))
+ @app.get("/api/thematic/unassigned")
+ async def unassigned_history(request:Request):
+  # Administrator-assisted migration for real older checks with no recorded
+  # owner. Never silently attribute legacy campaigns to the current user.
+  claimed=ownership.already_assigned(request)
+  result=await asyncio.to_thread(thematic_history_records,ns)
+  return {"batches":[x for x in result["batches"] if x["id"] not in claimed]}
+
+ @app.post("/api/thematic/adopt/{batch}")
+ async def adopt_real_batch(batch:str,request:Request):
+  if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(422,"Некорректная проверка")
+  ownership.protect_write(request)
+  ownership.already_assigned(request)  # administrator gate and identity DB health
+  c=db(ns)
+  try:
+   exists=c.execute("SELECT 1 FROM thematic_batches WHERE id=?",(batch,)).fetchone()
+   if not exists:raise HTTPException(404,"Тематическая проверка не найдена")
+  finally:c.close()
+  ownership.claim_historical(request,batch)
+  return {"linked":True}
+
  @app.get("/thematic/card/{batch}/{reg}")
  def thematic_card(batch:str,reg:str,request:Request):
   from html import escape
