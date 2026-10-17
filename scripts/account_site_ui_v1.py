@@ -244,14 +244,18 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <ul id="eis223-favorite-list"><li>Загрузка избранного…</li></ul>
 <p role="status" id="eis223-favorite-status"></p>
 </section>
-<section class="eis223-feature" aria-label="Поручения руководителя">
+<section class="eis223-feature" aria-label="Обычные поручения">
 <h3>Поручения руководителя</h3>
-<p>Сроки, задания и результаты, которые нужно передать на согласование.</p>
+<p>Только отдельные задания по конкретным закупкам и сроки их выполнения.</p>
 <ul id="eis223-assignment-list"><li>Загрузка поручений…</li></ul>
-<div class="eis223-check-desc"><b>Нарушения тематических проверок</b></div>
-<ul id="eis223-manager-goals"><li>Загрузка…</li></ul>
-<a class="eis223-all-checks" href="/account/workbench">Открыть рабочее место и план проверок →</a>
 <p id="eis223-assignment-status" role="status"></p>
+</section>
+<section class="eis223-feature" aria-label="Нарушения тематических проверок">
+<h3>Нарушения тематических проверок</h3>
+<p>Обычные карточки нарушений с правовой нормой, доказательством и оригиналом ЕИС. План руководителя не заменяет фактические результаты.</p>
+<ul id="eis223-manager-goals"><li>Загрузка нарушений…</li></ul>
+<a class="eis223-all-checks" href="/account/workbench">Все нарушения и тематические проверки →</a>
+<p id="eis223-thematic-status" role="status"></p>
 </section>
 </div></section></div>
 <script>
@@ -480,20 +484,47 @@ async function refreshMyName(){
  }catch{q('eis223-owner-fullname').textContent='Данные профиля временно недоступны'}
 }
 async function refreshCampaignGoals(){
+ const list=q('eis223-manager-goals');list.replaceChildren();
  try{
-  const data=await get('/me/campaign-goals'),list=q('eis223-manager-goals');list.replaceChildren();
-  if(!data.length){const li=document.createElement('li');li.textContent='Нарушений по тематическим проверкам пока нет';list.append(li);return}
-  for(const campaign of data.slice(0,7)){
-   const li=document.createElement('li'),info=document.createElement('div');info.className='eis223-check-desc';
-   const heading=document.createElement('strong');heading.textContent=campaign.title;
-   const numbers=document.createElement('small');
-   numbers.textContent='Найдено нарушений: '+campaign.actual_violations+' / план '+campaign.target_violations+
-     ' · закупок: '+campaign.verified_procurements;
-   info.append(heading,numbers);li.append(info);
-   const link=document.createElement('a');link.href='/account/workbench';
-   link.textContent='Подробнее';li.append(link);list.append(li);
+  const data=await get('/me/campaign-goals/violations');
+  const findings=Array.isArray(data.findings)?data.findings:[];
+  if(!findings.length){
+   const li=document.createElement('li');li.className='eis223-empty';
+   li.textContent='Подтверждённых анализатором нарушений по тематическим проверкам пока нет';
+   list.append(li);return;
   }
- }catch{show('eis223-assignment-status','Результаты тематических проверок временно недоступны')}
+  for(const finding of findings.slice(0,8)){
+   const li=document.createElement('li'),info=document.createElement('div');
+   info.className='eis223-check-desc';
+   const title=document.createElement('strong');
+   title.textContent='Нарушение · '+(finding.title||'Без названия');
+   const meta=document.createElement('small');
+   meta.textContent='Закупка № '+finding.reg_number+' · '+
+     (finding.law||'Правовая норма требует уточнения');
+   const evidence=document.createElement('small');
+   evidence.textContent=String(finding.evidence||'Доказательство не найдено').slice(0,320);
+   info.append(title,meta,evidence);
+   if(finding.needs_review){
+    const warning=document.createElement('small');
+    warning.textContent='Требует проверки доказательств';
+    info.append(warning);
+   }
+   li.append(info);
+   if(finding.source_url&&/^https:\/\/(?:[a-z0-9-]+\.)?zakupki\.gov\.ru\//i.test(finding.source_url)){
+    const link=document.createElement('a');link.href=finding.source_url;
+    link.textContent='Оригинал ЕИС';link.target='_blank';link.rel='noopener noreferrer';li.append(link);
+   }
+   if(finding.law_url&&finding.law_url.startsWith('https://www.consultant.ru/')){
+    const law=document.createElement('a');law.href=finding.law_url;
+    law.textContent='Статья закона';law.target='_blank';law.rel='noopener noreferrer';li.append(law);
+   }
+   list.append(li);
+  }
+  if(data.truncated||findings.length>8)show('eis223-thematic-status','Показаны первые 8 нарушений. Полный список — в рабочем месте сотрудника.');
+  else show('eis223-thematic-status','Нарушения сформированы по реальным документам ЕИС; одинаковые эпизоды объединены.');
+ }catch{
+  show('eis223-thematic-status','Нарушения тематических проверок временно недоступны');
+ }
 }
 async function refreshAssignments(){
  try{
