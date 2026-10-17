@@ -191,11 +191,13 @@ def check_routes_schema_and_ui():
     html=render_workbench()
     parser=H();parser.feed(html)
     assert not parser.duplicates,parser.duplicates
-    assert {"bulk","goals","templates","case","activity","library"}<=parser.tabs
+    assert {"overview","bulk","goals","templates","case","activity","library"}<=parser.tabs
     for phrase in ("Массовая самостоятельная проверка","Нарушения тематических проверок",
                    "Зафиксировать нарушение вручную","Сравнение доступных редакций",
-                   "Служебные записки","Календарь сроков"):
+                   "Служебные записки","Моё рабочее пространство"):
         assert phrase in html,phrase
+    assert "Календарь сроков" not in html
+    assert "staff-case-draft" in html and "staff-task-list" in html
     assert "innerHTML" not in html
     director=render_manager("manager")
     assert 'id="mgr-goal-form"' in director
