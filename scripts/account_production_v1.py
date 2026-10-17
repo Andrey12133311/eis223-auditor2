@@ -1,7 +1,7 @@
 """Secure opt-in mount of personal accounts into the legacy EIS web app.
 
-Shared EIS audit results are readable by all approved users; mutations stay
-admin-only. Personal resources remain owner-scoped. Existing EIS intake endpoints keep their independent token auth.
+Shared EIS audit results are readable by everyone, including guests; mutations
+stay admin-only. Personal resources remain owner-scoped. Existing EIS intake endpoints keep their independent token auth.
 Call install(app) *before* starting Uvicorn; disabled by default.
 """
 import hmac
@@ -105,8 +105,20 @@ class ProductionAccountGate:
         path = scope.get("path", "")
         method = scope.get("method", "GET")
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
+
+        async def no_cache_send(message):
+            if message["type"] == "http.response.start":
+                original = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
+                message = {**message, "headers": original + [(b"cache-control", b"no-store")]}
+            await send(message)
+
         if path in PUBLIC or path.startswith("/static/"):
             await self.app(scope, receive, send)
+            return
+        # Public procurement evidence is shared with visitors, not tied to a
+        # personal session. PostgreSQL outages must not hide public audits.
+        if scope["type"] == "http" and shared_read_route(path, method):
+            await self.app(scope, receive, no_cache_send)
             return
         if scope["type"] == "http" and method == "OPTIONS" and machine_path(path):
             await self.app(scope, receive, send)
@@ -140,11 +152,6 @@ class ProductionAccountGate:
                 else:
                     await _answer(send, 403, b'{"detail":"Shared audit is read-only for users"}')
                 return
-        async def no_cache_send(message):
-            if message["type"] == "http.response.start":
-                original = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
-                message = {**message, "headers": original + [(b"cache-control", b"no-store")]}
-            await send(message)
         await self.app(scope, receive, no_cache_send)
 
 
