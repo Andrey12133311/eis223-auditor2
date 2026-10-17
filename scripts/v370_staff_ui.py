@@ -129,10 +129,19 @@ async function templates(){
        checkbox.checked=(checkbox.name==="categories"?item.categories:item.legal_forms).includes(checkbox.value);
     msg("Настройки шаблона перенесены в форму");root.scrollIntoView({behavior:"smooth"});
    };
+   const launch=make("button","Запустить тематическую проверку");launch.className="primary";
+   launch.onclick=async()=>{
+    launch.disabled=true;
+    try{
+     const result=await api('/me/workbench/templates/'+item.id+'/start','POST');
+     msg('Создана настоящая тематическая проверка ЕИС: '+result.batch_id);
+     section('goals');await campaigns();
+    }catch(e){msg(e.message)}finally{launch.disabled=false}
+   };
    const del=make("button","Удалить");del.className="danger";
    del.onclick=async()=>{if(!confirm("Удалить личный шаблон?"))return;
     try{await api("/me/workbench/templates/"+item.id,"DELETE");await templates()}catch(e){msg(e.message)}};
-   const row=make("div");row.className="action-row";row.append(button,del);box.append(row);return box;
+   const row=make("div");row.className="action-row";row.append(button,launch,del);box.append(row);return box;
   });
  }catch(e){msg(e.message)}
 }
@@ -182,7 +191,7 @@ async function loadCase(){
  el("staff-case").hidden=false;
  el("staff-case-link").href='/me/cases/'+reg;
  el("staff-case-download").href='/me/workbench/'+reg+'/export.zip';
- for(const cb of [loadChecklist,loadManual,loadRelated,loadDiscussion,loadPreferences])await cb(reg);
+ for(const cb of [loadChecklist,loadManual,loadRelated,loadDiscussion,loadPreferences,loadVersions])await cb(reg);
 }
 async function loadChecklist(reg){
  try{
@@ -291,6 +300,93 @@ el("staff-save-pref").onclick=async()=>{
  }catch(e){msg(e.message)}
 };
 el("staff-case-load").onclick=loadCase;
+el("staff-recheck").onclick=async()=>{
+ const reg=el("staff-reg").value.trim();
+ if(!regOK(reg))return msg('Выберите номер своей закупки');
+ try{const result=await api('/me/workbench/'+reg+'/recheck','POST');
+  msg('Повторная загрузка оригиналов ЕИС: '+result.status+'. История сохранена')}
+ catch(e){msg(e.message)}
+};
+async function loadVersions(reg){
+ try{
+  const result=await api('/me/workbench/'+reg+'/versions');
+  const left=el('staff-version-left'),right=el('staff-version-right');
+  left.replaceChildren();right.replaceChildren();
+  for(const group of result.groups||[]){
+   for(const version of group.versions){
+    for(const select of [left,right]){
+     const option=make('option',version.name+' · '+(version.published_at||'дата неизвестна'));
+     option.value=version.document_id;select.append(option);
+    }
+   }
+  }
+  if(right.options.length>1)right.selectedIndex=1;
+  el('staff-version-note').textContent=result.note;
+ }catch(e){msg(e.message)}
+}
+el('staff-version-compare').onclick=async()=>{
+ const reg=el('staff-reg').value.trim(),a=el('staff-version-left').value,b=el('staff-version-right').value;
+ if(!a||!b||a===b)return msg('Выберите две разные редакции');
+ try{const result=await api('/me/workbench/'+reg+'/compare?left='+encodeURIComponent(a)+'&right='+encodeURIComponent(b));
+  const root=el('staff-version-diff');root.replaceChildren();
+  for(const row of result.diff||[]){const node=make('div',row);node.style.whiteSpace='pre-wrap';
+   node.style.background=row.startsWith('+')?'#e5f5e9':row.startsWith('-')?'#fff0ef':'#fff';
+   root.append(node)}
+  msg(result.note+(result.truncated?' · Вывод сокращён':''));
+ }catch(e){msg(e.message)}
+};
+el('staff-original-search').onsubmit=async event=>{
+ event.preventDefault();const reg=el('staff-reg').value.trim();
+ const phrase=String(new FormData(event.currentTarget).get('q')||'').trim();
+ try{
+  const result=await api('/me/workbench/'+reg+'/search-originals?q='+encodeURIComponent(phrase));
+  list('staff-original-results',result.results||[],x=>{
+   const box=make('article');box.className='entry';
+   box.append(make('h3',x.name),make('p',x.fragment));return box});
+  msg(result.scope+' · просмотрено файлов: '+result.documents_scanned);
+ }catch(e){msg(e.message)}
+};
+async function loadCalendar(){
+ try{
+  const result=await api('/me/workbench/calendar');
+  list('staff-calendar-list',result.events||[],x=>{
+   const box=make('article');box.className='entry';
+   box.append(make('h3',x.title),
+    make('p','Срок: '+x.due_date+' · '+(x.overdue?'Просрочено':
+     x.days_left+' дней осталось')+' · '+x.status));return box;
+  });
+ }catch(e){msg(e.message)}
+}
+async function loadHistory(){
+ try{
+  const data=await api('/me/workbench/history');
+  list('staff-history-list',data,x=>{
+   const box=make('div');box.className='entry';
+   box.append(make('small',new Date(x.date).toLocaleString('ru-RU')),
+    make('h3',x.kind+' · '+x.action),make('p',x.detail||x.reference));return box;
+  })
+ }catch(e){msg(e.message)}
+}
+async function loadLibrary(){
+ try{
+  const data=await api('/me/workbench/approved-library');
+  list('staff-library-list',data,x=>{
+   const box=make('div');box.className='entry';
+   box.append(make('h3',x.title),make('p',x.law),make('small','№ '+x.reg_number+' · согласовано руководителем'));
+   box.append(link('/check-new/'+x.reg_number,'Открыть закупку'));return box;
+  })
+ }catch(e){msg(e.message)}
+}
+el('staff-memo-check').onclick=async()=>{
+ const id=el('staff-memo-id').value.trim();
+ if(!/^[a-f0-9-]{36}$/i.test(id))return msg('Укажите идентификатор сохранённой служебной записки');
+ try{
+  const result=await api('/me/workbench/memos/'+encodeURIComponent(id)+'/quality');
+  list('staff-memo-warnings',result.warnings||[],x=>make('p',x));
+  msg(result.note+(result.warnings.length?' · есть замечания':' · формат без явных замечаний'));
+ }catch(e){msg(e.message)}
+};
+loadCalendar();loadHistory();loadLibrary();
 options().catch(e=>msg(e.message));
 reloadOverview();campaigns();templates();
 })();
@@ -317,6 +413,8 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <button type="button" data-staff-tab="bulk" aria-selected="false">Массовая проверка</button>
 <button type="button" data-staff-tab="templates" aria-selected="false">Мои шаблоны</button>
 <button type="button" data-staff-tab="case" aria-selected="false">Контроль закупки</button>
+<button type="button" data-staff-tab="activity" aria-selected="false">Календарь и история</button>
+<button type="button" data-staff-tab="library" aria-selected="false">База нарушений</button>
 </nav>
 <section class="panel" data-staff-section="goals">
 <h2>Тематические задания от руководителя</h2>
@@ -359,6 +457,7 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <div class="action-row">
 <a id="staff-case-link" href="#">Электронное дело и оригиналы ЕИС</a>
 <a id="staff-case-download" href="#">Выгрузить материалы ZIP</a>
+<button class="outline" id="staff-recheck" type="button">Перепроверить оригиналы ЕИС</button>
 <a href="/account/memos">Архив служебных записок</a></div>
 <fieldset><legend>Персональные настройки</legend>
 <label class="check-options"><input id="staff-priority" type="checkbox"> Приоритетная закупка</label>
@@ -377,6 +476,19 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <button class="primary" type="submit">Передать на проверку</button></form>
 <div id="staff-manual-findings"></div>
 <h2>Связанные закупки заказчика</h2><div id="staff-related"></div>
+<h2>Сравнение доступных редакций</h2>
+<p>Для сохранённых документов с одинаковым названием можно проверить различия в извлечённом тексте.</p>
+<div class="action-row"><label>Первый документ<select id="staff-version-left"></select></label>
+<label>Второй документ<select id="staff-version-right"></select></label>
+<button class="outline" type="button" id="staff-version-compare">Показать различия</button></div>
+<p id="staff-version-note"></p>
+<div class="entry" id="staff-version-diff"></div>
+<h2>Поиск внутри сохранённых оригиналов</h2>
+<form id="staff-original-search">
+<label class="wide">Точное слово или фраза<input name="q" minlength="3" maxlength="100" required
+placeholder="Срок оплаты договора"></label>
+<button class="primary">Поиск в файлах ЕИС</button></form>
+<div id="staff-original-results"></div>
 <h2>Поиск по сохранённым доказательствам и документам</h2>
 <form id="staff-search-form"><label class="wide">Искомая фраза
 <input name="q" minlength="3" maxlength="110" required placeholder="Обеспечение заявки"></label>
@@ -388,6 +500,24 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <textarea name="body" minlength="4" maxlength="2000" required></textarea></label>
 <button class="primary" type="submit">Отправить сообщение</button></form>
 </div></section>
+<section class="panel" data-staff-section="activity" hidden>
+<h2>Календарь сроков и поручений</h2>
+<p>Сроки из реальных поручений. Приближение срока определяется по вашим настройкам.</p>
+<div id="staff-calendar-list"></div>
+<h2>История работы</h2>
+<p>Действия сотрудника и руководителя, сохранённые замечания, решения и контрольные вопросы.</p>
+<div id="staff-history-list"></div></section>
+<section class="panel" data-staff-section="library" hidden>
+<h2>Моя база согласованных нарушений</h2>
+<p>Только подтверждённые руководителем выводы, отдельно от автоматических находок анализатора.</p>
+<div id="staff-library-list"></div>
+<h2>Проверка оформления служебной записки</h2>
+<p>Проверка ODT на реквизиты и правовые ссылки не заменяет юридическую оценку.</p>
+<div class="action-row"><label>Идентификатор собственной сохранённой записки
+<input id="staff-memo-id" placeholder="UUID из архива записок"></label>
+<button type="button" class="outline" id="staff-memo-check">Проверить структуру</button></div>
+<div id="staff-memo-warnings"></div><p>
+<a href="/account/memos">Открыть архив записок и скачать документы →</a></p></section>
 <div id="staff-status" role="status" aria-live="polite"></div>
 </main>__JS__</body></html>"""
 
