@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir -r requirements-accounts.txt
 COPY scripts/ /app/scripts/
 RUN python -m compileall -q /app/scripts
 EXPOSE 8080
-CMD ["python","-m","uvicorn","scripts.account_staging_app:application","--host","0.0.0.0","--port","8080"]
+CMD ["python","-m","uvicorn","scripts.account_staging_app:application","--host","0.0.0.0","--port","8080"]\n
