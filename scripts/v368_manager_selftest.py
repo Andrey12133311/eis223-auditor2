@@ -155,7 +155,9 @@ def check_transitions():
     assert set(flow.TaskDecision.model_fields["action"].annotation.__args__) == set() if False else True
     src=inspect.getsource(flow.employee_task_action)
     assert 'legal_review_completed' in src
-    assert "Сначала запустите самостоятельную проверку" in src
+    assert "account_manager_task_eis_jobs" in src
+    assert "account_manual_checks" in src  # legacy manual check is optional fallback
+    assert "legal_review_completed" in src  # never submit without completed audit
     assert "WHERE id=%s AND user_id=%s" in src
     task=inspect.getsource(flow.task_decision)
     assert '"complete":("submitted",)' in task
