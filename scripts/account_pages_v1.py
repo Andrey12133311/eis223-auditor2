@@ -183,6 +183,27 @@ async function loadBatches(){
  m.textContent=data.length?data.map(j=>j.reg_number+' — '+(labels[j.status]||'Неизвестный статус')+'; попыток: '+j.attempts).join(' | '):'Заданий пока нет';
  }catch{m.textContent='Ошибка соединения'}finally{jobs.disabled=false}
  });action.append(jobs);
+ const findings=document.createElement('button');findings.textContent='Нарушения';
+ findings.addEventListener('click',async()=>{
+ findings.disabled=true;
+ try{
+ const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/findings',{credentials:'same-origin'});
+ if(!res.ok){m.textContent='Не удалось загрузить нарушения';return}
+ const data=await res.json();
+ const panel=document.createElement('section');panel.id='personal-findings';
+ const heading=document.createElement('h2');heading.textContent='Нарушения тематической проверки';panel.append(heading);
+ for(const finding of data){
+ const entry=document.createElement('article');
+ const title=document.createElement('strong');title.textContent=finding.reg_number+' — '+finding.legal_basis;
+ const description=document.createElement('p');description.textContent=finding.description;
+ const evidence=document.createElement('p');evidence.textContent='Источник: '+finding.evidence_source;
+ entry.append(title,description,evidence);panel.append(entry);
+ }
+ const previous=document.getElementById('personal-findings');if(previous)previous.remove();
+ document.getElementById('rows').after(panel);
+ m.textContent=data.length?'Найдено нарушений: '+data.length:'Подтверждённых нарушений пока нет';
+ }catch{m.textContent='Ошибка соединения'}finally{findings.disabled=false}
+ });action.append(findings);
  }
  const btn=document.createElement('button');btn.textContent='Удалить из моих';
  btn.addEventListener('click',async()=>{
