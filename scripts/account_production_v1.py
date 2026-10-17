@@ -251,6 +251,7 @@ def install(app):
     from scripts.v370_staff_documents import router as staff_documents
     from scripts.v370_staff_extras import router as staff_extras
     from scripts.v370_manager_review import router as manager_manual_reviews
+    from scripts.v371_profile import router as account_profile
     from scripts.account_page_routes_v1 import router as pages
     from scripts.account_private_api_v1 import router as private
     from scripts.account_migrations_v1 import initialize_schema
@@ -273,6 +274,7 @@ def install(app):
     app.include_router(staff_documents)
     app.include_router(staff_extras)
     app.include_router(manager_manual_reviews)
+    app.include_router(account_profile)
     app.include_router(employee_assignments)
     app.include_router(pages)
     app.include_router(private)
