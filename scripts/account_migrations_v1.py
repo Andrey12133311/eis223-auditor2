@@ -8,6 +8,12 @@ def initialize_schema(db):
     statements = [statement.strip() for statement in SCHEMA.split(";") if statement.strip()]
     for statement in statements:
         db.execute(statement)
+    # Safe additive migration for existing accounts. Never guess names from email.
+    for column in ("last_name", "first_name", "patronymic"):
+        db.execute(
+            "ALTER TABLE account_users ADD COLUMN IF NOT EXISTS "
+            + column + " TEXT NOT NULL DEFAULT ''"
+        )
     # Older installations already have a two-role CHECK. Amend only when
     # needed, inside the existing PostgreSQL transaction.
     existing = db.execute(
