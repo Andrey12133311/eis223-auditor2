@@ -2,19 +2,20 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from scripts.account_api_v1 import current_account
-from scripts.account_pages_v1 import REGISTER, LOGIN, HOME, ADMIN, THEMATIC, MEMOS
+from scripts.account_pages_v1 import HOME, ADMIN, THEMATIC, MEMOS
+from scripts.account_site_ui_v1 import login_portal
 
 router = APIRouter(prefix="/account", tags=["account-pages"])
 
 
 @router.get("/register", response_class=HTMLResponse)
 def register_page():
-    return REGISTER
+    return login_portal('register')
 
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page():
-    return LOGIN
+    return login_portal('login')
 
 
 @router.get("/home", response_class=HTMLResponse)
