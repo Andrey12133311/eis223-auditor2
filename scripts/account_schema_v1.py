@@ -102,6 +102,43 @@ CREATE TABLE IF NOT EXISTS account_memos (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS account_memos_owner ON account_memos(user_id);
+CREATE TABLE IF NOT EXISTS account_favorites (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    kind TEXT NOT NULL CHECK(kind IN ('procurement','customer')),
+    entity_key TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,kind,entity_key)
+);
+CREATE INDEX IF NOT EXISTS account_favorites_owner
+    ON account_favorites(user_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS account_alert_snapshots (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    source_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    violation_count INTEGER NOT NULL DEFAULT 0,
+    documents_checked INTEGER NOT NULL DEFAULT 0,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,source_key)
+);
+CREATE TABLE IF NOT EXISTS account_alert_events (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    source_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('documents_checked','new_violation','thematic_finished')),
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    read_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS account_alert_events_owner
+    ON account_alert_events(user_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS account_memo_blobs (
+    memo_id UUID PRIMARY KEY REFERENCES account_memos(id) ON DELETE CASCADE,
+    odt BYTEA NOT NULL,
+    pdf BYTEA,
+    pdf_created_at TIMESTAMPTZ
+);
 CREATE TABLE IF NOT EXISTS account_throttle (
     bucket_key TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL,
