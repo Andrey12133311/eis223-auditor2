@@ -5,17 +5,17 @@ The account worker is opt-in and **must not be deployed as the production web st
 ## Prerequisites
 - A separate staging PostgreSQL database migrated with `scripts.account_migrations_v1`.
 - A separate worker process with `requirements-accounts.txt`.
-- A trusted adapter implemented as a Python function `audit(owner_id, batch_id, reg_number) -> bool` inside a `scripts.*` module.
-- The adapter must use the EIS connector and real documents, apply legal checks, and durably persist evidence-backed findings scoped to the owner and batch **before** returning `True`. It must return `False` or raise if evidence is unavailable or persistence fails. No adapter is provided yet.
+- A trusted adapter implemented as a Python function `audit(owner_id, batch_id, reg_number, attempts) -> bool` inside a `scripts.*` module.
+- The adapter must use the EIS connector and real documents, apply legal checks, and durably persist evidence-backed findings scoped to the owner and batch **before** returning `True`. It must return `False` or raise if evidence is unavailable or persistence fails. An initial adapter is available in `scripts.account_eis_adapter_v1:audit`; it still requires staging integration tests against live EIS and the database.
 - The callback must never treat missing documents as confirmed violations.
-- The current callback signature does not include the attempt number; an adapter that persists findings must look up and fence the active attempt via `save_findings`. Do not enable the worker until this integration is tested.
+- The callback receives the claimed attempt number and must use it to fence result persistence. Do not enable the worker until this integration is tested.
 
 ## Example separate-process configuration
 
 ```sh
 export EIS223_WORKER_ENABLED=true
 export EIS223_IDENTITY_DATABASE_URL='postgresql://...'
-export EIS223_AUDIT_ADAPTER='scripts.your_verified_eis_adapter:audit'
+export EIS223_AUDIT_ADAPTER='scripts.account_eis_adapter_v1:audit'
 python -m scripts.account_worker_service_v1
 ```
 
@@ -23,4 +23,4 @@ Never commit credentials. Do not use `claim_next` or another low-level database 
 
 ## Status
 
-The queue, claims, bounded stale-job recovery, and finding storage exist. **Real EIS ingestion, the legal analysis adapter, end-to-end verification, and ODT memo generation are not yet connected.** Do not claim completed procurement audits from this staging module until those stages are integrated and tested.
+The queue, claims, bounded stale-job recovery, and finding storage exist. **An initial EIS analysis adapter is connected in code, but live EIS ingestion and end-to-end verification have not been confirmed; ODT memo generation remains unconnected.** Do not claim completed procurement audits from this staging module until those stages are integrated and tested.
