@@ -49,6 +49,14 @@ class OwnerIsolationTests(unittest.TestCase):
             self.assertEqual(workspace.my_procurements(object(), Response()), [])
         self.assertEqual(db.calls[-1][1], (OWNER_B,))
 
+    def test_new_personal_batch_is_owned_and_not_running(self):
+        db = FakeDB()
+        with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_A, 'user', 'approved')), patch.object(private, 'require_origin'):
+            result = private.create_personal_batch(object(), Response())
+        self.assertTrue(result['batch_id'].startswith('personal-'))
+        self.assertFalse(result['execution_started'])
+        self.assertEqual(db.calls[-1][1], (OWNER_A, result['batch_id']))
+
     def test_unowned_memo_download_returns_not_found(self):
         db = FakeDB()
         with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'owned_memo_key', return_value=None) as lookup:
