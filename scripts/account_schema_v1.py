@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS account_users (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
+    role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','manager','admin')),
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','approved','rejected','blocked')),
     email_verified_at TIMESTAMPTZ,
@@ -139,6 +139,91 @@ CREATE TABLE IF NOT EXISTS account_memo_blobs (
     pdf BYTEA,
     pdf_created_at TIMESTAMPTZ
 );
+-- Supervisor access is independently granted by an administrator.
+-- Each staff member belongs to at most one explicit managerial team.
+CREATE TABLE IF NOT EXISTS account_manager_teams (
+    user_id UUID PRIMARY KEY REFERENCES account_users(id),
+    manager_id UUID NOT NULL REFERENCES account_users(id),
+    assigned_by UUID NOT NULL REFERENCES account_users(id),
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (user_id <> manager_id)
+);
+CREATE INDEX IF NOT EXISTS account_manager_teams_manager
+    ON account_manager_teams(manager_id,assigned_at DESC);
+CREATE TABLE IF NOT EXISTS account_manager_tasks (
+    id UUID PRIMARY KEY,
+    manager_id UUID NOT NULL REFERENCES account_users(id),
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}
+    bucket_key TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_audit (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    actor_id UUID,
+    subject_id UUID,
+    action TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+),
+    title TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    due_date DATE,
+    status TEXT NOT NULL DEFAULT 'assigned'
+        CHECK(status IN ('assigned','in_progress','submitted','returned','completed','cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    submitted_at TIMESTAMPTZ,
+    closed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS account_manager_tasks_manager
+    ON account_manager_tasks(manager_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS account_manager_tasks_user
+    ON account_manager_tasks(user_id,status,due_date);
+CREATE UNIQUE INDEX IF NOT EXISTS account_manager_tasks_one_active
+    ON account_manager_tasks(manager_id,user_id,reg_number)
+    WHERE status NOT IN ('completed','cancelled');
+CREATE TABLE IF NOT EXISTS account_manager_finding_reviews (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL,
+    finding_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    legal_basis TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    reviewer_id UUID NOT NULL REFERENCES account_users(id),
+    decision TEXT NOT NULL CHECK(decision IN ('approved','returned','rejected')),
+    comment TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,reg_number,finding_key)
+);
+CREATE INDEX IF NOT EXISTS account_manager_finding_reviewer
+    ON account_manager_finding_reviews(reviewer_id,updated_at DESC);
+CREATE TABLE IF NOT EXISTS account_manager_memo_reviews (
+    memo_id UUID PRIMARY KEY REFERENCES account_memos(id) ON DELETE CASCADE,
+    owner_id UUID NOT NULL REFERENCES account_users(id),
+    reviewer_id UUID REFERENCES account_users(id),
+    status TEXT NOT NULL DEFAULT 'submitted'
+        CHECK(status IN ('submitted','approved','returned','rejected')),
+    comment TEXT NOT NULL DEFAULT '',
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS account_manager_memo_pending
+    ON account_manager_memo_reviews(owner_id,status,submitted_at DESC);
+CREATE TABLE IF NOT EXISTS account_manager_actions (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    actor_id UUID NOT NULL REFERENCES account_users(id),
+    target_user_id UUID REFERENCES account_users(id),
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS account_manager_actions_recent
+    ON account_manager_actions(actor_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS account_throttle (
     bucket_key TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL,
