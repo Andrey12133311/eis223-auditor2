@@ -183,6 +183,88 @@ def manager_list(request:Request,response:Response):
                             () if role=="admin" else (actor,))
     return _read(rows,request)
 
+@staff_router.get("/violations")
+def staff_campaign_violations(request:Request,response:Response):
+    """Present real thematic findings as ordinary violation cards, not tasks.
+
+    Only results from EIS thematic batches explicitly assigned to this
+    authenticated employee by the supervisor are queried. Duplicate legal
+    episodes from overlapping campaigns are displayed only once.
+    """
+    uid=current_account(request)[0]
+    response.headers.update(no_store_headers())
+    with connect() as db:
+        rows=db.execute(
+            """SELECT batch_id,title FROM account_manager_campaign_targets
+               WHERE user_id=%s AND status NOT IN ('setup_failed','preparing')
+               ORDER BY created_at DESC LIMIT 45""",(uid,)).fetchall()
+    if not rows:
+        return {"findings":[],"count":0,"truncated":False,
+                "scope":"Нарушения по тематическим проверкам, назначенным руководителем"}
+    from v342_thematic_queue import db as eis_db
+    from v352_dashboard_truth import collapse_legal_events
+    from v365_consultant_refs import enrich
+    con=eis_db(_engine(request))
+    try:
+        con.execute("PRAGMA busy_timeout=2000")
+        con.execute("PRAGMA query_only=ON")
+        ids=[r[0] for r in rows]
+        placeholders=",".join("?" for _ in ids)
+        data=[dict(r) for r in con.execute(
+            """SELECT batch_id,reg,category,title,law,evidence,code,
+                      document,source_url,law_url FROM thematic_findings
+               WHERE batch_id IN ("""+placeholders+""")
+               ORDER BY rowid DESC LIMIT 1200""",ids)]
+    except sqlite3.Error as exc:
+        raise HTTPException(503,"Результаты тематической проверки ЕИС временно недоступны") from exc
+    finally:con.close()
+    by_reg={}
+    for item in data:
+        by_reg.setdefault(item["reg"],[]).append(item)
+    prepared=[]
+    for reg,findings in by_reg.items():
+        for item in collapse_legal_events(findings):
+            enriched=enrich(item)
+            from urllib.parse import urlsplit
+            url=str(item.get("source_url") or "").strip()
+            try:
+                parts=urlsplit(url)
+                safe_source=parts.scheme=="https" and (
+                    parts.hostname=="zakupki.gov.ru" or
+                    str(parts.hostname or "").endswith(".zakupki.gov.ru")
+                ) and not parts.username and not parts.password
+            except ValueError:
+                safe_source=False
+            law_url=str(enriched.get("consultant_url") or "")
+            if not law_url.startswith("https://www.consultant.ru/"):
+                law_url=""
+            prepared.append({
+                "reg_number":reg,
+                "title":str(item.get("title") or "Нарушение")[:280],
+                "category":str(item.get("category") or "")[:90],
+                "law":str(enriched.get("law") or "")[:350],
+                "evidence":str(item.get("evidence") or "")[:3000],
+                "document":str(item.get("document") or "")[:220],
+                "source_url":url if safe_source else "",
+                "law_url":law_url,
+                "categories":list(item.get("categories") or []),
+                "source_representations":int(item.get("raw_count",1)),
+                "needs_review":not (
+                    str(enriched.get("law") or "").strip() and
+                    str(item.get("evidence") or "").strip() and
+                    (str(item.get("document") or "").strip() or safe_source)
+                ),
+                "batch_id":str(item.get("batch_id") or "")[:24],
+            })
+    return {
+        "findings":prepared[:500],
+        "count":len(prepared[:500]),
+        "truncated":len(data)>=1200 or len(prepared)>500,
+        "scope":"Подтверждённые анализатором нарушения по тематическим проверкам сотрудника",
+        "note":"Результаты с одинаковыми обстоятельствами объединены; предложения без достаточных доказательств требуют проверки."
+    }
+
+
 @staff_router.get("")
 def staff_list(request:Request,response:Response):
     owner=current_account(request)[0]
