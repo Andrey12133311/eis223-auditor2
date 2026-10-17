@@ -83,12 +83,14 @@ def admin_users(request:Request,response:Response):
     response.headers.update(no_store_headers())
     with connect() as db:
         rows=db.execute(
-            """SELECT u.id,u.email,u.role,u.status,t.manager_id
+            """SELECT u.id,u.email,u.role,u.status,t.manager_id,
+                      u.last_name,u.first_name,u.patronymic
                FROM account_users u
                LEFT JOIN account_manager_teams t ON t.user_id=u.id
                ORDER BY lower(u.email) ASC LIMIT 250""").fetchall()
     return [{"id":str(r[0]),"email":r[1],"role":r[2],
-             "status":r[3],"manager_id":str(r[4]) if r[4] else None} for r in rows]
+             "status":r[3],"manager_id":str(r[4]) if r[4] else None,
+             "full_name":" ".join(x for x in (r[5],r[6],r[7]) if x)} for r in rows]
 
 @router.post("/admin/users/{user_id}/role")
 def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
