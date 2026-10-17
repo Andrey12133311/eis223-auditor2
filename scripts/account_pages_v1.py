@@ -129,6 +129,11 @@ HOME = page("Мои самостоятельные проверки", """
 .manual-form label{flex:1 1 220px;margin:0}
 .manual-form input{margin-top:5px}
 .manual-form button{margin:0 0 1px}
+.manual-filter-area{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;
+ padding:16px;background:#f7fafc;border:1px solid #dbe8f2;border-radius:10px;align-items:end}
+.manual-filter-area label{margin:0;font-size:12px}.manual-only-confirmed{display:flex!important;align-items:center;gap:8px;padding:8px}
+.manual-only-confirmed input{width:16px;height:16px;min-height:0;margin:0}
+#manual-filters-reset{background:#fff;border:1px solid #cbdfea;color:#22618d}
 .manual-summary{display:flex;align-items:center;justify-content:space-between;
  flex-wrap:wrap;gap:8px;margin:12px 0}
 .manual-summary strong{color:#245875;font-size:15px}
@@ -168,6 +173,17 @@ HOME = page("Мои самостоятельные проверки", """
  maxlength="11" inputmode="numeric" autocomplete="off" placeholder="32616412317"></label>
 <button type="submit">Запустить проверку</button>
 </form>
+<div class="manual-filter-area" aria-label="Фильтры самостоятельных проверок">
+<label>Закупка / заказчик / ИНН<input type="search" id="manual-search" placeholder="Поиск"></label>
+<label>Статус<select id="manual-status"><option value="">Все</option>
+<option value="queued">В очереди</option><option value="leased">Загружается ЕИС</option>
+<option value="done">Загрузка завершена</option><option value="partial">Частично</option>
+<option value="deferred">Ожидает источник</option><option value="error">Ошибка</option></select></label>
+<label>Дата с<input type="date" id="manual-date-start"></label>
+<label>Дата по<input type="date" id="manual-date-end"></label>
+<label>Вид нарушения<select id="manual-violation-type"><option value="">Все виды</option></select></label>
+<label class="manual-only-confirmed"><input type="checkbox" id="manual-only-violations"> Есть нарушения</label>
+<button type="button" id="manual-filters-reset">Сбросить фильтры</button></div>
 <p id="manual-message" class="message" role="status" aria-live="polite"></p>
 <div class="manual-summary"><strong id="manual-total">Загрузка проверок…</strong>
 <button type="button" id="manual-refresh">Обновить данные</button></div>
@@ -189,10 +205,28 @@ async function refresh(){
  const response=await fetch('/me/manual-checks',{credentials:'same-origin',cache:'no-store'});
  if(response.status===401){location.replace('/account/login');return}
  if(!response.ok)throw Error('Не удалось загрузить проверки');
- const data=await response.json();
- if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
+ const allData=await response.json();
+ if(!Array.isArray(allData))throw Error('Некорректный ответ сервера');
+ const select=el('manual-violation-type'),selected=select.value;
+ const kinds=[...new Set(allData.flatMap(x=>x.violation_types||[]))].sort((a,b)=>a.localeCompare(b,'ru'));
+ select.replaceChildren();
+ const allOption=document.createElement('option');allOption.value='';allOption.textContent='Все виды';select.append(allOption);
+ for(const kind of kinds){const opt=document.createElement('option');opt.value=kind;opt.textContent=kind;select.append(opt)}
+ select.value=kinds.includes(selected)?selected:'';
+ const term=el('manual-search').value.trim().toLowerCase();
+ const status=el('manual-status').value;
+ const from=el('manual-date-start').value,to=el('manual-date-end').value;
+ const only=el('manual-only-violations').checked;
+ const data=allData.filter(item=>{
+  const customer=[item.reg_number,item.customer,item.customer_inn].join(' ').toLowerCase();
+  const day=(item.started_at||'').slice(0,10);
+  return (!term||customer.includes(term))&&(!status||item.job_status===status)&&
+    (!from||(day&&day>=from))&&(!to||(day&&day<=to))&&
+    (!only||Number(item.violations||0)>0)&&
+    (!select.value||(item.violation_types||[]).includes(select.value));
+ });
  const rows=el('manual-rows');rows.replaceChildren();
- el('manual-total').textContent='Самостоятельных проверок: '+data.length;
+ el('manual-total').textContent='Показано: '+data.length+' из '+allData.length;
  el('manual-empty').hidden=!!data.length;
  el('manual-table').hidden=!data.length;
  for(const item of data){
@@ -203,6 +237,8 @@ async function refresh(){
   const date=document.createElement('small');const stamp=Date.parse(item.started_at||'');
   date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'';
   reg.append(date);
+  if(item.customer){const name=document.createElement('small');name.textContent=item.customer;reg.append(name)}
+  if(item.customer_inn){const inn=document.createElement('small');inn.textContent='ИНН '+item.customer_inn;reg.append(inn)}
   const label=document.createElement('span');label.className='manual-chip';
   label.textContent=state[item.job_status]||'Проверяется';
   if(['queued','deferred','leased'].includes(item.job_status))label.classList.add('wait');
@@ -226,7 +262,16 @@ async function refresh(){
       await refreshAfterAction();
     }catch(error){el('manual-message').textContent=error.message;remove.disabled=false}
   };
-  wrapper.append(open,remove);actions.append(wrapper);
+  const favorite=document.createElement('button');favorite.type='button';favorite.textContent='☆ В избранное';
+  favorite.onclick=async()=>{
+   favorite.disabled=true;
+   try{const response=await fetch('/me/favorites/procurement/'+encodeURIComponent(item.reg_number),
+     {method:'POST',credentials:'same-origin'});
+    if(!response.ok)throw Error();el('manual-message').textContent='Закупка добавлена в избранное';
+   }catch{el('manual-message').textContent='Не удалось добавить в избранное'}
+   finally{favorite.disabled=false}
+  };
+  wrapper.append(open,favorite,remove);actions.append(wrapper);
   tr.append(reg,status,docs,violations,actions);rows.append(tr);
  }
  }catch(error){el('manual-message').textContent=error.message}
@@ -234,6 +279,18 @@ async function refresh(){
 }
 async function refreshAfterAction(){loading=false;await refresh()}
 el('manual-refresh').onclick=refresh;
+const filterNames=['manual-search','manual-status','manual-date-start','manual-date-end',
+                   'manual-violation-type','manual-only-violations'];
+let filterTimer;
+for(const id of filterNames){
+ const field=el(id);
+ const handler=()=>{clearTimeout(filterTimer);filterTimer=setTimeout(refresh,150)};
+ field.addEventListener('input',handler);field.addEventListener('change',handler);
+}
+el('manual-filters-reset').onclick=()=>{
+ for(const id of filterNames){const field=el(id);if(field.type==='checkbox')field.checked=false;else field.value=''}
+ refresh();
+};
 el('manual-add').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
  const number=String(new FormData(form).get('reg')||'').trim();
