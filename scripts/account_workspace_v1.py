@@ -53,11 +53,11 @@ def my_thematic_batches(request: Request):
     user = current_account(request)
     with connect() as db:
         rows = db.execute(
-            """SELECT id, name, status FROM account_thematic_batches
-               WHERE user_id=%s ORDER BY created_at DESC LIMIT 100""",
+            """SELECT batch_id FROM account_thematic_batches
+               WHERE user_id=%s ORDER BY batch_id DESC LIMIT 100""",
             (user[0],),
         ).fetchall()
-    return [{"id": str(r[0]), "name": r[1], "status": r[2]} for r in rows]
+    return [{"id": r[0], "name": r[0], "status": "Сохранена"} for r in rows]
 
 
 @router.get("/memos")
@@ -66,8 +66,8 @@ def my_memos(request: Request):
     user = current_account(request)
     with connect() as db:
         rows = db.execute(
-            """SELECT id, title FROM account_memos
+            """SELECT id, reg_number FROM account_memos
                WHERE user_id=%s ORDER BY created_at DESC LIMIT 100""",
             (user[0],),
         ).fetchall()
-    return [{"id": str(r[0]), "title": r[1]} for r in rows]
+    return [{"id": str(r[0]), "title": "Служебная записка · " + r[1]} for r in rows]
