@@ -285,39 +285,43 @@ refresh();
 
 _GATEWAY_STYLE = """
 <style id="eis223-signin-style">
-:root{font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
- --auth-ink:#203c32;--auth-border:#dce9e2;--auth-muted:#677b70}
+:root{font-family:Inter,"Segoe UI",system-ui,sans-serif;color:#2a4356;
+ --auth-ink:#213f57;--auth-border:#dbe7ef;--auth-muted:#687e8e}
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%;font-family:inherit}
-body{color:var(--auth-ink);background:radial-gradient(ellipse at 90% 0%,#e5f4eb,transparent 40%),
- radial-gradient(ellipse at 0% 90%,#edf4f1,transparent 42%),#f5f8f5}
-.layout{min-height:100vh;display:flex;justify-content:center;align-items:center;padding:25px 16px}
+body{background:linear-gradient(155deg,#eaf2f8 0%,#f4f7fa 42%,#edf3f8 100%);
+ color:var(--auth-ink)}
+.layout{min-height:100vh;display:flex;justify-content:center;align-items:center;
+ padding:26px 15px}
 .auth{position:relative;overflow:hidden;background:#fff;width:min(490px,100%);
- border:1px solid var(--auth-border);border-radius:23px;
- padding:clamp(22px,4.5vw,38px);box-shadow:0 22px 65px #1a42331c}
-.auth:before{content:"";position:absolute;left:0;right:0;top:0;height:5px;
- background:linear-gradient(90deg,#067969,#38baa0,#d2e7d7)}
-h1{font-size:clamp(24px,3vw,29px);line-height:1.2;letter-spacing:-.04em;
- font-weight:800;color:#23433a;margin:7px 0 11px}
-p{font-size:14px;line-height:1.65;color:var(--auth-muted)}
-.tabs{display:flex;gap:5px;padding:5px;margin:23px 0 19px;
- border-radius:12px;background:#f0f6f2}
-.tabs button{flex:1;min-height:44px;padding:10px 12px;background:transparent;border:0;
- border-radius:9px;font:700 14px system-ui;cursor:pointer;color:#697e73}
-.tabs button[aria-selected=true]{background:#fff;color:#087c6c;box-shadow:0 2px 9px #2a4c380f}
+ border:1px solid var(--auth-border);border-radius:14px;
+ padding:clamp(23px,4vw,36px);box-shadow:0 16px 56px #204e7119}
+.auth:before{position:absolute;top:0;left:0;right:0;content:"";height:5px;
+ background:linear-gradient(90deg,#174c76,#3483b7,#7fb4d4)}
+h1{font-size:clamp(24px,2.8vw,29px);line-height:1.17;
+ font-weight:790;letter-spacing:-.035em;color:#204c70;margin:10px 0 11px}
+p{font-size:13px;color:var(--auth-muted);line-height:1.65}
+.tabs{display:flex;gap:4px;padding:4px;margin:22px 0 19px;
+ border-radius:9px;background:#eef4f9}
+.tabs button{flex:1;min-height:43px;padding:9px;border:0;
+ border-radius:7px;cursor:pointer;font:700 14px system-ui;
+ background:transparent;color:#637d92}
+.tabs button[aria-selected=true]{background:#fff;color:#175b8b;box-shadow:0 1px 7px #244b6812}
 form[hidden]{display:none!important}
-label{display:block;font-size:13px;margin:15px 0 6px;color:#3b574e;font-weight:700}
-input{display:block;width:100%;background:white;color:#203b31;min-height:47px;
- border:1px solid #ceddd5;border-radius:11px;padding:12px 14px;font:inherit}
-input:focus{border-color:#0e967f;outline:3px solid #c9ebe0;outline-offset:1px}
-.submit{width:100%;min-height:47px;margin-top:22px;padding:12px;border:0;border-radius:11px;
- background:#087e71;color:#fff;font:700 15px system-ui;cursor:pointer}
-.submit:hover:not(:disabled){background:#04695e}
-.submit:disabled{opacity:.6;cursor:wait}
-#auth-status{min-height:24px;font-size:13px;color:#346a5c;margin:14px 0}
-.small{text-align:center;font-size:12px;color:#819187;margin:15px 0 0}
-:focus-visible{outline:3px solid #7dceb9;outline-offset:2px}
-@media(max-width:500px){.layout{align-items:flex-start;padding-top:8vh}.auth{border-radius:17px}}
+label{display:block;margin:15px 0 6px;font-size:13px;color:#425f74;font-weight:670}
+input{width:100%;display:block;min-height:45px;border-radius:8px;
+ background:#fff;color:#263f53;border:1px solid #cbdce8;
+ padding:11px 13px;font:inherit}
+input:focus{outline:3px solid #c8e3f6;border-color:#3b80ae}
+.submit{min-height:46px;width:100%;border:1px solid #175f92;
+ background:#175f92;color:#fff;border-radius:8px;
+ font:700 14px system-ui;margin-top:21px;cursor:pointer}
+.submit:hover:not(:disabled){background:#104971}
+.submit:disabled{opacity:.55}
+#auth-status{min-height:24px;font-size:13px;color:#406985;margin:12px 0}
+.small{font-size:11px;text-align:center;color:#8598a8;margin-top:14px}
+:focus-visible{outline:3px solid #8dbfe0;outline-offset:2px}
+@media(max-width:500px){.layout{align-items:flex-start;padding-top:8vh}.auth{border-radius:11px}}
 </style>
 """
 
