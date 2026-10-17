@@ -57,7 +57,7 @@ def unlink_batch(batch_id: str, request: Request, response: Response):
     require_origin(request)
     owner_id = current_account(request)[0]
     response.headers.update(no_store_headers())
-    if not batch_id or len(batch_id) > 200:
+    if not batch_id or len(batch_id) > 200 or not batch_id.isascii() or not all(c.isalnum() or c in "-_" for c in batch_id):
         raise HTTPException(422, "Некорректный идентификатор очереди")
     with connect() as db:
         row = db.execute(
