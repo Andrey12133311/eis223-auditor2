@@ -79,7 +79,7 @@ def process_one(connect, audit_callback):
     owner_id, batch_id, reg_number, attempts = claimed
     succeeded = False
     try:
-        succeeded = audit_callback(owner_id, batch_id, reg_number) is True
+        succeeded = audit_callback(owner_id, batch_id, reg_number, attempts) is True
     except Exception:
         # The failure is recorded below; never treat an exception as success.
         succeeded = False
