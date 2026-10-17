@@ -367,7 +367,10 @@ if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignment
 });
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
 async function get(url){
-const r=await fetch(url,{credentials:'same-origin',cache:'no-store'});
+const controller=new AbortController();
+const timeout=setTimeout(()=>controller.abort(),9000);
+let r;try{r=await fetch(url,{credentials:'same-origin',cache:'no-store',signal:controller.signal});}
+finally{clearTimeout(timeout)}
 if(r.status===401){location.replace('/account/login');throw Error('Требуется вход')}
 if(!r.ok)throw Error('Ошибка загрузки');return await r.json();
 }
@@ -742,7 +745,7 @@ if(r.ok){form.reset();await refresh()}
 }catch{show('eis223-add-status','Ошибка соединения')}finally{btn.disabled=false}
 });
 
-refresh();
+// Defer expensive private dashboard requests until the user opens the cabinet.
 refreshMyName();
 })();
 </script>
