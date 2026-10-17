@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS account_thematic_batches (
     batch_id TEXT NOT NULL,
     PRIMARY KEY(user_id, batch_id)
 );
-CREATE TABLE IF NOT EXISTS account_memos (
+CREATE TABLE IF NOT EXISTS account_thematic_procurements (\n    user_id UUID NOT NULL REFERENCES account_users(id),\n    batch_id TEXT NOT NULL,\n    reg_number TEXT NOT NULL,\n    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    PRIMARY KEY(user_id, batch_id, reg_number),\n    FOREIGN KEY(user_id, batch_id) REFERENCES account_thematic_batches(user_id, batch_id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS account_memos (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
     reg_number TEXT NOT NULL,
