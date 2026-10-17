@@ -49,11 +49,12 @@ LOGIN = page("Вход", """
 <p class="message" id="message" role="status"></p><p><a href="/account/register">Создать аккаунт</a></p>
 <script>
 document.getElementById('login').addEventListener('submit',async e=>{
- e.preventDefault();const f=e.currentTarget,m=document.getElementById('message');
+ e.preventDefault();const f=e.currentTarget,m=document.getElementById('message'),b=f.querySelector('button');
+ b.disabled=true;
  try{const r=await fetch('/auth/login',{method:'POST',credentials:'same-origin',
  headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(f)))});
  if(r.ok){location.assign('/account/home')}else{m.textContent='Неверные данные или аккаунт ещё не подтверждён.'}
- }catch{m.textContent='Ошибка соединения.'}
+ }catch{m.textContent='Ошибка соединения.'}finally{b.disabled=false}
 });
 </script>""")
 
