@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from scripts.account_api_v1 import router as auth, admin_router
 from scripts.account_workspace_v1 import router as workspace
 from scripts.account_page_routes_v1 import router as pages
-from scripts.account_schema_v1 import SCHEMA
+from scripts.account_migrations_v1 import initialize_schema
 from scripts.account_asgi_gate_v1 import AccountGateMiddleware
 from scripts.account_api_v1 import connect
 
@@ -28,7 +28,7 @@ def initialize_identity_schema():
     if os.environ.get("EIS223_IDENTITY_INIT_SCHEMA") != "true":
         return
     with connect() as db:
-        db.execute(SCHEMA)
+        initialize_schema(db)
 
 
 @app.on_event("startup")
