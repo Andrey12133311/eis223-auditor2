@@ -83,10 +83,14 @@ def _period_report(request,actor,role,start,end):
         from scripts.v366_account_manual import _read_only_status
         from sqlite3 import Error as SQLiteError
         try:
-            for row in entries:
+            # One bounded read-only SQLite session for the entire period;
+            # do not open hundreds of connections on a busy EIS instance.
+            all_entries=[{"reg_number":reg,"job_id":job,
+                          "created_at":created,"last_started_at":last_started}
+                         for user_id,reg,job,created,last_started in entries]
+            statuses=_read_only_status(ns,all_entries)
+            for row,detail in zip(entries,statuses):
                 user_id,reg,job,created,last_started=row
-                detail=_read_only_status(ns,[{"reg_number":reg,"job_id":job,
-                                              "created_at":created,"last_started_at":last_started}])[0]
                 person=by_worker.get(str(user_id))
                 if not person:continue
                 person["manual_checks"]+=1
