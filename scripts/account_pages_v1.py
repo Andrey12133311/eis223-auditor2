@@ -7,60 +7,71 @@ def page(title, body):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>""" + escape(title) + """ · ЕИС Аудитор</title>
 <style id="eis223-pages-modern">
-:root{font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
- --page-ink:#203e34;--page-muted:#657b71;--page-main:#087e71;--page-line:#dce8e1;
- background:#f6f8f6;font-synthesis:none}
+:root{font-family:Inter,"Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+ color:#264053;background:#f4f7fa;--accent:#165b8a;--accent-dark:#104772;
+ --line:#dbe6ee;--muted:#687e8e;--page:#fff;font-synthesis:none}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;color:var(--page-ink);
- background:radial-gradient(ellipse at 100% 0%,#e7f4ed,transparent 32%),#f5f8f6;
- -webkit-font-smoothing:antialiased}
-header{background:#fff;border-bottom:1px solid var(--page-line);padding:17px clamp(16px,5vw,62px);
- font-size:16px;font-weight:800;color:#25453a;letter-spacing:-.025em}
-main{width:min(100%,1050px);margin:clamp(22px,4vw,45px) auto;
- padding:0 clamp(12px,3vw,24px) 44px}
-.panel{background:#fff;border:1px solid var(--page-line);
- border-radius:20px;box-shadow:0 15px 42px #153d300c;padding:clamp(20px,4vw,38px);
- min-width:0}
-h1{font-size:clamp(25px,3.6vw,33px);font-weight:820;letter-spacing:-.04em;
- line-height:1.18;color:#204337;margin:0 0 10px}
-h2{color:#24493d;font-size:21px}
-p{color:var(--page-muted);font-size:14px;line-height:1.7;margin:11px 0}
-nav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:13px 0}
-a{color:#09786a;font-weight:680;text-decoration:none}
+body{margin:0;min-height:100vh;background:#f4f7fa;color:#263f50;
+ font:14px/1.55 Inter,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+header{
+ color:#fff;background:#174c76;border-bottom:3px solid #6bb4dc;
+ font-size:16px;font-weight:800;letter-spacing:-.025em;
+ padding:18px clamp(15px,5vw,65px)}
+main{width:min(100%,1110px);margin:clamp(20px,3.2vw,34px) auto 60px;
+ padding:0 clamp(11px,3vw,24px)}
+.panel{background:#fff;border:1px solid var(--line);border-radius:12px;
+ box-shadow:0 5px 22px #244e710b;padding:clamp(18px,3vw,33px);min-width:0}
+h1{font-size:clamp(23px,2.8vw,31px);font-weight:780;letter-spacing:-.03em;
+ color:#1e4b6d;line-height:1.2;margin:0 0 10px}
+h2{color:#204e70;font-size:20px;letter-spacing:-.02em}
+p{color:var(--muted);line-height:1.65;font-size:13px;margin:11px 0}
+nav{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+ margin:12px 0;padding:10px 0;border-bottom:1px solid var(--line)}
+nav a{padding:7px 10px;border-radius:7px;border:1px solid #dbe6ee;
+ background:#f4f8fb}
+a{color:#185f91;font-weight:650;text-decoration:none}
 a:hover{text-decoration:underline}
-label{display:block;margin-top:16px;font-weight:680;color:#3f5b50}
-input,textarea,select{display:block;width:100%;min-height:44px;background:#fff;color:#213d34;
- border:1px solid #cbdcd2;border-radius:10px;padding:11px 13px;margin-top:7px;
- font:inherit}
-input:focus{border-color:#159484;outline:3px solid #cceddf;outline-offset:1px}
-button{border:1px solid #087e71;background:#087e71;color:#fff;border-radius:10px;
- font:700 13px system-ui;min-height:40px;padding:10px 14px;margin:8px 5px 4px 0;
- cursor:pointer;transition:background .15s}
-button:hover:not(:disabled){background:#04695e}
-button:disabled{cursor:wait;opacity:.56}
-.message,[role=status]{font-size:13px;color:#59766b;min-height:20px}
-table{border:1px solid #dfe9e3;border-radius:13px;border-collapse:separate;border-spacing:0;
- width:100%;margin-top:16px;overflow:hidden}
-th,td{padding:12px 13px;vertical-align:middle;text-align:left;border-bottom:1px solid #edf1ee}
-th{font-size:12px;font-weight:750;color:#507267;background:#eff6f1}
+label{display:block;font-weight:690;margin-top:16px;color:#3c5e78}
+input,select,textarea{display:block;max-width:100%;width:100%;min-height:43px;
+ background:#fff;color:#273f53;border:1px solid #cad9e5;
+ border-radius:8px;margin-top:7px;padding:10px 13px;font:inherit}
+input:focus{outline:3px solid #d2e8f7;border-color:#438abb}
+button{background:#175e92;color:#fff;border:1px solid #175e92;
+ border-radius:8px;padding:10px 13px;min-height:40px;
+ font:680 13px system-ui;cursor:pointer;margin:8px 5px 4px 0;
+ transition:background .15s}
+button:hover:not(:disabled){background:#0d466f}
+button:disabled{opacity:.55;cursor:wait}
+.message,[role=status]{font-size:12px;color:#52748a;min-height:20px}
+table{width:100%;margin-top:17px;border:1px solid var(--line);
+ border-collapse:separate;border-spacing:0;border-radius:10px;overflow:hidden;
+ background:white;font-variant-numeric:tabular-nums}
+th,td{padding:12px 13px;border-bottom:1px solid #e9f0f5;
+ text-align:left;vertical-align:middle;line-height:1.5}
+th{font-size:12px;color:#345c7c;background:#eaf2f8;font-weight:750}
 tr:last-child td{border-bottom:0}
-tbody tr:hover{background:#f7fbf8}
-td button{margin:3px 5px 3px 0}
-#rows td:last-child{min-width:185px}
-#personal-procurements,#personal-findings{margin-top:16px;padding:15px;
- border-radius:12px;border:1px solid #e1eae4;background:#f8fbf9}
-.eis-my-check{border-color:#dce9e2!important;background:#f9fcfa!important}
-.eis-my-check h2{color:#1d5446!important}
-.eis-my-actions a{background:#087e71!important;border-color:#087e71!important}
-.eis-my-actions a:hover{background:#04695e!important}
-.eis-pill{background:#e7f6ed!important;color:#16745b!important}
-:focus-visible{outline:3px solid #9bdecb;outline-offset:2px}
-@media(max-width:700px){
- header{padding:15px 17px}
- main{margin:16px auto;padding:0 11px 26px}
- .panel{padding:19px 15px;border-radius:16px}
- table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
- th,td{padding:11px 10px}
+tbody tr:hover td{background:#f2f8fc}
+td button{margin:4px 5px 4px 0}
+#rows td:last-child{min-width:180px}
+#personal-procurements,#personal-findings{
+ margin-top:17px;background:#f9fbfd;border:1px solid #dde9f1;
+ border-radius:10px;padding:14px}
+.eis-my-check{background:#fff!important;border:1px solid #dae6ef!important;
+ border-radius:10px!important;box-shadow:0 3px 10px #143e6109}
+.eis-my-check h2{color:#1d5279!important}
+.eis-my-actions a{background:#176092!important;border-color:#176092!important;color:white!important}
+.eis-my-actions a:hover{background:#0d496f!important}
+.eis-my-actions button{color:#984347!important;border:1px solid #e7cdd1!important;background:#fff!important}
+.eis-pill{background:#e7f3fb!important;color:#236a99!important}
+:is(button,input,select,textarea,a):focus-visible{outline:3px solid #89bbdc;outline-offset:2px}
+@media(max-width:720px){
+ header{padding:15px 16px}
+ main{margin:16px auto 32px;padding:0 11px}
+ .panel{padding:17px 14px;border-radius:11px}
+ nav{gap:7px}
+ nav a{font-size:12px;padding:7px 9px}
+ table{display:block;overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+ th,td{padding:10px 11px}
 }
 @media(prefers-reduced-motion:reduce){button{transition:none}}
 </style></head><body><header>ЕИС Аудитор · Личный кабинет</header>
