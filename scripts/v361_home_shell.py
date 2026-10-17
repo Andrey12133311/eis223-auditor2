@@ -1,153 +1,125 @@
-"""Responsive application shell for the existing working EIS homepage.
+"""Minimal modern, responsive design for the existing EIS audit homepage.
 
-Progressive enhancement ONLY: existing forms, filters, callbacks and the
-server-rendered procurement table are left intact. No fabricated metrics.
+No promotional hero, duplicate cabinet buttons, fake counters, DOM replacement
+of forms, or changes to EIS/audit logic. Layout CSS is injected after sign-in.
 """
 STYLE = r"""
 <style id="eis361-home-style">
-body:has(> .eis223-workspace){background:#f3f6fa!important;color:#253b52!important}
-body:has(> .eis223-workspace)>header{
- background:#fff!important;color:#213f5c!important;box-shadow:none!important;
- padding:15px clamp(17px,3.6vw,55px)!important;border-bottom:1px solid #e0e8f2!important}
-body:has(> .eis223-workspace)>header h1{
- color:#203e5c!important;font-size:clamp(17px,2.1vw,23px)!important;
- line-height:1.4;margin:0 0 5px!important}
-body:has(> .eis223-workspace)>header nav a{color:#2b669b!important}
-body:has(> .eis223-workspace)>main{width:min(1600px,100%)!important;
- max-width:1600px!important;margin:0 auto 68px!important;padding:18px clamp(14px,3.3vw,52px)!important}
-.eis361-hero{position:relative;isolation:isolate;overflow:hidden;display:grid;
- grid-template-columns:minmax(0,1.65fr) minmax(255px,.8fr);gap:24px;
- min-height:270px;padding:clamp(24px,4vw,44px);margin:7px 0 25px;
- border-radius:22px;background:linear-gradient(112deg,#122e4e 0%,#1b4e7f 68%,#2678ab 100%);
- color:#fff;box-shadow:0 16px 45px #163e642a}
-.eis361-hero:before{content:"";position:absolute;z-index:-1;right:-9%;top:-58%;
- width:55%;aspect-ratio:1;border:1px solid #b1d9ff30;border-radius:50%;
- box-shadow:0 0 0 58px #c6e5ff0a,0 0 0 126px #c6e5ff09}
-.eis361-copy{min-width:0;align-self:center}
-.eis361-kicker{display:inline-flex;align-items:center;gap:7px;
- padding:6px 10px;border-radius:100px;background:#b5d9f321;border:1px solid #b2d6ef42;
- font-weight:780;letter-spacing:.09em;font-size:10px;color:#d4eeff}
-.eis361-copy h1{margin:13px 0 12px;font-size:clamp(26px,3vw,40px);
- line-height:1.14;letter-spacing:-.045em;font-weight:810;color:#fff!important;max-width:670px}
-.eis361-copy p{margin:0 0 22px;color:#d4e5f5;font-size:clamp(13px,1.4vw,15px);
- line-height:1.65;max-width:610px}
-.eis361-actions{display:flex;gap:9px;flex-wrap:wrap}
-.eis361-actions a{min-height:43px;display:inline-flex;align-items:center;justify-content:center;
- gap:7px;padding:11px 16px;border-radius:10px;background:#fff;color:#174a74!important;
- font-size:13px;font-weight:750;text-decoration:none;border:1px solid #fff;
- transition:transform .14s,background .14s}
-.eis361-actions a:hover{background:#edf7ff;transform:translateY(-1px)}
-.eis361-actions a.eis361-secondary{background:#ffffff12;color:#fff!important;
- border:1px solid #a6d0ee6b}
-.eis361-actions a.eis361-secondary:hover{background:#ffffff25}
-.eis361-aside{align-self:center;justify-self:end;width:min(100%,305px);
- background:#ffffff13;border:1px solid #ffffff33;border-radius:18px;padding:20px;
- backdrop-filter:blur(7px)}
-.eis361-aside strong{display:block;font-size:15px;color:white;font-weight:750;margin-bottom:13px}
-.eis361-aside ul{list-style:none;margin:0;padding:0;display:grid;gap:12px}
-.eis361-aside li{display:flex;align-items:start;gap:10px;font-size:12px;line-height:1.5;
- color:#dceaf9}
-.eis361-aside li span{width:20px;height:20px;display:grid;place-items:center;
- color:#d0edff;background:#bce2ff26;border-radius:7px;flex:none;font-weight:750}
-.eis361-overview-head{display:flex;align-items:end;justify-content:space-between;
- gap:12px;flex-wrap:wrap;margin:16px 0 17px}
-.eis361-overview-head h2{margin:0 0 4px;color:#183f62!important;
- font-weight:800;font-size:clamp(20px,2.2vw,27px);letter-spacing:-.025em}
-.eis361-overview-head p{margin:0;color:#647991;font-size:13px}
-.eis361-source-note{font-size:12px;color:#49708d;background:#e8f2fa;
- border:1px solid #d3e4f2;border-radius:100px;padding:7px 12px;white-space:nowrap}
-body:has(> .eis223-workspace) .stats{gap:14px!important;margin-bottom:19px!important}
-body:has(> .eis223-workspace) .stat{position:relative;overflow:hidden;min-height:94px;
- background:linear-gradient(160deg,#fff,#f8fbff)!important;border:1px solid #dce5ef!important;
- border-radius:15px!important;padding:17px 20px!important;
- box-shadow:0 5px 18px #1239590b!important}
-body:has(> .eis223-workspace) .stat small{font-size:12px!important;
- font-weight:650;color:#72849a!important;display:block;margin-bottom:8px}
-body:has(> .eis223-workspace) .stat b{font-size:clamp(22px,2.4vw,32px)!important;
- font-weight:800!important;letter-spacing:-.04em!important;color:#193e60!important}
-body:has(> .eis223-workspace) :is(.card,.filters,.detail,details,#v302-search-panel){
- background:#fff!important;border-radius:17px!important;
- border:1px solid #dce6f0!important;box-shadow:0 5px 24px #1a42640b!important}
-body:has(> .eis223-workspace) :is(.filters,.card){margin-bottom:15px!important}
-body:has(> .eis223-workspace) :is(input,select,textarea){accent-color:#2976b2}
-body:has(> .eis223-workspace) :is(input,select,textarea):focus-visible{
- border-color:#498fc4!important;outline:3px solid #bfddf6!important;outline-offset:1px}
-body:has(> .eis223-workspace) button:hover:not(:disabled){filter:brightness(1.04)}
-body:has(> .eis223-workspace) table{width:100%;border-radius:14px!important;
- border:1px solid #dce7f0!important;overflow:hidden;box-shadow:0 5px 25px #213e5709;
- font-variant-numeric:tabular-nums}
-body:has(> .eis223-workspace) table th{font-size:12px!important;
- letter-spacing:.015em;background:#f0f5fb!important;color:#45627f!important;
- padding:13px 11px!important;font-weight:760!important}
-body:has(> .eis223-workspace) table td{padding:12px 11px!important;
- border-bottom:1px solid #ecf0f5!important;line-height:1.5}
-body:has(> .eis223-workspace) table td:first-child{font-weight:650}
-body:has(> .eis223-workspace) .v302-box{border-radius:13px!important}
+:root{
+ --aud-ink:#172b34;--aud-muted:#657781;--aud-green:#087f73;
+ --aud-green-dark:#04695e;--aud-accent-bg:#e8f7f3;
+ --aud-line:#dee7e5;--aud-surface:#fff;--aud-back:#f5f7f6;
+ --aud-radius:16px;--aud-shadow:0 8px 30px #172f2a0a;
+}
+body:has(> .eis223-workspace){background:var(--aud-back)!important;color:var(--aud-ink)!important;
+ font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif!important;letter-spacing:-.012em}
+body:has(> .eis223-workspace)>header{background:#fff!important;box-shadow:none!important;
+ border-bottom:1px solid var(--aud-line)!important;padding:14px clamp(16px,3vw,46px)!important;
+ color:var(--aud-ink)!important}
+body:has(> .eis223-workspace)>header h1{color:#193b36!important;
+ font-size:clamp(16px,1.7vw,22px)!important;margin:0 0 4px!important;letter-spacing:-.025em}
+body:has(> .eis223-workspace)>header a,body:has(> .eis223-workspace)>header nav a{
+ color:var(--aud-green-dark)!important}
+body:has(> .eis223-workspace)>main{box-sizing:border-box;max-width:1560px!important;
+ width:100%!important;margin:0 auto 65px!important;
+ padding:clamp(16px,2.5vw,34px) clamp(14px,3vw,45px)!important}
+.eis361-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;
+ gap:10px;margin:0 0 22px!important}
+.eis361-heading h2{font-size:clamp(23px,2.5vw,31px);font-weight:800;letter-spacing:-.045em;
+ color:#1a3431!important;margin:0 0 4px}
+.eis361-heading p{color:var(--aud-muted);font-size:13px;margin:0}
+.eis361-source{border:1px solid #d4e5df;color:#37776b;background:#eff8f4;
+ padding:7px 12px;border-radius:999px;font-size:12px;font-weight:650}
+body:has(> .eis223-workspace) .stats{gap:12px!important;margin-bottom:20px!important}
+body:has(> .eis223-workspace) .stat{background:#fff!important;border:1px solid var(--aud-line)!important;
+ border-radius:var(--aud-radius)!important;box-shadow:var(--aud-shadow)!important;
+ padding:17px 20px!important;min-height:88px;position:relative}
+body:has(> .eis223-workspace) .stat::before{content:"";display:block;height:3px;width:29px;
+ border-radius:9px;background:#18a595;margin-bottom:11px}
+body:has(> .eis223-workspace) .stat small{display:block;font-size:12px!important;
+ font-weight:660!important;color:var(--aud-muted)!important;margin-bottom:6px}
+body:has(> .eis223-workspace) .stat b{color:#1c4039!important;font-size:clamp(23px,2vw,31px)!important;
+ font-weight:800!important;letter-spacing:-.045em!important;font-variant-numeric:tabular-nums}
+body:has(> .eis223-workspace) :is(.card,.filters,.detail,details,#v302-search-panel,
+ #v300-eis-status){background:var(--aud-surface)!important;border:1px solid var(--aud-line)!important;
+ border-radius:var(--aud-radius)!important;box-shadow:var(--aud-shadow)!important}
+body:has(> .eis223-workspace) :is(.card,.filters,.detail){margin-bottom:16px!important}
+body:has(> .eis223-workspace) h2,body:has(> .eis223-workspace) h3{color:#1b463e!important;
+ letter-spacing:-.025em}
+body:has(> .eis223-workspace) :is(input,select,textarea){color:#203b36!important;
+ border:1px solid #ccdad5!important;border-radius:10px!important;background:#fff!important;
+ accent-color:var(--aud-green)}
+body:has(> .eis223-workspace) :is(input,select,textarea):focus{outline:3px solid #c4ebe0!important;
+ border-color:var(--aud-green)!important}
+body:has(> .eis223-workspace) :is(button,input[type=submit],.btn){
+ border-radius:10px!important;background:var(--aud-green)!important;
+ border:1px solid var(--aud-green)!important;color:#fff!important;font-weight:680!important;
+ box-shadow:none!important;transition:background .15s,transform .15s}
+body:has(> .eis223-workspace) button:hover:not(:disabled){background:var(--aud-green-dark)!important}
+body:has(> .eis223-workspace) button:disabled{opacity:.55}
 body:has(> .eis223-workspace) :is(button,a,input,select,textarea):focus-visible{
- outline:3px solid #98c8ef!important;outline-offset:2px}
-@media(max-width:980px){
- .eis361-hero{grid-template-columns:minmax(0,1fr);min-height:0}
- .eis361-aside{display:none}
-}
+ outline:3px solid #78ccba!important;outline-offset:2px}
+body:has(> .eis223-workspace) a{color:#087769}
+body:has(> .eis223-workspace) #v302-search-panel{overflow:hidden}
+body:has(> .eis223-workspace) .v302-header{
+ background:linear-gradient(120deg,#edf8f3,#f9fcfb)!important;border-color:#dcebe5!important}
+body:has(> .eis223-workspace) .v302-emblem{background:linear-gradient(145deg,#0e9987,#0a6059)!important;
+ border-radius:12px}
+body:has(> .eis223-workspace) .v302-title strong{color:#1f4039!important}
+body:has(> .eis223-workspace) .v302-box{
+ background:#f9fcfa!important;border:1px solid #e1ece6!important;border-radius:13px!important}
+body:has(> .eis223-workspace) .v302-links{background:#f9fcfa!important;border-color:#e4eeea!important}
+body:has(> .eis223-workspace) .v302-connect.online{background:#e4f6ee!important;color:#087554!important}
+body:has(> .eis223-workspace) #v257-tabs a{background:#f5faf8!important;
+ border:1px solid #d8e7e1!important;color:#1c695a!important;border-radius:10px!important}
+body:has(> .eis223-workspace) table{width:100%;border:1px solid var(--aud-line)!important;
+ border-radius:14px!important;border-spacing:0!important;
+ box-shadow:0 4px 16px #1b403707!important;font-variant-numeric:tabular-nums}
+body:has(> .eis223-workspace) table th{background:#eef5f1!important;color:#48665e!important;
+ font-weight:760!important;font-size:12px!important;padding:12px 13px!important;
+ border-bottom:1px solid #d8e6df!important}
+body:has(> .eis223-workspace) table td{color:#26423c!important;padding:12px 13px!important;
+ border-bottom:1px solid #eaf0ed!important;line-height:1.5}
+body:has(> .eis223-workspace) table tbody tr:hover td{background:#f7fbf9!important}
+body:has(> .eis223-workspace) table td:first-child{font-weight:650}
 @media(max-width:720px){
- body:has(> .eis223-workspace)>header{padding:12px 15px!important}
- body:has(> .eis223-workspace)>main{padding:12px!important}
- .eis361-hero{padding:23px 18px;border-radius:17px;margin:4px 0 20px}
- .eis361-copy h1{font-size:clamp(25px,7vw,32px)}
- .eis361-actions{gap:8px}
- .eis361-actions a{width:100%;justify-content:center}
- .eis361-overview-head{margin:15px 0 13px}
- .eis361-source-note{white-space:normal}
- body:has(> .eis223-workspace) .stats{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:9px!important}
- body:has(> .eis223-workspace) .stat{padding:14px!important;min-height:87px}
- body:has(> .eis223-workspace) table{display:block;overflow-x:auto;
- -webkit-overflow-scrolling:touch;border-radius:12px!important}
+ body:has(> .eis223-workspace)>header{padding:11px 14px!important}
+ body:has(> .eis223-workspace)>main{padding:16px 12px!important}
+ .eis361-heading{margin-bottom:16px!important}
+ .eis361-heading h2{font-size:23px}
+ .eis361-source{font-size:11px}
+ body:has(> .eis223-workspace) .stats{grid-template-columns:repeat(2,minmax(0,1fr))!important;
+ gap:9px!important}
+ body:has(> .eis223-workspace) .stat{padding:13px!important;min-height:81px}
+ body:has(> .eis223-workspace) table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;
+ max-width:100%;border-radius:12px!important}
  body:has(> .eis223-workspace) table th,body:has(> .eis223-workspace) table td{
- padding:11px 10px!important}
+ padding:10px 11px!important}
 }
-@media(max-width:370px){
- body:has(> .eis223-workspace) .stats{grid-template-columns:1fr!important}
-}
-@media(prefers-reduced-motion:reduce){.eis361-actions a{transition:none}}
+@media(max-width:390px){body:has(> .eis223-workspace) .stats{
+ grid-template-columns:minmax(0,1fr)!important}}
+@media(prefers-reduced-motion:reduce){body:has(> .eis223-workspace) *{transition:none!important}}
 </style>
 """
 
 SCRIPT = r"""
 <script id="eis361-home-script">
 (function(){
-  function render(){
-    if(location.pathname!=='/'||document.getElementById('eis361-hero'))return;
-    const main=document.querySelector('body > main')||document.querySelector('main');
-    if(!main)return;
-    const hero=document.createElement('section');
-    hero.id='eis361-hero';hero.className='eis361-hero';
-    hero.setAttribute('aria-label','Главная панель аудитора');
-    hero.innerHTML=[
-      '<div class="eis361-copy">',
-      '<span class="eis361-kicker">АНАЛИТИКА ЕИС · 223-ФЗ</span>',
-      '<h1>Закупки под контролем.<br>Нарушения — по документам.</h1>',
-      '<p>Поиск закупок, анализ оригиналов и подтверждённые нарушения — в едином рабочем пространстве.</p>',
-      '<nav class="eis361-actions" aria-label="Основные действия">',
-      '<a href="/thematic">Новая тематическая проверка →</a>',
-      '<a class="eis361-secondary" href="/account/thematic">Мои тематические проверки</a>',
-      '<a class="eis361-secondary" href="/account/home">Мои закупки</a>',
-      '</nav></div>',
-      '<aside class="eis361-aside"><strong>Как формируются результаты</strong>',
-      '<ul><li><span>1</span>Получаем доступные оригиналы из ЕИС</li>',
-      '<li><span>2</span>Сопоставляем документы и сведения о закупке</li>',
-      '<li><span>3</span>Фиксируем нарушения с правовым основанием</li></ul></aside>'
-    ].join('');
-    main.insertBefore(hero,main.firstChild);
-    const head=document.createElement('div');head.className='eis361-overview-head';
-    head.innerHTML='<div><h2>Общий реестр закупок</h2>'+
-      '<p>Данные и результаты проверок, сохранённые в системе</p></div>'+
-      '<span class="eis361-source-note">Источник: ЕИС закупки</span>';
-    const stats=main.querySelector('.stats');
-    if(stats&&stats.parentElement===main)main.insertBefore(head,stats);
-    else hero.insertAdjacentElement('afterend',head);
-  }
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',render,{once:true});
-  else render();
+ function prepare(){
+  if(location.pathname!=="/"||document.getElementById("eis361-heading"))return;
+  const main=document.querySelector("body > main")||document.querySelector("main");
+  if(!main)return;
+  // The previously added promotional banner is deliberately removed.
+  const previous=document.getElementById("eis361-hero");
+  if(previous)previous.remove();
+  const heading=document.createElement("div");
+  heading.id="eis361-heading";heading.className="eis361-heading";
+  heading.innerHTML='<div><h2>Реестр закупок</h2><p>Поиск, документы и подтверждённые результаты проверок</p></div>'+
+   '<span class="eis361-source">Источник данных · ЕИС</span>';
+  main.insertBefore(heading,main.firstChild);
+ }
+ if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",prepare,{once:true});
+ else prepare();
 })();
 </script>
 """
