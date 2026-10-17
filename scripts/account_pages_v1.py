@@ -332,6 +332,10 @@ load();
 
 THEMATIC = page("Мои тематические проверки", """
 <style>
+.manual-filter-area{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:9px;
+ padding:13px;background:#f7fafc;border:1px solid #dfe9f2;border-radius:10px}
+.manual-filter-area label{margin:0;font-size:12px}
+#thematic-reset{background:#fff;color:#265f8c;border:1px solid #cbdfea}
 .eis-my-checks{display:grid;gap:14px;margin-top:22px}
 .eis-my-check{padding:18px 20px;background:linear-gradient(135deg,#fff,#f8fbff);
  border:1px solid #dce8f3;border-radius:15px}
@@ -351,6 +355,13 @@ THEMATIC = page("Мои тематические проверки", """
 <p><a href="/">← На главную</a></p>
 <h1>Мои тематические проверки</h1>
 <p>Здесь автоматически отображаются только реальные тематические проверки, которые вы запускали под своей учётной записью. Никаких идентификаторов или отдельных очередей создавать не требуется.</p>
+<div id="thematic-filters" class="manual-filter-area" aria-label="Фильтры тематических проверок">
+<label>Заказчик<input id="thematic-customer" type="search" placeholder="Наименование заказчика"></label>
+<label>Статус<select id="thematic-filter-status"><option value="">Все</option><option value="active">Выполняется</option><option value="stopped">Остановлена</option><option value="completed">Завершена</option></select></label>
+<label>Дата с<input id="thematic-from" type="date"></label>
+<label>Дата по<input id="thematic-to" type="date"></label>
+<label>Вид нарушения<select id="thematic-type"><option value="">Все</option></select></label>
+<button type="button" id="thematic-reset">Сбросить фильтры</button></div>
 <p id="thematic-status" role="status" aria-live="polite">Загружаем ваши проверки…</p>
 <div id="real-thematic-list" class="eis-my-checks" aria-label="Тематические проверки"></div>
 <section id="unassigned-section" hidden style="margin-top:28px;border-top:1px solid #e4edf5;padding-top:21px">
@@ -373,9 +384,28 @@ async function refresh(){
   if(response.status===401){location.assign('/account/login');return}
   if(!response.ok)throw Error('Не удалось получить тематические проверки');
   const data=await response.json();
-  const batches=Array.isArray(data.batches)?data.batches:[];
+  const allBatches=Array.isArray(data.batches)?data.batches:[];
+  const control=document.getElementById('thematic-type'),previous=control.value;
+  const types=[...new Set(allBatches.flatMap(b=>b.violation_types||[]))]
+      .sort((a,b)=>a.localeCompare(b,'ru'));
+  control.replaceChildren();
+  const opt=document.createElement('option');opt.value='';opt.textContent='Все';control.append(opt);
+  for(const kind of types){const child=document.createElement('option');
+    child.value=kind;child.textContent=kind;control.append(child)}
+  control.value=types.includes(previous)?previous:'';
+  const customer=document.getElementById('thematic-customer').value.trim().toLowerCase(),
+   wanted=document.getElementById('thematic-filter-status').value,
+   from=document.getElementById('thematic-from').value,
+   to=document.getElementById('thematic-to').value;
+  const batches=allBatches.filter(b=>{
+   const clients=(b.customers||[]).join(' ').toLowerCase();
+   const day=(b.created_at||'').slice(0,10);
+   return (!customer||clients.includes(customer))&&(!wanted||b.status===wanted)&&
+    (!from||(day&&day>=from))&&(!to||(day&&day<=to))&&
+    (!control.value||(b.violation_types||[]).includes(control.value));
+  });
   holder.replaceChildren();
-  status.textContent='Ваших тематических проверок: '+batches.length;
+  status.textContent='Показано: '+batches.length+' из '+allBatches.length;
   if(!batches.length){
    const empty=document.createElement('div');empty.className='eis-empty';
    empty.textContent='Проверки, запущенные вами в разделе «Тематическая проверка», появятся здесь автоматически.';
@@ -391,7 +421,8 @@ async function refresh(){
    const meta=document.createElement('p');meta.className='eis-meta';
    const timestamp=Date.parse(check.created_at);
    meta.textContent=(Number.isFinite(timestamp)?'Запущена: '+new Date(timestamp).toLocaleString('ru-RU')+' · ':'')+
-     'Закупок: '+Number(check.purchases||0)+' · Подтверждённых нарушений: '+Number(check.violations||0);
+     'Закупок: '+Number(check.purchases||0)+' · Подтверждённых нарушений: '+Number(check.violations||0)+
+     ((check.customers||[]).length?' · Заказчики: '+check.customers.slice(0,2).join(', '):'');
    const actions=document.createElement('div');actions.className='eis-my-actions';
    const open=document.createElement('a');open.href='/thematic#'+encodeURIComponent(check.id);open.textContent='Открыть результаты';
    const remove=document.createElement('button');remove.type='button';remove.textContent='Удалить проверку';
@@ -445,6 +476,17 @@ async function loadHistorical(){
   }
  }catch(error){/* An unavailable historical migration never hides actual owned checks. */}
 }
+let pendingFilter;
+for(const id of ['thematic-customer','thematic-filter-status','thematic-from','thematic-to','thematic-type']){
+ const input=document.getElementById(id);
+ const handler=()=>{clearTimeout(pendingFilter);pendingFilter=setTimeout(refresh,180)};
+ input.addEventListener('input',handler);input.addEventListener('change',handler);
+}
+document.getElementById('thematic-reset').onclick=()=>{
+ for(const id of ['thematic-customer','thematic-filter-status','thematic-from','thematic-to','thematic-type'])
+  document.getElementById(id).value='';
+ refresh();
+};
 setInterval(()=>{if(!document.hidden){refresh();loadHistorical()}},30000);
 refresh();loadHistorical();
 })();
