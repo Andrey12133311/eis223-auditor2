@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS account_alert_events (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
     source_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('documents_checked','new_violation','thematic_finished')),
+    kind TEXT NOT NULL CHECK(kind IN ('documents_checked','new_violation','thematic_finished','review_completed')),
     title TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
