@@ -73,7 +73,7 @@ async def collect(reg_number):
         return findings
 
 
-def audit(owner_id, batch_id, reg_number):
+def audit(owner_id, batch_id, reg_number, attempts):
     """Return True only after a completed evidence-backed EIS pass."""
     if not isinstance(reg_number, str) or not re.fullmatch(r"3[0-9]{10}", reg_number):
         return False
@@ -81,12 +81,4 @@ def audit(owner_id, batch_id, reg_number):
     if findings is None:
         return False
     with connect() as db:
-        row = db.execute(
-            """SELECT attempts FROM account_thematic_jobs
-               WHERE user_id=%s AND batch_id=%s AND reg_number=%s
-                 AND status='running'""",
-            (owner_id, batch_id, reg_number),
-        ).fetchone()
-        if not row:
-            return False
-        return save_findings(db, owner_id, batch_id, reg_number, row[0], findings)
+        return save_findings(db, owner_id, batch_id, reg_number, attempts, findings)
