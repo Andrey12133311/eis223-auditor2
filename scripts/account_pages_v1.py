@@ -168,6 +168,11 @@ THEMATIC = page("Мои тематические проверки", """
 <p>Здесь автоматически отображаются только реальные тематические проверки, которые вы запускали под своей учётной записью. Никаких идентификаторов или отдельных очередей создавать не требуется.</p>
 <p id="thematic-status" role="status" aria-live="polite">Загружаем ваши проверки…</p>
 <div id="real-thematic-list" class="eis-my-checks" aria-label="Тематические проверки"></div>
+<section id="unassigned-section" hidden style="margin-top:28px;border-top:1px solid #e4edf5;padding-top:21px">
+<h2>Ранее запущенные проверки</h2>
+<p>Некоторые старые тематические проверки были созданы до появления личных кабинетов. Администратор может привязать такую проверку к своей учётной записи одним нажатием. Сохранённые результаты не изменяются.</p>
+<div id="unassigned-list" class="eis-my-checks"></div>
+</section>
 <script>
 (()=>{
 const holder=document.getElementById('real-thematic-list');
@@ -221,8 +226,42 @@ async function refresh(){
  finally{busy=false}
 }
 async function refreshAfterDelete(){busy=false;await refresh()}
-setInterval(()=>{if(!document.hidden)refresh()},30000);
-refresh();
+async function loadHistorical(){
+ try{
+  const response=await fetch('/api/thematic/unassigned',{credentials:'same-origin',cache:'no-store'});
+  if(response.status===403)return;
+  if(!response.ok)return;
+  const data=await response.json();
+  const items=Array.isArray(data.batches)?data.batches:[];
+  const section=document.getElementById('unassigned-section');
+  const list=document.getElementById('unassigned-list');
+  list.replaceChildren();section.hidden=!items.length;
+  for(const check of items){
+   const card=document.createElement('article');card.className='eis-my-check';
+   const h=document.createElement('h2');
+   const cats=(check.categories||[]).map(key=>labels[key]||key);
+   h.textContent=cats.length?cats.join(' · '):'Тематическая проверка';
+   const meta=document.createElement('p');meta.className='eis-meta';
+   const date=Date.parse(check.created_at);
+   meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleString('ru-RU')+' · ':'')+
+      'Закупок: '+Number(check.purchases||0)+' · Нарушений: '+Number(check.violations||0);
+   const btn=document.createElement('button');btn.type='button';btn.textContent='Привязать к моему кабинету';
+   btn.onclick=async()=>{
+    if(!confirm('Привязать выбранную ранее запущенную тематическую проверку к вашему кабинету?'))return;
+    btn.disabled=true;
+    try{
+     const result=await fetch('/api/thematic/adopt/'+encodeURIComponent(check.id),
+       {method:'POST',credentials:'same-origin'});
+     if(!result.ok)throw Error('Не удалось привязать проверку. Возможно, она уже принадлежит другой учётной записи.');
+     await refresh();await loadHistorical();
+    }catch(error){status.textContent=error.message;btn.disabled=false}
+   };
+   card.append(h,meta,btn);list.append(card);
+  }
+ }catch(error){/* An unavailable historical migration never hides actual owned checks. */}
+}
+setInterval(()=>{if(!document.hidden){refresh();loadHistorical()}},30000);
+refresh();loadHistorical();
 })();
 </script>""")
 
