@@ -5,6 +5,14 @@ from scripts.account_eis_adapter_v1 import audit
 
 
 class AdapterTests(unittest.TestCase):
+    def test_adapter_uses_attempt_fencing(self):
+        import inspect
+        from scripts.account_eis_adapter_v1 import audit
+        self.assertEqual(
+            list(inspect.signature(audit).parameters),
+            ["owner_id", "batch_id", "reg_number", "attempts"],
+        )
+
     def test_invalid_registration_number(self):
         self.assertFalse(audit("owner", "batch", "invalid", 1))
 
