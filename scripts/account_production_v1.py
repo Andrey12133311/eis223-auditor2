@@ -258,6 +258,8 @@ def install(app):
     app.include_router(first_admin_setup)
     app.include_router(auth)
     app.include_router(admin_router)
+    from scripts.account_role_management_v1 import router as role_router
+    app.include_router(role_router)
     app.include_router(workspace)
     app.include_router(real_manual_checks)
     app.include_router(personal_features)
