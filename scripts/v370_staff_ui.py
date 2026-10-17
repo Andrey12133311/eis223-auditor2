@@ -48,7 +48,38 @@ th{background:#eaf3fa;text-align:left;color:#3e627b;font-size:11px}
 td,th{padding:12px 10px;border-bottom:1px solid #e2edf3}
 .table-scroll{max-width:100%;overflow-x:auto}
 #staff-status{font-size:12px;min-height:20px;color:#2d7098}
-@media(max-width:760px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}form{grid-template-columns:minmax(0,1fr)}.tabs{padding-top:13px}}
+.staff-layout{display:grid;grid-template-columns:205px minmax(0,1fr);gap:18px;margin-top:22px;align-items:start}
+.staff-layout>.tabs{position:sticky;top:14px;display:flex;flex-direction:column;gap:5px;overflow:visible;padding:10px;background:#fff;border:1px solid var(--line);border-radius:14px}
+.staff-layout>.tabs button{width:100%;white-space:normal;text-align:left;line-height:1.35;border:0;background:transparent;color:#53748c;padding:13px 12px}
+.staff-layout>.tabs button[aria-selected=true]{background:#eaf4fb;color:#165781;box-shadow:inset 3px 0 #247aae}
+.staff-panels{min-width:0}
+.staff-columns{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(260px,1fr);gap:14px}
+.staff-subpanel{border:1px solid var(--line);border-radius:11px;padding:16px;background:#fbfdff;margin:0 0 13px;min-width:0}
+.staff-subpanel h3{margin:0 0 12px}
+.staff-smallrow{padding:12px 0;border-bottom:1px solid #e1eaf1;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;justify-content:space-between}
+.staff-smallrow:last-child{border:0}
+.staff-smallrow .staff-rowbody{flex:1;min-width:160px}
+.staff-smallrow .staff-rowbody strong{font-size:13px;display:block;color:#234f73}
+.staff-smallrow .staff-rowbody small{font-size:11px;color:#698295;display:block;margin-top:3px}
+.staff-status-pill{display:inline-flex;padding:4px 8px;background:#eaf3fa;color:#276b95;border-radius:30px;font-size:11px;font-weight:730}
+.staff-status-pill.attention{background:#fff2e7;color:#a26420}
+.staff-status-pill.good{background:#e7f6ee;color:#23764e}
+.staff-tools{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
+.staff-tools button,.staff-tools a{padding:7px 9px;font-size:11px;min-height:34px}
+.staff-message-unread{border-left:3px solid #267cb1;padding-left:10px}
+.staff-statline{font-size:11px;color:#66839b;margin:3px 0 13px}
+.staff-search-result{padding:11px;border:1px solid #dce8f0;border-radius:9px;margin-top:8px}
+.staff-search-result small{color:#6a8191}
+.staff-auto{display:flex;align-items:center;gap:8px;background:#eaf7f1;color:#226f52;border:1px solid #d2e9df;border-radius:9px;padding:10px 13px;font-size:12px;font-weight:650;margin-bottom:12px}
+.staff-dot{width:9px;height:9px;background:#29835b;border-radius:50%;flex:none}
+.staff-hero{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.staff-hero h1{margin:0}
+.staff-hero p{margin:4px 0 0}
+.staff-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:13px}
+.staff-section-heading h2{margin:0}
+.staff-finding-state{margin:9px 0;color:#315d78;font-size:12px}
+@media(max-width:980px){.staff-layout{grid-template-columns:1fr;gap:10px}.staff-layout>.tabs{position:static;flex-direction:row;overflow-x:auto;flex-wrap:nowrap}.staff-layout>.tabs button{white-space:nowrap;width:auto;flex:none;border:1px solid #dbe5ed}.staff-columns{grid-template-columns:1fr}}
+@media(max-width:760px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}form{grid-template-columns:minmax(0,1fr)}.tabs{padding-top:10px}.staff-smallrow{display:block}.staff-smallrow .staff-tools{margin-top:10px}}
 :focus-visible{outline:3px solid #92bddb;outline-offset:3px}
 </style>
 """
@@ -61,6 +92,10 @@ async function showName(){
  try{
   const r=await api('/me/profile');
   el('staff-user-name').textContent=r.full_name||'ФИО не заполнено — укажите данные в профиле';
+  if(r.role==='admin'||r.role==='manager'){
+   const place=el('staff-account-actions');
+   if(place&&!el('staff-manager-link')){const l=link('/account/manager',r.role==='admin'?'Управление пользователями':'Кабинет руководителя');l.id='staff-manager-link';place.prepend(l)}
+  }
  }catch{el('staff-user-name').textContent='Имя сотрудника недоступно'}
 }
 
@@ -79,6 +114,9 @@ async function api(url,method="GET",body){
 function section(tab){
  document.querySelectorAll('[data-staff-section]').forEach(x=>x.hidden=x.dataset.staffSection!==tab);
  document.querySelectorAll('[data-staff-tab]').forEach(x=>x.setAttribute("aria-selected",String(x.dataset.staffTab===tab)));
+ if(tab==='goals')campaigns();
+ if(tab==='activity')loadHistory();
+ if(tab==='overview')loadDashboard();
 }
 document.querySelectorAll('[data-staff-tab]').forEach(x=>x.onclick=()=>section(x.dataset.staffTab));
 function list(root,items,build){
@@ -96,6 +134,154 @@ async function reloadOverview(){
   }))el('staff-'+id).textContent=Number(number||0).toLocaleString("ru-RU");
  }catch(e){msg(e.message)}
 }
+const taskNames={assigned:'Назначено',in_progress:'В работе',submitted:'Передано руководителю',
+ returned:'Возвращено на доработку',completed:'Завершено',cancelled:'Отменено'};
+function createAction(text,onClick,kind='outline'){
+ const button=make('button',text);button.type='button';button.className=kind;
+ button.onclick=async()=>{button.disabled=true;try{await onClick()}catch(error){msg(error.message)}finally{button.disabled=false}};
+ return button;
+}
+async function loadDashboard(){
+ try{
+  const data=await api('/me/center/dashboard');
+  for(const [id,count] of Object.entries({
+   'active-tasks':data.task_active,'active-campaigns':data.campaign_active,
+   'unread':data.unread_notifications,'reviewed':data.finding_decisions?.confirmed||0
+  }))if(el('staff-'+id))el('staff-'+id).textContent=Number(count).toLocaleString('ru-RU');
+  el('staff-updated').textContent='Данные обновлены: '+new Date(data.as_of).toLocaleTimeString('ru-RU');
+  if(data.full_name)el('staff-hello').textContent='Здравствуйте, '+data.full_name;
+  list('staff-task-list',data.tasks.filter(x=>!['completed','cancelled'].includes(x.status)),x=>{
+   const row=make('div');row.className='staff-smallrow';
+   const body=make('div');body.className='staff-rowbody';
+   body.append(make('strong',x.title),make('small','Закупка № '+x.reg_number+
+    (x.due_date?' · до '+x.due_date:'')+' · '+(taskNames[x.status]||x.status)));
+   const actions=make('div');actions.className='staff-tools';
+   const go=link('/check-new/'+x.reg_number,'Карточка ЕИС');actions.append(go);
+   if(x.status==='assigned'||x.status==='returned')
+    actions.append(createAction('Принять',async()=>{await api('/me/assignments/'+x.id+'/take','POST');await loadDashboard()}));
+   if(x.status==='in_progress')
+    actions.append(createAction('Передать результат',async()=>{
+     if(!confirm('Передать руководителю только завершённую проверку?'))return;
+     await api('/me/assignments/'+x.id+'/submit','POST');await loadDashboard();
+    }));
+   row.append(body,actions);return row;
+  });
+  list('staff-goal-summary',data.campaigns.filter(x=>x.status==='active'||x.status==='submitted'),x=>{
+   const box=make('div');box.className='staff-smallrow';
+   const body=make('div');body.className='staff-rowbody';
+   body.append(make('strong',x.title),make('small','План: '+x.target_violations+
+    ' · '+(taskNames[x.status]||x.status)));
+   box.append(body,createAction('Нарушения',async()=>section('goals')));
+   return box;
+  });
+  const statuses=data.memo_reviews||{};
+  el('staff-memo-reviews').textContent='На рассмотрении: '+(statuses.submitted||0)+
+   ' · Согласовано: '+(statuses.approved||0)+' · На доработке: '+(statuses.returned||0);
+ }catch(error){msg('Обзор сотрудника: '+error.message)}
+}
+async function loadProgress(){
+ try{
+  const info=await api('/me/center/progress');
+  if(!info.available){el('staff-progress-note').textContent=info.note;return}
+  el('staff-progress-note').textContent=info.note;
+  list('staff-progress-list',info.checks,x=>{
+   const row=make('div');row.className='staff-smallrow';
+   const body=make('div');body.className='staff-rowbody';
+   body.append(make('strong','Закупка № '+x.reg_number),
+    make('small',x.stage+' · оригиналов проверено: '+x.documents_checked+
+       ' · фактических нарушений: '+x.violations));
+   const tool=make('div');tool.className='staff-tools';
+   tool.append(createAction('Открыть',async()=>{
+     section('case');el('staff-reg').value=x.reg_number;await loadCase()
+   }));
+   const badge=make('span',x.stage);badge.className='staff-status-pill'+
+       (x.legal_review_completed?' good':x.job_status==='failed'?' attention':'');
+   row.append(body,tool);return row;
+  });
+ }catch(error){msg('Этапы проверок: '+error.message)}
+}
+async function loadNotifications(){
+ try{
+  const items=await api('/me/notifications');
+  const unread=items.filter(x=>!x.read).length;
+  el('staff-notification-count').textContent=unread?unread+' непрочитанных':'Нет новых';
+  list('staff-notification-list',items.slice(0,25),x=>{
+   const row=make('div');row.className='staff-smallrow'+(!x.read?' staff-message-unread':'');
+   const body=make('div');body.className='staff-rowbody';
+   body.append(make('strong',x.title),make('small',x.detail||''),
+    make('small',new Date(x.created_at).toLocaleString('ru-RU')));
+   row.append(body);
+   if(!x.read)row.append(createAction('Прочитано',async()=>{
+    await api('/me/notifications/'+x.id+'/read','POST');await loadNotifications();await loadDashboard();
+   }));
+   return row;
+  });
+ }catch(error){msg('Уведомления: '+error.message)}
+}
+async function searchAll(event){
+ event.preventDefault();
+ const q=el('staff-global-query').value.trim();
+ if(q.length<2)return msg('Введите не менее двух символов для поиска');
+ try{
+  const data=await api('/me/center/search?q='+encodeURIComponent(q));
+  list('staff-global-results',data.results||[],x=>{
+   const box=make('div');box.className='staff-search-result';
+   box.append(make('strong',x.title),make('small',x.status||''));
+   if(x.reg_number&&regOK(x.reg_number))
+    box.append(link('/check-new/'+x.reg_number,'Открыть карточку закупки'));
+   if(x.batch_id)box.append(createAction('Результаты',async()=>section('goals')));
+   return box;
+  });
+  msg((data.results||[]).length+' результатов. '+data.scope);
+ }catch(error){msg(error.message)}
+}
+async function loadSavedSearches(){
+ try{
+  const items=await api('/me/center/saved-searches');
+  list('staff-saved-searches',items,x=>{
+   const row=make('div');row.className='staff-smallrow';
+   const term=createAction(x.phrase,async()=>{
+    el('staff-global-query').value=x.phrase;
+    await searchAll({preventDefault(){}});
+   });
+   const del=createAction('Удалить',async()=>{
+    await api('/me/center/saved-searches/'+x.id,'DELETE');
+    await loadSavedSearches()
+   },'danger');
+   row.append(term,del);return row;
+  });
+ }catch(error){msg('Сохранённые запросы: '+error.message)}
+}
+let autosaveHandle=null;
+async function loadDraft(reg){
+ try{
+  const data=await api('/me/center/draft/'+reg);
+  const field=el('staff-case-draft');
+  field.dataset.reg=reg;field.value=data.body||'';
+  el('staff-draft-saved').textContent=data.updated_at?
+    'Последнее сохранение: '+new Date(data.updated_at).toLocaleString('ru-RU'):'Черновик пуст';
+ }catch(error){msg('Черновик: '+error.message)}
+}
+el('staff-case-draft').addEventListener('input',()=>{
+ clearTimeout(autosaveHandle);
+ const field=el('staff-case-draft'),reg=field.dataset.reg,text=field.value;
+ if(!regOK(reg))return;
+ el('staff-draft-saved').textContent='Сохранение изменений…';
+ autosaveHandle=setTimeout(async()=>{
+  try{await api('/me/center/draft/'+reg,'PUT',{body:text});
+   if(field.dataset.reg===reg&&field.value===text)
+    el('staff-draft-saved').textContent='Изменения автоматически сохранены';
+  }catch(error){msg('Не удалось сохранить черновик: '+error.message);
+   el('staff-draft-saved').textContent='Ошибка автосохранения'}
+ },800);
+});
+el('staff-search-save').onclick=async()=>{
+ const phrase=el('staff-global-query').value.trim();
+ if(phrase.length<2)return msg('Сначала укажите поисковый запрос');
+ try{await api('/me/center/saved-searches','POST',{phrase});
+  await loadSavedSearches();msg('Поисковый запрос сохранён для вашего аккаунта')}
+ catch(error){msg(error.message)}
+};
 async function campaigns(){
  try{
   const [goals,result]=await Promise.all([
@@ -148,6 +334,27 @@ async function campaigns(){
     actions.append(link('/thematic/card/'+encodeURIComponent(item.batch_id)+
      '/'+item.reg_number,'Карточка проверки'));
    }
+   const stateNames={unreviewed:'Не рассмотрено',confirmed:'Подтверждено сотрудником',
+    rejected:'Отклонено сотрудником',recheck:'Требует дополнительной проверки'};
+   const status=make('div','Решение сотрудника: '+(stateNames[item.review_status]||'Не рассмотрено'));
+   status.className='staff-finding-state';
+   card.append(status);
+   if(item.review_comment)card.append(make('small','Комментарий: '+item.review_comment));
+   if(item.finding_id&&/^[0-9a-f]{32}$/.test(item.finding_id)){
+    for(const [value,label] of [['confirmed','Подтвердить'],['recheck','На допроверку'],
+     ['rejected','Отклонить'],['unreviewed','Сбросить решение']]){
+     if(value===item.review_status)continue;
+     actions.append(createAction(label,async()=>{
+      const comment=(value==='unreviewed')?'':(prompt('Комментарий к решению (можно оставить пустым)','')||'');
+      if(value==='rejected'&&!confirm('Отклонить это нарушение только в личной оценке, сохранив исходные данные ЕИС?'))return;
+      await api('/me/center/findings/'+item.finding_id+'/decision','POST',
+       {reg_number:item.reg_number,decision:value,comment});
+      await campaigns();await loadDashboard();
+      msg('Решение сохранено; исходные результаты ЕИС не изменялись');
+     }));
+    }
+   }
+   actions.append(link('/account/memos','Подготовить служебную записку'));
    card.append(actions);
    return card;
   });
@@ -229,7 +436,7 @@ async function loadCase(){
  el("staff-case").hidden=false;
  el("staff-case-link").href='/me/cases/'+reg;
  el("staff-case-download").href='/me/workbench/'+reg+'/export.zip';
- for(const cb of [loadChecklist,loadManual,loadRelated,loadDiscussion,loadPreferences,loadVersions])await cb(reg);
+ for(const cb of [loadChecklist,loadManual,loadRelated,loadDiscussion,loadPreferences,loadVersions,loadDraft])await cb(reg);
 }
 async function loadChecklist(reg){
  try{
@@ -320,7 +527,7 @@ async function loadPreferences(reg){
  try{
   const pref=await api('/me/workbench/preferences');
   el("staff-priority").checked=pref.priority_regs.includes(reg);
-  el("staff-reminder-days").value=pref.notification_days;
+  // Settings persisted in PostgreSQL; the calendar is deliberately not shown.
  }catch(e){msg(e.message)}
 }
 el("staff-save-pref").onclick=async()=>{
@@ -333,7 +540,7 @@ el("staff-save-pref").onclick=async()=>{
   await api('/me/workbench/preferences','PUT',{
    priority_regs:next.slice(0,30),
    pinned_legal_categories:old.pinned_legal_categories,
-   notification_days:Number(el("staff-reminder-days").value)});
+   notification_days:old.notification_days});
   msg("Персональные настройки сохранены")
  }catch(e){msg(e.message)}
 };
@@ -384,17 +591,6 @@ el('staff-original-search').onsubmit=async event=>{
   msg(result.scope+' · просмотрено файлов: '+result.documents_scanned);
  }catch(e){msg(e.message)}
 };
-async function loadCalendar(){
- try{
-  const result=await api('/me/workbench/calendar');
-  list('staff-calendar-list',result.events||[],x=>{
-   const box=make('article');box.className='entry';
-   box.append(make('h3',x.title),
-    make('p','Срок: '+x.due_date+' · '+(x.overdue?'Просрочено':
-     x.days_left+' дней осталось')+' · '+x.status));return box;
-  });
- }catch(e){msg(e.message)}
-}
 async function loadHistory(){
  try{
   const data=await api('/me/workbench/history');
@@ -415,10 +611,17 @@ async function loadLibrary(){
   })
  }catch(e){msg(e.message)}
 }
-loadCalendar();loadHistory();loadLibrary();
+loadHistory();loadLibrary();
 showName();
+el('staff-global-search').addEventListener('submit',searchAll);
 options().catch(e=>msg(e.message));
-reloadOverview();campaigns();templates();
+reloadOverview();loadDashboard();loadProgress();loadNotifications();loadSavedSearches();campaigns();templates();
+// Live server-side jobs continue independently of the browser; this only refreshes the view.
+setInterval(()=>{
+ if(document.hidden)return;
+ reloadOverview();loadDashboard();loadProgress();loadNotifications();
+ if(document.querySelector('[data-staff-tab="goals"]')?.getAttribute('aria-selected')==='true')campaigns();
+},60000);
 })();
 </script>
 """
@@ -427,11 +630,12 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <title>Рабочее место сотрудника — ЕИС Аудитор</title>__CSS__</head>
 <body><header><div><strong>ЕИС Аудитор · Рабочее место сотрудника</strong>
 <div id="staff-user-name" style="font-size:12px;color:#d9e9f3">ФИО: загрузка…</div></div>
-<div class="action-row"><a href="/account/profile">Моё ФИО</a>
+<div class="action-row" id="staff-account-actions"><a href="/account/profile">Моё ФИО</a>
 <a href="/">← В личный кабинет</a></div></header>
 <main>
-<h1>Моё рабочее пространство</h1>
-<p>Здесь находятся только реальные проверки, поручения и материалы вашей учётной записи.</p>
+<div class="staff-hero"><div><h1 id="staff-hello">Моё рабочее пространство</h1>
+<p>Собственные проверки, поручения и нарушения по реальным данным ЕИС. Без дублирования результатов.</p></div>
+<button id="staff-refresh" type="button" class="outline" onclick="location.reload()">↻ Обновить данные</button></div>
 <div class="grid">
 <div class="metric"><small>Самостоятельные проверки</small><strong id="staff-checks">—</strong></div>
 <div class="metric"><small>Завершён анализ</small><strong id="staff-complete">—</strong></div>
@@ -440,15 +644,54 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <div class="metric"><small>Ожидают документы</small><strong id="staff-waiting">—</strong></div>
 <div class="metric"><small>Служебные записки</small><strong id="staff-memos">—</strong></div>
 </div>
+<div class="staff-layout">
 <nav class="tabs" aria-label="Разделы рабочего места">
-<button type="button" data-staff-tab="goals" aria-selected="true">Нарушения тематических проверок</button>
+<button type="button" data-staff-tab="overview" aria-selected="true">Обзор</button>
+<button type="button" data-staff-tab="goals" aria-selected="false">Нарушения и поручения</button>
 <button type="button" data-staff-tab="bulk" aria-selected="false">Массовая проверка</button>
 <button type="button" data-staff-tab="templates" aria-selected="false">Мои шаблоны</button>
 <button type="button" data-staff-tab="case" aria-selected="false">Контроль закупки</button>
-<button type="button" data-staff-tab="activity" aria-selected="false">Календарь и история</button>
+<button type="button" data-staff-tab="activity" aria-selected="false">История работы</button>
 <button type="button" data-staff-tab="library" aria-selected="false">База нарушений</button>
 </nav>
-<section class="panel" data-staff-section="goals">
+<div class="staff-panels">
+<section class="panel" data-staff-section="overview">
+<div class="staff-section-heading"><h2>Рабочая панель</h2><small id="staff-updated" class="staff-statline">Получение актуальных данных</small></div>
+<div class="staff-auto"><span class="staff-dot" aria-hidden="true"></span>
+Автоматический анализ закупок выполняется сервером. Карточки и показатели обновляются без перезагрузки.</div>
+<div class="grid" style="margin-bottom:18px">
+<div class="metric"><small>Активные поручения</small><strong id="staff-active-tasks">—</strong></div>
+<div class="metric"><small>Тематические проверки</small><strong id="staff-active-campaigns">—</strong></div>
+<div class="metric"><small>Новые уведомления</small><strong id="staff-unread">—</strong></div>
+<div class="metric"><small>Лично подтверждено</small><strong id="staff-reviewed">—</strong></div>
+</div>
+<div class="staff-columns">
+<div>
+<div class="staff-subpanel"><h3>Мои поручения</h3><p>Изменения статусов сохраняются и доступны руководителю.</p>
+<div id="staff-task-list"></div></div>
+<div class="staff-subpanel"><h3>Ход самостоятельных проверок</h3>
+<p id="staff-progress-note">Получаю этапы работы с ЕИС…</p><div id="staff-progress-list"></div>
+</div></div>
+<div>
+<div class="staff-subpanel"><h3>Тематические поручения</h3><div id="staff-goal-summary"></div>
+</div>
+<div class="staff-subpanel"><div class="staff-section-heading"><h3>Уведомления</h3>
+<span class="staff-status-pill" id="staff-notification-count">Загрузка…</span></div>
+<div id="staff-notification-list"></div></div>
+<div class="staff-subpanel"><h3>Мои служебные записки</h3>
+<p id="staff-memo-reviews"></p>
+<a class="pill" href="/account/memos">Открыть документы и проверку качества →</a></div>
+</div></div>
+<div class="staff-subpanel"><h3>Быстрый поиск по моим материалам</h3>
+<form id="staff-global-search"><label class="wide">Номер ЕИС, название поручения или обнаруженного нарушения
+<input id="staff-global-query" type="search" minlength="2" maxlength="80" placeholder="32616412317 или срок подачи заявок" required></label>
+<button class="primary" type="submit">Найти</button>
+<button class="outline" type="button" id="staff-search-save">Сохранить запрос</button></form>
+<div id="staff-saved-searches"></div>
+<div id="staff-global-results"></div>
+<p><a href="/">Поиск по общей базе ЕИС и расширенные фильтры ИНН, ОГРН и цены →</a></p></div>
+</section>
+<section class="panel" data-staff-section="goals" hidden>
 <h2>Нарушения тематических проверок</h2>
 <p class="notice">Все подтверждённые анализатором эпизоды отображаются как обычные нарушения:
 с доказательствами, нормами закона и ссылками на ЕИС. Цель руководителя не влияет
@@ -490,6 +733,11 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  placeholder="32616412317"></label>
 <button class="primary" id="staff-case-load" type="button">Открыть инструменты</button></div>
 <div id="staff-case" hidden>
+<div class="staff-subpanel"><h3>Мои рабочие заметки</h3>
+<p>Черновик сохраняется автоматически только в вашей учётной записи и не изменяет оригиналы ЕИС.</p>
+<textarea id="staff-case-draft" maxlength="3000" aria-label="Черновик заметок к проверке"
+ placeholder="Зафиксируйте вопросы и обстоятельства, которые нужно дополнительно проверить"></textarea>
+<small id="staff-draft-saved" aria-live="polite">Черновик не загружен</small></div>
 <div class="action-row">
 <a id="staff-case-link" href="#">Электронное дело и оригиналы ЕИС</a>
 <a id="staff-case-download" href="#">Выгрузить материалы ZIP</a>
@@ -497,8 +745,7 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <a href="/account/memos">Архив служебных записок</a></div>
 <fieldset><legend>Персональные настройки</legend>
 <label class="check-options"><input id="staff-priority" type="checkbox"> Приоритетная закупка</label>
-<label>Напоминать за количество дней<input id="staff-reminder-days" type="number" min="0" max="30" value="3"></label>
-<button class="outline" type="button" id="staff-save-pref">Сохранить настройки</button></fieldset>
+<button class="outline" type="button" id="staff-save-pref">Сохранить приоритет</button></fieldset>
 <h2>Чек-лист проверки по 223-ФЗ</h2>
 <div id="staff-checklist"></div>
 <h2>Зафиксировать нарушение вручную</h2>
@@ -537,9 +784,6 @@ placeholder="Срок оплаты договора"></label>
 <button class="primary" type="submit">Отправить сообщение</button></form>
 </div></section>
 <section class="panel" data-staff-section="activity" hidden>
-<h2>Календарь сроков и поручений</h2>
-<p>Сроки из реальных поручений. Приближение срока определяется по вашим настройкам.</p>
-<div id="staff-calendar-list"></div>
 <h2>История работы</h2>
 <p>Действия сотрудника и руководителя, сохранённые замечания, решения и контрольные вопросы.</p>
 <div id="staff-history-list"></div></section>
@@ -551,6 +795,7 @@ placeholder="Срок оплаты договора"></label>
 <p>Откройте архив и нажмите «Проверить записку» рядом с нужным документом.
 Никаких идентификаторов вводить не требуется.</p>
 <p><a href="/account/memos">Открыть архив и проверить мои ODT →</a></p></section>
+</div></div>
 <div id="staff-status" role="status" aria-live="polite"></div>
 </main>__JS__</body></html>"""
 

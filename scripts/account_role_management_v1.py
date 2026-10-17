@@ -20,21 +20,10 @@ def users(request: Request):
 
 @router.put("/users/{user_id}")
 def change_role(user_id: UUID, data: RoleInput, request: Request):
-    require_origin(request)
-    actor=current_account(request,admin=True)
-    if data.role not in ("user","manager","admin"):
-        raise HTTPException(422,"Недопустимая роль")
-    if actor[0]==user_id and data.role!="admin":
-        raise HTTPException(409,"Нельзя лишить себя прав администратора")
-    with connect() as db:
-        row=db.execute("SELECT role,status FROM account_users WHERE id=%s FOR UPDATE",(user_id,)).fetchone()
-        if not row:
-            raise HTTPException(404,"Пользователь не найден")
-        if row[1]!="approved":
-            raise HTTPException(409,"Сначала подтвердите пользователя")
-        if row[0]!=data.role:
-            db.execute("UPDATE account_users SET role=%s WHERE id=%s",(data.role,user_id))
-            db.execute("UPDATE account_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=%s",(user_id,))
-            db.execute("INSERT INTO account_audit(actor_id,subject_id,action) VALUES (%s,%s,%s)",
-                       (actor[0],user_id,"role:"+row[0]+"->"+data.role))
-    return {"status":"ok","role":data.role}
+    # The account admin page and manager workspace must enforce exactly the
+    # same role permissions, audit trail, team rules and notifications.
+    from scripts.v368_manager_workflow import RoleUpdate, admin_change_role
+    if data.role not in ("user", "manager", "admin"):
+        raise HTTPException(422, "Недопустимая роль")
+    result = admin_change_role(str(user_id), RoleUpdate(role=data.role), request)
+    return {"status": "ok", **result}

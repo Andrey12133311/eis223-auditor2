@@ -269,7 +269,11 @@ function renderAdmin(){
  const root=$("mgr-admin-section");root.classList.toggle("mgr-hidden",ROLE!=="admin");
  if(ROLE!=="admin")return;
  const managers=cache.users.filter(x=>x.role==="manager"&&x.status==="approved"),rows=[];
+ const query=($("mgr-admin-search")?.value||"").trim().toLocaleLowerCase("ru-RU");
+ const selectedStatus=$("mgr-admin-status")?.value||"all";
  for(const person of cache.users){
+  if(query&&!(person.full_name+" "+person.email+" "+person.role).toLocaleLowerCase("ru-RU").includes(query))continue;
+  if(selectedStatus!=="all"&&person.status!==selectedStatus)continue;
   const tr=tag("tr");
   const roleLabels={user:"Сотрудник",manager:"Руководитель",admin:"Администратор"};
   tr.append(cell(person.full_name||person.email),cell(person.status),cell(roleLabels[person.role]||person.role));
@@ -290,7 +294,7 @@ function renderAdmin(){
        :"Назначить роль «"+roleLabels[next]+"» пользователю "+person.email+"?";
      if(!confirm(warning)){roleSelect.value=person.role;return}
      await api("/manager/admin/users/"+person.id+"/role","POST",{role:next});
-     toast("Роль назначена. Пользователь получит уведомление на почту регистрации.");
+     toast("Роль назначена. Почтовое уведомление будет отправлено, если отправитель настроен.");
      await reload();
    }));
    if(person.role==="user"){
@@ -639,6 +643,9 @@ if(ROLE==="admin"){
   finally{await renderMailStatus()}
  };
 }
+for(const id of ["mgr-admin-search","mgr-admin-status"]){
+ const field=$(id);if(field)field.addEventListener(id==="mgr-admin-search"?"input":"change",renderAdmin);
+}
 const mgrToday=new Date();
 $("mgr-report-form").elements.namedItem("to").value=mgrToday.toISOString().slice(0,10);
 const mgrPast=new Date(mgrToday.getTime()-29*86400000);
@@ -801,8 +808,15 @@ __STYLE__</head><body>
 </div>
 <div class="mgr-card mgr-hidden" id="mgr-admin-section">
 <h2>Администрирование ролей и подразделений</h2>
-<p>Доступно только администратору системы. Сначала назначьте роль руководителя,
-затем выберите его в строке сотрудника и сохраните.</p>
+<p>Изменяйте роли уже зарегистрированных сотрудников и руководителей. Все изменения фиксируются в журнале; назначение администратора требует отдельного подтверждения.</p>
+<div class="mgr-row" style="margin-bottom:13px">
+<label style="min-width:180px;flex:1">Найти пользователя
+<input id="mgr-admin-search" type="search" placeholder="ФИО или адрес регистрации" style="width:100%"></label>
+<label style="min-width:150px">Статус
+<select id="mgr-admin-status"><option value="all">Все учётные записи</option>
+<option value="approved">Подтверждённые</option><option value="pending">Ожидают</option>
+<option value="blocked">Заблокированные</option><option value="rejected">Отклонённые</option></select></label>
+</div>
 <div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
 <th>Учётная запись</th><th>Доступ</th><th>Роль</th><th>Управление</th>
 </tr></thead><tbody id="mgr-admin-rows"></tbody></table></div>

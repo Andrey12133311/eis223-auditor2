@@ -40,4 +40,20 @@ def initialize_schema(db):
             """ALTER TABLE account_users ADD CONSTRAINT account_users_role_check
                CHECK(role IN ('user','manager','admin'))"""
         )
+    alert_constraint = db.execute(
+        """SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+           WHERE conrelid='account_alert_events'::regclass
+             AND conname='account_alert_events_kind_check'"""
+    ).fetchone()
+    if alert_constraint and "'assignment'" not in str(alert_constraint[0]):
+        db.execute(
+            "ALTER TABLE account_alert_events DROP CONSTRAINT account_alert_events_kind_check"
+        )
+        db.execute(
+            """ALTER TABLE account_alert_events
+               ADD CONSTRAINT account_alert_events_kind_check
+               CHECK(kind IN ('documents_checked','new_violation','thematic_finished',
+                              'review_completed','assignment','review_feedback','role_change'))"""
+        )
     return len(statements)

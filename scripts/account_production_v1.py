@@ -248,6 +248,7 @@ def install(app):
     from scripts.v369_manager_report import router as manager_report
     from scripts.v370_manager_campaigns import router as manager_campaigns, staff_router as staff_campaigns
     from scripts.v370_staff_workbench import router as staff_workbench, team_router as manager_discussions
+    from scripts.v375_staff_center import router as staff_center
     from scripts.v370_staff_documents import router as staff_documents
     from scripts.v370_staff_extras import router as staff_extras
     from scripts.v370_manager_review import router as manager_manual_reviews
@@ -272,6 +273,7 @@ def install(app):
     app.include_router(manager_campaigns)
     app.include_router(staff_campaigns)
     app.include_router(staff_workbench)
+    app.include_router(staff_center)
     app.include_router(manager_discussions)
     app.include_router(staff_documents)
     app.include_router(staff_extras)
@@ -290,6 +292,8 @@ def install(app):
         try:
             with connect() as db:
                 initialize_schema(db)
+            from scripts.v375_task_autoload import start as start_manager_task_queue
+            start_manager_task_queue(app)
         except Exception:
             logging.getLogger(__name__).exception(
                 "Account database unavailable; private sign-in is temporarily blocked"

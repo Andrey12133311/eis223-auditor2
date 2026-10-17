@@ -9,6 +9,7 @@ from datetime import date
 import json
 import secrets
 import sqlite3
+from hashlib import sha256
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -239,7 +240,13 @@ def staff_campaign_violations(request:Request,response:Response):
             law_url=str(enriched.get("consultant_url") or "")
             if not law_url.startswith("https://www.consultant.ru/"):
                 law_url=""
+            incident_id=sha256(("\\n".join([
+                reg, str(item.get("title") or "").strip().casefold(),
+                str(enriched.get("law") or "").strip().casefold(),
+                str(item.get("evidence") or "").strip().casefold()
+            ])).encode("utf-8")).hexdigest()[:32]
             prepared.append({
+                "finding_id":incident_id,
                 "reg_number":reg,
                 "title":str(item.get("title") or "Нарушение")[:280],
                 "category":str(item.get("category") or "")[:90],
@@ -260,8 +267,23 @@ def staff_campaign_violations(request:Request,response:Response):
                 # the 'view evidence' link may open a different thematic check.
                 "batch_id":str(item.get("batch_id") or first_batch)[:24],
             })
+    # Employee decisions annotate only the visible, owned, deduplicated events.
+    # They do not change the number of original detected violations.
+    visible=prepared[:500]
+    if visible:
+        with connect() as db:
+            reviewed=db.execute(
+                """SELECT finding_key,decision,comment FROM account_staff_finding_decisions
+                   WHERE user_id=%s AND finding_key=ANY(%s)""",
+                (uid,list({x["finding_id"] for x in visible})),
+            ).fetchall()
+        by_id={str(row[0]):{"decision":row[1],"comment":row[2]} for row in reviewed}
+        for finding in visible:
+            data=by_id.get(finding["finding_id"],{})
+            finding["review_status"]=data.get("decision","unreviewed")
+            finding["review_comment"]=data.get("comment","")
     return {
-        "findings":prepared[:500],
+        "findings":visible,
         "count":len(prepared[:500]),
         "truncated":len(data)>=1200 or len(prepared)>500,
         "scope":"Подтверждённые анализатором нарушения по тематическим проверкам сотрудника",

@@ -57,6 +57,15 @@ def _audit(db,actor,subject,kind,entity,action,details=""):
            VALUES(%s,%s,%s,%s,%s,%s)""",
         (actor,subject,kind,str(entity),action,str(details)[:1500]))
 
+def _notify(db,employee,source,kind,title,detail=""):
+    """Only owner-scoped event, without embedding secret EIS documents."""
+    db.execute(
+        """INSERT INTO account_alert_events
+           (user_id,source_key,kind,title,detail) VALUES(%s,%s,%s,%s,%s)""",
+        (employee,str(source),kind,title[:180],str(detail)[:800]),
+    )
+
+
 class RoleUpdate(BaseModel):
     role:str=Field(pattern="^(user|manager|admin)$")
 
@@ -142,6 +151,16 @@ def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
             raise HTTPException(404,"Действующая учётная запись сотрудника не найдена")
         if row[0]==data.role:
             return {"id":str(target),"role":data.role,"changed":False}
+        if row[0]=="admin" and data.role!="admin":
+            # Serialize demotions so two admins cannot remove the final admin
+            # simultaneously from the same identity database.
+            db.execute("SELECT pg_advisory_xact_lock(223375)")
+            admins=db.execute(
+                """SELECT COUNT(*) FROM account_users
+                   WHERE role='admin' AND status='approved'"""
+            ).fetchone()[0]
+            if admins<=1:
+                raise HTTPException(409,"Нельзя лишить прав последнего администратора")
         if row[0]=="manager":
             members=db.execute(
                 "SELECT 1 FROM account_manager_teams WHERE manager_id=%s LIMIT 1",
@@ -152,7 +171,11 @@ def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
             # Elevated roles cannot remain listed as ordinary staff.
             db.execute("DELETE FROM account_manager_teams WHERE user_id=%s",(target,))
         db.execute("UPDATE account_users SET role=%s WHERE id=%s",(data.role,target))
+        # Reject stale sessions immediately; the new role applies on fresh login.
+        db.execute("UPDATE account_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=%s AND revoked_at IS NULL",(target,))
         _audit(db,admin,target,"role",target,"set_"+data.role)
+        _notify(db,target,target,"role_change","Изменена роль пользователя",
+                "Назначена роль: "+{"user":"Сотрудник","manager":"Руководитель","admin":"Администратор"}[data.role])
         from scripts.account_notifications_v1 import enqueue_role_change
         enqueue_role_change(db,target,data.role,uuid4().hex)
     return {"id":str(target),"role":data.role,"changed":True}
@@ -271,8 +294,10 @@ def create_task(data:TaskCreate,request:Request):
             (task_id,manager_id[0],employee,data.reg_number,data.title.strip(),
              data.note.strip(),data.due_date))
         _audit(db,actor,employee,"task",task_id,"assign",data.title)
+        _notify(db,employee,task_id,"assignment","Новое поручение",
+                data.title+" · закупка № "+data.reg_number)
     return {"id":str(task_id),"status":"assigned",
-            "note":"Поручение создано. Проверка ЕИС запускается сотрудником отдельно."}
+            "note":"Поручение создано. Сервер автоматически поставит закупку в очередь ЕИС."}
 
 def _task_auth(db,actor,role,task_id):
     task_id=_uuid(task_id)
@@ -312,6 +337,11 @@ def task_decision(task_id:str,data:TaskDecision,request:Request):
                              THEN CURRENT_TIMESTAMP ELSE NULL END
               WHERE id=%s""",(new_status,new_status,row[0]))
         _audit(db,actor,row[1],"task",row[0],data.action,data.comment)
+        _notify(db,row[1],row[0],"review_feedback",
+                {"returned":"Поручение возвращено на доработку",
+                 "completed":"Поручение согласовано",
+                 "cancelled":"Поручение отменено"}[new_status],
+                data.comment)
     return {"status":new_status}
 
 @employee_router.get("")
@@ -347,11 +377,20 @@ def employee_task_action(task_id:str,action:str,request:Request):
         else:
             if task[2]!="in_progress":
                 raise HTTPException(409,"Сначала примите поручение")
-            check=db.execute(
-                "SELECT job_id,created_at,last_started_at FROM account_manual_checks "
-                "WHERE user_id=%s AND reg_number=%s",(owner,task[1])).fetchone()
+            # Prefer the isolated manager task job; employee manual checks
+            # remain an independent, user-entered list.
+            queued=db.execute(
+                """SELECT job_id,queued_at FROM account_manager_task_eis_jobs
+                   WHERE task_id=%s""", (task[0],),
+            ).fetchone()
+            if queued:
+                check=(queued[0],queued[1],queued[1])
+            else:
+                check=db.execute(
+                    "SELECT job_id,created_at,last_started_at FROM account_manual_checks "
+                    "WHERE user_id=%s AND reg_number=%s",(owner,task[1])).fetchone()
             if not check:
-                raise HTTPException(409,"Сначала запустите самостоятельную проверку ЕИС")
+                raise HTTPException(409,"Автоматическая проверка ЕИС ещё не запущена")
             ns=getattr(request.app.state,"eis223_manual_ns",None)
             if ns is None:
                 raise HTTPException(503,"Сведения юридической проверки недоступны")
@@ -443,6 +482,11 @@ def memo_decision(memo_id:str,data:MemoDecision,request:Request):
                WHERE memo_id=%s""",
             (data.decision,actor,data.comment.strip(),memo_id))
         _audit(db,actor,row[0],"memo",memo_id,data.decision,data.comment)
+        _notify(db,row[0],memo_id,"review_feedback",
+                {"approved":"Служебная записка согласована",
+                 "returned":"Служебная записка возвращена",
+                 "rejected":"Служебная записка отклонена"}[data.decision],
+                data.comment)
     return {"status":data.decision}
 
 @employee_router.get("/memos")
