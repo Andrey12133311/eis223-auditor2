@@ -460,6 +460,8 @@ async function loadFindings(){
  try{personalNotes=await api("/manager/cases/"+encodeURIComponent(employee)+
   "/"+encodeURIComponent(reg)+"/notes")}catch(e){/* Notes may be unavailable while evidence loads */}
  $("mgr-finding-note").textContent="Найдено подтверждённых анализатором эпизодов: "+data.findings.length+". Решения руководителя сохраняются отдельно.";
+ await renderProposals(employee,reg);
+ await renderDiscussion(employee,reg);
  if(!data.findings.length){root.append(tag("p","mgr-muted","Для этой закупки подтверждённых нарушений пока нет."));return}
  for(const item of data.findings){
   const card=tag("article","mgr-entry");
@@ -506,6 +508,58 @@ async function loadFindings(){
   }
   card.append(buttons);root.append(card);
  }
+}
+async function renderProposals(employee,reg){
+ const node=$("mgr-manual-proposals");node.replaceChildren();
+ try{
+  const rows=await api('/manager/workbench/'+employee+'/'+reg+'/proposals');
+  if(!rows.length){node.append(tag('p','mgr-muted','Ручных предложений сотрудника нет'));return}
+  for(const item of rows){
+   const card=tag("article","mgr-entry");
+   card.append(tag("h3","",item.title),tag("p","mgr-muted","Статья: "+item.law),
+    tag("div","mgr-evidence",item.evidence),
+    tag("div","mgr-muted","Статус: "+item.status));
+   if(item.source_url.startsWith('https://zakupki.gov.ru/')){
+    const linkEl=link(item.source_url,'Оригинал ЕИС ↗');
+    linkEl.target='_blank';linkEl.rel='noopener noreferrer';card.append(linkEl)
+   }
+   if(item.status==="needs_review"){
+    const commands=tag('div','mgr-actions');
+    for(const [decision,label] of [['approved','Подтвердить вручную'],['rejected','Отклонить']]){
+     commands.append(action(label,'mgr-outline',async()=>{
+      const comment=decision==='rejected'?prompt('Укажите причину отклонения'):prompt('Комментарий к согласованию (по желанию)');
+      if(comment===null)return;
+      await api('/manager/workbench/'+employee+'/'+reg+'/proposals/'+item.id+'/decision',
+        'POST',{decision,comment});
+      toast('Решение сохранено отдельно от автоматических нарушений');
+      await renderProposals(employee,reg);
+     }));
+    }
+    card.append(commands);
+   }
+   node.append(card);
+  }
+ }catch(e){node.append(tag('p','mgr-muted','Ручные предложения временно недоступны'))}
+}
+async function renderDiscussion(employee,reg){
+ const node=$("mgr-case-discussion");node.replaceChildren();
+ try{
+  const entries=await api('/manager/workbench/'+employee+'/'+reg+'/discussion');
+  for(const item of entries){
+   const box=tag('div','mgr-entry');
+   box.append(tag('b','',item.author),tag('div','mgr-muted',
+     new Date(item.created_at).toLocaleString('ru-RU')),
+    tag('p','',item.body));node.append(box);
+  }
+ }catch(e){node.append(tag('p','mgr-muted','Обсуждение пока недоступно'))}
+ const form=$('mgr-case-message');
+ form.onsubmit=async e=>{
+  e.preventDefault();
+  const body=String(new FormData(form).get('body')||'').trim();
+  try{await api('/manager/workbench/'+employee+'/'+reg+'/discussion','POST',{body});
+   form.reset();await renderDiscussion(employee,reg)}
+  catch(err){toast(err.message)}
+ };
 }
 $("mgr-finding-load").onclick=()=>loadFindings().catch(e=>toast(e.message));
 $("mgr-task-search").oninput=renderTasks;
@@ -664,7 +718,16 @@ __STYLE__</head><body>
 <label>Номер ЕИС<input id="mgr-finding-reg" maxlength="11" inputmode="numeric" placeholder="Номер закупки"></label>
 <button class="mgr-primary" id="mgr-finding-load" type="button">Показать нарушения</button></div>
 <p id="mgr-finding-note" class="mgr-muted">Выберите закупку для проверки доказательств.</p>
-<div id="mgr-finding-items"></div></div>
+<div id="mgr-finding-items"></div>
+<h2>Нарушения, добавленные сотрудником</h2>
+<p>Предложения рассматриваются отдельно и не увеличивают счётчик автоматических нарушений.</p>
+<div id="mgr-manual-proposals"></div>
+<h2>Обсуждение дела с сотрудником</h2>
+<div id="mgr-case-discussion"></div>
+<form id="mgr-case-message" class="mgr-form">
+<label class="wide">Сообщение или замечание<textarea name="body" minlength="4" maxlength="2000" required></textarea></label>
+<button class="mgr-primary" type="submit">Отправить сотруднику</button></form>
+</div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="memos">
 <div class="mgr-card"><h2>Служебные записки на согласовании</h2>
