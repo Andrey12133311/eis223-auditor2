@@ -13,6 +13,7 @@ from http.cookies import SimpleCookie
 from scripts.account_sessions_v1 import resolve_session
 from scripts.account_api_v1 import connect
 from scripts.account_site_ui_v1 import site_header
+from scripts.v361_home_shell import home_shell
 
 PUBLIC = frozenset({
     "/health", "/healthz", "/account/login", "/account/register",
@@ -96,7 +97,7 @@ def add_account_navigation(html, role="user"):
     end = html.find(b'>', start)
     if end < 0:
         return html
-    return html[:end + 1] + site_header(role) + html[end + 1:]
+    return html[:end + 1] + site_header(role) + home_shell() + html[end + 1:]
 
 
 def machine_path(path):
