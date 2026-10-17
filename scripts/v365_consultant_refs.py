@@ -110,27 +110,38 @@ def references(row):
     if found:
         for idx,match in enumerate(found):
             if match.re == REF_REV:
-                article = match.group(2)
-                chunk = low[max(0,match.start()-30):match.end()]
-                part = match.group(1)
+                article=match.group(2)
+                piece=low[max(0,match.start()-30):match.end()]
+                segments=[piece]
             else:
-                article = match.group(1)
-                after = low[match.end():found[idx+1].start() if idx+1<len(found) else len(low)]
-                # Avoid taking a part belonging to the next statute.
-                after = re.split(r"\b(?:пп\s*рф|постановлени[ея]|1875|1352)\b",after,maxsplit=1)[0]
-                parts = list(REF_PART.finditer(after))
-                part = parts[0].group(1).replace(" ","") if parts else None
-                chunk = after
+                article=match.group(1)
+                after=low[match.end():found[idx+1].start() if idx+1<len(found) else len(low)]
+                after=re.split(r"\b(?:пп\s*рф|постановлени[ея]|1875|1352)\b",
+                               after,maxsplit=1)[0]
+                # A preceding part ("часть 11 статьи 4") belongs to this
+                # article, not the previous one.
+                prefix=low[max(0,match.start()-48):match.start()]
+                before=re.search(
+                    r"((?:п(?:ункт|ункта|ункте)?\.?\s*\d+(?:\.\d+)?\s*)?"
+                    r"(?:ч(?:асть|асти|астью)?\.?\s*\d+(?:\.\d+)?))\s*$",
+                    prefix,re.I)
+                segments=[before.group(1)] if before else []
+                segments.extend(after.split(";"))
             if article not in ARTICLES:
                 continue
-            point = REF_POINT.search(chunk)
-            p = point.group(1) if point else None
-            suffix = (" · ч. "+part if part else "")+(" · п. "+p if p else "")
-            url = LAW_223+ARTICLES[article]+"/"
-            if (article,part) in PASSAGES:
-                url = _fragment(url, PASSAGES[(article,part)])
-            identity = "223:"+article+":"+(part or "")+":"+(p or "")
-            add(identity, "223-ФЗ · ст. "+article+suffix, url, article, part)
+            if not any(REF_PART.search(v) or REF_POINT.search(v) for v in segments):
+                segments=[""]
+            for piece in segments:
+                part_match=REF_PART.search(piece)
+                point_match=REF_POINT.search(piece)
+                part=part_match.group(1).replace(" ","") if part_match else None
+                point=point_match.group(1) if point_match else None
+                suffix=(" · ч. "+part if part else "")+(" · п. "+point if point else "")
+                url=LAW_223+ARTICLES[article]+"/"
+                if (article,part) in PASSAGES:
+                    url=_fragment(url,PASSAGES[(article,part)])
+                identity="223:"+article+":"+(part or "")+":"+(point or "")
+                add(identity, "223-ФЗ · ст. "+article+suffix,url,article,part)
 
     # If a verified code explicitly specifies the same statute but legacy
     # rows have no law text, a code can support identifying the article.
