@@ -150,7 +150,8 @@ def team(request:Request,response:Response):
     with connect() as db:
         if role=="admin":
             rows=db.execute(
-                """SELECT u.id,u.email,u.role,u.status,t.manager_id,m.email
+                """SELECT u.id,u.email,u.role,u.status,t.manager_id,m.email,
+                          u.last_name,u.first_name,u.patronymic
                    FROM account_users u
                    LEFT JOIN account_manager_teams t ON t.user_id=u.id
                    LEFT JOIN account_users m ON m.id=t.manager_id
@@ -158,14 +159,16 @@ def team(request:Request,response:Response):
             ).fetchall()
         else:
             rows=db.execute(
-                """SELECT u.id,u.email,u.role,u.status,t.manager_id,m.email
+                """SELECT u.id,u.email,u.role,u.status,t.manager_id,m.email,
+                          u.last_name,u.first_name,u.patronymic
                    FROM account_manager_teams t
                    JOIN account_users u ON u.id=t.user_id
                    JOIN account_users m ON m.id=t.manager_id
                    WHERE t.manager_id=%s AND u.status='approved'
                    ORDER BY lower(u.email) LIMIT 200""",(actor,)).fetchall()
     return [{"id":str(r[0]),"email":r[1],"role":r[2],"status":r[3],
-             "manager_id":str(r[4]) if r[4] else None,"manager_email":r[5]} for r in rows]
+             "manager_id":str(r[4]) if r[4] else None,"manager_email":r[5],
+             "full_name":" ".join(part for part in (r[6],r[7],r[8]) if part).strip()} for r in rows]
 
 def _task_rows(db,actor,role):
     where=("WHERE t.manager_id=%s AND mt.manager_id=%s"
