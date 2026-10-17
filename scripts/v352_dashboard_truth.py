@@ -6,30 +6,70 @@ grouping drives the dashboard counter and the general card.
 """
 from collections import defaultdict
 import difflib
+from datetime import datetime
 import re
 from v333_dedup_ui import issue_key, _proof, _different_fact
+from v365_consultant_refs import legal_identity
 
 def _normalized_law(row):
-    return re.sub(r"\s+"," ",str(row.get("law") or "").casefold().replace("ё","е")).strip()
+    # Equivalent ways to cite the same article/part and Government decree are
+    # the same legal basis; different parts or acts must not be merged.
+    return legal_identity(row.get("law"),row.get("code") or row.get("field_path"))
+
+_DATE = re.compile(r"(?<!\d)(\d{2})\.(\d{2})\.(20\d{2})(?!\d)")
+def _normalized_proof(text):
+    proof=_proof(text)
+    def iso(match):
+        try:return datetime.strptime(match.group(0),"%d.%m.%Y").strftime("%Y-%m-%d")
+        except ValueError:return match.group(0)
+    return _DATE.sub(iso,proof)
+
+def _dates(text):
+    return frozenset(re.findall(r"(?<!\d)20\d{2}-\d{2}-\d{2}(?!\d)",text))
 
 def _common_event(a,b):
-    if issue_key(a.get("title") or a.get("item"))!=issue_key(b.get("title") or b.get("item")):
-        return False
+    """One incident: same legal basis and demonstrably matching factual episode.
+
+    Different dates, money/payment terms or independently established clauses
+    cannot be merged solely because a title, law article or detector is shared.
+    """
+    ta=issue_key(a.get("title") or a.get("item") or a.get("code"))
+    tb=issue_key(b.get("title") or b.get("item") or b.get("code"))
+    same_title=bool(ta and ta==tb)
     la,lb=_normalized_law(a),_normalized_law(b)
     if la and lb and la!=lb:return False
-    pa,pb=_proof(a.get("evidence")),_proof(b.get("evidence"))
-    if not pa or not pb:return bool(pa)==bool(pb) and (
-        a.get("document")==b.get("document") and a.get("source_url")==b.get("source_url")
-    )
+    pa,pb=_normalized_proof(a.get("evidence")),_normalized_proof(b.get("evidence"))
+    if not pa or not pb:
+        return (same_title and pa==pb and bool(pa) and
+                a.get("document")==b.get("document") and
+                a.get("source_url")==b.get("source_url"))
     if _different_fact(pa,pb):return False
-    if pa==pb:return True
+    da,db=_dates(pa),_dates(pb)
+    if da and db and da!=db:return False
+    if not same_title:
+        # Alternative analyzer titles describe a common act only when a
+        # specific legal provision and a long identical original are present.
+        same_law=bool(la and lb and la==lb)
+        same_code=bool(a.get("code") and a.get("code")==b.get("code"))
+        if not(same_law or same_code):return False
+        if da!=db:return False
+        short,long=sorted((pa,pb),key=len)
+        if len(short)<120:return False
+        if short==long:return True
+        if short in long and len(short)>=160:return True
+        m=difflib.SequenceMatcher(None,pa[:1800],pb[:1800],
+                                  autojunk=False).find_longest_match()
+        return m.size>=175 and m.size>=.94*len(short)
+    if pa==pb:
+        # Tiny generic text with different documents is insufficient evidence.
+        return len(pa)>=45 or (
+            a.get("document")==b.get("document") and
+            a.get("source_url")==b.get("source_url"))
     short,long=sorted((pa,pb),key=len)
     if len(short)<90:return False
-    if short in long and len(short)>=90:return True
-    # Remove nonessential wrappers and truncated lead-in from displayed quotes,
-    # but require a substantial *identical clause*. This is not fuzzy matching
-    # merely on the law/title, and never merges conflicting dates or deadlines.
-    m=difflib.SequenceMatcher(None,pa[:1800],pb[:1800],autojunk=False).find_longest_match()
+    if short in long:return True
+    m=difflib.SequenceMatcher(None,pa[:1800],pb[:1800],
+                              autojunk=False).find_longest_match()
     return m.size>=145 and m.size>=.82*len(short)
 
 def _choose(a,b):
@@ -41,32 +81,50 @@ def _choose(a,b):
     return b if quality(b)>quality(a) else a
 
 def collapse_legal_events(rows):
-    """One visual card per established act; retain every source reference."""
-    clusters=defaultdict(list)
+    """One card per proven act, retaining citations and every original source.
+
+    Deliberately read-only: returned clusters do not modify any saved finding,
+    verification row, document, audit counter or prior historic evidence.
+    """
+    clusters=[]
+    by_key=defaultdict(list)
     for item in rows:
         if not isinstance(item,dict):continue
         row=dict(item)
         row["title"]=row.get("title") or row.get("item") or row.get("code") or "Нарушение"
-        key=issue_key(row["title"])
-        if not key:continue
-        matched=next((c for c in clusters[key] if _common_event(c["best"],row)),None)
+        title=issue_key(row["title"])
+        if not title:continue
+        norm=_normalized_law(row)
+        keys=["title:"+title]
+        if norm:keys.append("law:"+norm)
+        eligible=[]
+        visited=set()
+        for key in keys:
+            for cluster in by_key[key]:
+                idx=id(cluster)
+                if idx not in visited:
+                    eligible.append(cluster);visited.add(idx)
+        matched=next((c for c in eligible if _common_event(c["best"],row)),None)
         src={"document":str(row.get("document") or ""),
              "url":str(row.get("source_url") or "")}
         if matched is None:
-            clusters[key].append({"best":row,"sources":[src] if any(src.values()) else [],
-                                  "raw_count":1})
+            matched={"best":row,"sources":[src] if any(src.values()) else [],
+                     "raw_count":1}
+            clusters.append(matched)
         else:
             matched["raw_count"]+=1
             if any(src.values()) and src not in matched["sources"]:
                 matched["sources"].append(src)
             matched["best"]=_choose(matched["best"],row)
+        for key in keys:
+            if all(x is not matched for x in by_key[key]):
+                by_key[key].append(matched)
     result=[]
-    for cs in clusters.values():
-        for c in cs:
-            best=dict(c["best"])
-            best["supporting_sources"]=c["sources"]
-            best["raw_count"]=c["raw_count"]
-            result.append(best)
+    for cluster in clusters:
+        best=dict(cluster["best"])
+        best["supporting_sources"]=cluster["sources"]
+        best["raw_count"]=cluster["raw_count"]
+        result.append(best)
     return result
 
 def load_counts(conn,regs):
