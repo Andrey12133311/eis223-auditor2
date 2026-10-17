@@ -156,6 +156,9 @@ _STYLE = """
  border-radius:8px;background:#fff;color:#233f52;min-width:0}
 .eis223-feature form button{grid-column:1/-1;min-height:39px;border:1px solid #17618f;
  background:#17618f;color:white;border-radius:8px;cursor:pointer;font-weight:690}
+.eis223-employee-links{display:flex;gap:9px;flex-wrap:wrap}
+.eis223-workspace .eis223-employee-links a{display:inline-flex;align-items:center;min-height:39px;padding:9px 12px;background:#eef5fa;border:1px solid #d5e4ee;border-radius:8px;color:#195b86!important;text-decoration:none;font-weight:700;font-size:12px}
+.eis223-workspace .eis223-employee-links a:hover{background:#e0eef8}
 .eis223-notification-dot[hidden]{display:none!important}
 .eis223-notification-dot{display:inline-grid;min-width:20px;min-height:20px;
  padding:2px 4px;place-items:center;border-radius:999px;background:#b94645;color:#fff;
@@ -246,6 +249,17 @@ def site_header(role="user"):
 <div id="eis223-admin-users"></div>
 </div></section>
 ''' if role == "admin" else "") + '''
+<section class="eis223-feature" aria-label="Работа сотрудника на сегодня">
+<h3>Работа на сегодня</h3>
+<p>Быстрый доступ к проверкам, поручениям, нарушениям и документам без перехода через отдельные кабинеты.</p>
+<div class="eis223-employee-links">
+<a href="/account/workbench">Рабочее место сотрудника</a>
+<a href="/account/home">Мои проверки</a>
+<a href="/account/thematic">Тематические проверки</a>
+<a href="/account/memos">Служебные записки</a>
+</div>
+<p class="eis223-note" id="eis223-today-summary" role="status">Данные обновятся при открытии кабинета.</p>
+</section>
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
 <span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
