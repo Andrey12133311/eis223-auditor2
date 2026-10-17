@@ -34,6 +34,11 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('WHERE user_id=%s',api)
         self.assertIn('(owner_id, owner_id, owner_id)',api)
         self.assertIn("fetch('/me/summary'",page)
+    def test_procurement_list_disables_caching(self):
+        api=(ROOT/'scripts/account_workspace_v1.py').read_text()
+        self.assertIn('def my_procurements(request: Request, response: Response):',api)
+        self.assertIn('response.headers.update(no_store_headers())',api)
+        self.assertIn("if not REG_NUMBER.fullmatch(reg_number):",api)
     def test_no_email_confirmation_required(self):
         a=(ROOT/'scripts/account_api_v1.py').read_text()
         b=(ROOT/'scripts/account_repository_v1.py').read_text()
