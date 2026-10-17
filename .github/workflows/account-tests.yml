@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install isolated account test dependencies
-        run: python -m pip install fastapi argon2-cffi 'psycopg[binary]' httpx
+        run: python -m pip install -r requirements-accounts.txt
       - name: Compile account modules
         run: python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('scripts').glob('account_*.py')]"
       - name: Run isolated account tests
