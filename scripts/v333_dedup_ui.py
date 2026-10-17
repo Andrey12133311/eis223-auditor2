@@ -286,7 +286,21 @@ def install(ns):
                 try:
                     obj=json.loads(body)
                     if isinstance(obj,dict) and isinstance(obj.get("items"),list):
-                        obj["items"]=collapse(obj["items"])
+                        # The legacy findings endpoint mixes confirmed
+                        # findings and checklist copies of the same episode.
+                        # Preserve all source rows, but return each legal act once.
+                        from v352_dashboard_truth import collapse_legal_events
+                        from v365_consultant_refs import enrich
+                        confirmed=[];others=[]
+                        for item in obj["items"]:
+                            if not isinstance(item,dict):
+                                others.append(item);continue
+                            state=str(item.get("status") or item.get("kind") or "violation").lower()
+                            if state in ("violation","нарушение"):
+                                confirmed.append(item)
+                            else:
+                                others.append(item)
+                        obj["items"]=[enrich(x) for x in collapse_legal_events(confirmed)]+collapse(others)
                         obj["total"]=len(obj["items"])
                     return JSONResponse(obj,headers={"Cache-Control":"no-store"})
                 except (ValueError,TypeError):
