@@ -622,6 +622,12 @@ def login_portal(initial_tab="login"):
 <button class="submit" type="submit">Войти на сайт</button>
 </form>
 <form id="registration-form" autocomplete="on">
+<label for="register-last-name">Фамилия</label>
+<input id="register-last-name" name="last_name" autocomplete="family-name" maxlength="80" required>
+<label for="register-first-name">Имя</label>
+<input id="register-first-name" name="first_name" autocomplete="given-name" maxlength="80" required>
+<label for="register-middle-name">Отчество (если есть)</label>
+<input id="register-middle-name" name="patronymic" autocomplete="additional-name" maxlength="80">
 <label for="register-email">Электронная почта</label>
 <input id="register-email" name="email" type="email" autocomplete="email" required maxlength="254">
 <label for="register-password">Пароль (не менее 12 символов)</label>
