@@ -278,8 +278,17 @@ def thematic_history_records(ns, permitted_ids=None):
          """+owner_filter+""" GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100""",
          permitted_ids or ()).fetchall()
   out=[]
+  has_purchases=bool(c.execute(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchases'"
+  ).fetchone())
+  customer_col=""
+  if has_purchases:
+   cols={r[1] for r in c.execute("PRAGMA table_info(purchases)")}
+   customer_col="customer" if "customer" in cols else ("customer_name" if "customer_name" in cols else "")
   for row in rows:
    item=dict(row)
+   try:item["categories"]=json.loads(item["categories"] or "[]")
+   except (ValueError,TypeError):item["categories"]=[]
    batch=item["id"]
    rev=c.execute("SELECT COALESCE(MAX(rowid),0) FROM thematic_findings WHERE batch_id=?",(batch,)).fetchone()[0]
    stamp=(int(item["stored_rows"]),int(rev))
@@ -295,6 +304,16 @@ def thematic_history_records(ns, permitted_ids=None):
     unique=sum(len(collapse_legal_events(group)) for group in grouped.values())
     _HISTORY_COUNT_CACHE[batch]=(stamp,unique)
    item["violations"]=unique
+   item["violation_types"]=[r[0] for r in c.execute(
+     "SELECT DISTINCT title FROM thematic_findings WHERE batch_id=? "
+     "AND title IS NOT NULL AND title<>'' LIMIT 35",(batch,))]
+   item["customers"]=[]
+   if customer_col:
+    item["customers"]=[r[0] for r in c.execute(
+      "SELECT DISTINCT p."+customer_col+" FROM thematic_items i "
+      "JOIN purchases p ON p.reg_number=i.reg WHERE i.batch_id=? "
+      "AND p."+customer_col+" IS NOT NULL AND p."+customer_col+"<>'' LIMIT 35",
+      (batch,))]
    out.append(item)
   # Discard counts for deleted campaigns; never change their stored evidence.
   active={x["id"] for x in out}
