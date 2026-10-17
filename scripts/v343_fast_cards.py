@@ -106,6 +106,23 @@ def read(ns,reg):
     finally:
         c.close()
 
+def legal_links(item, law=None, link=None):
+    """Build only verified ConsultantPlus law links; never use EIS URL filter."""
+    from v365_consultant_refs import references, consultant_url
+    record={**(item or {}),"law":law or (item or {}).get("law"),
+            "law_url":link or (item or {}).get("law_url")}
+    refs=references(record)
+    if refs:
+        return '<p class="meta"><b>Точная норма:</b> '+'; '.join(
+          '<a href="'+esc(ref["url"])+'" target="_blank" rel="noopener noreferrer">'+
+          esc(ref["label"])+' · КонсультантПлюс ↗</a>' for ref in refs)+'</p>'
+    if consultant_url(link):
+        return ('<p class="meta"><b>Источник нормы:</b> <a href="'+esc(link)+
+                '" target="_blank" rel="noopener noreferrer">'+
+                'КонсультантПлюс · открыть норму ↗</a></p>')
+    return '<p class="meta">Точная часть или пункт статьи требуют юридического уточнения.</p>'
+
+
 def detail_block(item, kind, title, law, evidence, document, source, link):
     supporting=(item or {}).get("supporting_sources") or []
     extra=""
@@ -123,7 +140,7 @@ def detail_block(item, kind, title, law, evidence, document, source, link):
       +('<p class="evidence"><b>Обстоятельства и доказательства:</b> '+esc(evidence)+'</p>' if evidence else '')
       +('<p class="meta">Документ: '+esc(document)+'</p>' if document else '')
       +('<p>'+source_link(source,"Оригинал ЕИС")+'</p>' if source_link(source,"Оригинал ЕИС") else '')
-      +('<p>'+source_link(link,"Норма права")+'</p>' if source_link(link,"Норма права") else '')
+      +legal_links(item,law,link)
       +extra
       +'</article>')
 
@@ -131,8 +148,8 @@ def render_thematic_panel(reg,thematic):
     """Reuse the same panels and finding cards used by the main audit view."""
     if not thematic:return ""
     batch=thematic["batch"]
-    from v333_dedup_ui import collapse
-    rows=collapse(thematic.get("findings",[]))
+    from v352_dashboard_truth import collapse_legal_events
+    rows=collapse_legal_events(thematic.get("findings",[]))
     labels=thematic.get("category_labels") or {}
     selected=thematic.get("categories") or []
     state=thematic.get("state") or "queued"
