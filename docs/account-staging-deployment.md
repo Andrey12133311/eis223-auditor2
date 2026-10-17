@@ -7,7 +7,7 @@ This is **not** the EIS production startup and must not be attached to the exist
 1. Create a **separate staging environment** and PostgreSQL database; confirm billing and retention before provisioning.
 2. Configure `EIS223_IDENTITY_DATABASE_URL` as a **private** PostgreSQL URL.
 3. Configure `EIS223_PUBLIC_ORIGIN` to the **exact HTTPS staging origin**.
-4. Install `requirements-accounts.txt`.
+4. Set `EIS223_RATE_LIMIT_SECRET` to a separately generated random secret of at least 32 characters, identical across staging workers. Install `requirements-accounts.txt`.
 5. Run a one-time schema migration against staging PostgreSQL using `scripts.account_migrations_v1.initialize_schema`; do not use the production SQLite volume.
 6. Run `python -m scripts.account_bootstrap_v1` in a secure interactive operator terminal to create the first admin.
 7. Set `EIS223_AUTH_ENFORCE=true` before making the staging service public.
@@ -17,7 +17,7 @@ This is **not** the EIS production startup and must not be attached to the exist
 
 ## Stop conditions before production merge
 
-- Per-IP and per-account **distributed rate limiting** is not implemented.
+- Shared PostgreSQL rate limiting is implemented for registration/login, but real multi-worker concurrency and trusted proxy-IP behavior are not yet verified.
 - Legacy EIS endpoints have not been audited for ownership checks; global authentication is not sufficient for per-user isolation.
 - EIS collectors need independent, narrowly scoped machine authentication; do not grant collector access using ordinary user cookies.
 - Document and ODT download authorization has not been verified.
