@@ -235,3 +235,28 @@ def list_personal_jobs(batch_id: str, request: Request, response: Response):
             (owner_id, batch_id),
         ).fetchall()
     return [{"reg_number": r[0], "status": r[1], "attempts": r[2]} for r in rows]
+
+
+@router.get("/thematic-batches/{batch_id}/findings")
+def personal_batch_findings(batch_id: str, request: Request, response: Response):
+    """Read only evidence-backed findings from an owned personal queue."""
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not _personal_batch_id(batch_id):
+        raise HTTPException(404, "Личная очередь не найдена")
+    with connect() as db:
+        if not owns_batch(db, batch_id, owner_id):
+            raise HTTPException(404, "Личная очередь не найдена")
+        rows = db.execute(
+            """SELECT reg_number,finding_key,legal_basis,description,evidence_source
+               FROM account_thematic_findings
+               WHERE user_id=%s AND batch_id=%s
+               ORDER BY reg_number,finding_key LIMIT 500""",
+            (owner_id, batch_id),
+        ).fetchall()
+    return [
+        {"reg_number": row[0], "finding_key": row[1],
+         "legal_basis": row[2], "description": row[3],
+         "evidence_source": row[4]}
+        for row in rows
+    ]
