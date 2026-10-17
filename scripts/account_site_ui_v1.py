@@ -366,13 +366,17 @@ q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));
 if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignments();refreshCampaignGoals();refreshMyName()}
 });
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
+const pendingRequests=new Map();
 async function get(url){
-const controller=new AbortController();
-const timeout=setTimeout(()=>controller.abort(),9000);
-let r;try{r=await fetch(url,{credentials:'same-origin',cache:'no-store',signal:controller.signal});}
-finally{clearTimeout(timeout)}
-if(r.status===401){location.replace('/account/login');throw Error('Требуется вход')}
-if(!r.ok)throw Error('Ошибка загрузки');return await r.json();
+ if(pendingRequests.has(url))return pendingRequests.get(url);
+ const task=(async()=>{
+  const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
+  if(response.status===401){location.replace('/account/login');throw Error('Требуется вход')}
+  if(!response.ok)throw Error('Ошибка загрузки: '+response.status);
+  return response.json();
+ })();
+ pendingRequests.set(url,task);
+ try{return await task}finally{pendingRequests.delete(url)}
 }
 async function refresh(){
 try{
