@@ -27,6 +27,13 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('require_origin(request)',api)
         self.assertIn('VALUES (%s,%s) ON CONFLICT DO NOTHING',api)
         self.assertIn("method:'DELETE'",pages)
+    def test_personal_summary_is_owner_scoped(self):
+        api=(ROOT/'scripts/account_workspace_v1.py').read_text()
+        page=(ROOT/'scripts/account_pages_v1.py').read_text()
+        self.assertIn('@router.get("/summary")',api)
+        self.assertIn('WHERE user_id=%s',api)
+        self.assertIn('(owner_id, owner_id, owner_id)',api)
+        self.assertIn("fetch('/me/summary'",page)
     def test_no_email_confirmation_required(self):
         a=(ROOT/'scripts/account_api_v1.py').read_text()
         b=(ROOT/'scripts/account_repository_v1.py').read_text()
