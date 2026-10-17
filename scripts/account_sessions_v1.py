@@ -2,11 +2,12 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from scripts.account_security_v1 import new_session_token, digest_session_token
+from scripts.account_session_policy_v1 import SESSION_MAX_AGE
 
 
-def create_session(db, user_id, hours=12):
+def create_session(db, user_id, hours=None):
     token = new_session_token()
-    expires = datetime.now(timezone.utc) + timedelta(hours=hours)
+    expires = datetime.now(timezone.utc) + (timedelta(seconds=SESSION_MAX_AGE) if hours is None else timedelta(hours=hours))
     db.execute(
         """INSERT INTO account_sessions(id,user_id,token_digest,expires_at)
            VALUES (%s,%s,%s,%s)""",
