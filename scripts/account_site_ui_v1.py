@@ -195,6 +195,8 @@ def site_header(role="user"):
 <div class="eis223-cabinet-heading">
 <div><p class="eis223-kicker">Персональное пространство</p>
 <h2>Личный кабинет</h2>
+<p class="eis223-subtle" id="eis223-owner-fullname">Фамилия, имя, отчество: загрузка…</p>
+<a class="eis223-all-checks" href="/account/profile">Редактировать ФИО →</a>
 <p class="eis223-subtle">Самостоятельные и тематические проверки, документы и результаты в одном месте</p></div>
 <span class="eis223-panel-mark">Доступно только вашей учётной записи</span></div>
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
@@ -246,7 +248,7 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <h3>Поручения руководителя</h3>
 <p>Сроки, задания и результаты, которые нужно передать на согласование.</p>
 <ul id="eis223-assignment-list"><li>Загрузка поручений…</li></ul>
-<div class="eis223-check-desc"><b>Тематические поручения</b></div>
+<div class="eis223-check-desc"><b>Нарушения тематических проверок</b></div>
 <ul id="eis223-manager-goals"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/workbench">Открыть рабочее место и план проверок →</a>
 <p id="eis223-assignment-status" role="status"></p>
@@ -258,7 +260,7 @@ const q=id=>document.getElementById(id);
 q('eis223-toggle-cabinet').addEventListener('click',()=>{
 const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;
 q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));
-if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignments();refreshCampaignGoals()}
+if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignments();refreshCampaignGoals();refreshMyName()}
 });
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
 async function get(url){
@@ -471,21 +473,27 @@ q('eis223-favorite-form').addEventListener('submit',async event=>{
 window.setInterval(()=>{if(!document.hidden)refreshAlerts()},90000);
 refreshAlerts();
 
+async function refreshMyName(){
+ try{
+  const person=await get('/me/profile');
+  q('eis223-owner-fullname').textContent=person.full_name||'ФИО ещё не указано';
+ }catch{q('eis223-owner-fullname').textContent='Данные профиля временно недоступны'}
+}
 async function refreshCampaignGoals(){
  try{
   const data=await get('/me/campaign-goals'),list=q('eis223-manager-goals');list.replaceChildren();
-  if(!data.length){const li=document.createElement('li');li.textContent='Тематических поручений нет';list.append(li);return}
+  if(!data.length){const li=document.createElement('li');li.textContent='Нарушений по тематическим проверкам пока нет';list.append(li);return}
   for(const campaign of data.slice(0,7)){
    const li=document.createElement('li'),info=document.createElement('div');info.className='eis223-check-desc';
    const heading=document.createElement('strong');heading.textContent=campaign.title;
    const numbers=document.createElement('small');
-   numbers.textContent='Нарушений: '+campaign.actual_violations+' / план '+campaign.target_violations+
+   numbers.textContent='Найдено нарушений: '+campaign.actual_violations+' / план '+campaign.target_violations+
      ' · закупок: '+campaign.verified_procurements;
    info.append(heading,numbers);li.append(info);
    const link=document.createElement('a');link.href='/account/workbench';
    link.textContent='Подробнее';li.append(link);list.append(li);
   }
- }catch{show('eis223-assignment-status','Тематические поручения временно недоступны')}
+ }catch{show('eis223-assignment-status','Результаты тематических проверок временно недоступны')}
 }
 async function refreshAssignments(){
  try{
