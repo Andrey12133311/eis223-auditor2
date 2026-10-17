@@ -84,7 +84,7 @@ class ThematicWorkerTests(unittest.TestCase):
         result = process_one(lambda: next(transactions),
                              lambda *args: seen.append(args) or True)
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(seen, [("owner", "personal-batch", "32615969056")])
+        self.assertEqual(seen, [("owner", "personal-batch", "32615969056", 1)])
 
     def test_process_one_records_callback_failure(self):
         class Transaction:
