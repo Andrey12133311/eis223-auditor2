@@ -74,6 +74,26 @@ def migration_and_owner():
         assert token in SCHEMA,token
     migration=inspect.getsource(initialize_schema)
     assert "ADD COLUMN IF NOT EXISTS" in migration
+    # Regression: the SCHEMA has a '-- append-only; preserve...' SQL comment.
+    # The former split(';') accidentally executed its tail as standalone SQL,
+    # blocking every login when identity migrations ran on Railway.
+    class DummyIdentityDB:
+        def __init__(self): self.executed=[]
+        def execute(self,sql,*args):
+            self.executed.append(sql.strip())
+            if sql.lstrip().startswith("SELECT pg_get_constraintdef"):
+                return self
+            assert sql.lstrip().upper().startswith(("CREATE ","ALTER ")),sql
+            assert not sql.lstrip().startswith("append-only"),sql
+            return self
+        def fetchone(self):
+            return ("CHECK (role = ANY (ARRAY['user','manager','admin']))",)
+    replay=DummyIdentityDB()
+    total=initialize_schema(replay)
+    assert total>=40 and len(replay.executed)>=total
+    assert all(not q.startswith("append-only") for q in replay.executed)
+    assert any("CREATE TABLE IF NOT EXISTS account_manager_campaign_targets" in q for q in replay.executed)
+    assert any("CREATE TABLE IF NOT EXISTS account_staff_checklists" in q for q in replay.executed)
     assert "ALTER TABLE account_users" in migration
     assert "initialize_schema(db)" in inspect.getsource(install)
     assert "app.include_router(account_profile)" in inspect.getsource(install)
