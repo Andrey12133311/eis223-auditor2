@@ -204,6 +204,7 @@ def site_header(role="user"):
 <div><h3>Самостоятельные проверки</h3><p class="eis223-tile-sub">Закупки, которые вы запустили на проверку</p></div></div>
 <ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/home">Все самостоятельные проверки →</a>
+<a class="eis223-all-checks" href="/account/workbench">Рабочее место сотрудника · 30 инструментов →</a>
 <form id="eis223-add-procurement">
 <input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
 name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
@@ -245,6 +246,9 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <h3>Поручения руководителя</h3>
 <p>Сроки, задания и результаты, которые нужно передать на согласование.</p>
 <ul id="eis223-assignment-list"><li>Загрузка поручений…</li></ul>
+<div class="eis223-check-desc"><b>Тематические поручения</b></div>
+<ul id="eis223-manager-goals"><li>Загрузка…</li></ul>
+<a class="eis223-all-checks" href="/account/workbench">Открыть рабочее место и план проверок →</a>
 <p id="eis223-assignment-status" role="status"></p>
 </section>
 </div></section></div>
@@ -254,7 +258,7 @@ const q=id=>document.getElementById(id);
 q('eis223-toggle-cabinet').addEventListener('click',()=>{
 const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;
 q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));
-if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignments()}
+if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignments();refreshCampaignGoals()}
 });
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
 async function get(url){
@@ -467,6 +471,22 @@ q('eis223-favorite-form').addEventListener('submit',async event=>{
 window.setInterval(()=>{if(!document.hidden)refreshAlerts()},90000);
 refreshAlerts();
 
+async function refreshCampaignGoals(){
+ try{
+  const data=await get('/me/campaign-goals'),list=q('eis223-manager-goals');list.replaceChildren();
+  if(!data.length){const li=document.createElement('li');li.textContent='Тематических поручений нет';list.append(li);return}
+  for(const campaign of data.slice(0,7)){
+   const li=document.createElement('li'),info=document.createElement('div');info.className='eis223-check-desc';
+   const heading=document.createElement('strong');heading.textContent=campaign.title;
+   const numbers=document.createElement('small');
+   numbers.textContent='Нарушений: '+campaign.actual_violations+' / план '+campaign.target_violations+
+     ' · закупок: '+campaign.verified_procurements;
+   info.append(heading,numbers);li.append(info);
+   const link=document.createElement('a');link.href='/account/workbench';
+   link.textContent='Подробнее';li.append(link);list.append(li);
+  }
+ }catch{show('eis223-assignment-status','Тематические поручения временно недоступны')}
+}
 async function refreshAssignments(){
  try{
   const data=await get('/me/assignments'),ul=q('eis223-assignment-list');
