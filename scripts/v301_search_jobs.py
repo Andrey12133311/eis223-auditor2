@@ -279,6 +279,9 @@ def _bridge(ns):
 def install(ns):
     _init(ns)
     app=ns["app"]
+    # Shared engine reference is used only by owner-scoped /me/manual-checks.
+    # This is not a public service or a new background worker.
+    app.state.eis223_manual_ns=ns
 
     @app.post("/api/v301/search")
     async def search(request:Request):
@@ -320,6 +323,18 @@ def install(ns):
             job=await asyncio.to_thread(
                 _finish,ns,job["id"],"done",
                 "Сохранённые оригиналы найдены; локальная юридическая проверка запущена, результат ожидается.",1,0)
+        # Explicit registry submissions from the existing manual-search UI are
+        # associated with the actual signed-in owner. An INN lookup and every
+        # background discovery job remain outside personal manual checks.
+        owner_id=request.scope.get("eis223_account_id")
+        if kind=="reg" and owner_id:
+            from scripts.v366_account_manual import link_run
+            try:
+                await asyncio.to_thread(link_run,owner_id,value,job["id"])
+            except Exception as exc:
+                raise HTTPException(503,
+                    "Запрос ЕИС принят, но привязка к кабинету недоступна. "
+                    "Повторный запуск не дублирует ожидающее задание.") from exc
         return {"id":job["id"],"status":job["status"],"kind":kind,
                 "target":value,"new_request":created,
                 "local_recheck":local_recheck,
