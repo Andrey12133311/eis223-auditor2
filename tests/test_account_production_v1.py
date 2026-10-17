@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.account_production_v1 import ProductionAccountGate, add_account_navigation, machine_path, shared_read_route, verified_machine
+from scripts.account_site_ui_v1 import login_portal
 
 
 async def fake_app(scope, receive, send):
@@ -31,29 +32,65 @@ def request(path, account=None, method="GET", token=None):
 
 
 class ProductionLoginTests(unittest.TestCase):
-    def test_general_dashboard_links_to_personal_account(self):
+    def test_authenticated_dashboard_contains_personal_workspace(self):
         html = b'<html><body><main>General audit</main></body></html>'
         result = add_account_navigation(html)
-        self.assertIn(b'/account/login', result)
-        self.assertIn(b'/account/register', result)
         self.assertIn(b'/account/home', result)
+        self.assertIn(b'/account/thematic', result)
+        self.assertIn(b'/me/summary', result)
+        self.assertIn(b'/auth/logout', result)
         self.assertIn(b'General audit', result)
         self.assertEqual(add_account_navigation(result), result)
         self.assertEqual(add_account_navigation(b'plain text'), b'plain text')
+        self.assertIn(b'/account/admin', add_account_navigation(html, "admin"))
+        self.assertNotIn(b'/account/admin', result)
+
+    def test_gateway_has_login_and_registration_without_general_audit(self):
+        for tab in ("login", "register"):
+            html = login_portal(tab)
+            self.assertIn('/auth/login', html)
+            self.assertIn('/auth/register', html)
+            self.assertIn("select('"+tab+"',false)", html)
+            self.assertNotIn('/api/dashboard', html)
+            self.assertIn("location.replace('/')", html)
+
+    def test_root_html_injects_personal_area_only_after_approved_login(self):
+        messages = []
+        async def html_app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/html; charset=utf-8"),
+                                    (b"content-length", b"59")]})
+            await send({"type": "http.response.body",
+                        "body": b'<html><body><p>General audit</p></body></html>'})
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        async def send(message):
+            messages.append(message)
+        scope={"type":"http","path":"/","method":"GET","headers":[]}
+        with patch.dict(os.environ, {"EIS223_AUTH_ENFORCE": "true"}):
+            with patch("scripts.account_production_v1.user_session",
+                       return_value=("account","user","approved")):
+                asyncio.run(ProductionAccountGate(html_app)(scope,receive,send))
+        self.assertEqual(messages[0]["status"],200)
+        self.assertNotIn(b"content-length",dict(messages[0]["headers"]))
+        self.assertIn(b'/me/summary', messages[1]["body"])
+        self.assertIn(b'General audit', messages[1]["body"])
 
     def test_public_pages_and_health(self):
         for path in ("/health", "/healthz", "/account/login",
                      "/account/register", "/auth/register", "/eis223/collector.js"):
             self.assertEqual(request(path)[0], 200)
 
-    def test_general_audit_is_public_without_registration(self):
-        for path in ("/", "/api/status", "/api/dashboard", "/api/procurements",
+    def test_every_audit_view_requires_prior_login(self):
+        code,headers=request("/")
+        self.assertEqual(code,303)
+        self.assertEqual(headers[b"location"], b"/account/login")
+        for path in ("/api/status", "/api/dashboard", "/api/procurements",
                      "/api/purchases/32615969056",
                      "/api/v334/violation-ledger/summary",
-                     "/files/32615969056/original/notice.pdf"):
-            code, headers = request(path)
-            self.assertEqual(code, 200, path)
-            self.assertEqual(headers[b"cache-control"], b"no-store")
+                     "/files/32615969056/original/notice.pdf",
+                     "/reports/32615969056.html"):
+            self.assertEqual(request(path)[0], 401, path)
 
     def test_guest_cannot_mutate_shared_audit(self):
         for path, method in (("/api/scan-now", "POST"),
