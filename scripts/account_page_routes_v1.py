@@ -5,6 +5,7 @@ from scripts.account_api_v1 import current_account
 from scripts.account_pages_v1 import HOME, ADMIN, THEMATIC, MEMOS
 from scripts.account_site_ui_v1 import login_portal
 from scripts.v368_manager_ui import render_manager
+from scripts.v370_staff_ui import render_workbench
 
 router = APIRouter(prefix="/account", tags=["account-pages"])
 
@@ -17,6 +18,12 @@ def register_page():
 @router.get("/login", response_class=HTMLResponse)
 def login_page():
     return login_portal('login')
+
+
+@router.get("/workbench", response_class=HTMLResponse)
+def workbench_page(request: Request):
+    current_account(request)
+    return HTMLResponse(render_workbench(), headers={"Cache-Control":"private,no-store"})
 
 
 @router.get("/home", response_class=HTMLResponse)
