@@ -63,8 +63,8 @@ def _read_only_status(ns, entries):
         has_purchases=bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchases'"
         ).fetchone())
-        purchase_columns={x[1] for x in conn.execute("PRAGMA table_info(purchases)")}
-             if has_purchases else set()
+        purchase_columns=({x[1] for x in conn.execute("PRAGMA table_info(purchases)")}
+                          if has_purchases else set())
         available_name=[c for c in ("customer","customer_name") if c in purchase_columns]
         has_inn="customer_inn" in purchase_columns
         has_findings=bool(conn.execute(
