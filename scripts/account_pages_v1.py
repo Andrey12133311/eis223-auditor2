@@ -96,8 +96,10 @@ async function load(){const r=await fetch('/admin/accounts/pending',{credentials
  email.textContent=item.email;date.textContent=new Date(item.created_at).toLocaleString('ru-RU');
  for(const [name,label] of [['approve','Одобрить'],['reject','Отклонить']]){
  const b=document.createElement('button');b.textContent=label;
- b.addEventListener('click',async()=>{b.disabled=true;const res=await fetch('/admin/accounts/'+encodeURIComponent(item.id)+'/'+name,{method:'POST',credentials:'same-origin'});
- m.textContent=res.ok?'Решение сохранено':'Не удалось сохранить решение';load()});actions.append(b)}
+ b.addEventListener('click',async()=>{b.disabled=true;try{
+ const res=await fetch('/admin/accounts/'+encodeURIComponent(item.id)+'/'+name,{method:'POST',credentials:'same-origin'});
+ if(res.ok){await load();m.textContent='Решение сохранено'}else{m.textContent='Не удалось сохранить решение';b.disabled=false}
+ }catch{m.textContent='Ошибка соединения';b.disabled=false}});actions.append(b)}
  tr.append(email,date,actions);tbody.append(tr)}
 }
 load();
