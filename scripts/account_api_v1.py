@@ -97,13 +97,15 @@ def logout(request: Request, response: Response):
 
 
 @router.get("/me")
-def me(request: Request):
+def me(request: Request, response: Response):
+    response.headers.update(no_store_headers())
     row = current_account(request)
     return {"id": str(row[0]), "role": row[1], "status": row[2]}
 
 
 @admin_router.get("/pending")
-def list_pending(request: Request):
+def list_pending(request: Request, response: Response):
+    response.headers.update(no_store_headers())
     current_account(request, admin=True)
     with connect() as db:
         rows = pending_users(db)
