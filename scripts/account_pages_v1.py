@@ -107,6 +107,7 @@ THEMATIC = page("Тематические проверки", """
 <h1>Мои тематические проверки</h1>
 <p>Сохранённые в вашем личном кабинете очереди. Добавление не запускает проверку.</p>
 <p><a href="/account/home">← Личный кабинет</a></p>
+<button id="create-personal" type="button">Создать личную очередь</button>
 <form id="add-batch"><label>Идентификатор тематической очереди
 <input name="batch" required maxlength="200"></label><button>Сохранить очередь</button></form>
 <p id="message" role="status"></p>
@@ -132,6 +133,13 @@ async function loadBatches(){
  if(!data.length)m.textContent='Сохранённых очередей пока нет';
  }catch{m.textContent='Ошибка соединения'}
 }
+document.getElementById('create-personal').addEventListener('click',async()=>{
+ const m=document.getElementById('message');try{
+ const r=await fetch('/me/thematic-batches',{method:'POST',credentials:'same-origin'});
+ m.textContent=r.ok?'Личная очередь создана. Проверка ещё не запущена.':'Не удалось создать очередь';
+ if(r.ok)loadBatches();
+ }catch{m.textContent='Ошибка соединения'}
+});
 document.getElementById('add-batch').addEventListener('submit',async e=>{
  e.preventDefault();const m=document.getElementById('message');
  const id=new FormData(e.currentTarget).get('batch');
