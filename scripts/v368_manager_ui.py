@@ -101,6 +101,12 @@ SCRIPT=r"""
 (()=>{
 const ROLE=__ROLE__;
 const $=id=>document.getElementById(id);
+async function refreshOwnName(){
+ try{
+  const result=await api('/me/profile');
+  $('mgr-my-name').textContent=result.full_name||'ФИО не заполнено — укажите в профиле';
+ }catch(e){$('mgr-my-name').textContent='Имя руководителя временно недоступно'}
+}
 const labels={assigned:"Назначено",in_progress:"В работе",submitted:"На согласовании",returned:"Возвращено",completed:"Завершено",cancelled:"Отменено",approved:"Согласовано",rejected:"Отклонено"};
 let cache={tasks:[],team:[],memos:[],alerts:[],thematic:[],campaigns:[],options:null,quality:null,dashboard:null,users:[]};
 let currentTab="overview";
@@ -162,7 +168,7 @@ function populateWorkers(){
  for(const field of fields){
   const previous=field.value;field.replaceChildren();
   const first=document.createElement("option");first.value="";first.textContent="Выберите сотрудника";field.append(first);
-  for(const item of team){const o=document.createElement("option");o.value=item.id;o.textContent=item.email;field.append(o)}
+  for(const item of team){const o=document.createElement("option");o.value=item.id;o.textContent=item.full_name?item.full_name+' · '+item.email:item.email;field.append(o)}
   field.value=team.some(x=>x.id===previous)?previous:"";
  }
 }
@@ -174,7 +180,7 @@ function renderTasks(){
   const row=tag("tr");
   const title=tag("div");
   title.append(tag("strong","",t.title),tag("div","mgr-muted",t.reg_number));
-  row.append(cell(title),cell(t.employee),cell(t.due_date?fmt(t.due_date):"Без срока"),cell(status(t.status)));
+  row.append(cell(title),cell(displayEmployee(t.employee)),cell(t.due_date?fmt(t.due_date):"Без срока"),cell(status(t.status)));
   const commands=tag("div","mgr-actions");
   commands.append(action("Нарушения","mgr-outline",async()=>{await openFindings(t.user_id,t.reg_number);show("findings")}));
   if(t.status==="submitted"){
@@ -233,7 +239,7 @@ function renderTeam(){
  const rows=[];
  for(const person of cache.team){
   const tr=tag("tr");
-  tr.append(cell(person.email),cell(person.role==="manager"?"Руководитель":"Сотрудник"),
+  tr.append(cell(person.full_name||'ФИО не заполнено'),cell(person.role==="manager"?"Руководитель":"Сотрудник"),
     cell(person.manager_email||"Не назначен"),cell(person.status));
   const commands=tag("div","mgr-actions");
   commands.append(action("Поручения","mgr-outline",async()=>{
@@ -291,6 +297,10 @@ function renderCampaignOptions(){
  fill("mgr-goal-categories",cache.options.categories||{});
  fill("mgr-goal-forms",cache.options.legal_forms||{});
 }
+function displayEmployee(email){
+ const person=cache.team.find(x=>x.email===email);
+ return person?.full_name?person.full_name+' · '+email:email;
+}
 function renderCampaigns(){
  const root=$("mgr-goal-results");root.replaceChildren();
  const items=cache.campaigns||[];
@@ -298,7 +308,7 @@ function renderCampaigns(){
  for(const item of items){
   const card=tag("article","mgr-entry");
   card.append(tag("h3","",item.title),
-   tag("div","mgr-muted","Исполнитель: "+item.employee+" · Формы: "+item.legal_forms.join(", ")),
+   tag("div","mgr-muted","Исполнитель: "+displayEmployee(item.employee)+" · Формы: "+item.legal_forms.join(", ")),
    tag("div","mgr-muted",item.category_names.join(", ")));
   const result=tag("p","mgr-goal-figures",
    "Подтверждено "+item.actual_violations+" из целевых "+item.target_violations+
@@ -599,6 +609,7 @@ $("mgr-history-refresh").onclick=async()=>{
  try{renderHistory(await api("/manager/history"));toast("Журнал актуален")}
  catch(e){toast(e.message)}
 };
+refreshOwnName();
 reload();
 })();
 </script>
@@ -613,8 +624,10 @@ def render_manager(role):
 <meta name="color-scheme" content="light"><title>Кабинет руководителя — ЕИС Аудитор</title>
 __STYLE__</head><body>
 <header class="mgr-top"><div class="mgr-brand"><div class="mgr-logo">223</div>
-<div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя · независимая аналитическая система</small></div></div>
-<a href="/">← Главная страница</a></header>
+<div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя · независимая аналитическая система</small>
+<small id="mgr-my-name">ФИО: загрузка…</small></div></div>
+<div class="mgr-actions"><a href="/account/profile">Моё ФИО</a>
+<a href="/">← Главная страница</a></div></header>
 <div class="mgr-shell">
 <nav class="mgr-side" aria-label="Разделы руководителя">
 <span class="mgr-side-heading">УПРАВЛЕНИЕ</span>
