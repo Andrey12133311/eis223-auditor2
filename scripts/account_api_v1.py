@@ -12,7 +12,7 @@ from email_validator import validate_email, EmailNotValidError
 from scripts.account_passwords_v1 import hash_password, verify_password
 from scripts.account_security_v1 import normalize_email
 from scripts.account_gate_v1 import origin_matches
-from scripts.account_session_policy_v1 import cookie_options, no_store_headers
+from scripts.account_session_policy_v1 import SESSION_COOKIE, cookie_options, no_store_headers
 from scripts.account_throttle_v1 import request_allowed
 from scripts.account_repository_v1 import (
     create_pending_user, pending_users, approve_user, reject_user, block_user
@@ -39,7 +39,7 @@ def require_origin(request):
 
 
 def current_account(request, admin=False):
-    token = request.cookies.get("eis223_session", "")
+    token = request.cookies.get(SESSION_COOKIE, "")
     with connect() as db:
         row = resolve_session(db, token)
     if not row:
@@ -94,7 +94,10 @@ def login(data: Credentials, request: Request, response: Response):
         if not row or not verify_password(row[1], data.password) or row[2] != "approved":
             raise HTTPException(401, "Неверные данные или доступ не подтверждён")
         token, expiry = create_session(db, row[0])
-    response.set_cookie("eis223_session", token, **cookie_options())
+    response.set_cookie(SESSION_COOKIE, token, **cookie_options())
+    # Old persistent cookie may remain on the device; never accept it again.
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie("eis223_session", path="/")
     response.headers.update(no_store_headers())
     return {"status": "ok"}
 
@@ -102,7 +105,7 @@ def login(data: Credentials, request: Request, response: Response):
 @router.post("/logout")
 def logout(request: Request, response: Response):
     require_origin(request)
-    token = request.cookies.get("eis223_session", "")
+    token = request.cookies.get(SESSION_COOKIE, "")
     with connect() as db:
         revoke_session(db, token)
     response.delete_cookie("eis223_session", path="/")
