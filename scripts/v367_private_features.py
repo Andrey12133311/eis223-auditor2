@@ -167,8 +167,10 @@ def _reconcile_alerts(db, owner, snapshots):
                VALUES(%s,%s,%s,%s,%s)
                ON CONFLICT(user_id,source_key) DO UPDATE SET
                 status=EXCLUDED.status,
-                violation_count=EXCLUDED.violation_count,
-                documents_checked=EXCLUDED.documents_checked,
+                violation_count=GREATEST(account_alert_snapshots.violation_count,
+                                         EXCLUDED.violation_count),
+                documents_checked=GREATEST(account_alert_snapshots.documents_checked,
+                                          EXCLUDED.documents_checked),
                 observed_at=CURRENT_TIMESTAMP""",
             (owner,key,status,violations,checked))
 
