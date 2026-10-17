@@ -62,3 +62,34 @@ def requeue_stale(db, max_attempts=3, stale_minutes=30):
         (max_attempts,max_attempts,stale_minutes),
     ).fetchall()
     return [tuple(row) for row in rows]
+
+
+def process_one(connect, audit_callback):
+    """Execute one job with a trusted audit callback and separate transactions.
+
+    The callback must return True only after evidence and results are durably
+    saved. No callback is installed by default; this does not access EIS.
+    """
+    if not callable(audit_callback):
+        raise TypeError("A trusted audit callback is required")
+    with connect() as db:
+        claimed = claim_next(db)
+    if claimed is None:
+        return None
+    owner_id, batch_id, reg_number, attempts = claimed
+    succeeded = False
+    try:
+        succeeded = audit_callback(owner_id, batch_id, reg_number) is True
+    except Exception:
+        # The failure is recorded below; never treat an exception as success.
+        succeeded = False
+    with connect() as db:
+        recorded = complete_job(
+            db, owner_id, batch_id, reg_number, attempts, succeeded
+        )
+    return {
+        "batch_id": batch_id,
+        "reg_number": reg_number,
+        "attempts": attempts,
+        "status": ("completed" if succeeded else "failed") if recorded else "stale",
+    }
