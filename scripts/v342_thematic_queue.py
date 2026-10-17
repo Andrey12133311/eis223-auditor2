@@ -301,32 +301,32 @@ def thematic_history_records(ns, permitted_ids=None):
 
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тематическая проверка ЕИС</title><style>
-:root{font-family:Inter,"Segoe UI",system-ui,sans-serif;--tone:#087e71;--ink:#203e34;--muted:#687b71}
+:root{font-family:Inter,"Segoe UI",system-ui,sans-serif;--tone:#17618f;--ink:#203e34;--muted:#687b71}
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(ellipse at 95% 0%,#e6f5ed,transparent 32%),#f5f8f6;
+body{margin:0;background:radial-gradient(ellipse at 95% 0%,#eaf3f9,transparent 32%),#f4f7fa;
  color:var(--ink);font:14px/1.6 Inter,"Segoe UI",system-ui,sans-serif}
 main{width:min(100% - 24px,1100px);margin:clamp(16px,3vw,38px) auto 60px;
- padding:clamp(18px,3.5vw,36px);border:1px solid #dce8e0;border-radius:19px;
- background:white;box-shadow:0 15px 40px #17392d0d}
-h1{font-size:clamp(25px,3.6vw,34px);letter-spacing:-.045em;line-height:1.2;margin:17px 0 8px;color:#24483a}
-h2{font-size:20px;margin:25px 0 12px;letter-spacing:-.025em;color:#2b4c40}
-h3{font-size:16px;color:#315b4a}
+ padding:clamp(18px,3.5vw,36px);border:1px solid #dbe6ee;border-radius:19px;
+ background:white;box-shadow:0 15px 40px #17466a0d}
+h1{font-size:clamp(25px,3.6vw,34px);letter-spacing:-.045em;line-height:1.2;margin:17px 0 8px;color:#1c4b70}
+h2{font-size:20px;margin:25px 0 12px;letter-spacing:-.025em;color:#285878}
+h3{font-size:16px;color:#355c76}
 p{line-height:1.7;color:#61796d}
 #cats,#forms{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:14px 0}
 #cats label,#forms label{display:flex;align-items:center;gap:10px;cursor:pointer;
- border:1px solid #e0ebe3;border-radius:12px;background:#f9fcfa;padding:13px 14px;
+ border:1px solid #dce7f0;border-radius:12px;background:#f9fbfe;padding:13px 14px;
  font-size:13px;min-height:56px}
-#cats label:hover,#forms label:hover{border-color:#b6dfcf;background:#f2f9f5}
-input[type=checkbox]{height:17px;width:17px;accent-color:#087e71;flex:none}
-button{min-height:40px;background:#087e71;color:#fff;padding:10px 16px;
- font:700 13px system-ui;border:1px solid #087e71;border-radius:10px;cursor:pointer}
-button:hover:not(:disabled){background:#04695e}
+#cats label:hover,#forms label:hover{border-color:#bed9eb;background:#f1f7fb}
+input[type=checkbox]{height:17px;width:17px;accent-color:#17618f;flex:none}
+button{min-height:40px;background:#17618f;color:#fff;padding:10px 16px;
+ font:700 13px system-ui;border:1px solid #17618f;border-radius:10px;cursor:pointer}
+button:hover:not(:disabled){background:#114b74}
 button:disabled{opacity:.55;cursor:wait}
-a{color:#0a7b6d;text-decoration:none;font-weight:650}
+a{color:#176394;text-decoration:none;font-weight:650}
 a:hover{text-decoration:underline}
 #history{display:grid;gap:9px}
 #history p{margin:0!important;display:flex;flex-wrap:wrap;align-items:center;gap:10px;
- background:#f9fcfa;border:1px solid #e2ece5;border-radius:12px;padding:11px 14px}
+ background:#f9fbfe;border:1px solid #dde8f0;border-radius:12px;padding:11px 14px}
 #history button{margin:0!important}
 #out{white-space:pre-wrap;overflow-wrap:anywhere}
 #out table{width:100%;border-spacing:0;border-collapse:separate;
