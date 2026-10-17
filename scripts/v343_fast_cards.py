@@ -11,22 +11,53 @@ from urllib.parse import urlsplit
 from fastapi.responses import HTMLResponse
 
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
-STYLE="""<style>
-:root{font-family:system-ui,-apple-system,Arial,sans-serif;color:#173b5d;background:#eff4f9}
-*{box-sizing:border-box}body{margin:0}header{background:#184772;color:#fff;padding:20px max(16px,4vw)}
-header h1{margin:0;font-size:21px}main{max-width:1180px;margin:20px auto;padding:0 15px 40px}
-nav{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:17px}
-a{color:#17609d;text-decoration:none}a:hover{text-decoration:underline}
-nav a,.action{display:inline-flex;align-items:center;border-radius:8px;padding:11px 13px;background:#fff;border:1px solid #c9d9e8;color:#17456c;font-weight:650}
-.action{background:#225e98;color:white}
-.panel{background:white;border:1px solid #d9e5ef;border-radius:12px;padding:18px;margin:14px 0}
-.panel h2{font-size:19px;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:9px 20px}
-.legal{border-left:4px solid #b93838;background:#fffafa;padding:13px 15px;margin:10px 0;border-radius:6px}
-.review{border-left:4px solid #b38a38;background:#fffdf7;padding:11px 14px;margin:9px 0;border-radius:6px}
-.legal h3,.review h3{font-size:16px;margin:0 0 8px}.evidence{white-space:pre-wrap;overflow-wrap:anywhere}
-.meta{font-size:14px;color:#536a7f}.chip{font-size:13px;padding:3px 9px;background:#e4effa;border-radius:15px}
-table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:10px;border-bottom:1px solid #edf0f3;overflow-wrap:anywhere;vertical-align:top}
-h2{color:#17466f}@media(max-width:640px){main{padding:0 10px 28px}header h1{font-size:18px}.panel{padding:13px}table,tbody,tr,td{display:block}thead{display:none}}
+STYLE="""<style id="eis-modern-audit-card">
+:root{font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
+ color:#234036;background:#f5f8f6;--edge:#dce8e1;--green:#087e71}
+*{box-sizing:border-box}
+body{margin:0;color:#244136;background:radial-gradient(ellipse at 100% 0%,#eaf5ee,transparent 30%),#f5f8f6}
+header{background:#fff;color:#20483b;border-bottom:1px solid var(--edge);
+ padding:18px clamp(16px,4vw,52px)}
+header h1{font-size:clamp(19px,2.5vw,25px);letter-spacing:-.03em;margin:0;font-weight:800}
+main{max-width:1250px;padding:0 clamp(12px,2.5vw,25px) 42px;margin:22px auto}
+nav{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:20px}
+a{color:#08786a;font-weight:650;text-decoration:none}
+a:hover{text-decoration:underline}
+nav a,.action{display:inline-flex;align-items:center;justify-content:center;
+ min-height:40px;border-radius:10px;padding:10px 14px;
+ background:#fff;border:1px solid #d5e5db;color:#247461;font-weight:700}
+.action{background:var(--green);color:white;border-color:var(--green)}
+.action:hover{background:#04695e;color:white}
+.panel{margin:14px 0;background:white;border:1px solid var(--edge);border-radius:16px;
+ padding:clamp(16px,2.5vw,24px);box-shadow:0 7px 22px #123b2b0b}
+.panel h2{color:#21493a;font-size:clamp(19px,2.2vw,23px);margin:0 0 13px;
+ letter-spacing:-.025em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px 20px}
+.legal{border:1px solid #f1d8d8;border-left:4px solid #bf615f;background:#fffafa;
+ border-radius:12px;padding:15px 16px;margin:12px 0}
+.review{border:1px solid #f0e3c6;border-left:4px solid #b38a38;background:#fffcf4;
+ border-radius:12px;padding:13px 15px;margin:10px 0}
+.legal h3,.review h3{font-size:16px;margin:0 0 9px;color:#3b4e44}
+.evidence{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}
+.meta{color:#647d70;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.chip{font-size:12px;border:1px solid #d7e8db;background:#edf7f0;color:#31745a;
+ border-radius:999px;padding:4px 10px}
+table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e0eae2;
+ border-radius:12px;overflow:hidden}
+th,td{text-align:left;padding:11px 12px;vertical-align:top;overflow-wrap:anywhere;
+ border-bottom:1px solid #e9f0eb}
+th{background:#eff6f1;color:#426659;font-size:13px}
+tbody tr:last-child td{border-bottom:0}
+:focus-visible{outline:3px solid #91d9c5;outline-offset:2px}
+@media(max-width:660px){
+ header{padding:16px 14px}
+ main{padding:0 11px 30px;margin:16px auto}
+ nav a,.action{flex:1}
+ .panel{padding:15px;border-radius:13px}
+ .grid{grid-template-columns:minmax(0,1fr)}
+ table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+ th,td{padding:10px}
+}
 </style>"""
 
 def esc(x):
