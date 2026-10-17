@@ -47,8 +47,15 @@ def batch_details(batch_id: str, request: Request, response: Response):
         permitted = owns_batch(db, batch_id, owner_id)
     if not permitted:
         raise HTTPException(404, "Проверка не найдена")
-    # Never read a global queue by a guessed ID: bookmark ownership is not engine ownership.
-    raise HTTPException(501, "Детали тематической проверки ещё не подключены")
+    # A personal queue is an owned placeholder until a worker is connected.
+    # Never read the shared engine using a user-bookmarked global ID.
+    if batch_id.startswith("personal-") and len(batch_id) == 41:
+        try:
+            UUID(batch_id[9:])
+        except ValueError:
+            raise HTTPException(404, "Проверка не найдена")
+        return {"batch_id": batch_id, "status": "saved", "execution_started": False, "results_available": False}
+    raise HTTPException(501, "Детали общей тематической проверки ещё не подключены")
 
 
 @router.delete("/thematic-batches/{batch_id}")
