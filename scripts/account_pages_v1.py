@@ -109,7 +109,7 @@ THEMATIC = page("Тематические проверки", """
 (async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/thematic-batches',{credentials:'same-origin'});
 if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить очереди';return}
 const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr');
-for(const v of [item.name||item.id||'Очередь',item.status||'—']){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}rows.append(tr)}
+for(const v of [item.batch_id||'Очередь','Сохранена']){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}rows.append(tr)}
 m.textContent=data.length?'':'Очередей пока нет';}catch{m.textContent='Ошибка соединения'}})();
 </script>""")
 
@@ -121,6 +121,6 @@ MEMOS = page("Служебные записки", """
 (async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/memos',{credentials:'same-origin'});
 if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить документы';return}
 const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr'),td=document.createElement('td');
-td.textContent=String(item.title||item.name||item.id||'Документ');tr.append(td);rows.append(tr)}
+td.textContent=String('Служебная записка · '+item.reg_number);tr.append(td);rows.append(tr)}
 m.textContent=data.length?'':'Документов пока нет';}catch{m.textContent='Ошибка соединения'}})();
 </script>""")
