@@ -222,6 +222,100 @@ CREATE TABLE IF NOT EXISTS account_case_notes (
 );
 CREATE INDEX IF NOT EXISTS account_case_notes_owner
     ON account_case_notes(user_id,reg_number,created_at DESC);
+-- Manager thematic targets: the target is a planning indicator, never a count of invented violations.
+CREATE TABLE IF NOT EXISTS account_manager_campaign_targets (
+    id UUID PRIMARY KEY,
+    manager_id UUID NOT NULL REFERENCES account_users(id),
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    batch_id TEXT UNIQUE NOT NULL CHECK(batch_id ~ '^[0-9a-f]{24}
+    bucket_key TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_audit (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    actor_id UUID,
+    subject_id UUID,
+    action TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+),
+    title TEXT NOT NULL,
+    categories JSONB NOT NULL,
+    legal_forms JSONB NOT NULL,
+    target_violations INTEGER NOT NULL CHECK(target_violations BETWEEN 1 AND 10000),
+    due_date DATE,
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'preparing'
+        CHECK(status IN ('preparing','active','setup_failed','submitted','completed','cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    submitted_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS account_manager_campaign_owner ON account_manager_campaign_targets(manager_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS account_manager_campaign_assignee ON account_manager_campaign_targets(user_id,status);
+-- Persistent personal workflows and evidence notes never modify EIS originals.
+CREATE TABLE IF NOT EXISTS account_staff_templates (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    name TEXT NOT NULL,
+    categories JSONB NOT NULL DEFAULT '[]',
+    legal_forms JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS account_staff_templates_owner ON account_staff_templates(user_id);
+CREATE TABLE IF NOT EXISTS account_staff_checklists (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}
+    bucket_key TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_audit (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    actor_id UUID,
+    subject_id UUID,
+    action TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+),
+    question_key TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','verified','needs_attention','not_applicable')),
+    comment TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,reg_number,question_key)
+);
+CREATE TABLE IF NOT EXISTS account_staff_preferences (
+    user_id UUID PRIMARY KEY REFERENCES account_users(id),
+    priority_regs JSONB NOT NULL DEFAULT '[]',
+    pinned_legal_categories JSONB NOT NULL DEFAULT '[]',
+    notification_days INTEGER NOT NULL DEFAULT 3 CHECK(notification_days BETWEEN 0 AND 30)
+);
+CREATE TABLE IF NOT EXISTS account_staff_manual_findings (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL,
+    title TEXT NOT NULL,
+    law TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL DEFAULT 'needs_review' CHECK(status IN ('needs_review','approved','rejected'))
+);
+CREATE INDEX IF NOT EXISTS account_staff_manual_findings_owner
+    ON account_staff_manual_findings(user_id,reg_number,created_at DESC);
+CREATE TABLE IF NOT EXISTS account_staff_discussions (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL,
+    author_id UUID NOT NULL REFERENCES account_users(id),
+    body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS account_staff_discussions_case
+    ON account_staff_discussions(user_id,reg_number,created_at DESC);
 CREATE TABLE IF NOT EXISTS account_throttle (
     bucket_key TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL,
