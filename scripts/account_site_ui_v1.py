@@ -205,13 +205,22 @@ if(!r.ok)throw Error('Ошибка загрузки');return await r.json();
 }
 async function refresh(){
 try{
-const [summary,purchases,batches,memos]=await Promise.all([
+const [sumResponse,manualResponse,batchResponse,memoResponse]=await Promise.allSettled([
 get('/me/summary'),get('/me/manual-checks'),get('/api/thematic/history'),get('/me/memos')]);
-const realBatches=batches.batches||[];
+const summary=sumResponse.status==='fulfilled'?sumResponse.value:{};
+const purchases=manualResponse.status==='fulfilled'&&Array.isArray(manualResponse.value)?
+ manualResponse.value:[];
+const batches=batchResponse.status==='fulfilled'?batchResponse.value:{batches:[]};
+const memos=memoResponse.status==='fulfilled'&&Array.isArray(memoResponse.value)?
+ memoResponse.value:[];
+const realBatches=Array.isArray(batches.batches)?batches.batches:[];
 const overview=q('eis223-personal-summary');overview.replaceChildren();
 const counters=[
- ['Самостоятельные',purchases.length],['Тематические проверки',realBatches.length],
- ['Служебные записки',summary.memos]];
+ ['Самостоятельные',sumResponse.status==='fulfilled'?
+  summary.manual_checks:(manualResponse.status==='fulfilled'?purchases.length:undefined)],
+ ['Тематические проверки',batchResponse.status==='fulfilled'?realBatches.length:undefined],
+ ['Служебные записки',sumResponse.status==='fulfilled'?
+  summary.memos:(memoResponse.status==='fulfilled'?memos.length:undefined)]];
 for(const [label,value] of counters){
  const chip=document.createElement('span'),number=document.createElement('b');
  const caption=document.createElement('small');
@@ -222,7 +231,9 @@ for(const [label,value] of counters){
 const pl=q('eis223-my-procurements');pl.replaceChildren();
 if(!purchases.length){
  const li=document.createElement('li');li.className='eis223-empty';
- li.textContent='Пока нет самостоятельных проверок. Запустите проверку по номеру ЕИС.';
+ li.textContent=manualResponse.status==='fulfilled'?
+ 'Пока нет самостоятельных проверок. Запустите проверку по номеру ЕИС.':
+ 'Список самостоятельных проверок временно недоступен. Попробуйте обновить.';
  pl.append(li);
 }
 const statusLabels={queued:'Ожидает загрузки',leased:'Получение данных ЕИС',
@@ -258,7 +269,10 @@ for(const item of purchases.slice(0,8)){
  li.append(del);pl.append(li);
 }
 const bl=q('eis223-my-batches');bl.replaceChildren();
-if(!realBatches.length){const li=document.createElement('li');li.textContent='Запущенных вами тематических проверок пока нет';bl.append(li)}
+if(!realBatches.length){const li=document.createElement('li');
+li.textContent=batchResponse.status==='fulfilled'?
+ 'Запущенных вами тематических проверок пока нет':'Не удалось загрузить тематические проверки';
+bl.append(li)}
 const categoryNames={dates:'Сроки',docs:'Документация',national:'Национальный режим',
 security:'Обеспечение',sme:'МСП',access:'Участники',protocols:'Протоколы',
 contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
@@ -288,7 +302,10 @@ for(const item of realBatches){
  li.append(del);bl.append(li);
 }
 const ml=q('eis223-my-memos');ml.replaceChildren();
-if(!memos.length){const li=document.createElement('li');li.textContent='Служебных записок пока нет';ml.append(li)}
+if(!memos.length){const li=document.createElement('li');
+li.textContent=memoResponse.status==='fulfilled'?
+ 'Служебных записок пока нет':'Список служебных записок временно недоступен';
+ml.append(li)}
 for(const memo of memos.slice(0,7)){
  const li=document.createElement('li');const link=document.createElement('a');
  link.href='/account/memos';link.textContent='Закупка № '+memo.reg_number;
