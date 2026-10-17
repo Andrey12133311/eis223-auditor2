@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from scripts.account_production_v1 import ProductionAccountGate, machine_path, shared_read_route, verified_machine
+from scripts.account_production_v1 import ProductionAccountGate, add_account_navigation, machine_path, shared_read_route, verified_machine
 
 
 async def fake_app(scope, receive, send):
@@ -31,6 +31,16 @@ def request(path, account=None, method="GET", token=None):
 
 
 class ProductionLoginTests(unittest.TestCase):
+    def test_general_dashboard_links_to_personal_account(self):
+        html = b'<html><body><main>General audit</main></body></html>'
+        result = add_account_navigation(html)
+        self.assertIn(b'/account/login', result)
+        self.assertIn(b'/account/register', result)
+        self.assertIn(b'/account/home', result)
+        self.assertIn(b'General audit', result)
+        self.assertEqual(add_account_navigation(result), result)
+        self.assertEqual(add_account_navigation(b'plain text'), b'plain text')
+
     def test_public_pages_and_health(self):
         for path in ("/health", "/healthz", "/account/login",
                      "/account/register", "/auth/register", "/eis223/collector.js"):
