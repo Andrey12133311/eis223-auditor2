@@ -421,7 +421,7 @@ async function refreshFavorites(){
    const detail=document.createElement('small');detail.textContent=f.label||'';
    body.append(title,detail);li.append(body);
    const link=document.createElement('a');
-   link.href=f.kind==='procurement'?'/check-new/'+encodeURIComponent(f.key):'/';
+   link.href=f.kind==='procurement'?'/check-new/'+encodeURIComponent(f.key):'/?favorite_inn='+encodeURIComponent(f.key);
    link.textContent=f.kind==='procurement'?'Карточка':'Поиск';
    li.append(link);
    const del=document.createElement('button');del.type='button';del.textContent='Убрать';
