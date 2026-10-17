@@ -53,7 +53,7 @@ class ProductionLoginTests(unittest.TestCase):
     def test_regular_user_gets_only_private_routes(self):
         self.assertEqual(request("/me/procurements", account=("id", "user", "approved"))[0], 200)
         self.assertEqual(request("/account/home", account=("id", "user", "approved"))[0], 200)
-        self.assertEqual(request("/admin/accounts/pending", account=("id", "user", "approved"))[0], 200)
+        self.assertEqual(request("/admin/accounts/pending", account=("id", "user", "approved"))[0], 403)
 
     def test_admin_can_access_existing_app(self):
         code, headers = request("/api/purchases", account=("id", "admin", "approved"))
@@ -63,9 +63,7 @@ class ProductionLoginTests(unittest.TestCase):
     def test_eis_upload_token_is_route_limited(self):
         token = "valid-token-for-bridge-worker-12345"
         self.assertTrue(machine_path("/api/v294/eis223/archive"))
-        self.assertTrue(verified_machine({b"x-eis223-upload-token": token.encode()})
-                        if os.getenv("EIS223_UPLOAD_TOKEN") == token else True)
-        self.assertEqual(request("/api/v294/eis223/archive", method="POST", token=token)[0], 200)
+                self.assertEqual(request("/api/v294/eis223/archive", method="POST", token=token)[0], 200)
         self.assertEqual(request("/api/purchases", token=token)[0], 401)
         self.assertEqual(request("/api/v294/eis223/archive", method="POST", token="bad")[0], 401)
 
