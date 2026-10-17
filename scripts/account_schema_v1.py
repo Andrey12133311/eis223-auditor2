@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS account_thematic_jobs (
         ON DELETE CASCADE,
     CHECK(status IN ('queued', 'running', 'completed', 'failed'))
 );
+CREATE TABLE IF NOT EXISTS account_thematic_findings (
+    user_id UUID NOT NULL,
+    batch_id TEXT NOT NULL,
+    reg_number TEXT NOT NULL,
+    finding_key TEXT NOT NULL,
+    legal_basis TEXT NOT NULL,
+    description TEXT NOT NULL,
+    evidence_source TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id, batch_id, reg_number, finding_key),
+    FOREIGN KEY(user_id, batch_id, reg_number)
+        REFERENCES account_thematic_jobs(user_id, batch_id, reg_number)
+        ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS account_memos (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
