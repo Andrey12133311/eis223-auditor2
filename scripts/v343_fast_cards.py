@@ -135,7 +135,8 @@ def detail_block(item, kind, title, law, evidence, document, source, link):
         if labels:
             extra='<p class="meta"><b>Подтверждения в оригиналах ЕИС:</b> '+(
                 '; '.join(labels))+'</p>'
-    return ('<article class="'+kind+'"><h3>'+esc(title or "Нарушение")+'</h3>'
+    heading=('<p class="meta"><b>Карточка нарушения</b></p>' if kind=="legal" else "")
+    return ('<article class="'+kind+'">'+heading+'<h3>'+esc(title or "Нарушение")+'</h3>'
       +('<p><b>Правовое основание:</b> '+esc(law)+'</p>' if law else '')
       +('<p class="evidence"><b>Обстоятельства и доказательства:</b> '+esc(evidence)+'</p>' if evidence else '')
       +('<p class="meta">Документ: '+esc(document)+'</p>' if document else '')
