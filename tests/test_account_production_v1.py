@@ -89,7 +89,10 @@ class ProductionLoginTests(unittest.TestCase):
         token = "valid-token-for-bridge-worker-12345"
         self.assertTrue(machine_path("/api/v294/eis223/archive"))
         self.assertEqual(request("/api/v294/eis223/archive", method="POST", token=token)[0], 200)
+        self.assertEqual(request("/api/v301/bridge/next", token=token)[0], 200)
+        self.assertEqual(request("/api/v301/bridge/report/0123456789abcdef01234567", method="POST", token=token)[0], 200)
         self.assertEqual(request("/api/purchases", token=token)[0], 401)
+        self.assertEqual(request("/api/v301/bridge/next", token="bad")[0], 401)
         self.assertEqual(request("/api/v294/eis223/archive", method="POST", token="bad")[0], 401)
 
     def test_machine_preflight_is_allowed_for_existing_cors_guard(self):
