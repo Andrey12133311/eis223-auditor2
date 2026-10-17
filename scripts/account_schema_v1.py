@@ -55,6 +55,21 @@ CREATE TABLE IF NOT EXISTS account_thematic_procurements (
     PRIMARY KEY(user_id, batch_id, reg_number),
     FOREIGN KEY(user_id, batch_id) REFERENCES account_thematic_batches(user_id, batch_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS account_thematic_jobs (
+    user_id UUID NOT NULL,
+    batch_id TEXT NOT NULL,
+    reg_number TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    PRIMARY KEY(user_id, batch_id, reg_number),
+    FOREIGN KEY(user_id, batch_id, reg_number)
+        REFERENCES account_thematic_procurements(user_id, batch_id, reg_number)
+        ON DELETE CASCADE,
+    CHECK(status IN ('queued', 'running', 'completed', 'failed'))
+);
 CREATE TABLE IF NOT EXISTS account_memos (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
