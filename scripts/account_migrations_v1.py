@@ -5,7 +5,17 @@ from scripts.account_schema_v1 import SCHEMA
 def initialize_schema(db):
     # psycopg 3 does not accept multiple prepared statements in one execute.
     # Split the known, static schema into individual DDL statements.
-    statements = [statement.strip() for statement in SCHEMA.split(";") if statement.strip()]
+    # Strip whole-line SQL comments BEFORE splitting DDL statements.
+    # A comment such as "-- append-only; preserve history" must never be
+    # split into a standalone executable SQL fragment. Preserve originals.
+    ddl = "\n".join(
+        line for line in SCHEMA.splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    statements = [statement.strip() for statement in ddl.split(";") if statement.strip()]
+    if any(not statement.upper().startswith(("CREATE ", "ALTER "))
+           for statement in statements):
+        raise RuntimeError("Unsafe SQL fragment in account migration")
     for statement in statements:
         db.execute(statement)
     # Safe additive migration for existing accounts. Never guess names from email.
