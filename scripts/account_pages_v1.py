@@ -21,7 +21,7 @@ table{border-collapse:collapse;width:100%;margin-top:15px}td,th{padding:12px;tex
 
 REGISTER = page("Регистрация", """
 <h1>Создать аккаунт</h1>
-<p>Регистрация свободная. После подачи заявки доступ откроется только после подтверждения администратором.</p>
+<p>Регистрация свободная. На вашу почту придёт письмо со ссылкой подтверждения. После подтверждения адреса заявку рассмотрит администратор.</p>
 <form id="registration">
 <label>Электронная почта<input type="email" name="email" required autocomplete="email"></label>
 <label>Пароль<input type="password" name="password" required minlength="12" autocomplete="new-password"></label>
@@ -33,7 +33,7 @@ document.getElementById('registration').addEventListener('submit',async e=>{
  b.disabled=true;m.textContent='Отправляем заявку…';
  try{const r=await fetch('/auth/register',{method:'POST',credentials:'same-origin',
  headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(f)))});
- m.textContent=r.ok?'Заявка отправлена. Ожидайте подтверждения администратора.':'Не удалось отправить заявку. Проверьте данные.';
+ m.textContent=r.ok?'Проверьте почту: мы отправили ссылку для подтверждения адреса.':'Не удалось отправить заявку. Проверьте данные.';
  if(r.ok)f.reset();
  }catch{m.textContent='Ошибка соединения. Попробуйте позже.'}finally{b.disabled=false}
 });
