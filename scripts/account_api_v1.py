@@ -17,6 +17,7 @@ from scripts.account_repository_v1 import (
     create_pending_user, pending_users, approve_user, reject_user, block_user
 )
 from scripts.account_sessions_v1 import create_session, resolve_session, revoke_session
+from scripts.account_email_v1 import create_challenge, verify_challenge, send_verification_email
 
 router = APIRouter(prefix="/auth", tags=["accounts"])
 admin_router = APIRouter(prefix="/admin/accounts", tags=["accounts"])
@@ -65,9 +66,24 @@ def register(data: Credentials, request: Request):
     if not allowed:
         raise HTTPException(429, "Слишком много попыток. Повторите позже")
     encoded = hash_password(data.password)
+    try:
+        with connect() as db:
+            uid = create_pending_user(db, email, encoded)
+            if uid is not None:
+                token = create_challenge(db, uid)
+                send_verification_email(email, token)
+    except (OSError, RuntimeError, KeyError) as exc:
+        raise HTTPException(503, "Почтовая служба временно недоступна") from exc
+    return {"status": "pending", "message": "Проверьте почту для подтверждения адреса"}
+
+
+@router.get("/verify-email")
+def verify_email(token: str):
     with connect() as db:
-        create_pending_user(db, email, encoded)
-    return {"status": "pending", "message": "Заявка ожидает подтверждения администратора"}
+        verified = verify_challenge(db, token)
+    if not verified:
+        raise HTTPException(400, "Ссылка недействительна или срок действия истёк")
+    return {"status": "verified", "message": "Почта подтверждена. Ожидайте решения администратора"}
 
 
 @router.post("/login")
