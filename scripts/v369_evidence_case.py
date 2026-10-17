@@ -141,42 +141,30 @@ def _case_snapshot(ns,reg):
             """SELECT state,documents_read,documents_unreadable,updated_at
                FROM v332_audit_queue WHERE reg=? ORDER BY updated_at DESC LIMIT 1""",
             (reg,)).fetchone() if audit_table else None)
-        unique=collapse_legal_events(confirmed)
+        # The manager and employee must see the SAME versioned evidence key.
+        # Use the existing deduplicated manager source, never derive a
+        # second potentially divergent key from differently ordered rows.
+        from scripts.v368_manager_evidence import _legal_items
+        canonical=_legal_items(ns,reg)
         findings=[]
-        for item in unique:
-            refs=references(item)
-            source=_validated_source(item.get("source_url"))
+        for item in canonical:
             supporting=[]
             for other in item.get("supporting_sources",[])[:25]:
-                supporting.append({"document":str(other.get("document") or "")[:240],
-                                   "url":_validated_source(other.get("url"))})
-            issues=[]
-            if not str(item.get("law") or "").strip():
-                issues.append("Не указана правовая норма")
-            if not str(item.get("evidence") or "").strip():
-                issues.append("Не приведено доказательство")
-            if not item.get("document") and not source:
-                issues.append("Не определён документ-источник")
-            if item.get("law") and not refs:
-                issues.append("Нет ссылки на точную норму")
-            # Match the same evidence-version identity used by manager review.
-            finding_key=sha256(json.dumps(
-                [reg,str(item.get("title") or ""),str(item.get("law") or ""),
-                 str(item.get("evidence") or ""),str(item.get("document") or ""),
-                 str(item.get("source_url") or "")],
-                ensure_ascii=False,separators=(",",":")).encode("utf-8")
-            ).hexdigest()
+                supporting.append({
+                    "document":str(other.get("document") or "")[:240],
+                    "url":_validated_source(other.get("url")),
+                })
             findings.append({
-                "finding_key":finding_key,
-                "title":str(item.get("title") or "Нарушение")[:400],
-                "law":str(item.get("law") or "")[:450],
-                "evidence":str(item.get("evidence") or "")[:3200],
-                "document":str(item.get("document") or "")[:260],
-                "source_url":source,
-                "consultant_references":refs[:4],
-                "source_representations":int(item.get("raw_count",1)),
+                "finding_key":item["finding_key"],
+                "title":item["title"][:400],
+                "law":item["law"][:450],
+                "evidence":item["evidence"][:3200],
+                "document":item["document"][:260],
+                "source_url":_validated_source(item["source_url"]),
+                "consultant_references":item.get("references",[])[:4],
+                "source_representations":item.get("source_representations",1),
                 "supporting_sources":supporting,
-                "warnings":issues,
+                "warnings":item.get("warnings",[]),
             })
         comparisons=[]
         review=[]
