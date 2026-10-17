@@ -7,7 +7,7 @@ historical campaign whose creator is unknown.
 from __future__ import annotations
 import os
 from fastapi import HTTPException
-from scripts.account_api_v1 import connect, require_origin
+
 
 
 def enabled() -> bool:
@@ -26,6 +26,7 @@ def account_id(request):
 
 def protect_write(request):
     if enabled():
+        from scripts.account_api_v1 import require_origin
         require_origin(request)
 
 
@@ -34,6 +35,7 @@ def linked_ids(request):
     if owner is None:
         return None
     try:
+        from scripts.account_api_v1 import connect
         with connect() as db:
             rows = db.execute(
                 "SELECT batch_id FROM account_thematic_batches "
@@ -50,6 +52,7 @@ def require_owned(request, batch):
     if owner is None:
         return
     try:
+        from scripts.account_api_v1 import connect
         with connect() as db:
             row = db.execute(
                 "SELECT 1 FROM account_thematic_batches "
@@ -66,6 +69,7 @@ def link_started(request, batch):
     if owner is None:
         return
     try:
+        from scripts.account_api_v1 import connect
         with connect() as db:
             db.execute(
                 "INSERT INTO account_thematic_batches(user_id,batch_id) "
@@ -80,6 +84,7 @@ def unlink(request, batch):
     if owner is None:
         return
     try:
+        from scripts.account_api_v1 import connect
         with connect() as db:
             db.execute(
                 "DELETE FROM account_thematic_batches "
