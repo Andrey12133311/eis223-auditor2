@@ -1,35 +1,34 @@
 # Isolated identity staging — deployment checklist
 
-This is **not** the EIS production startup and must not be attached to the existing `web` service.
+This staging app is separate from the production EIS web service. Do not replace the production startup or database.
 
-## Infrastructure
+## Registration policy
 
-1. Create a **separate staging environment** and PostgreSQL database; confirm billing and retention before provisioning.
-2. Configure `EIS223_IDENTITY_DATABASE_URL` as a **private** PostgreSQL URL.
-3. Configure `EIS223_PUBLIC_ORIGIN` to the **exact HTTPS staging origin**.
-4. Configure a real SMTP sender: `EIS223_SMTP_HOST`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER`, `EIS223_SMTP_PASSWORD`, `EIS223_SMTP_FROM`; verify domain SPF/DKIM/DMARC and actual inbox delivery. Configure `EIS223_SMTP_HOST`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER`, `EIS223_SMTP_PASSWORD`, `EIS223_SMTP_FROM` for outbound confirmation messages. Set `EIS223_RATE_LIMIT_SECRET` to a separately generated random secret of at least 32 characters, identical across staging workers. Install `requirements-accounts.txt`.
-5. Run a one-time schema migration against staging PostgreSQL using `scripts.account_migrations_v1.initialize_schema`; do not use the production SQLite volume.
-6. Run `python -m scripts.account_bootstrap_v1` in a secure interactive operator terminal to create the first admin.
-7. Set `EIS223_AUTH_ENFORCE=true` before making the staging service public.
-8. Start with `uvicorn scripts.account_staging_app:application --host 0.0.0.0 --port $PORT`.
-9. Verify registration -> delivery to inbox -> one-time email confirmation -> pending -> admin approval -> login -> private procurement list -> logout; verify rejected and blocked users cannot log in.
-10. Verify anonymous access to private endpoints is rejected, including WebSocket and document downloads.
+- Registration is open; each new account starts with status `pending`.
+- An administrator must approve the account before login succeeds.
+- No email messages, confirmation links, or SMTP sender are required. The email address is validated for syntax and domain mail deliverability, **not** verified as belonging to the registrant.
+- Do not describe this as proof that the mailbox exists or that the applicant controls it.
 
-## Stop conditions before production merge
+## Isolated staging setup
 
-- Shared PostgreSQL rate limiting is implemented for registration/login, but real multi-worker concurrency and trusted proxy-IP behavior are not yet verified.
-- Legacy EIS endpoints have not been audited for ownership checks; global authentication is not sufficient for per-user isolation.
-- EIS collectors need independent, narrowly scoped machine authentication; do not grant collector access using ordinary user cookies.
-- Document and ODT download authorization has not been verified.
-- Email verification code is present but real SMTP delivery, resend/recovery, session cleanup, logging/redaction, and DB backup/restore still require testing/implementation.
-- GitHub CI status and real PostgreSQL integration tests must be green.
-- Do not merge PR #29 or enable production registration before all conditions are satisfied.
+1. Obtain approval for any new infrastructure cost; provision a separate environment and PostgreSQL database.
+2. Set `EIS223_IDENTITY_DATABASE_URL` to the staging PostgreSQL connection string using protected variables.
+3. Set `EIS223_PUBLIC_ORIGIN` to the exact public HTTPS origin, and `EIS223_AUTH_ENFORCE=true`.
+4. Generate a distinct `EIS223_RATE_LIMIT_SECRET` (at least 32 random characters), shared by staging workers. Install `requirements-accounts.txt`.
+5. Initialize schema once with `scripts.account_migrations_v1.initialize_schema`; alternatively set `EIS223_IDENTITY_INIT_SCHEMA=true` only for initial staging setup. Never run this against the production SQLite volume.
+6. Bootstrap the first administrator in a secure operator terminal with `python -m scripts.account_bootstrap_v1`.
+7. Start `uvicorn scripts.account_staging_app:application --host 0.0.0.0 --port $PORT`.
+8. Test registration → pending status → admin approval → login → private lists → logout. Test rejection and blocking, unauthorized access, and isolation between two distinct accounts.
+9. Confirm CSRF/origin checks, cookie security, HTTPS proxy configuration, rate limits, and private data cache headers.
+10. Verify database backups and recovery before accepting real user data.
 
-## Existing service
+## Known limitations / production stop conditions
 
-Keep `scripts/railway_start_v282.py` and production environment unchanged. Never set `EIS223_AUTH_ENFORCE=true` on the existing service before completing the compatibility review.
+- The personal thematic queue endpoint creates an owner-bound placeholder only. It does **not** start EIS processing. The legacy thematic engine is not connected.
+- Bookmarking a legacy queue identifier does not establish ownership of that engine's data. Do not expose shared queue results based solely on bookmarks.
+- Private memo download currently returns HTTP 501 for owned documents pending a secure storage adapter.
+- End-to-end PostgreSQL tests, real multi-worker throttling, and trusted proxy behavior still need validation.
+- Legacy EIS APIs and collectors require separate ownership and machine-authentication review.
+- Do not merge the account feature branch or enable production registration until isolation, download authorization, and deployment tests are complete.
 
-
-## Mail.ru sender for isolated staging
-
-Use dedicated sender `eisauditor@mail.ru` with `EIS223_SMTP_HOST=smtp.mail.ru`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER=eisauditor@mail.ru`, `EIS223_SMTP_FROM=eisauditor@mail.ru`. Set `EIS223_SMTP_PASSWORD` only through protected Railway variables using a Mail.ru application-specific password; do not commit credentials. Users may register with addresses at any mail provider; email ownership requires clicking the verification link. Real SMTP delivery is unverified until staging credentials and a separate recipient mailbox are configured.
+Keep `scripts/railway_start_v282.py` and the production Railway environment unchanged.
