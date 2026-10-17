@@ -47,7 +47,15 @@ CREATE TABLE IF NOT EXISTS account_thematic_batches (
     batch_id TEXT NOT NULL,
     PRIMARY KEY(user_id, batch_id)
 );
-CREATE TABLE IF NOT EXISTS account_thematic_procurements (\n    user_id UUID NOT NULL REFERENCES account_users(id),\n    batch_id TEXT NOT NULL,\n    reg_number TEXT NOT NULL,\n    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    PRIMARY KEY(user_id, batch_id, reg_number),\n    FOREIGN KEY(user_id, batch_id) REFERENCES account_thematic_batches(user_id, batch_id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS account_memos (
+CREATE TABLE IF NOT EXISTS account_thematic_procurements (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    batch_id TEXT NOT NULL,
+    reg_number TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id, batch_id, reg_number),
+    FOREIGN KEY(user_id, batch_id) REFERENCES account_thematic_batches(user_id, batch_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS account_memos (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
     reg_number TEXT NOT NULL,
@@ -55,7 +63,12 @@ CREATE TABLE IF NOT EXISTS account_thematic_procurements (\n    user_id UUID NOT
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS account_memos_owner ON account_memos(user_id);
-CREATE TABLE IF NOT EXISTS account_throttle (\n    bucket_key TEXT PRIMARY KEY,\n    attempts INTEGER NOT NULL,\n    started_at TIMESTAMPTZ NOT NULL\n);\nCREATE TABLE IF NOT EXISTS account_audit (
+CREATE TABLE IF NOT EXISTS account_throttle (
+    bucket_key TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_audit (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     actor_id UUID,
     subject_id UUID,
