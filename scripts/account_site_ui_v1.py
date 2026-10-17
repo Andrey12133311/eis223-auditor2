@@ -241,6 +241,12 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <ul id="eis223-favorite-list"><li>Загрузка избранного…</li></ul>
 <p role="status" id="eis223-favorite-status"></p>
 </section>
+<section class="eis223-feature" aria-label="Поручения руководителя">
+<h3>Поручения руководителя</h3>
+<p>Сроки, задания и результаты, которые нужно передать на согласование.</p>
+<ul id="eis223-assignment-list"><li>Загрузка поручений…</li></ul>
+<p id="eis223-assignment-status" role="status"></p>
+</section>
 </div></section></div>
 <script>
 (()=>{
@@ -248,7 +254,7 @@ const q=id=>document.getElementById(id);
 q('eis223-toggle-cabinet').addEventListener('click',()=>{
 const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;
 q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));
-if(!panel.hidden){refresh();refreshAlerts();refreshFavorites()}
+if(!panel.hidden){refresh();refreshAlerts();refreshFavorites();refreshAssignments()}
 });
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
 async function get(url){
@@ -457,6 +463,48 @@ q('eis223-favorite-form').addEventListener('submit',async event=>{
 });
 window.setInterval(()=>{if(!document.hidden)refreshAlerts()},90000);
 refreshAlerts();
+
+async function refreshAssignments(){
+ try{
+  const data=await get('/me/assignments'),ul=q('eis223-assignment-list');
+  ul.replaceChildren();
+  if(!data.length){const li=document.createElement('li');li.textContent='Новых поручений нет';ul.append(li);return}
+  const states={assigned:'Назначено',in_progress:'В работе',submitted:'На согласовании',
+                returned:'На доработке',completed:'Завершено',cancelled:'Отменено'};
+  for(const item of data.slice(0,12)){
+   const li=document.createElement('li'),body=document.createElement('div');
+   body.className='eis223-check-desc';
+   const title=document.createElement('strong');title.textContent=item.title||'Проверка закупки';
+   const desc=document.createElement('small');
+   desc.textContent='№ '+item.reg_number+' · '+(states[item.status]||item.status)+
+     (item.due_date?' · до '+new Date(item.due_date).toLocaleDateString('ru-RU'):'');
+   body.append(title,desc);li.append(body);
+   const link=document.createElement('a');link.href='/account/home';
+   link.textContent='Проверить';li.append(link);
+   const action=item.status==='assigned'||item.status==='returned'?'take':
+                item.status==='in_progress'?'submit':null;
+   if(action){
+    const button=document.createElement('button');button.type='button';
+    button.textContent=action==='take'?'Взять':'На согласование';
+    button.onclick=async()=>{
+     button.disabled=true;
+     try{
+      const response=await fetch('/me/assignments/'+encodeURIComponent(item.id)+'/'+action,
+       {method:'POST',credentials:'same-origin'});
+      if(!response.ok){
+       const data=await response.json().catch(()=>({}));
+       throw Error(data.detail||'Не удалось обновить поручение');
+      }
+      await refreshAssignments();
+      show('eis223-assignment-status','Статус поручения обновлён');
+     }catch(e){button.disabled=false;show('eis223-assignment-status',e.message)}
+    };
+    li.append(button);
+   }
+   ul.append(li);
+  }
+ }catch{show('eis223-assignment-status','Поручения временно недоступны')}
+}
 
 q('eis223-logout').addEventListener('click',async()=>{
 const button=q('eis223-logout');button.disabled=true;
