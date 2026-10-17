@@ -201,7 +201,7 @@ _STYLE = """
 
 
 def site_header(role="user"):
-    admin = ""  # Administrator controls live inside the personal cabinet.
+    admin = '<button type="button" id="eis223-admin-nav" hidden>Управление пользователями</button>' if role == "admin" else ""
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
     return (_STYLE + '''
@@ -308,6 +308,14 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <script>
 (()=>{
 const q=id=>document.getElementById(id);
+const navAdmin=q('eis223-admin-nav');
+if(navAdmin){navAdmin.hidden=false;navAdmin.addEventListener('click',()=>{
+ const cabinet=q('eis223-cabinet'),toggle=q('eis223-toggle-cabinet');
+ if(cabinet.hidden){toggle.click()}
+ const open=q('eis223-admin-open'),panel=q('eis223-admin-panel');
+ if(open&&panel.hidden)open.click();
+ q('eis223-admin-controls')?.scrollIntoView({behavior:'smooth',block:'start'});
+});}
 const adminButton=q('eis223-admin-open');
 if(adminButton){
  adminButton.addEventListener('click',async()=>{
