@@ -58,7 +58,7 @@ document.getElementById('login').addEventListener('submit',async e=>{
 </script>""")
 
 HOME = page("Мои закупки", """
-<h1>Мой кабинет</h1><p>Ваши сохранённые закупки ЕИС.</p>
+<h1>Мой кабинет</h1><p>Ваши сохранённые закупки ЕИС.</p><nav aria-label="Разделы личного кабинета"><a href="/account/home">Мои закупки</a> · <a href="/account/thematic">Тематические проверки</a> · <a href="/account/memos">Служебные записки</a></nav>
 <form id="add"><label>Номер закупки<input name="reg" pattern="3[0-9]{10}" required placeholder="32616412317"></label>
 <button>Добавить закупку</button></form>
 <p class="message" id="message" role="status"></p><table><thead><tr><th>Номер ЕИС</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
@@ -99,4 +99,28 @@ async function load(){const r=await fetch('/admin/accounts/pending',{credentials
  tr.append(email,date,actions);tbody.append(tr)}
 }
 load();
+</script>""")
+
+THEMATIC = page("Тематические проверки", """
+<h1>Мои тематические проверки</h1><p>Здесь отображаются только ваши очереди тематических проверок.</p>
+<p><a href="/account/home">← Личный кабинет</a></p>
+<p id="message" role="status">Загружаем…</p><table><thead><tr><th>Очередь</th><th>Статус</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+(async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/thematic-batches',{credentials:'same-origin'});
+if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить очереди';return}
+const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr');
+for(const v of [item.name||item.id||'Очередь',item.status||'—']){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}rows.append(tr)}
+m.textContent=data.length?'':'Очередей пока нет';}catch{m.textContent='Ошибка соединения'}})();
+</script>""")
+
+MEMOS = page("Служебные записки", """
+<h1>Мои служебные записки</h1><p>Доступны только документы, принадлежащие вашей учётной записи.</p>
+<p><a href="/account/home">← Личный кабинет</a></p>
+<p id="message" role="status">Загружаем…</p><table><thead><tr><th>Документ</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+(async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/memos',{credentials:'same-origin'});
+if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить документы';return}
+const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr'),td=document.createElement('td');
+td.textContent=String(item.title||item.name||item.id||'Документ');tr.append(td);rows.append(tr)}
+m.textContent=data.length?'':'Документов пока нет';}catch{m.textContent='Ошибка соединения'}})();
 </script>""")
