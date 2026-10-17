@@ -45,7 +45,7 @@ SHARED_READ_PATHS = frozenset((
 SHARED_READ_PATTERNS = tuple(map(re.compile, (
     r"/api/purchases/3[0-9]{10}",
     r"/api/v334/violation-ledger/purchase/3[0-9]{10}",
-    r"/reports/3[0-9]{10}\\.html",
+    r"/reports/3[0-9]{10}\.html",
     r"/files/3[0-9]{10}/(?:original|annotated)/[0-9A-Za-z._-]+",
 )))
 
