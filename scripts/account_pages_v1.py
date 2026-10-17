@@ -59,18 +59,20 @@ document.getElementById('login').addEventListener('submit',async e=>{
 
 HOME = page("Мои закупки", """
 <h1>Мой кабинет</h1><p>Ваши сохранённые закупки ЕИС.</p><nav aria-label="Разделы личного кабинета"><a href="/account/home">Мои закупки</a> · <a href="/account/thematic">Тематические проверки</a> · <a href="/account/memos">Служебные записки</a></nav>
+<p id="summary" role="status">Загружаем сводку личного кабинета…</p>
 <form id="add"><label>Номер закупки<input name="reg" pattern="3[0-9]{10}" required placeholder="32616412317"></label>
 <button>Добавить закупку</button></form>
 <p class="message" id="message" role="status"></p><table><thead><tr><th>Номер ЕИС</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
 <button id="logout">Выйти</button>
 <script>
+async function loadSummary(){try{const r=await fetch('/me/summary',{credentials:'same-origin'});if(!r.ok)return;const x=await r.json();document.getElementById('summary').textContent='Мои закупки: '+x.procurements+' · Тематические очереди: '+x.thematic_batches+' · Служебные записки: '+x.memos;}catch{document.getElementById('summary').textContent='Сводка временно недоступна'}}
 async function load(){const r=await fetch('/me/procurements',{credentials:'same-origin'});
  if(r.status===401){location.assign('/account/login');return}
  if(!r.ok)return;const data=await r.json(),tbody=document.getElementById('rows');tbody.replaceChildren();
  for(const item of data){const tr=document.createElement('tr'),td=document.createElement('td'),act=document.createElement('td');
  td.textContent=item.reg_number;const b=document.createElement('button');b.textContent='Удалить';
  b.addEventListener('click',async()=>{await fetch('/me/procurements/'+encodeURIComponent(item.reg_number),{method:'DELETE',credentials:'same-origin'});load()});
- act.append(b);tr.append(td,act);tbody.append(tr)}
+ act.append(b);tr.append(td,act);tbody.append(tr)}loadSummary();
 }
 document.getElementById('add').addEventListener('submit',async e=>{e.preventDefault();
  const reg=new FormData(e.currentTarget).get('reg');
