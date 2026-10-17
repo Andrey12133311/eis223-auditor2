@@ -1,5 +1,5 @@
 """Private staging endpoints; all access is scoped to authenticated owner."""
-from uuid import UUID
+from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException, Request, Response
 from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_owner_queries_v1 import MEMOS, THEMATIC_BATCHES, owned_memo_key, owns_batch
@@ -47,7 +47,7 @@ def batch_details(batch_id: str, request: Request, response: Response):
         permitted = owns_batch(db, batch_id, owner_id)
     if not permitted:
         raise HTTPException(404, "Проверка не найдена")
-    # Details are not yet connected to the legacy thematic engine.
+    # Never read a global queue by a guessed ID: bookmark ownership is not engine ownership.
     raise HTTPException(501, "Детали тематической проверки ещё не подключены")
 
 
@@ -85,3 +85,19 @@ def save_batch(batch_id: str, request: Request, response: Response):
             (owner_id, batch_id),
         )
     return {"saved": True, "batch_id": batch_id}
+
+
+@router.post("/thematic-batches", status_code=201)
+def create_personal_batch(request: Request, response: Response):
+    """Allocate an unguessable user-owned queue ID; execution is not started."""
+    require_origin(request)
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    batch_id = "personal-" + uuid4().hex
+    with connect() as db:
+        db.execute(
+            """INSERT INTO account_thematic_batches(user_id,batch_id)
+               VALUES (%s,%s)""",
+            (owner_id, batch_id),
+        )
+    return {"batch_id": batch_id, "status": "saved", "execution_started": False}
