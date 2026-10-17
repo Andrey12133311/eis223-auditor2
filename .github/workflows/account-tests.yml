@@ -1,0 +1,24 @@
+name: Account module tests
+on:
+  push:
+    branches:
+      - feature/user-accounts-approval
+  pull_request:
+    paths:
+      - "scripts/account_*"
+      - "tests/test_account_*"
+      - ".github/workflows/account-tests.yml"
+jobs:
+  account-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated account test dependencies
+        run: python -m pip install fastapi argon2-cffi psycopg[binary] httpx
+      - name: Compile account modules
+        run: python -m compileall -q scripts/account_*.py
+      - name: Run isolated account tests
+        run: python -m unittest discover -s tests -p 'test_account_*.py' -v
