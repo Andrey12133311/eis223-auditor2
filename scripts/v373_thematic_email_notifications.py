@@ -19,8 +19,9 @@ _TASK = None
 
 
 def open_eis(ns):
-    import v342_thematic_queue
-    con = v342_thematic_queue.db(ns)
+    import sqlite3
+    con = ns["conn"]()
+    con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=2000")
     return con
 
