@@ -28,6 +28,27 @@ _STYLE = """
 .eis223-brand-copy{display:flex;flex-direction:column;gap:1px}
 .eis223-brand-name{font-size:18px;font-weight:780;letter-spacing:-.03em;line-height:1.15}
 .eis223-brand-sub{font-size:10px;color:#c6dfed;letter-spacing:.025em}
+.eis223-auth-user{display:flex;flex-direction:column;justify-content:center;gap:2px;
+ min-width:175px;max-width:min(35vw,360px);color:#fff!important;
+ padding:6px 12px;border:1px solid #ffffff45;border-radius:9px;background:#ffffff11}
+.eis223-auth-user strong{font-size:13px;color:#fff;font-weight:750;overflow-wrap:anywhere}
+.eis223-auth-user small{font-size:10px;color:#cde3ef}
+.eis223-profile-prompt[hidden]{display:none!important}
+.eis223-profile-prompt{position:fixed;z-index:2147482000;inset:0;
+ display:grid;place-items:center;overflow:auto;padding:15px;background:#102f48bd}
+.eis223-profile-prompt form{width:min(100%,460px);max-height:100%;
+ overflow-y:auto;border-radius:15px;background:#fff;padding:clamp(18px,4vw,30px);
+ box-shadow:0 15px 65px #0b2d4580;color:#245070;border:1px solid #d9e9f3}
+.eis223-profile-prompt h2{font-size:22px!important;color:#1b527a!important;margin:0 0 10px}
+.eis223-profile-prompt p{font-size:12px;line-height:1.5;color:#687f91;margin-bottom:12px}
+.eis223-profile-prompt label{display:block;font-size:12px;font-weight:700;margin:8px 0;color:#2d5c7c}
+.eis223-profile-prompt input{display:block;width:100%;min-height:42px;border-radius:8px;
+ margin-top:4px;border:1px solid #c7dbe9;padding:10px 12px;font:13px system-ui;background:#fff;color:#23455c}
+.eis223-profile-prompt button{border-radius:8px;border:1px solid #1a638f;
+ background:#1a638f;color:#fff;padding:9px 13px;cursor:pointer;font:700 12px system-ui}
+.eis223-profile-prompt button:disabled{opacity:.5}
+.eis223-profile-prompt .eis223-profile-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:15px}
+.eis223-profile-prompt [role=status]{font-size:12px;color:#b0524d}
 .eis223-menu button,.eis223-menu a{
  display:inline-flex;align-items:center;justify-content:center;
  cursor:pointer;min-height:40px;font:670 13px system-ui,sans-serif;
@@ -160,6 +181,7 @@ _STYLE = """
  .eis223-brand-icon{height:36px;width:36px}
  .eis223-brand-name{font-size:16px}
  .eis223-brand-sub{font-size:10px}
+ .eis223-auth-user{width:100%;max-width:none;min-height:40px}
  .eis223-menu button{flex:1}
  .eis223-personal{padding:16px 11px}
  .eis223-panel-mark{display:none}
@@ -186,11 +208,26 @@ def site_header(role="user"):
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
+<span class="eis223-auth-user" aria-label="Авторизованный пользователь"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></span>
 <button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет <span id="eis223-unread" class="eis223-notification-dot" hidden aria-label="Новые уведомления"></span></button>
 ''' + admin + director + '''
 <button type="button" id="eis223-logout">Выйти</button>
 <span id="eis223-logout-status" role="status"></span>
 </nav>
+<div id="eis223-profile-prompt" class="eis223-profile-prompt" hidden>
+ <form id="eis223-profile-prompt-form" aria-label="Указать фамилию имя отчество">
+  <h2>Укажите ваше ФИО</h2>
+  <p>Фамилия и имя будут показываться сразу после входа на главной странице и в кабинетах сотрудника или руководителя. Отчество указывать необязательно.</p>
+  <label>Фамилия<input name="last_name" autocomplete="family-name" minlength="2" maxlength="80" required></label>
+  <label>Имя<input name="first_name" autocomplete="given-name" minlength="2" maxlength="80" required></label>
+  <label>Отчество (если есть)<input name="patronymic" autocomplete="additional-name" maxlength="80"></label>
+  <p id="eis223-profile-prompt-status" role="status" aria-live="polite"></p>
+  <div class="eis223-profile-actions">
+   <button type="submit" id="eis223-profile-save">Сохранить ФИО</button>
+   <button type="button" id="eis223-profile-later" style="background:#f3f8fc;color:#235b81;border-color:#d5e5f0">Позже</button>
+  </div>
+ </form>
+</div>
 <section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
 <div class="eis223-cabinet-heading">
 <div><p class="eis223-kicker">Персональное пространство</p>
@@ -477,12 +514,56 @@ q('eis223-favorite-form').addEventListener('submit',async event=>{
 window.setInterval(()=>{if(!document.hidden)refreshAlerts()},90000);
 refreshAlerts();
 
+let profilePromptDismissed=false;
+let currentProfileRole='user';
+function showProfileIdentity(name,role){
+ const display=String(name||'').trim();
+ const title=display||'Укажите ФИО';
+ currentProfileRole=role||currentProfileRole;
+ q('eis223-owner-fullname').textContent=display||'ФИО ещё не указано';
+ q('eis223-topbar-fullname').textContent=title;
+ q('eis223-topbar-role').textContent=({user:'Сотрудник',manager:'Руководитель',admin:'Администратор'})[currentProfileRole]||'Личная учётная запись';
+}
 async function refreshMyName(){
  try{
   const person=await get('/me/profile');
-  q('eis223-owner-fullname').textContent=person.full_name||'ФИО ещё не указано';
- }catch{q('eis223-owner-fullname').textContent='Данные профиля временно недоступны'}
+  showProfileIdentity(person.full_name,person.role);
+  if(!person.completed&&!profilePromptDismissed){
+   const form=q('eis223-profile-prompt-form');
+   for(const field of ['last_name','first_name','patronymic']){
+    form.elements.namedItem(field).value=String(person[field]||'');
+   }
+   q('eis223-profile-prompt').hidden=false;
+   form.elements.namedItem('last_name').focus();
+  }
+ }catch{
+  q('eis223-owner-fullname').textContent='Не удалось получить ФИО';
+  q('eis223-topbar-fullname').textContent='Имя временно недоступно';
+ }
 }
+q('eis223-profile-later').addEventListener('click',()=>{
+ profilePromptDismissed=true;
+ q('eis223-profile-prompt').hidden=true;
+});
+q('eis223-profile-prompt-form').addEventListener('submit',async event=>{
+ event.preventDefault();const form=event.currentTarget;
+ const button=q('eis223-profile-save');button.disabled=true;
+ show('eis223-profile-prompt-status','Сохраняем…');
+ try{
+  const response=await fetch('/me/profile',{method:'PUT',credentials:'same-origin',
+   cache:'no-store',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify(Object.fromEntries(new FormData(form)))});
+  if(!response.ok){
+   const result=await response.json().catch(()=>({}));
+   throw Error(typeof result.detail==='string'?result.detail:'Проверьте фамилию и имя');
+  }
+  const data=await response.json();
+  showProfileIdentity(data.full_name,currentProfileRole);
+  q('eis223-profile-prompt').hidden=true;
+  show('eis223-profile-prompt-status','');
+ }catch(error){show('eis223-profile-prompt-status',error.message)}
+ finally{button.disabled=false}
+});
 async function refreshCampaignGoals(){
  const list=q('eis223-manager-goals');list.replaceChildren();
  try{
@@ -600,6 +681,7 @@ if(r.ok){form.reset();await refresh()}
 });
 
 refresh();
+refreshMyName();
 })();
 </script>
 ''').encode("utf-8")
