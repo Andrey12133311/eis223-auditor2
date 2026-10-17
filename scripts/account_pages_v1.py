@@ -6,52 +6,61 @@ def page(title, body):
     return """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>""" + escape(title) + """ · ЕИС Аудитор</title>
-<style>
-:root{font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#203750;background:#f3f7fb;
- font-synthesis:none}
+<style id="eis223-pages-modern">
+:root{font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
+ --page-ink:#203e34;--page-muted:#657b71;--page-main:#087e71;--page-line:#dce8e1;
+ background:#f6f8f6;font-synthesis:none}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;background:radial-gradient(ellipse at top right,#e9f4ff 0%,transparent 44%),#f3f7fb;
+body{margin:0;min-height:100vh;color:var(--page-ink);
+ background:radial-gradient(ellipse at 100% 0%,#e7f4ed,transparent 32%),#f5f8f6;
  -webkit-font-smoothing:antialiased}
-header{background:#fff;border-bottom:1px solid #dfe7f0;padding:18px clamp(18px,5vw,64px);
- font-size:16px;font-weight:780;color:#183b5a;letter-spacing:-.02em}
-main{width:min(100%,960px);margin:clamp(22px,4vw,44px) auto;padding:0 clamp(14px,3vw,24px) 40px}
-.panel{background:#fff;border:1px solid #dfe8f1;border-radius:20px;
- padding:clamp(20px,4vw,38px);box-shadow:0 16px 45px #173d6110;min-width:0}
-h1{font-size:clamp(24px,4.2vw,34px);font-weight:800;line-height:1.2;letter-spacing:-.035em;color:#193f63;margin:0 0 13px}
-h2{font-size:21px;color:#213f5c}
-p{line-height:1.65;color:#65788c;margin:12px 0}
-nav{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:12px 0}
-a{color:#2469a4;font-weight:600;text-decoration:none}
+header{background:#fff;border-bottom:1px solid var(--page-line);padding:17px clamp(16px,5vw,62px);
+ font-size:16px;font-weight:800;color:#25453a;letter-spacing:-.025em}
+main{width:min(100%,1050px);margin:clamp(22px,4vw,45px) auto;
+ padding:0 clamp(12px,3vw,24px) 44px}
+.panel{background:#fff;border:1px solid var(--page-line);
+ border-radius:20px;box-shadow:0 15px 42px #153d300c;padding:clamp(20px,4vw,38px);
+ min-width:0}
+h1{font-size:clamp(25px,3.6vw,33px);font-weight:820;letter-spacing:-.04em;
+ line-height:1.18;color:#204337;margin:0 0 10px}
+h2{color:#24493d;font-size:21px}
+p{color:var(--page-muted);font-size:14px;line-height:1.7;margin:11px 0}
+nav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:13px 0}
+a{color:#09786a;font-weight:680;text-decoration:none}
 a:hover{text-decoration:underline}
-label{display:block;margin-top:17px;font-weight:650;color:#35516b}
-input,select,textarea{display:block;width:100%;min-height:45px;
- padding:11px 13px;border:1px solid #c7d7e7;border-radius:11px;
- background:#fff;color:#203750;font:inherit;margin-top:7px}
-input:focus{border-color:#3a83bd;outline:3px solid #d7e9fb}
-button{min-height:41px;margin:9px 6px 5px 0;border:1px solid #2365a3;
- border-radius:10px;background:#2467a6;color:white;padding:10px 15px;
- font:650 14px system-ui,sans-serif;cursor:pointer;transition:background .15s,box-shadow .15s}
-button:hover:not(:disabled){background:#164c81;box-shadow:0 4px 12px #1a558628}
-button:disabled{opacity:.5;cursor:wait}
-a:focus-visible,button:focus-visible{outline:3px solid #8ac2f0;outline-offset:3px}
-.message,[role=status]{min-height:19px;font-size:13px;color:#59728c}
-table{border-collapse:separate;border-spacing:0;width:100%;margin-top:18px;
- border:1px solid #dfe9f3;border-radius:14px;overflow:hidden}
-th,td{padding:13px 15px;text-align:left;border-bottom:1px solid #ebf0f6;vertical-align:middle}
-th{background:#f3f8fe;color:#47617b;font-size:13px;font-weight:750}
+label{display:block;margin-top:16px;font-weight:680;color:#3f5b50}
+input,textarea,select{display:block;width:100%;min-height:44px;background:#fff;color:#213d34;
+ border:1px solid #cbdcd2;border-radius:10px;padding:11px 13px;margin-top:7px;
+ font:inherit}
+input:focus{border-color:#159484;outline:3px solid #cceddf;outline-offset:1px}
+button{border:1px solid #087e71;background:#087e71;color:#fff;border-radius:10px;
+ font:700 13px system-ui;min-height:40px;padding:10px 14px;margin:8px 5px 4px 0;
+ cursor:pointer;transition:background .15s}
+button:hover:not(:disabled){background:#04695e}
+button:disabled{cursor:wait;opacity:.56}
+.message,[role=status]{font-size:13px;color:#59766b;min-height:20px}
+table{border:1px solid #dfe9e3;border-radius:13px;border-collapse:separate;border-spacing:0;
+ width:100%;margin-top:16px;overflow:hidden}
+th,td{padding:12px 13px;vertical-align:middle;text-align:left;border-bottom:1px solid #edf1ee}
+th{font-size:12px;font-weight:750;color:#507267;background:#eff6f1}
 tr:last-child td{border-bottom:0}
-tbody tr:hover{background:#f8fbff}
+tbody tr:hover{background:#f7fbf8}
 td button{margin:3px 5px 3px 0}
-#rows td:last-child{min-width:210px}
-#personal-procurements,#personal-findings{margin-top:18px;padding:15px;border-radius:13px;
- background:#f8fbff;border:1px solid #e4edf5}
+#rows td:last-child{min-width:185px}
+#personal-procurements,#personal-findings{margin-top:16px;padding:15px;
+ border-radius:12px;border:1px solid #e1eae4;background:#f8fbf9}
+.eis-my-check{border-color:#dce9e2!important;background:#f9fcfa!important}
+.eis-my-check h2{color:#1d5446!important}
+.eis-my-actions a{background:#087e71!important;border-color:#087e71!important}
+.eis-my-actions a:hover{background:#04695e!important}
+.eis-pill{background:#e7f6ed!important;color:#16745b!important}
+:focus-visible{outline:3px solid #9bdecb;outline-offset:2px}
 @media(max-width:700px){
- header{padding:16px 18px}
- main{margin:20px auto;padding:0 12px 30px}
- .panel{padding:20px 16px;border-radius:16px}
+ header{padding:15px 17px}
+ main{margin:16px auto;padding:0 11px 26px}
+ .panel{padding:19px 15px;border-radius:16px}
  table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
- th,td{padding:11px 12px;white-space:normal}
- td button{margin-top:5px}
+ th,td{padding:11px 10px}
 }
 @media(prefers-reduced-motion:reduce){button{transition:none}}
 </style></head><body><header>ЕИС Аудитор · Личный кабинет</header>
@@ -266,7 +275,7 @@ refresh();loadHistorical();
 </script>""")
 
 MEMOS = page("Служебные записки", """
-<h1>Мои служебные записки</h1><p>Доступны только документы, принадлежащие вашей учётной записи.</p>
+<h1>Мои служебные записки</h1><p>Документы, сохранённые за вашей учётной записью. Перейти сюда можно из личного кабинета на главной странице.</p>
 <p><a href="/account/home">← Личный кабинет</a></p>
 <p id="message" role="status">Загружаем…</p><table><thead><tr><th>Документ</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
 <script>
