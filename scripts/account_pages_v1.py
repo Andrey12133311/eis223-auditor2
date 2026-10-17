@@ -172,6 +172,17 @@ async function loadBatches(){
  const previous=document.getElementById('personal-procurements');if(previous)previous.remove();
  panel.id='personal-procurements';document.getElementById('rows').after(panel);
  }catch{m.textContent='Ошибка соединения'}});action.append(show);
+ const jobs=document.createElement('button');jobs.textContent='Статусы заданий';
+ jobs.addEventListener('click',async()=>{
+ jobs.disabled=true;
+ try{
+ const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/jobs',{credentials:'same-origin'});
+ if(!res.ok){m.textContent='Не удалось загрузить статусы';return}
+ const data=await res.json();
+ const labels={queued:'В очереди',running:'Выполняется',completed:'Завершено',failed:'Ошибка'};
+ m.textContent=data.length?data.map(j=>j.reg_number+' — '+(labels[j.status]||'Неизвестный статус')+'; попыток: '+j.attempts).join(' | '):'Заданий пока нет';
+ }catch{m.textContent='Ошибка соединения'}finally{jobs.disabled=false}
+ });action.append(jobs);
  }
  const btn=document.createElement('button');btn.textContent='Удалить из моих';
  btn.addEventListener('click',async()=>{
