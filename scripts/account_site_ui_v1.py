@@ -117,6 +117,14 @@ _STYLE = """
 .eis223-workspace .eis223-tile li button:hover{background:#fff3f3!important}
 .eis223-workspace :is(button,a,input):focus-visible{
  outline:3px solid #86bfdf!important;outline-offset:2px}
+.eis223-tile li.eis223-empty{background:#f7fafc;color:#6c8192;
+ border:1px dashed #d2e2ec;border-radius:8px;padding:15px 12px}
+.eis223-personal .eis223-tile{transition:box-shadow .15s,border-color .15s}
+.eis223-personal .eis223-tile:hover{border-color:#c5dbea;box-shadow:0 8px 22px #204e7010}
+.eis223-personal .eis223-tile li a{white-space:nowrap;font-size:12px}
+.eis223-personal .eis223-tile li .eis223-check-desc{gap:5px}
+.eis223-personal .eis223-tile-head{padding-bottom:9px;border-bottom:1px solid #edf2f5}
+.eis223-workspace .eis223-tile input{max-width:100%}
 @media(max-width:1100px){.eis223-columns{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:660px){
  .eis223-menu{padding:9px 12px;gap:7px}
@@ -157,18 +165,19 @@ def site_header(role="user"):
 <div class="eis223-cabinet-heading">
 <div><p class="eis223-kicker">Персональное пространство</p>
 <h2>Личный кабинет</h2>
-<p class="eis223-subtle">Ваши закупки, тематические проверки и служебные записки</p></div>
+<p class="eis223-subtle">Самостоятельные и тематические проверки, документы и результаты в одном месте</p></div>
 <span class="eis223-panel-mark">Доступно только вашей учётной записи</span></div>
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
 <span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
 <div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">01</span>
-<div><h3>Сохранённые закупки</h3><p class="eis223-tile-sub">Добавленные вами номера ЕИС</p></div></div>
-<ul id="eis223-my-procurements"><li>Загрузка…</li></ul>
+<div><h3>Самостоятельные проверки</h3><p class="eis223-tile-sub">Закупки, которые вы запустили на проверку</p></div></div>
+<ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
+<a class="eis223-all-checks" href="/account/home">Все самостоятельные проверки →</a>
 <form id="eis223-add-procurement">
 <input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
 name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
-<button type="submit">Добавить</button></form>
+<button type="submit">Запустить проверку</button></form>
 <p role="status" id="eis223-add-status"></p>
 </div>
 <div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">02</span>
@@ -197,11 +206,11 @@ if(!r.ok)throw Error('Ошибка загрузки');return await r.json();
 async function refresh(){
 try{
 const [summary,purchases,batches,memos]=await Promise.all([
-get('/me/summary'),get('/me/procurements'),get('/api/thematic/history'),get('/me/memos')]);
+get('/me/summary'),get('/me/manual-checks'),get('/api/thematic/history'),get('/me/memos')]);
 const realBatches=batches.batches||[];
 const overview=q('eis223-personal-summary');overview.replaceChildren();
 const counters=[
- ['Закупки',summary.procurements],['Тематические проверки',realBatches.length],
+ ['Самостоятельные',purchases.length],['Тематические проверки',realBatches.length],
  ['Служебные записки',summary.memos]];
 for(const [label,value] of counters){
  const chip=document.createElement('span'),number=document.createElement('b');
@@ -211,10 +220,42 @@ for(const [label,value] of counters){
  caption.textContent=label;chip.append(number,caption);overview.append(chip);
 }
 const pl=q('eis223-my-procurements');pl.replaceChildren();
-if(!purchases.length){const li=document.createElement('li');li.textContent='Пока нет закупок';pl.append(li)}
-for(const item of purchases.slice(0,10)){
- const li=document.createElement('li'),a=document.createElement('a');
- a.href='/';a.textContent=item.reg_number;li.append(a);pl.append(li);
+if(!purchases.length){
+ const li=document.createElement('li');li.className='eis223-empty';
+ li.textContent='Пока нет самостоятельных проверок. Запустите проверку по номеру ЕИС.';
+ pl.append(li);
+}
+const statusLabels={queued:'Ожидает загрузки',leased:'Получение данных ЕИС',
+ done:'Загрузка завершена',partial:'Частично загружено',deferred:'Ожидает источника',
+ error:'Ошибка источника',unknown:'Проверяется статус'};
+for(const item of purchases.slice(0,8)){
+ const li=document.createElement('li'),body=document.createElement('div');
+ body.className='eis223-check-desc';
+ const num=document.createElement('strong');num.textContent='№ '+item.reg_number;
+ const meta=document.createElement('small');
+ const stamp=Date.parse(item.started_at||'');
+ const when=Number.isFinite(stamp)?new Date(stamp).toLocaleDateString('ru-RU')+' · ':'';
+ const checked=Math.max(0,Number(item.documents_checked||0));
+ const found=Math.max(0,Number(item.violations||0));
+ meta.textContent=when+(statusLabels[item.job_status]||'Задание ЕИС')+
+ ' · Документов: '+checked+' · Нарушений: '+found;
+ body.append(num,meta);li.append(body);
+ const open=document.createElement('a');open.href=item.card_available?
+ '/check-new/'+encodeURIComponent(item.reg_number):'/account/home';
+ open.textContent=item.card_available?'Карточка':'Подробности';li.append(open);
+ const del=document.createElement('button');del.type='button';del.textContent='Убрать';
+ del.title='Убрать из личного кабинета, не удаляя документы и результаты проверки';
+ del.onclick=async()=>{
+  if(!confirm('Убрать эту самостоятельную проверку из вашего кабинета? Оригиналы ЕИС и результаты не удалятся.'))return;
+  del.disabled=true;
+  try{
+   const response=await fetch('/me/manual-checks/'+encodeURIComponent(item.reg_number),
+    {method:'DELETE',credentials:'same-origin'});
+   if(!response.ok)throw Error('Ошибка удаления');
+   await refresh();
+  }catch{del.disabled=false;show('eis223-add-status','Не удалось убрать проверку')}
+ };
+ li.append(del);pl.append(li);
 }
 const bl=q('eis223-my-batches');bl.replaceChildren();
 if(!realBatches.length){const li=document.createElement('li');li.textContent='Запущенных вами тематических проверок пока нет';bl.append(li)}
@@ -270,9 +311,9 @@ const reg=String(new FormData(form).get('reg')||'').trim();
 if(!/^3[0-9]{10}$/.test(reg))return show('eis223-add-status','Некорректный номер ЕИС');
 const btn=form.querySelector('button');btn.disabled=true;
 try{
-const r=await fetch('/me/procurements/'+encodeURIComponent(reg),
+const r=await fetch('/me/manual-checks/'+encodeURIComponent(reg),
 {method:'POST',credentials:'same-origin'});
-show('eis223-add-status',r.ok?'Закупка сохранена':'Не удалось сохранить');
+show('eis223-add-status',r.ok?'Самостоятельная проверка запущена':'Не удалось запустить проверку');
 if(r.ok){form.reset();await refresh()}
 }catch{show('eis223-add-status','Ошибка соединения')}finally{btn.disabled=false}
 });
