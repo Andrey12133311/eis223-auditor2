@@ -41,6 +41,10 @@ def origin_matches(origin, canonical_origin):
     return (
         parsed.scheme == expected.scheme == "https"
         and parsed.netloc == expected.netloc
+        and parsed.username is None and parsed.password is None
+        and expected.username is None and expected.password is None
+        and parsed.port == expected.port
+        and parsed.hostname == expected.hostname
         and parsed.path in ("", "/")
         and not parsed.query and not parsed.fragment
     )
