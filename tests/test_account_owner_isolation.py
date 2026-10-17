@@ -83,6 +83,24 @@ class OwnerIsolationTests(unittest.TestCase):
                 private.batch_details(batch_id, object(), Response())
         self.assertEqual(caught.exception.status_code, 404)
 
+    def test_personal_queue_procurement_is_owner_scoped(self):
+        db = FakeDB()
+        batch_id = 'personal-' + uuid4().hex
+        with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_A, 'user', 'approved')), patch.object(private, 'require_origin'), patch.object(private, 'owns_batch', return_value=True):
+            result = private.add_personal_batch_procurement(batch_id, '32616412317', object(), Response())
+        self.assertTrue(result['saved'])
+        self.assertFalse(result['execution_started'])
+        self.assertEqual(db.calls[-1][1], (OWNER_A, batch_id, '32616412317'))
+
+    def test_other_user_cannot_add_to_personal_queue(self):
+        db = FakeDB()
+        batch_id = 'personal-' + uuid4().hex
+        with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'require_origin'), patch.object(private, 'owns_batch', return_value=False):
+            with self.assertRaises(HTTPException) as caught:
+                private.add_personal_batch_procurement(batch_id, '32616412317', object(), Response())
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(db.calls, [])
+
     def test_unowned_memo_download_returns_not_found(self):
         db = FakeDB()
         with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'owned_memo_key', return_value=None) as lookup:
