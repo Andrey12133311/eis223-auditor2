@@ -111,6 +111,29 @@ async function api(url,method="GET",body){
  if(!r.ok)throw Error(typeof data.detail==="string"?data.detail:"Ошибка HTTP "+r.status);
  return data;
 }
+async function loadToday(){
+ const status=el('today-status');status.textContent='Получение данных…';
+ try{
+  const data=await api('/me/center/dashboard');
+  for(const [id,value] of [['today-tasks',data.task_active],['today-campaigns',data.campaign_active],
+   ['today-manual',data.manual_checks],['today-alerts',data.unread_notifications]]){
+   el(id).textContent=Number(value||0).toLocaleString('ru-RU');
+  }
+  const fill=(target,items,format)=>{
+   const root=el(target);root.replaceChildren();
+   if(!items.length)root.append(make('p','Нет активных записей'));
+   for(const item of items.slice(0,12)){
+    const row=make('div');row.className='staff-smallrow';
+    row.append(make('strong',item.title||item.reg_number||'Проверка'),
+     make('small',format(item)));
+    root.append(row);
+   }
+  };
+  fill('today-task-list',data.tasks||[],x=>'№ '+(x.reg_number||'—')+' · '+x.status);
+  fill('today-campaign-list',data.campaigns||[],x=>'Цель: '+x.target_violations+' нарушений · '+x.status);
+  status.textContent='Данные обновлены';
+ }catch(error){status.textContent='Не удалось получить данные: '+error.message}
+}
 function section(tab){
  document.querySelectorAll('[data-staff-section]').forEach(x=>x.hidden=x.dataset.staffSection!==tab);
  document.querySelectorAll('[data-staff-tab]').forEach(x=>x.setAttribute("aria-selected",String(x.dataset.staffTab===tab)));
@@ -118,6 +141,7 @@ function section(tab){
  if(tab==='activity')loadHistory();
  if(tab==='overview')loadDashboard();
  if(tab==='library')loadLibrary();
+ if(tab==='today')loadToday();
 }
 document.querySelectorAll('[data-staff-tab]').forEach(x=>x.onclick=()=>section(x.dataset.staffTab));
 el('staff-refresh').addEventListener('click',()=>{
@@ -654,7 +678,7 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 </div>
 <div class="staff-layout">
 <nav class="tabs" aria-label="Разделы рабочего места">
-<button type="button" data-staff-tab="overview" aria-selected="true">Обзор</button>
+<button type="button" data-staff-tab="overview" aria-selected="true">Обзор</button><button type="button" data-staff-tab="today" aria-selected="false">Работа на сегодня</button>
 <button type="button" data-staff-tab="goals" aria-selected="false">Нарушения и поручения</button>
 <button type="button" data-staff-tab="bulk" aria-selected="false">Массовая проверка</button>
 <button type="button" data-staff-tab="templates" aria-selected="false">Мои шаблоны</button>
@@ -663,6 +687,23 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <button type="button" data-staff-tab="library" aria-selected="false">База нарушений</button>
 </nav>
 <div class="staff-panels">
+<section class="panel" data-staff-section="today" hidden>
+<h2>Работа на сегодня</h2>
+<p>Актуальные поручения, самостоятельные и тематические проверки, уведомления и служебные записки.</p>
+<div class="grid">
+<div class="metric"><small>Активные поручения</small><strong id="today-tasks">—</strong></div>
+<div class="metric"><small>Тематические проверки</small><strong id="today-campaigns">—</strong></div>
+<div class="metric"><small>Самостоятельные проверки</small><strong id="today-manual">—</strong></div>
+<div class="metric"><small>Непрочитанные уведомления</small><strong id="today-alerts">—</strong></div>
+</div>
+<div class="action-row">
+<a href="/account/home">Мои проверки</a><a href="/account/thematic">Тематические проверки</a>
+<a href="/account/memos">Служебные записки ODT</a>
+</div>
+<h3>Поручения руководителя</h3><div id="today-task-list"></div>
+<h3>Тематические проверки</h3><div id="today-campaign-list"></div>
+<p class="notice" id="today-status" role="status">Загрузка при открытии раздела.</p>
+</section>
 <section class="panel" data-staff-section="overview">
 <div class="staff-section-heading"><h2>Рабочая панель</h2><small id="staff-updated" class="staff-statline">Получение актуальных данных</small></div>
 <div class="staff-auto"><span class="staff-dot" aria-hidden="true"></span>
