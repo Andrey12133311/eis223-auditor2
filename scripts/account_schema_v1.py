@@ -7,6 +7,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS account_users (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL,
+    last_name TEXT NOT NULL DEFAULT '',
+    first_name TEXT NOT NULL DEFAULT '',
+    patronymic TEXT NOT NULL DEFAULT '',
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','manager','admin')),
     status TEXT NOT NULL DEFAULT 'pending'
