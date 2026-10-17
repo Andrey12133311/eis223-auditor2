@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - "scripts/account_*"
+      - "scripts/v373_thematic_email_notifications.py"
       - "tests/test_account_*"
       - ".github/workflows/account-tests.yml"
 jobs:

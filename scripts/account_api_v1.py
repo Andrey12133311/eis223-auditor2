@@ -155,6 +155,9 @@ def approve(user_id: str, request: Request):
         raise HTTPException(422, "Некорректный идентификатор")
     with connect() as db:
         success = approve_user(db, actor[0], uid)
+        if success:
+            from scripts.account_notifications_v1 import enqueue_access
+            enqueue_access(db, uid, "approved")
     if not success:
         raise HTTPException(409, "Заявка уже рассмотрена или не найдена")
     return {"status": "approved"}

@@ -21,6 +21,30 @@ CREATE TABLE IF NOT EXISTS account_users (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS account_users_email_unique
     ON account_users (lower(email));
+CREATE TABLE IF NOT EXISTS account_mail_outbox (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    event_key TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    batch_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TIMESTAMPTZ,
+    last_error TEXT,
+    UNIQUE(user_id,event_key)
+);
+CREATE INDEX IF NOT EXISTS account_mail_outbox_pending
+    ON account_mail_outbox(next_attempt_at,id) WHERE sent_at IS NULL;
+CREATE TABLE IF NOT EXISTS account_thematic_email_seen (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    batch_id TEXT NOT NULL,
+    reg_number TEXT NOT NULL,
+    finding_hash TEXT NOT NULL,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,batch_id,reg_number,finding_hash)
+);
 CREATE TABLE IF NOT EXISTS account_email_challenges (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),

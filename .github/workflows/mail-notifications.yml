@@ -1,0 +1,31 @@
+name: Email notification regression checks
+on:
+  pull_request:
+    paths:
+      - "scripts/account_notifications_v1.py"
+      - "scripts/v373_thematic_email_notifications.py"
+      - "scripts/account_api_v1.py"
+      - "scripts/v368_manager_workflow.py"
+      - "scripts/account_schema_v1.py"
+      - "scripts/railway_start_v282.py"
+      - "tests/test_account_notifications_v1.py"
+      - ".github/workflows/mail-notifications.yml"
+  push:
+    branches:
+      - thematic-audit-20261015
+    paths:
+      - "scripts/account_notifications_v1.py"
+      - "scripts/v373_thematic_email_notifications.py"
+      - "tests/test_account_notifications_v1.py"
+jobs:
+  emails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax verification
+        run: python -m py_compile scripts/account_notifications_v1.py scripts/v373_thematic_email_notifications.py scripts/account_api_v1.py scripts/v368_manager_workflow.py scripts/account_schema_v1.py scripts/railway_start_v282.py
+      - name: Mail queue and thematic finding tests
+        run: python -m unittest discover -s tests -p 'test_account_notifications_v1.py' -v
