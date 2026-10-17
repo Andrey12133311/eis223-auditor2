@@ -98,7 +98,7 @@ SCRIPT=r"""
 const ROLE=__ROLE__;
 const $=id=>document.getElementById(id);
 const labels={assigned:"Назначено",in_progress:"В работе",submitted:"На согласовании",returned:"Возвращено",completed:"Завершено",cancelled:"Отменено",approved:"Согласовано",rejected:"Отклонено"};
-let cache={tasks:[],team:[],memos:[],alerts:[],dashboard:null,users:[]};
+let cache={tasks:[],team:[],memos:[],alerts:[],thematic:[],quality:null,dashboard:null,users:[]};
 let currentTab="overview";
 const tag=(name,cls="",value="")=>{const x=document.createElement(name);if(cls)x.className=cls;if(value!==undefined)x.textContent=String(value);return x};
 const status=(s)=>{const text=labels[s]||s||"Неизвестно";const cls=["completed","approved"].includes(s)?"good":["returned","cancelled","rejected"].includes(s)?"bad":["submitted"].includes(s)?"warn":"";return tag("span","mgr-chip "+cls,text)};
@@ -121,7 +121,7 @@ function show(name){
  currentTab=name;
  document.querySelectorAll(".mgr-tab").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.tab===name)));
  document.querySelectorAll(".mgr-section").forEach(x=>x.classList.toggle("mgr-hidden",x.dataset.section!==name));
- const titles={overview:"Панель управления",tasks:"Поручения и сроки",findings:"Согласование нарушений",memos:"Служебные записки",team:"Сотрудники",history:"Журнал действий"};
+ const titles={overview:"Панель управления",tasks:"Поручения и сроки",findings:"Согласование нарушений",thematic:"Тематические проверки подразделения",quality:"Контроль качества",memos:"Служебные записки",team:"Сотрудники",history:"Журнал действий"};
  $("mgr-title").textContent=titles[name]||"Кабинет руководителя";
  if(name==="findings")fillFindingTarget();
 }
@@ -273,6 +273,37 @@ function renderAdmin(){
  }
  mountRows("mgr-admin-rows",rows);
 }
+function renderThematic(){
+ const rows=[];
+ for(const item of cache.thematic||[]){
+  const tr=tag("tr");
+  const cats=Array.isArray(item.categories)?item.categories.join(", "):"Тематическая проверка";
+  tr.append(cell(item.employee),cell(cats||"Тематическая проверка"),
+    cell(fmt(item.created_at)),cell(item.purchases||0),cell(item.violations||0),cell(status(item.status)));
+  rows.push(tr);
+ }
+ mountRows("mgr-thematic-rows",rows);
+ $("mgr-thematic-empty").classList.toggle("mgr-hidden",!!rows.length);
+}
+function renderQuality(){
+ const data=cache.quality,root=$("mgr-quality-items");root.replaceChildren();
+ if(!data){root.append(tag("p","mgr-muted","Состояние доказательств временно недоступно"));return}
+ $("mgr-quality-summary").textContent="Проверено последних закупок: "+data.checked_latest_procurements+
+ " · Выявленных эпизодов: "+data.reviewed_finding_episodes+
+ " · Требуют уточнения доказательств: "+data.needs_human_verification;
+ const issues=data.issues||[];
+ if(!issues.length){root.append(tag("p","mgr-muted","В просмотренном объёме дополнительных замечаний нет."));return}
+ for(const item of issues){
+  const card=tag("article","mgr-entry");
+  card.append(tag("h3","",item.title),tag("p","mgr-muted",
+    "№ "+item.reg_number+" · "+item.employee));
+  card.append(tag("p","mgr-warning",(item.warnings||[]).join(" · ")));
+  card.append(action("Открыть доказательства","mgr-outline",async()=>{
+    await openFindings(item.user_id,item.reg_number);show("findings");
+  }));
+  root.append(card);
+ }
+}
 function renderHistory(items){
  const rows=[];
  for(const item of items){
@@ -353,7 +384,8 @@ $("mgr-task-create").onsubmit=async e=>{
 };
 async function reload(){
  const paths=[["dashboard","/manager/dashboard"],["tasks","/manager/tasks"],["team","/manager/team"],
-  ["memos","/manager/memos"],["alerts","/manager/alerts"]];
+  ["memos","/manager/memos"],["alerts","/manager/alerts"],
+  ["thematic","/manager/thematic"],["quality","/manager/quality"]];
  const all=await Promise.allSettled(paths.map(async([key,url])=>[key,await api(url)]));
  for(const a of all){
   if(a.status==="fulfilled")cache[a.value[0]]=a.value[1];
@@ -364,7 +396,7 @@ async function reload(){
  }
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
- populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();
+ populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();
  $("mgr-refresh").disabled=false;
 }
 $("mgr-refresh").onclick=async()=>{const btn=$("mgr-refresh");btn.disabled=true;try{await reload();toast("Сведения обновлены")}finally{btn.disabled=false}};
@@ -393,7 +425,9 @@ __STYLE__</head><body>
 <span class="mgr-side-heading">УПРАВЛЕНИЕ</span>
 <button type="button" class="mgr-tab" data-tab="overview" aria-selected="true"><span class="mgr-tab-icon">▦</span>Обзор</button>
 <button type="button" class="mgr-tab" data-tab="tasks" aria-selected="false"><span class="mgr-tab-icon">☷</span>Поручения</button>
+<button type="button" class="mgr-tab" data-tab="thematic" aria-selected="false"><span class="mgr-tab-icon">◈</span>Тематические</button>
 <button type="button" class="mgr-tab" data-tab="findings" aria-selected="false"><span class="mgr-tab-icon">⚖</span>Нарушения</button>
+<button type="button" class="mgr-tab" data-tab="quality" aria-selected="false"><span class="mgr-tab-icon">✓</span>Качество</button>
 <button type="button" class="mgr-tab" data-tab="memos" aria-selected="false"><span class="mgr-tab-icon">▤</span>Записки</button>
 <button type="button" class="mgr-tab" data-tab="team" aria-selected="false"><span class="mgr-tab-icon">♙</span>Сотрудники</button>
 <button type="button" class="mgr-tab" data-tab="history" aria-selected="false"><span class="mgr-tab-icon">◷</span>Журнал действий</button>
@@ -444,6 +478,22 @@ __STYLE__</head><body>
 <th>Поручение / закупка</th><th>Исполнитель</th><th>Срок</th><th>Статус</th><th>Действия</th>
 </tr></thead><tbody id="mgr-task-rows"></tbody></table></div>
 <p class="mgr-muted mgr-hidden" id="mgr-task-empty">Поручений пока нет.</p></div>
+</section>
+<section class="mgr-section mgr-hidden" data-section="thematic">
+<div class="mgr-card"><h2>Тематические проверки сотрудников</h2>
+<p>Только реальные запуски ЕИС, закреплённые за сотрудниками подразделения.
+Количество нарушений рассчитывается без повторного подсчёта одинаковых эпизодов.</p>
+<div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
+<th>Исполнитель</th><th>Направления</th><th>Дата</th><th>Закупок</th><th>Нарушений</th><th>Статус</th>
+</tr></thead><tbody id="mgr-thematic-rows"></tbody></table></div>
+<p id="mgr-thematic-empty" class="mgr-muted mgr-hidden">Тематических проверок пока нет.</p></div>
+</section>
+<section class="mgr-section mgr-hidden" data-section="quality">
+<div class="mgr-card"><h2>Контроль полноты доказательств</h2>
+<p>Проверяем, есть ли правовая норма, документ и фактическое доказательство.
+Недостаток данных не превращается в новое нарушение и блокирует утверждение.</p>
+<div id="mgr-quality-summary" class="mgr-banner">Сведения загружаются…</div>
+<div id="mgr-quality-items"></div></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="findings">
 <div class="mgr-card"><h2>Рассмотрение нарушений</h2>
