@@ -146,7 +146,21 @@ async function loadBatches(){
  show.addEventListener('click',async()=>{try{
  const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements',{credentials:'same-origin'});
  if(!res.ok){m.textContent='Не удалось получить список закупок';return}
- const list=await res.json();m.textContent=list.length?'Закупки: '+list.map(x=>x.reg_number).join(', '):'В очереди пока нет закупок';
+ const list=await res.json();m.textContent=list.length?'Закупок в очереди: '+list.length:'В очереди пока нет закупок';
+ const panel=document.createElement('div');panel.setAttribute('role','region');
+ const heading=document.createElement('p');heading.textContent='Закупки очереди '+item.batch_id;panel.append(heading);
+ for(const procurement of list){
+ const line=document.createElement('div'),label=document.createElement('span'),remove=document.createElement('button');
+ label.textContent=procurement.reg_number+' ';remove.textContent='Убрать закупку';
+ remove.addEventListener('click',async()=>{
+ remove.disabled=true;
+ try{const deleted=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements/'+encodeURIComponent(procurement.reg_number),{method:'DELETE',credentials:'same-origin'});
+ if(deleted.ok){line.remove();m.textContent='Закупка удалена из личной очереди'}else{m.textContent='Ошибка удаления закупки';remove.disabled=false}
+ }catch{m.textContent='Ошибка соединения';remove.disabled=false}
+ });line.append(label,remove);panel.append(line);
+ }
+ const previous=document.getElementById('personal-procurements');if(previous)previous.remove();
+ panel.id='personal-procurements';document.getElementById('rows').after(panel);
  }catch{m.textContent='Ошибка соединения'}});action.append(show);
  }
  const btn=document.createElement('button');btn.textContent='Удалить из моих';
