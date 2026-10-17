@@ -95,8 +95,7 @@ def login(data: Credentials, request: Request, response: Response):
             raise HTTPException(401, "Неверные данные или доступ не подтверждён")
         token, expiry = create_session(db, row[0])
     response.set_cookie(SESSION_COOKIE, token, **cookie_options())
-    # Old persistent cookie may remain on the device; never accept it again.
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    # Remove ONLY the legacy persistent cookie, not the new session cookie.
     response.delete_cookie("eis223_session", path="/")
     response.headers.update(no_store_headers())
     return {"status": "ok"}
@@ -108,6 +107,7 @@ def logout(request: Request, response: Response):
     token = request.cookies.get(SESSION_COOKIE, "")
     with connect() as db:
         revoke_session(db, token)
+    response.delete_cookie(SESSION_COOKIE, path="/")
     response.delete_cookie("eis223_session", path="/")
     response.headers.update(no_store_headers())
     return {"status": "ok"}
