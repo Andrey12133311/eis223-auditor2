@@ -56,6 +56,12 @@ def eis(request):
     if ns is None:raise HTTPException(503,"Загрузчик ЕИС временно недоступен")
     return ns
 
+@router.get("/options")
+def options(request:Request):
+    owner(request)
+    return {"categories":CATEGORIES,"legal_forms":LEGAL_FORMS,
+            "checklist":CHECKS}
+
 class Bulk(BaseModel):
     reg_numbers:list[str]=Field(min_length=1,max_length=30)
     @field_validator("reg_numbers")
@@ -124,14 +130,13 @@ def _working_records(request,uid):
         raw=db.execute(MANUAL_OWNED,(uid,)).fetchall()
     records=[{"reg_number":r[0],"job_id":r[1],"created_at":r[2],
               "last_started_at":r[3]} for r in raw]
-    return _read_only_status(eis(request),records)
+    return _read_only_status(eis(request),records) if records else []
 
 @router.get("/overview")
 def overview(request:Request,response:Response):
     uid=owner(request)
     response.headers.update(no_store_headers())
     rows=_working_records(request,uid)
-    from scripts.v367_private_features import memo_archive
     with connect() as db:
         assignments=db.execute(
             "SELECT status,COUNT(*) FROM account_manager_tasks WHERE user_id=%s GROUP BY status",
