@@ -108,11 +108,10 @@ load();
 
 THEMATIC = page("Тематические проверки", """
 <h1>Мои тематические проверки</h1>
-<p>Сохранённые в вашем личном кабинете очереди. Добавление не запускает проверку.</p>
+<p>Здесь автоматически отображаются тематические проверки, привязанные к вашей учётной записи. Идентификаторы вводить не нужно.</p>
 <p><a href="/">Общая проверка</a> · <a href="/account/home">← Личный кабинет</a></p>
 <button id="create-personal" type="button">Создать личную очередь</button>
-<form id="add-batch"><label>Идентификатор тематической очереди
-<input name="batch" required maxlength="200"></label><button>Сохранить очередь</button></form>
+
 <p id="message" role="status"></p>
 <table><thead><tr><th>Очередь</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
 <script>
@@ -125,7 +124,7 @@ async function loadBatches(){
  const data=await r.json(),rows=document.getElementById('rows');rows.replaceChildren();
  for(const item of data){
  const tr=document.createElement('tr'),name=document.createElement('td'),action=document.createElement('td');
- name.textContent=item.batch_id;
+ name.textContent='Тематическая проверка';
  if(item.batch_id.startsWith('personal-')){
  const details=document.createElement('button');details.textContent='Статус';
  details.addEventListener('click',async()=>{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{credentials:'same-origin'});
@@ -222,13 +221,7 @@ document.getElementById('create-personal').addEventListener('click',async()=>{
  if(r.ok)loadBatches();
  }catch{m.textContent='Ошибка соединения'}finally{button.disabled=false}
 });
-document.getElementById('add-batch').addEventListener('submit',async e=>{
- e.preventDefault();const m=document.getElementById('message');
- const id=new FormData(e.currentTarget).get('batch');
- const r=await fetch('/me/thematic-batches/'+encodeURIComponent(id),{method:'POST',credentials:'same-origin'});
- m.textContent=r.ok?'Очередь сохранена':'Не удалось сохранить очередь';
- if(r.ok){e.currentTarget.reset();loadBatches()}
-});
+
 loadBatches();
 </script>""")
 
