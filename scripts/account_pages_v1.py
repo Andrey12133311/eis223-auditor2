@@ -132,6 +132,22 @@ async function loadBatches(){
  if(!res.ok){m.textContent='Не удалось получить статус';return}
  const info=await res.json();m.textContent=info.execution_started?'Проверка выполняется':'Очередь сохранена, проверка ещё не запущена';});
  action.append(details);
+ const add=document.createElement('button');add.textContent='Добавить закупку';
+ add.addEventListener('click',async()=>{
+ const reg=prompt('Номер закупки ЕИС (11 цифр, начинается с 3)');
+ if(reg===null)return;
+ if(!/^3[0-9]{10}$/.test(reg)){m.textContent='Некорректный номер ЕИС';return}
+ add.disabled=true;
+ try{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements/'+reg,{method:'POST',credentials:'same-origin'});
+ m.textContent=res.ok?'Закупка добавлена в личную очередь. Проверка ещё не запущена':'Не удалось добавить закупку';
+ }catch{m.textContent='Ошибка соединения'}finally{add.disabled=false}
+ });action.append(add);
+ const show=document.createElement('button');show.textContent='Закупки';
+ show.addEventListener('click',async()=>{try{
+ const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements',{credentials:'same-origin'});
+ if(!res.ok){m.textContent='Не удалось получить список закупок';return}
+ const list=await res.json();m.textContent=list.length?'Закупки: '+list.map(x=>x.reg_number).join(', '):'В очереди пока нет закупок';
+ }catch{m.textContent='Ошибка соединения'}});action.append(show);
  }
  const btn=document.createElement('button');btn.textContent='Удалить из моих';
  btn.addEventListener('click',async()=>{
