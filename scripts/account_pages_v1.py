@@ -141,11 +141,11 @@ async function loadBatches(){
  }catch{m.textContent='Ошибка соединения'}
 }
 document.getElementById('create-personal').addEventListener('click',async()=>{
- const m=document.getElementById('message');try{
+ const m=document.getElementById('message'),button=document.getElementById('create-personal');button.disabled=true;try{
  const r=await fetch('/me/thematic-batches',{method:'POST',credentials:'same-origin'});
  m.textContent=r.ok?'Личная очередь создана. Проверка ещё не запущена.':'Не удалось создать очередь';
  if(r.ok)loadBatches();
- }catch{m.textContent='Ошибка соединения'}
+ }catch{m.textContent='Ошибка соединения'}finally{button.disabled=false}
 });
 document.getElementById('add-batch').addEventListener('submit',async e=>{
  e.preventDefault();const m=document.getElementById('message');
