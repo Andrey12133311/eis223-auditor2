@@ -43,16 +43,6 @@ def enqueue_access(db, user_id, event, role="user"):
         body = ("Ваша регистрация одобрена. Теперь вы можете войти "
                 "в ЕИС Аудитор, используя электронную почту и пароль.")
         key = "access:approved"
-    elif event == "role":
-        roles = {"manager": "руководителя", "user": "сотрудника"}
-        if role not in roles:
-            raise ValueError("Invalid role")
-        subject = "ЕИС Аудитор — права доступа изменены"
-        body = "Вам предоставлены права " + roles[role] + " в ЕИС Аудитор."
-        # A new grant is sent for each actual role transition, not a no-op.
-        # A role change's audit action ID is used as the unique event key
-        # by callers; use enqueue() for role transitions instead.
-        raise ValueError("Role change needs an event-specific id")
     else:
         raise ValueError("Unknown access event")
     origin = os.getenv("EIS223_PUBLIC_ORIGIN", "").rstrip("/")
