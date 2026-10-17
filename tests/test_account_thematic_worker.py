@@ -1,6 +1,6 @@
 """Contract tests for isolated personal thematic worker primitives."""
 import unittest
-from scripts.account_thematic_worker_v1 import claim_next, complete_job, requeue_stale, process_one
+from scripts.account_thematic_worker_v1 import claim_next, complete_job, requeue_stale, process_one, save_findings
 
 
 class FakeCursor:
@@ -106,6 +106,32 @@ class ThematicWorkerTests(unittest.TestCase):
         result = process_one(lambda: next(transactions), broken)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(second.params[0], "failed")
+
+
+    def test_findings_require_evidence_and_current_attempt(self):
+        class DB:
+            def __init__(self):
+                self.statements = []
+            def execute(self, sql, params=None):
+                self.statements.append((sql, params))
+                return FakeCursor((1,))
+        db = DB()
+        findings = [{"finding_key": "deadline-1", "legal_basis": "223-FZ art 4",
+                     "description": "Documented discrepancy",
+                     "evidence_source": "EIS document identifier"}]
+        self.assertTrue(save_findings(db, "owner", "batch", "32615969056", 1, findings))
+        self.assertIn("FOR UPDATE", db.statements[0][0])
+        self.assertIn("ON CONFLICT", db.statements[1][0])
+        with self.assertRaises(ValueError):
+            save_findings(db, "owner", "batch", "32615969056", 1,
+                          [{"finding_key": "missing", "legal_basis": "223-FZ",
+                            "description": "No evidence", "evidence_source": ""}])
+
+    def test_stale_worker_cannot_save_findings(self):
+        db = FakeDB(None)
+        finding = [{"finding_key": "k", "legal_basis": "law",
+                    "description": "fact", "evidence_source": "document"}]
+        self.assertFalse(save_findings(db, "owner", "batch", "32615969056", 2, finding))
 
     def test_invalid_attempt(self):
         with self.assertRaises(ValueError):
