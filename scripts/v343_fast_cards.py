@@ -13,24 +13,24 @@ from fastapi.responses import HTMLResponse
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
 STYLE="""<style id="eis-modern-audit-card">
 :root{font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
- color:#234036;background:#f5f8f6;--edge:#dce8e1;--green:#087e71}
+ color:#294658;background:#f4f7fa;--edge:#dce7ef;--green:#17618f}
 *{box-sizing:border-box}
-body{margin:0;color:#244136;background:radial-gradient(ellipse at 100% 0%,#eaf5ee,transparent 30%),#f5f8f6}
-header{background:#fff;color:#20483b;border-bottom:1px solid var(--edge);
+body{margin:0;color:#294657;background:radial-gradient(ellipse at 100% 0%,#eaf3f9,transparent 30%),#f4f7fa}
+header{background:#fff;color:#214c6c;border-bottom:1px solid var(--edge);
  padding:18px clamp(16px,4vw,52px)}
 header h1{font-size:clamp(19px,2.5vw,25px);letter-spacing:-.03em;margin:0;font-weight:800}
 main{max-width:1250px;padding:0 clamp(12px,2.5vw,25px) 42px;margin:22px auto}
 nav{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:20px}
-a{color:#08786a;font-weight:650;text-decoration:none}
+a{color:#166092;font-weight:650;text-decoration:none}
 a:hover{text-decoration:underline}
 nav a,.action{display:inline-flex;align-items:center;justify-content:center;
  min-height:40px;border-radius:10px;padding:10px 14px;
- background:#fff;border:1px solid #d5e5db;color:#247461;font-weight:700}
+ background:#fff;border:1px solid #d4e3ed;color:#2b6a96;font-weight:700}
 .action{background:var(--green);color:white;border-color:var(--green)}
-.action:hover{background:#04695e;color:white}
+.action:hover{background:#104b74;color:white}
 .panel{margin:14px 0;background:white;border:1px solid var(--edge);border-radius:16px;
  padding:clamp(16px,2.5vw,24px);box-shadow:0 7px 22px #123b2b0b}
-.panel h2{color:#21493a;font-size:clamp(19px,2.2vw,23px);margin:0 0 13px;
+.panel h2{color:#1f4d70;font-size:clamp(19px,2.2vw,23px);margin:0 0 13px;
  letter-spacing:-.025em}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px 20px}
 .legal{border:1px solid #f1d8d8;border-left:4px solid #bf615f;background:#fffafa;
@@ -40,13 +40,13 @@ nav a,.action{display:inline-flex;align-items:center;justify-content:center;
 .legal h3,.review h3{font-size:16px;margin:0 0 9px;color:#3b4e44}
 .evidence{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}
 .meta{color:#647d70;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
-.chip{font-size:12px;border:1px solid #d7e8db;background:#edf7f0;color:#31745a;
+.chip{font-size:12px;border:1px solid #d9e7f0;background:#e9f3fa;color:#316e97;
  border-radius:999px;padding:4px 10px}
-table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e0eae2;
+table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e0e8ee;
  border-radius:12px;overflow:hidden}
 th,td{text-align:left;padding:11px 12px;vertical-align:top;overflow-wrap:anywhere;
- border-bottom:1px solid #e9f0eb}
-th{background:#eff6f1;color:#426659;font-size:13px}
+ border-bottom:1px solid #e9f0f5}
+th{background:#eef4f9;color:#426783;font-size:13px}
 tbody tr:last-child td{border-bottom:0}
 :focus-visible{outline:3px solid #91d9c5;outline-offset:2px}
 @media(max-width:660px){
