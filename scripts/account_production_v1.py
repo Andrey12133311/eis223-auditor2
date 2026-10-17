@@ -41,6 +41,7 @@ PRIVATE_PREFIXES = ("/auth/", "/account/", "/me/", "/admin/accounts/")
 SHARED_READ_PATHS = frozenset((
     "/", "/api/status", "/api/org-forms", "/api/procurements",
     "/api/purchases", "/api/dashboard",
+    "/api/v257/dashboard", "/api/v257/violation-types",
     "/api/v332/legal-audit/progress",
     "/api/v334/violation-ledger/summary",
     "/api/v334/violation-ledger/overlaps",
@@ -48,6 +49,9 @@ SHARED_READ_PATHS = frozenset((
 ))
 SHARED_READ_PATTERNS = tuple(map(re.compile, (
     r"/api/purchases/3[0-9]{10}",
+    r"/api/v257/purchase-extra/3[0-9]{10}",
+    r"/api/v267/findings/3[0-9]{10}",
+    r"/check-new/3[0-9]{10}/?",
     r"/api/v334/violation-ledger/purchase/3[0-9]{10}",
     r"/reports/3[0-9]{10}\.html",
     r"/files/3[0-9]{10}/(?:original|annotated)/[0-9A-Za-z._-]+",

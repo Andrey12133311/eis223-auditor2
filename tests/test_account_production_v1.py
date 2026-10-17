@@ -92,6 +92,9 @@ class ProductionLoginTests(unittest.TestCase):
         self.assertEqual(code,303)
         self.assertEqual(headers[b"location"], b"/account/login")
         for path in ("/api/status", "/api/dashboard", "/api/procurements",
+                     "/api/v257/dashboard", "/api/v257/violation-types",
+                     "/api/v257/purchase-extra/32615969056",
+                     "/api/v267/findings/32615969056", "/check-new/32615969056",
                      "/api/purchases/32615969056",
                      "/api/v334/violation-ledger/summary",
                      "/files/32615969056/original/notice.pdf",
@@ -112,6 +115,9 @@ class ProductionLoginTests(unittest.TestCase):
         for path in (
             "/", "/api/status", "/api/dashboard", "/api/procurements",
             "/api/org-forms", "/api/purchases/32615969056",
+            "/api/v257/dashboard", "/api/v257/violation-types",
+            "/api/v257/purchase-extra/32615969056",
+            "/api/v267/findings/32615969056", "/check-new/32615969056",
             "/api/v334/violation-ledger/summary",
             "/api/v334/violation-ledger/purchase/32615969056",
             "/reports/32615969056.html",
