@@ -44,6 +44,9 @@ class WorkspaceContracts(unittest.TestCase):
         api=(ROOT/'scripts/account_private_api_v1.py').read_text()
         self.assertIn("add.textContent='Добавить закупку'",page)
         self.assertIn("show.textContent='Закупки'",page)
+        self.assertIn("remove.textContent='Убрать закупку'",page)
+        self.assertIn("method:'DELETE'",page)
+        self.assertIn('@router.delete("/thematic-batches/{batch_id}/procurements/{reg_number}")',api)
         self.assertIn('@router.get("/thematic-batches/{batch_id}/procurements")',api)
         self.assertIn('@router.post("/thematic-batches/{batch_id}/procurements/{reg_number}"',api)
     def test_no_email_confirmation_required(self):
