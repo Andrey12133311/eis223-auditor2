@@ -223,6 +223,7 @@ def staff_campaign_violations(request:Request,response:Response):
         by_reg.setdefault(item["reg"],[]).append(item)
     prepared=[]
     for reg,findings in by_reg.items():
+        first_batch=str(findings[0].get("batch_id") or "") if findings else ""
         for item in collapse_legal_events(findings):
             enriched=enrich(item)
             from urllib.parse import urlsplit
@@ -254,7 +255,7 @@ def staff_campaign_violations(request:Request,response:Response):
                     str(item.get("evidence") or "").strip() and
                     (str(item.get("document") or "").strip() or safe_source)
                 ),
-                "batch_id":str(item.get("batch_id") or "")[:24],
+                "batch_id":first_batch[:24],
             })
     return {
         "findings":prepared[:500],
