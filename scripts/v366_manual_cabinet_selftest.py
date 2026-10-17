@@ -30,7 +30,9 @@ def test_markup():
     assert "fetch('/me/manual-checks/'" in shell
     assert "get('/me/procurements')" not in shell
     assert "fetch('/me/procurements/'" not in shell
-    assert "['Самостоятельные',purchases.length]" in shell
+    assert "'Самостоятельные',sumResponse.status==='fulfilled'?" in shell
+    assert "summary.manual_checks" in shell
+    assert "Promise.allSettled" in shell
     assert 'href="/account/home"' in shell
     assert 'eis223-toggle-cabinet' in shell
     assert "Проверки, документы и результаты" not in shell  # no invented metrics
