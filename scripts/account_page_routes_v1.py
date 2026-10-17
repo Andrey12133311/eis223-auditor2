@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse
 from scripts.account_api_v1 import current_account
 from scripts.account_pages_v1 import HOME, ADMIN, THEMATIC, MEMOS
 from scripts.account_site_ui_v1 import login_portal
+from scripts.v368_manager_ui import render_manager
 
 router = APIRouter(prefix="/account", tags=["account-pages"])
 
@@ -40,3 +41,11 @@ def thematic_page(request: Request):
 def memos_page(request: Request):
     current_account(request)
     return MEMOS
+
+@router.get("/manager", response_class=HTMLResponse)
+def manager_page(request: Request):
+    user = current_account(request)
+    if user[1] not in ("manager", "admin"):
+        from fastapi import HTTPException
+        raise HTTPException(403, "Только для руководителя")
+    return HTMLResponse(render_manager(user[1]),headers={"Cache-Control":"no-store"})
