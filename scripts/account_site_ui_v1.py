@@ -16,6 +16,7 @@ background:#f2f6fb;border-bottom:1px solid #d7e2ee;padding:14px clamp(15px,5vw,8
 .eis223-menu button{font:inherit;border:1px solid #c7d7e7;border-radius:8px;
 background:white;color:#225c99;padding:7px 12px;cursor:pointer}
 .eis223-menu button:hover,.eis223-menu a:hover{text-decoration:underline}
+.eis223-personal[hidden]{display:none!important}
 .eis223-personal{margin-top:13px;border:1px solid #dce5ef;background:white;border-radius:13px;
 padding:16px;box-shadow:0 4px 15px #20374f0b}
 .eis223-personal h2{font-size:19px;margin:0 0 5px}
@@ -42,16 +43,15 @@ def site_header(role="user"):
     return (_STYLE + '''
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
-<strong>ЕИС Аудитор · Личный кабинет</strong>
+<strong>ЕИС Аудитор</strong>
+<button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет</button>
 <a href="/">Общая проверка</a>
-<a href="/account/thematic">Мои тематические проверки</a>
-<a href="/account/memos">Мои служебные записки</a>
-<a href="/account/home">Мои закупки</a>
 ''' + admin + '''
 <button type="button" id="eis223-logout">Выйти</button>
 <span id="eis223-logout-status" role="status"></span>
 </nav>
-<section class="eis223-personal" aria-label="Мой личный кабинет">
+<section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
+<p><a href="/account/home">Самостоятельные проверки</a>　<a href="/thematic">Тематические проверки</a>　<a href="/account/thematic">Мои тематические проверки</a>　<a href="/account/memos">Мои служебные записки</a></p>
 <h2>Мой личный кабинет</h2>
 <p class="eis223-subtle" id="eis223-personal-summary">Загрузка ваших данных…</p>
 <div class="eis223-columns">
@@ -72,6 +72,7 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <script>
 (()=>{
 const q=id=>document.getElementById(id);
+q('eis223-toggle-cabinet').addEventListener('click',()=>{const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)refresh();});
 const show=(id,msg)=>{const el=q(id);if(el)el.textContent=msg;};
 async function get(url){
 const r=await fetch(url,{credentials:'same-origin',cache:'no-store'});
@@ -92,8 +93,13 @@ for(const item of purchases.slice(0,10)){
 }
 const bl=q('eis223-my-batches');bl.replaceChildren();
 if(!batches.length){const li=document.createElement('li');li.textContent='Очереди не созданы';bl.append(li)}
-for(const item of batches.slice(0,10)){
- const li=document.createElement('li');li.textContent=item.batch_id;bl.append(li);
+for(const item of batches){
+ const li=document.createElement('li');
+ const label=document.createElement('span');label.textContent='Тематическая проверка';li.append(label);
+ const details=document.createElement('a');details.href='/account/thematic';details.textContent=' · Открыть';li.append(details);
+ const del=document.createElement('button');del.type='button';del.textContent='Удалить';del.style.marginLeft='8px';
+ del.onclick=async()=>{if(!confirm('Убрать выбранную тематическую проверку из личного кабинета?'))return;del.disabled=true;try{const resp=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});if(!resp.ok)throw Error();await refresh();}catch{del.disabled=false;show('eis223-batch-status','Не удалось удалить проверку');}};
+ li.append(del);bl.append(li);
 }
 }catch{show('eis223-personal-summary','Личные данные временно недоступны. Общая проверка сохранена.')}
 }
