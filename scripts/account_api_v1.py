@@ -8,6 +8,7 @@ import os
 from fastapi import APIRouter, HTTPException, Request, Response
 from uuid import UUID
 from pydantic import BaseModel, Field
+from email_validator import validate_email, EmailNotValidError
 from scripts.account_passwords_v1 import hash_password, verify_password
 from scripts.account_security_v1 import normalize_email
 from scripts.account_gate_v1 import origin_matches
@@ -64,6 +65,10 @@ def register(data: Credentials, request: Request):
         allowed = request_allowed(db, request, email, "register")
     if not allowed:
         raise HTTPException(429, "Слишком много попыток. Повторите позже")
+    try:
+        validate_email(email, check_deliverability=True)
+    except EmailNotValidError:
+        raise HTTPException(422, "Адрес почты некорректен или его домен не принимает почту")
     encoded = hash_password(data.password)
     with connect() as db:
         create_pending_user(db, email, encoded)
