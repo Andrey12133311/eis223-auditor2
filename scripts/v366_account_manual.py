@@ -73,6 +73,9 @@ def _read_only_status(ns, entries):
         has_checks=bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checks'"
         ).fetchone())
+        has_legal_queue=bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'"
+        ).fetchone())
         finding_columns={col[1] for col in conn.execute("PRAGMA table_info(findings)")} if has_findings else set()
         check_columns={col[1] for col in conn.execute("PRAGMA table_info(checks)")} if has_checks else set()
         data=[]
@@ -111,6 +114,15 @@ def _read_only_status(ns, entries):
                     "SELECT DISTINCT item FROM checks WHERE reg_number=? "
                     "AND (status='violation' OR status='нарушение') LIMIT 40",(reg,)):
                     if value[0]:labels.add(str(value[0]).strip()[:160])
+            legal_review_state="unknown"
+            legal_review_documents=0
+            if has_legal_queue:
+                audit=conn.execute(
+                    """SELECT state,documents_read FROM v332_audit_queue
+                       WHERE reg=? ORDER BY updated_at DESC LIMIT 1""",(reg,)).fetchone()
+                if audit:
+                    legal_review_state=str(audit["state"] or "unknown")
+                    legal_review_documents=int(audit["documents_read"] or 0)
             started_at=entry["last_started_at"]
             data.append({
                 "reg_number":reg,
@@ -122,6 +134,10 @@ def _read_only_status(ns, entries):
                 "documents_found":int(purchase["documents_found"] or 0) if purchase else 0,
                 "documents_checked":int(purchase["documents_checked"] or 0) if purchase else 0,
                 "violations":int(counts.get(reg,0)),
+                "legal_review_state":legal_review_state,
+                "legal_review_completed":(legal_review_state=="completed" and
+                                          legal_review_documents>0),
+                "legal_review_documents":legal_review_documents,
                 "card_available":bool(purchase),
                 "customer":customer_name,
                 "customer_inn":customer_inn,
