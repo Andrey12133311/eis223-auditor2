@@ -123,6 +123,13 @@ async function loadBatches(){
  for(const item of data){
  const tr=document.createElement('tr'),name=document.createElement('td'),action=document.createElement('td');
  name.textContent=item.batch_id;
+ if(item.batch_id.startsWith('personal-')){
+ const details=document.createElement('button');details.textContent='Статус';
+ details.addEventListener('click',async()=>{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{credentials:'same-origin'});
+ if(!res.ok){m.textContent='Не удалось получить статус';return}
+ const info=await res.json();m.textContent=info.execution_started?'Проверка выполняется':'Очередь сохранена, проверка ещё не запущена';});
+ action.append(details);
+ }
  const btn=document.createElement('button');btn.textContent='Удалить из моих';
  btn.addEventListener('click',async()=>{
  const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});
