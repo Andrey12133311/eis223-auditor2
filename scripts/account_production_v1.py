@@ -240,6 +240,7 @@ def install(app):
     from scripts.account_setup_v1 import router as first_admin_setup
     from scripts.account_workspace_v1 import router as workspace
     from scripts.v366_account_manual import router as real_manual_checks
+    from scripts.v367_private_features import router as personal_features
     from scripts.account_page_routes_v1 import router as pages
     from scripts.account_private_api_v1 import router as private
     from scripts.account_migrations_v1 import initialize_schema
@@ -248,6 +249,7 @@ def install(app):
     app.include_router(admin_router)
     app.include_router(workspace)
     app.include_router(real_manual_checks)
+    app.include_router(personal_features)
     app.include_router(pages)
     app.include_router(private)
     app.add_middleware(ProductionAccountGate, connection=connect)
