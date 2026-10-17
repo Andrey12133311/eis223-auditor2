@@ -119,18 +119,24 @@ async function loadToday(){
    ['today-manual',data.manual_checks],['today-alerts',data.unread_notifications]]){
    el(id).textContent=Number(value||0).toLocaleString('ru-RU');
   }
-  const fill=(target,items,format)=>{
+  const activeTasks=(data.tasks||[]).filter(x=>!['completed','cancelled'].includes(x.status));
+  const activeCampaigns=(data.campaigns||[]).filter(x=>['active','submitted'].includes(x.status));
+  const fill=(target,items,format,onOpen)=>{
    const root=el(target);root.replaceChildren();
    if(!items.length)root.append(make('p','Нет активных записей'));
    for(const item of items.slice(0,12)){
     const row=make('div');row.className='staff-smallrow';
-    row.append(make('strong',item.title||item.reg_number||'Проверка'),
+    const body=make('div');body.className='staff-rowbody';
+    body.append(make('strong',item.title||item.reg_number||'Проверка'),
      make('small',format(item)));
-    root.append(row);
+    const action=createAction('Открыть',()=>onOpen(item));
+    row.append(body,action);root.append(row);
    }
   };
-  fill('today-task-list',data.tasks||[],x=>'№ '+(x.reg_number||'—')+' · '+x.status);
-  fill('today-campaign-list',data.campaigns||[],x=>'Цель: '+x.target_violations+' нарушений · '+x.status);
+  fill('today-task-list',activeTasks,x=>'№ '+(x.reg_number||'—')+' · '+(taskNames[x.status]||x.status),
+   x=>{section('overview');if(x.reg_number)location.href='/check-new/'+encodeURIComponent(x.reg_number)});
+  fill('today-campaign-list',activeCampaigns,x=>'Цель: '+x.target_violations+' нарушений · '+x.status,
+   ()=>section('goals'));
   status.textContent='Данные обновлены';
  }catch(error){status.textContent='Не удалось получить данные: '+error.message}
 }
