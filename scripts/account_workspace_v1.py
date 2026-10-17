@@ -62,7 +62,9 @@ def my_summary(request: Request, response: Response):
             """SELECT
                 (SELECT count(*) FROM account_procurements WHERE user_id=%s),
                 (SELECT count(*) FROM account_thematic_batches WHERE user_id=%s),
-                (SELECT count(*) FROM account_memos WHERE user_id=%s)""",
-            (owner_id, owner_id, owner_id),
+                (SELECT count(*) FROM account_memos WHERE user_id=%s),
+                (SELECT count(*) FROM account_manual_checks WHERE user_id=%s)""",
+            (owner_id, owner_id, owner_id, owner_id),
         ).fetchone()
-    return {"procurements": row[0], "thematic_batches": row[1], "memos": row[2]}
+    return {"procurements": row[0], "thematic_batches": row[1],
+            "memos": row[2], "manual_checks": row[3]}
