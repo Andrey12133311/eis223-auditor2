@@ -18,7 +18,6 @@ from scripts.account_repository_v1 import (
     create_pending_user, pending_users, approve_user, reject_user, block_user
 )
 from scripts.account_sessions_v1 import create_session, resolve_session, revoke_session
-from scripts.account_email_v1 import create_challenge, verify_challenge, send_verification_email
 
 router = APIRouter(prefix="/auth", tags=["accounts"])
 admin_router = APIRouter(prefix="/admin/accounts", tags=["accounts"])
@@ -73,23 +72,7 @@ def register(data: Credentials, request: Request):
     encoded = hash_password(data.password)
     with connect() as db:
         user_id = create_pending_user(db, email, encoded)
-        token = create_challenge(db, user_id) if user_id else None
-    if token:
-        try:
-            send_verification_email(email, token)
-        except (OSError, RuntimeError, KeyError, ValueError) as exc:
-            raise HTTPException(503, "Не удалось отправить письмо. Повторите позже или обратитесь к администратору") from exc
-    return {"status": "pending", "message": "Если заявка создана, проверьте почту для подтверждения адреса"}
-
-@router.get("/verify-email")
-def verify_email(token: str, response: Response):
-    response.headers.update(no_store_headers())
-    response.headers["Referrer-Policy"] = "no-referrer"
-    with connect() as db:
-        verified = verify_challenge(db, token)
-    if not verified:
-        raise HTTPException(400, "Ссылка недействительна")
-    return {"status": "verified"}
+    return {"status": "pending", "message": "Заявка передана администратору"}
 
 
 @router.post("/login")
