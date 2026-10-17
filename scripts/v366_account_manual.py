@@ -63,6 +63,16 @@ def _read_only_status(ns, entries):
         has_purchases=bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchases'"
         ).fetchone())
+        purchase_columns={x[1] for x in conn.execute("PRAGMA table_info(purchases)")}
+             if has_purchases else set()
+        available_name=[c for c in ("customer","customer_name") if c in purchase_columns]
+        has_inn="customer_inn" in purchase_columns
+        has_findings=bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='findings'"
+        ).fetchone())
+        has_checks=bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checks'"
+        ).fetchone())
         data=[]
         for entry in entries:
             reg=entry["reg_number"]
@@ -75,6 +85,30 @@ def _read_only_status(ns, entries):
                 "SELECT documents_found,documents_checked FROM purchases "
                 "WHERE reg_number=? LIMIT 1",(reg,)).fetchone()
                 if has_purchases else None)
+            customer_name=""
+            customer_inn=""
+            if purchase:
+                cols=", ".join(([available_name[0]] if available_name else [])+
+                               (["customer_inn"] if has_inn else []))
+                if cols:
+                    customer_row=conn.execute(
+                        "SELECT "+cols+" FROM purchases WHERE reg_number=? LIMIT 1",
+                        (reg,)).fetchone()
+                    if available_name:
+                        customer_name=str(customer_row[available_name[0]] or "")[:250]
+                    if has_inn:
+                        customer_inn=str(customer_row["customer_inn"] or "")[:12]
+            labels=set()
+            if has_findings:
+                for value in conn.execute(
+                    "SELECT DISTINCT title FROM findings WHERE reg_number=? "
+                    "AND (kind='violation' OR kind='нарушение') LIMIT 40",(reg,)):
+                    if value[0]:labels.add(str(value[0]).strip()[:160])
+            if has_checks:
+                for value in conn.execute(
+                    "SELECT DISTINCT item FROM checks WHERE reg_number=? "
+                    "AND (status='violation' OR status='нарушение') LIMIT 40",(reg,)):
+                    if value[0]:labels.add(str(value[0]).strip()[:160])
             started_at=entry["last_started_at"]
             data.append({
                 "reg_number":reg,
@@ -87,6 +121,9 @@ def _read_only_status(ns, entries):
                 "documents_checked":int(purchase["documents_checked"] or 0) if purchase else 0,
                 "violations":int(counts.get(reg,0)),
                 "card_available":bool(purchase),
+                "customer":customer_name,
+                "customer_inn":customer_inn,
+                "violation_types":sorted(labels)[:40],
             })
         return data
     finally:
