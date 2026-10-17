@@ -19,7 +19,7 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('WHERE user_id=%s AND batch_id=%s RETURNING batch_id',api)
         self.assertIn('require_origin(request)',api)
         pages=(ROOT/'scripts/account_pages_v1.py').read_text()
-        self.assertIn("Убрать из кабинета",pages)
+        self.assertIn("Удалить из моих",pages)
     def test_thematic_bookmark_requires_owner_and_origin(self):
         api=(ROOT/'scripts/account_private_api_v1.py').read_text()
         pages=(ROOT/'scripts/account_pages_v1.py').read_text()
