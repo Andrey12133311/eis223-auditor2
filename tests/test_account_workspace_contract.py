@@ -54,6 +54,16 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertNotIn(chr(92)+'n',schema)
         self.assertIn('CREATE TABLE IF NOT EXISTS account_thematic_procurements',schema)
         self.assertIn('ON DELETE CASCADE',schema)
+    def test_personal_job_enqueue_is_owner_scoped_and_idempotent(self):
+        api=(ROOT/'scripts/account_private_api_v1.py').read_text()
+        schema=(ROOT/'scripts/account_schema_v1.py').read_text()
+        self.assertIn('@router.post("/thematic-batches/{batch_id}/jobs/{reg_number}"',api)
+        self.assertIn('@router.get("/thematic-batches/{batch_id}/jobs")',api)
+        self.assertIn('FROM account_thematic_procurements',api)
+        self.assertIn('ON CONFLICT DO NOTHING RETURNING status',api)
+        self.assertIn('WHERE user_id=%s AND batch_id=%s AND reg_number=%s',api)
+        self.assertIn('CREATE TABLE IF NOT EXISTS account_thematic_jobs',schema)
+        self.assertIn('PRIMARY KEY(user_id, batch_id, reg_number)',schema)
     def test_no_email_confirmation_required(self):
         a=(ROOT/'scripts/account_api_v1.py').read_text()
         b=(ROOT/'scripts/account_repository_v1.py').read_text()
