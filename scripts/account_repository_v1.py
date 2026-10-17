@@ -6,13 +6,15 @@ from uuid import uuid4
 from scripts.account_status_v1 import registration_status
 
 
-def create_pending_user(db, email, password_hash):
+def create_pending_user(db, email, password_hash, last_name="", first_name="", patronymic=""):
     user_id = uuid4()
     row = db.execute(
-        """INSERT INTO account_users(id,email,password_hash,status,role)
-           VALUES (%s,%s,%s,%s,'user')
+        """INSERT INTO account_users
+           (id,email,password_hash,status,role,last_name,first_name,patronymic)
+           VALUES (%s,%s,%s,%s,'user',%s,%s,%s)
            ON CONFLICT DO NOTHING RETURNING id""",
-        (user_id, email, password_hash, registration_status())
+        (user_id, email, password_hash, registration_status(),
+         last_name, first_name, patronymic)
     ).fetchone()
     return row[0] if row else None
 
