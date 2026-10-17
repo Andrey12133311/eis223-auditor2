@@ -180,12 +180,14 @@ _STYLE = """
 
 def site_header(role="user"):
     admin = '<a href="/account/admin">Заявки пользователей</a>' if role == "admin" else ""
+    director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
+                if role in ("manager", "admin") else "")
     return (_STYLE + '''
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
 <button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет <span id="eis223-unread" class="eis223-notification-dot" hidden aria-label="Новые уведомления"></span></button>
-''' + admin + '''
+''' + admin + director + '''
 <button type="button" id="eis223-logout">Выйти</button>
 <span id="eis223-logout-status" role="status"></span>
 </nav>
