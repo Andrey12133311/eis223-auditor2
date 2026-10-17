@@ -251,6 +251,8 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from scripts.account_production_v1 import install as mount_accounts_to_eis
         mount_accounts_to_eis(entry.app)
+        from scripts.v373_thematic_email_notifications import install as install_thematic_mail
+        install_thematic_mail(vars(entry))
     _guard_disk_full_startup(entry.app)
     if '--verify-only' in sys.argv:return
     # Railway cannot reach EIS SOAP; do not launch repeated network probes.
