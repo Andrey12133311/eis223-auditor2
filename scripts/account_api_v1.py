@@ -17,7 +17,6 @@ from scripts.account_repository_v1 import (
     create_pending_user, pending_users, approve_user, reject_user, block_user
 )
 from scripts.account_sessions_v1 import create_session, resolve_session, revoke_session
-from scripts.account_email_domain_v1 import has_mail_service
 
 router = APIRouter(prefix="/auth", tags=["accounts"])
 admin_router = APIRouter(prefix="/admin/accounts", tags=["accounts"])
@@ -65,8 +64,6 @@ def register(data: Credentials, request: Request):
         allowed = request_allowed(db, request, email, "register")
     if not allowed:
         raise HTTPException(429, "Слишком много попыток. Повторите позже")
-    if not has_mail_service(email):
-        raise HTTPException(422, "Почтовый домен не принимает электронную почту")
     encoded = hash_password(data.password)
     with connect() as db:
         create_pending_user(db, email, encoded)
