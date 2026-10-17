@@ -18,6 +18,15 @@ CREATE TABLE IF NOT EXISTS account_users (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS account_users_email_unique
     ON account_users (lower(email));
+CREATE TABLE IF NOT EXISTS account_email_challenges (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    token_digest TEXT UNIQUE NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS account_email_challenges_user ON account_email_challenges(user_id);
 CREATE TABLE IF NOT EXISTS account_sessions (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
