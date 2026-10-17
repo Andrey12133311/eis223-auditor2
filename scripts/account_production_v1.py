@@ -102,6 +102,9 @@ class ProductionAccountGate:
             return
         scope["eis223_account_id"] = account[0]
         scope["eis223_account_role"] = account[1]
+        if account[1] != "admin" and (path.startswith("/admin/accounts/") or path == "/account/admin"):
+            await _answer(send, 403, b'{"detail":"Administrator required"}')
+            return
         if account[1] != "admin" and not path.startswith(PRIVATE_PREFIXES):
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
