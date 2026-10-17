@@ -7,7 +7,7 @@ This is **not** the EIS production startup and must not be attached to the exist
 1. Create a **separate staging environment** and PostgreSQL database; confirm billing and retention before provisioning.
 2. Configure `EIS223_IDENTITY_DATABASE_URL` as a **private** PostgreSQL URL.
 3. Configure `EIS223_PUBLIC_ORIGIN` to the **exact HTTPS staging origin**.
-4. Configure a real SMTP sender: `EIS223_SMTP_HOST`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER`, `EIS223_SMTP_PASSWORD`, `EIS223_SMTP_FROM`; verify domain SPF/DKIM/DMARC and actual inbox delivery. Set `EIS223_RATE_LIMIT_SECRET` to a separately generated random secret of at least 32 characters, identical across staging workers. Install `requirements-accounts.txt`.
+4. Configure a real SMTP sender: `EIS223_SMTP_HOST`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER`, `EIS223_SMTP_PASSWORD`, `EIS223_SMTP_FROM`; verify domain SPF/DKIM/DMARC and actual inbox delivery. Configure `EIS223_SMTP_HOST`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER`, `EIS223_SMTP_PASSWORD`, `EIS223_SMTP_FROM` for outbound confirmation messages. Set `EIS223_RATE_LIMIT_SECRET` to a separately generated random secret of at least 32 characters, identical across staging workers. Install `requirements-accounts.txt`.
 5. Run a one-time schema migration against staging PostgreSQL using `scripts.account_migrations_v1.initialize_schema`; do not use the production SQLite volume.
 6. Run `python -m scripts.account_bootstrap_v1` in a secure interactive operator terminal to create the first admin.
 7. Set `EIS223_AUTH_ENFORCE=true` before making the staging service public.
