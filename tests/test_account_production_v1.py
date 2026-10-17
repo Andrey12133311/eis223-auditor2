@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from scripts.account_production_v1 import ProductionAccountGate, machine_path, verified_machine
+from scripts.account_production_v1 import ProductionAccountGate, machine_path, shared_read_route, verified_machine
 
 
 async def fake_app(scope, receive, send):
@@ -44,11 +44,36 @@ class ProductionLoginTests(unittest.TestCase):
     def test_anonymous_private_api_is_denied(self):
         self.assertEqual(request("/me/procurements")[0], 401)
 
-    def test_regular_user_cannot_read_global_eis_data(self):
-        self.assertEqual(request("/api/purchases", account=("id", "user", "approved"))[0], 403)
-        code, headers = request("/", account=("id", "user", "approved"))
-        self.assertEqual(code, 303)
-        self.assertEqual(headers[b"location"], b"/account/home")
+    def test_regular_user_can_view_shared_audit_and_originals(self):
+        user = ("id", "user", "approved")
+        for path in (
+            "/", "/api/status", "/api/dashboard", "/api/procurements",
+            "/api/org-forms", "/api/purchases/32615969056",
+            "/api/v334/violation-ledger/summary",
+            "/api/v334/violation-ledger/purchase/32615969056",
+            "/reports/32615969056.html",
+            "/files/32615969056/original/notice.pdf",
+        ):
+            code, headers = request(path, account=user)
+            self.assertEqual(code, 200, path)
+            self.assertEqual(headers[b"cache-control"], b"no-store")
+
+    def test_shared_audit_changes_remain_admin_only(self):
+        user = ("id", "user", "approved")
+        for path, method in (
+            ("/api/scan-now", "POST"),
+            ("/api/purchases/32615969056/recheck", "POST"),
+            ("/api/purchases/32615969056", "DELETE"),
+            ("/api/v301/bridge/next", "GET"),
+            ("/api/v304/memo/32615969056.odt", "GET"),
+            ("/api/thematic/history", "GET"),
+            ("/api/v294/eis223/upload", "GET"),
+            ("/reports/../../etc/passwd", "GET"),
+            ("/api/purchases/32615969056/recheck", "GET"),
+        ):
+            self.assertEqual(request(path, account=user, method=method)[0], 403, (path, method))
+        self.assertFalse(shared_read_route("/api/purchases/32615969056/recheck", "GET"))
+        self.assertFalse(shared_read_route("/api/purchases/32615969056", "POST"))
 
     def test_regular_user_gets_only_private_routes(self):
         self.assertEqual(request("/me/procurements", account=("id", "user", "approved"))[0], 200)
