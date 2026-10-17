@@ -146,7 +146,7 @@ async function templates(){
  }catch(e){msg(e.message)}
 }
 async function options(){
- const data=await api('/manager/campaigns/options').catch(()=>null);
+ const data=await api('/me/workbench/options').catch(()=>null);
  const opts=data||{
   categories:{dates:"Сроки и разъяснения",docs:"Документация",national:"Национальный режим",
    security:"Обеспечение",sme:"Закупки МСП",access:"Участники",protocols:"Протоколы",
@@ -377,15 +377,6 @@ async function loadLibrary(){
   })
  }catch(e){msg(e.message)}
 }
-el('staff-memo-check').onclick=async()=>{
- const id=el('staff-memo-id').value.trim();
- if(!/^[a-f0-9-]{36}$/i.test(id))return msg('Укажите идентификатор сохранённой служебной записки');
- try{
-  const result=await api('/me/workbench/memos/'+encodeURIComponent(id)+'/quality');
-  list('staff-memo-warnings',result.warnings||[],x=>make('p',x));
-  msg(result.note+(result.warnings.length?' · есть замечания':' · формат без явных замечаний'));
- }catch(e){msg(e.message)}
-};
 loadCalendar();loadHistory();loadLibrary();
 options().catch(e=>msg(e.message));
 reloadOverview();campaigns();templates();
@@ -512,12 +503,9 @@ placeholder="Срок оплаты договора"></label>
 <p>Только подтверждённые руководителем выводы, отдельно от автоматических находок анализатора.</p>
 <div id="staff-library-list"></div>
 <h2>Проверка оформления служебной записки</h2>
-<p>Проверка ODT на реквизиты и правовые ссылки не заменяет юридическую оценку.</p>
-<div class="action-row"><label>Идентификатор собственной сохранённой записки
-<input id="staff-memo-id" placeholder="UUID из архива записок"></label>
-<button type="button" class="outline" id="staff-memo-check">Проверить структуру</button></div>
-<div id="staff-memo-warnings"></div><p>
-<a href="/account/memos">Открыть архив записок и скачать документы →</a></p></section>
+<p>Откройте архив и нажмите «Проверить записку» рядом с нужным документом.
+Никаких идентификаторов вводить не требуется.</p>
+<p><a href="/account/memos">Открыть архив и проверить мои ODT →</a></p></section>
 <div id="staff-status" role="status" aria-live="polite"></div>
 </main>__JS__</body></html>"""
 
