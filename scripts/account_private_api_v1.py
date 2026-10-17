@@ -217,7 +217,7 @@ def enqueue_personal_audit(batch_id: str, reg_number: str, request: Request, res
             status = existing[0]
         else:
             status = row[0]
-    return {"batch_id": batch_id, "reg_number": reg_number, "status": status, "execution_started": status != "queued"}
+    return {"batch_id": batch_id, "reg_number": reg_number, "status": status, "execution_started": status in ("running", "completed", "failed")}
 
 
 @router.get("/thematic-batches/{batch_id}/jobs")
