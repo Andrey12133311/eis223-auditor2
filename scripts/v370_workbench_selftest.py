@@ -192,7 +192,7 @@ def check_routes_schema_and_ui():
     parser=H();parser.feed(html)
     assert not parser.duplicates,parser.duplicates
     assert {"bulk","goals","templates","case","activity","library"}<=parser.tabs
-    for phrase in ("Массовая самостоятельная проверка","Поручения руководителя",
+    for phrase in ("Массовая самостоятельная проверка","Нарушения тематических проверок",
                    "Зафиксировать нарушение вручную","Сравнение доступных редакций",
                    "Служебные записки","Календарь сроков"):
         assert phrase in html,phrase
