@@ -300,7 +300,49 @@ def thematic_history_records(ns, permitted_ids=None):
  finally:c.close()
 
 PAGE="""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Тематическая проверка ЕИС</title><style>body{font:16px system-ui;background:#f2f6fa;color:#193d5c;margin:0}main{max-width:850px;margin:30px auto;background:white;padding:25px;border-radius:16px}label{display:block;padding:10px;border-bottom:1px solid #eee}button{background:#2466a3;color:white;padding:13px;border:0;border-radius:8px;cursor:pointer}a{color:#2466a3}#out{white-space:pre-wrap}</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><h2>Организационно-правовые формы заказчиков</h2><p>Выберите одну или несколько форм. По умолчанию выбраны все хозяйственные общества.</p><div id="forms"></div><p><button id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="out">Выберите категории</div></main><script>
+<title>Тематическая проверка ЕИС</title><style>
+:root{font-family:Inter,"Segoe UI",system-ui,sans-serif;--tone:#087e71;--ink:#203e34;--muted:#687b71}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at 95% 0%,#e6f5ed,transparent 32%),#f5f8f6;
+ color:var(--ink);font:14px/1.6 Inter,"Segoe UI",system-ui,sans-serif}
+main{width:min(100% - 24px,1100px);margin:clamp(16px,3vw,38px) auto 60px;
+ padding:clamp(18px,3.5vw,36px);border:1px solid #dce8e0;border-radius:19px;
+ background:white;box-shadow:0 15px 40px #17392d0d}
+h1{font-size:clamp(25px,3.6vw,34px);letter-spacing:-.045em;line-height:1.2;margin:17px 0 8px;color:#24483a}
+h2{font-size:20px;margin:25px 0 12px;letter-spacing:-.025em;color:#2b4c40}
+h3{font-size:16px;color:#315b4a}
+p{line-height:1.7;color:#61796d}
+#cats,#forms{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px;margin:14px 0}
+#cats label,#forms label{display:flex;align-items:center;gap:10px;cursor:pointer;
+ border:1px solid #e0ebe3;border-radius:12px;background:#f9fcfa;padding:13px 14px;
+ font-size:13px;min-height:56px}
+#cats label:hover,#forms label:hover{border-color:#b6dfcf;background:#f2f9f5}
+input[type=checkbox]{height:17px;width:17px;accent-color:#087e71;flex:none}
+button{min-height:40px;background:#087e71;color:#fff;padding:10px 16px;
+ font:700 13px system-ui;border:1px solid #087e71;border-radius:10px;cursor:pointer}
+button:hover:not(:disabled){background:#04695e}
+button:disabled{opacity:.55;cursor:wait}
+a{color:#0a7b6d;text-decoration:none;font-weight:650}
+a:hover{text-decoration:underline}
+#history{display:grid;gap:9px}
+#history p{margin:0!important;display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+ background:#f9fcfa;border:1px solid #e2ece5;border-radius:12px;padding:11px 14px}
+#history button{margin:0!important}
+#out{white-space:pre-wrap;overflow-wrap:anywhere}
+#out table{width:100%;border-spacing:0;border-collapse:separate;
+ border:1px solid #dce7df;border-radius:13px;overflow:hidden}
+#out td{padding:10px 12px!important;border-bottom:1px solid #ebf0ec!important;
+ vertical-align:top}
+#out article{border-radius:12px!important;border-left-color:#ba6954!important;
+ background:#fffaf5!important;padding:15px!important}
+:focus-visible{outline:3px solid #99dfce;outline-offset:2px}
+@media(max-width:700px){
+ main{width:calc(100% - 20px);border-radius:16px;padding:17px 15px}
+ #cats,#forms{grid-template-columns:minmax(0,1fr)}
+ #out table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+ #history a{overflow-wrap:anywhere}
+}
+</style><main><a href="/">← Главная</a><h1>Тематическая проверка</h1><p>Выберите категории. Закупки из ЕИС поступают в отдельную очередь. Нарушения подтверждаются только оригиналами и юридическими правилами.</p><div id="cats"></div><h2>Организационно-правовые формы заказчиков</h2><p>Выберите одну или несколько форм. По умолчанию выбраны все хозяйственные общества.</p><div id="forms"></div><p><button id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="out">Выберите категории</div></main><script>
 const categories=__CATEGORIES__,legalForms=__LEGAL_FORMS__;const formsBox=document.querySelector("#forms");for(const [id,title] of Object.entries(legalForms)){const label=document.createElement("label"),check=document.createElement("input");check.type="checkbox";check.value=id;check.checked=true;label.append(check,document.createTextNode(" "+id+" — "+title));formsBox.append(label)}const box=document.querySelector('#cats');
 for(const [id,title] of Object.entries(categories)){let l=document.createElement('label'),i=document.createElement('input');i.type='checkbox';i.value=id;l.append(i,document.createTextNode(' '+title));box.append(l)}
 document.querySelector('#start').onclick=async()=>{const cats=[...box.querySelectorAll('input:checked')].map(x=>x.value);if(!cats.length)return alert('Выберите категорию');const forms=[...formsBox.querySelectorAll('input:checked')].map(x=>x.value);if(!forms.length)return alert('Выберите организационно-правовую форму');const r=await fetch('/api/thematic/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({categories:cats,legal_forms:forms})});const j=await r.json();if(!r.ok)return alert(j.detail||r.status);location.hash=j.id;refresh();history()};
