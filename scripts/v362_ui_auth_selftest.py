@@ -4,6 +4,7 @@ This suite never contacts PostgreSQL, Railway or the EIS and never edits data.
 """
 import asyncio
 import os
+import inspect
 from unittest.mock import patch
 from datetime import datetime, timezone
 
@@ -38,6 +39,17 @@ def test_login_cookie():
     assert "fetch('/auth/me'" not in login
     assert 'autocomplete="current-password"' in login
 
+    from scripts import account_api_v1 as api
+    from scripts.account_production_v1 import user_session as gate_resolve
+    login_source = inspect.getsource(api.login)
+    logout_source = inspect.getsource(api.logout)
+    assert "verify_password(" in login_source
+    assert "response.set_cookie(SESSION_COOKIE" in login_source
+    assert "response.delete_cookie(SESSION_COOKIE" not in login_source
+    assert "response.delete_cookie(SESSION_COOKIE" in logout_source
+    assert "request.cookies.get(SESSION_COOKIE" in inspect.getsource(api.current_account)
+    assert "cookies.get(SESSION_COOKIE)" in inspect.getsource(gate_resolve)
+
 
 def test_cabinet_and_home():
     ui = site_header()
@@ -52,6 +64,7 @@ def test_cabinet_and_home():
     assert b'eis361-home-style' in shell
     assert b'eis361-home-script' in shell
     assert b'insertBefore(hero' not in shell
+    assert "gradient(112deg,#122e4e" not in shell.decode("utf-8")
     assert "Мои закупки" not in shell.decode("utf-8")  # no giant CTA
     sample = b'<html><head></head><body><main class="container"></main></body></html>'
     combined = add_account_navigation(sample)
