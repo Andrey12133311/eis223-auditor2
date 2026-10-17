@@ -18,7 +18,7 @@ def list_memos(request: Request, response: Response):
 
 
 @router.get("/memos/{memo_id}/download")
-def memo_download(memo_id: UUID, request: Request, response: Response):
+async def memo_download(memo_id: UUID, request: Request, response: Response):
     owner_id = current_account(request)[0]
     response.headers.update(no_store_headers())
     with connect() as db:
@@ -26,8 +26,9 @@ def memo_download(memo_id: UUID, request: Request, response: Response):
     if key is None:
         raise HTTPException(404, "Документ не найден")
     # Do not return a storage path or bypass access checks via a public URL.
-    # Streaming requires a verified private storage adapter before activation.
-    raise HTTPException(501, "Защищённая выдача документов ещё не подключена")
+    from scripts.v367_private_features import download_owned_memo
+    return await download_owned_memo(memo_id,request,
+        request.query_params.get("format","odt"))
 
 
 @router.get("/thematic-batches")
