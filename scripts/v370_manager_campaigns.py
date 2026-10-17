@@ -255,7 +255,10 @@ def staff_campaign_violations(request:Request,response:Response):
                     str(item.get("evidence") or "").strip() and
                     (str(item.get("document") or "").strip() or safe_source)
                 ),
-                "batch_id":first_batch[:24],
+                # Use the exact batch which supplied the selected deduplicated
+                # incident, not the first batch for this procurement. Otherwise
+                # the 'view evidence' link may open a different thematic check.
+                "batch_id":str(item.get("batch_id") or first_batch)[:24],
             })
     return {
         "findings":prepared[:500],
