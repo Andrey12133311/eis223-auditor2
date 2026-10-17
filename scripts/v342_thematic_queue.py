@@ -6,6 +6,7 @@ from datetime import datetime,timezone
 from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from scripts import v360_thematic_ownership as ownership
 
 WORKER_TASK=None
 WORKER_STATE={"last_cycle_at":None,"last_cycle_finished_at":None,"last_error":None}
@@ -255,18 +256,23 @@ def overview(ns,batch):
  finally:c.close()
 _HISTORY_COUNT_CACHE={}
 
-def thematic_history_records(ns):
+def thematic_history_records(ns, permitted_ids=None):
  """Show unique legal incidents, not repeated saved excerpts, in history."""
  from v333_dedup_ui import collapse
+ if permitted_ids is not None and not permitted_ids:
+  return {"batches":[]}
  c=db(ns)
  try:
   c.execute("PRAGMA busy_timeout=1500")
+  placeholders=",".join("?" for _ in permitted_ids) if permitted_ids is not None else ""
+  owner_filter=(" WHERE b.id IN ("+placeholders+")") if permitted_ids is not None else ""
   rows=c.execute("""SELECT b.id,b.categories,b.created_at,b.status,
          COUNT(DISTINCT i.reg) AS purchases,
          (SELECT COUNT(*) FROM thematic_findings f WHERE f.batch_id=b.id) AS stored_rows
          FROM thematic_batches b
          LEFT JOIN thematic_items i ON i.batch_id=b.id
-         GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100""").fetchall()
+         """+owner_filter+""" GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100""",
+         permitted_ids or ()).fetchall()
   out=[]
   for row in rows:
    item=dict(row)
@@ -328,11 +334,12 @@ def install(ns):
    return {"reg_number":reg,"method":p["method"],"business_company":business_company(p["customer"]),**result}
   finally:c.close()
  @app.get("/thematic")
- async def page():return HTMLResponse(PAGE)
+ async def page():return HTMLResponse(PAGE,headers={"Cache-Control":"no-store"})
  @app.post("/api/thematic/start")
  async def start(request:Request):
+  ownership.protect_write(request)
   origin=request.headers.get("origin")
-  if origin and not origin.startswith(("https://web-production-1c2ea.up.railway.app","http://localhost:")):raise HTTPException(403,"Неверный источник")
+  if not ownership.enabled() and origin and not origin.startswith(("https://web-production-1c2ea.up.railway.app","http://localhost:")):raise HTTPException(403,"Неверный источник")
   raw=await request.body()
   if len(raw)>2000:raise HTTPException(413,"Слишком большой запрос")
   try:
@@ -343,23 +350,40 @@ def install(ns):
   if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORIES) or any(x not in CATEGORIES for x in cats):raise HTTPException(422,"Некорректные категории")
   if not isinstance(forms,list) or not forms or len(forms)>len(LEGAL_FORMS) or any(not isinstance(x,str) or x not in LEGAL_FORMS for x in forms):raise HTTPException(422,"Некорректные организационно-правовые формы")
   identifier=secrets.token_hex(12);c=db(ns)
+  linked=False
   try:
    if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
     raise HTTPException(429,"Одновременно допускается не более трёх тематических очередей")
-   c.execute("INSERT INTO thematic_batches(id,categories,created_at,legal_forms) VALUES(?,?,?,?)",(identifier,json.dumps(sorted(set(cats))),now(),json.dumps(sorted(set(forms)),ensure_ascii=False)));c.commit()
+   # Assign the real campaign to its authenticated creator before activation.
+   ownership.link_started(request,identifier)
+   linked=True
+   c.execute("INSERT INTO thematic_batches(id,categories,created_at,legal_forms) VALUES(?,?,?,?)",
+             (identifier,json.dumps(sorted(set(cats))),now(),
+              json.dumps(sorted(set(forms)),ensure_ascii=False)))
+   c.commit()
+  except Exception:
+   c.rollback()
+   if linked:
+    try:ownership.unlink(request,identifier)
+    except HTTPException:pass
+   raise
   finally:c.close()
   return {"id":identifier,"status":"active"}
  @app.post("/api/thematic/{batch}/stop")
- async def stop(batch:str):
+ async def stop(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
+  ownership.protect_write(request)
+  ownership.require_owned(request,batch)
   c=db(ns)
   try:
    c.execute("UPDATE thematic_batches SET status=? WHERE id=?",("stopped",batch));c.commit()
   finally:c.close()
   return {"id":batch,"status":"stopped"}
  @app.delete("/api/thematic/{batch}")
- async def delete_thematic(batch:str):
+ async def delete_thematic(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
+  ownership.protect_write(request)
+  ownership.require_owned(request,batch)
   c=db(ns)
   try:
    c.execute("BEGIN IMMEDIATE")
@@ -374,15 +398,17 @@ def install(ns):
    c.rollback()
    raise
   finally:c.close()
+  ownership.unlink(request,batch)
   return {"id":batch,"deleted":True}
  @app.get("/api/thematic/history")
- async def thematic_history():
+ async def thematic_history(request:Request):
   # Potentially large older evidence sets are scanned outside the HTTP loop,
   # with cached counts reused on the frequent 12-second dashboard refresh.
-  return await asyncio.to_thread(thematic_history_records,ns)
+  return await asyncio.to_thread(thematic_history_records,ns,ownership.linked_ids(request))
  @app.get("/thematic/card/{batch}/{reg}")
  def thematic_card(batch:str,reg:str,request:Request):
   from html import escape
+  ownership.require_owned(request,batch)
   if not re.fullmatch("[0-9a-f]{24}",batch) or not re.fullmatch("3[0-9]{10}",reg):raise HTTPException(400,"Некорректный номер")
   c=db(ns)
   try:
@@ -415,8 +441,9 @@ def install(ns):
   script="<script>window.print()</script>" if printable else ""
   return HTMLResponse("<!doctype html><html lang='ru'><meta charset='utf-8'><title>"+title+"</title><style>body{font:16px Georgia,serif;max-width:850px;margin:35px auto;padding:20px;color:#203247}h1{font-size:25px}section{break-inside:avoid}a{color:#175e9a}@media print{body{margin:0;max-width:none}a{display:none}}</style><h1>"+title+"</h1>"+actions+"<p><b>Номер закупки ЕИС:</b> "+escape(reg)+"</p><p><b>Заказчик:</b> "+customer+"</p><p><b>Статус:</b> "+escape(str(item["status"]))+"</p>"+notice+(rows or "<p>Подтверждённых нарушений по выбранным категориям пока нет.</p>")+script+"</html>")
  @app.get("/api/thematic/{batch}")
- async def status(batch:str):
+ async def status(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
+  ownership.require_owned(request,batch)
   return await asyncio.to_thread(overview,ns,batch)
  class ThemeNav(BaseHTTPMiddleware):
   async def dispatch(self,request,call_next):
