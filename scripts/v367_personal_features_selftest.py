@@ -85,6 +85,13 @@ def test_alert_transitions():
     features._reconcile_alerts(db,owner,[dict(theme,status="completed")])
     assert len(db.events)==4
     assert db.events[-1][2]=="thematic_finished"
+    features._reconcile_alerts(db,owner,[dict(first,status="review_completed",
+                                               violations=3,docs=3)])
+    assert len(db.events)==5
+    assert db.events[-1][2]=="review_completed"
+    features._reconcile_alerts(db,owner,[dict(first,status="review_completed",
+                                               violations=3,docs=3)])
+    assert len(db.events)==5
 
 
 def test_memo_formats():
