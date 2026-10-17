@@ -98,7 +98,8 @@ def _observations(request, owner):
     for item in manual:
         snapshots.append({
             "key":"manual:"+item["reg_number"],
-            "status":item["job_status"],
+            "status":("review_completed" if item.get("legal_review_completed")
+                      else item["job_status"]),
             "violations":max(0,int(item["violations"])),
             "docs":max(0,int(item["documents_checked"])),
             "found":max(0,int(item["documents_found"])),
@@ -143,6 +144,15 @@ def _reconcile_alerts(db, owner, snapshots):
                     (owner,key,"new_violation",
                      "Новые подтверждённые нарушения",
                      snapshot["label"]+": +"+str(delta)+"; всего "+str(violations)))
+            if (key.startswith("manual:") and
+                status=="review_completed" and old_status!="review_completed"): 
+                db.execute(
+                    """INSERT INTO account_alert_events
+                      (user_id,source_key,kind,title,detail) VALUES(%s,%s,%s,%s,%s)""",
+                    (owner,key,"review_completed",
+                     "Юридическая проверка завершена",
+                     snapshot["label"]+": проверено документов "+str(checked)+
+                     ", подтверждённых нарушений "+str(violations)))
             if (key.startswith("manual:") and
                 status=="done" and old_status!="done" and
                 checked>old_checked and checked>0):
