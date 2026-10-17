@@ -49,6 +49,11 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('@router.delete("/thematic-batches/{batch_id}/procurements/{reg_number}")',api)
         self.assertIn('@router.get("/thematic-batches/{batch_id}/procurements")',api)
         self.assertIn('@router.post("/thematic-batches/{batch_id}/procurements/{reg_number}"',api)
+    def test_identity_schema_contains_no_literal_escaped_newlines(self):
+        schema=(ROOT/'scripts/account_schema_v1.py').read_text()
+        self.assertNotIn(chr(92)+'n',schema)
+        self.assertIn('CREATE TABLE IF NOT EXISTS account_thematic_procurements',schema)
+        self.assertIn('ON DELETE CASCADE',schema)
     def test_no_email_confirmation_required(self):
         a=(ROOT/'scripts/account_api_v1.py').read_text()
         b=(ROOT/'scripts/account_repository_v1.py').read_text()
