@@ -1,11 +1,12 @@
 """Secure opt-in mount of personal accounts into the legacy EIS web app.
 
-Shared historical EIS audits remain admin-only; private account resources are
-owner-scoped. Existing EIS intake endpoints keep their independent token auth.
+Shared EIS audit results are readable by all approved users; mutations stay
+admin-only. Personal resources remain owner-scoped. Existing EIS intake endpoints keep their independent token auth.
 Call install(app) *before* starting Uvicorn; disabled by default.
 """
 import hmac
 import os
+import re
 from http.cookies import SimpleCookie
 
 from scripts.account_sessions_v1 import resolve_session
@@ -30,6 +31,31 @@ MACHINE_PREFIXES = (
     "/api/v295/eis223/recheck-status/",
 )
 PRIVATE_PREFIXES = ("/auth/", "/account/", "/me/", "/admin/accounts/")
+
+# Explicit read-only allowlist. Do not grant all GET requests to the legacy
+# engine: some GET handlers claim bridge jobs or trigger expensive checks.
+SHARED_READ_PATHS = frozenset((
+    "/", "/api/status", "/api/org-forms", "/api/procurements",
+    "/api/purchases", "/api/dashboard",
+    "/api/v332/legal-audit/progress",
+    "/api/v334/violation-ledger/summary",
+    "/api/v334/violation-ledger/overlaps",
+    "/api/v334/violation-ledger/changes",
+))
+SHARED_READ_PATTERNS = tuple(map(re.compile, (
+    r"/api/purchases/3[0-9]{10}",
+    r"/api/v334/violation-ledger/purchase/3[0-9]{10}",
+    r"/reports/3[0-9]{10}\\.html",
+    r"/files/3[0-9]{10}/(?:original|annotated)/[0-9A-Za-z._-]+",
+)))
+
+
+def shared_read_route(path, method):
+    return (method in ("GET", "HEAD") and (
+        path in SHARED_READ_PATHS or
+        any(pattern.fullmatch(path) for pattern in SHARED_READ_PATTERNS)
+    ))
+
 
 
 def machine_path(path):
@@ -106,13 +132,12 @@ class ProductionAccountGate:
             await _answer(send, 403, b'{"detail":"Administrator required"}')
             return
         if account[1] != "admin" and not path.startswith(PRIVATE_PREFIXES):
-            if scope["type"] == "websocket":
-                await send({"type": "websocket.close", "code": 1008})
-            elif path == "/" and method == "GET":
-                await _answer(send, 303, b"", location="/account/home")
-            else:
-                await _answer(send, 403, b'{"detail":"Only administrators may access shared EIS records"}')
-            return
+            if scope["type"] != "http" or not shared_read_route(path, method):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await _answer(send, 403, b'{"detail":"Shared audit is read-only for users"}')
+                return
         async def no_cache_send(message):
             if message["type"] == "http.response.start":
                 original = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
