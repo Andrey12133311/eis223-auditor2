@@ -135,6 +135,7 @@ _STYLE = """
  border-radius:8px;background:#fff;color:#233f52;min-width:0}
 .eis223-feature form button{grid-column:1/-1;min-height:39px;border:1px solid #17618f;
  background:#17618f;color:white;border-radius:8px;cursor:pointer;font-weight:690}
+.eis223-notification-dot[hidden]{display:none!important}
 .eis223-notification-dot{display:inline-grid;min-width:20px;min-height:20px;
  padding:2px 4px;place-items:center;border-radius:999px;background:#b94645;color:#fff;
  font-size:11px;font-weight:760;margin-left:7px}
