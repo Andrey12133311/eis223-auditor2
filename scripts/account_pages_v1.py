@@ -104,12 +104,16 @@ load();
 THEMATIC = page("Тематические проверки", """
 <h1>Мои тематические проверки</h1><p>Здесь отображаются только ваши очереди тематических проверок.</p>
 <p><a href="/account/home">← Личный кабинет</a></p>
-<p id="message" role="status">Загружаем…</p><table><thead><tr><th>Очередь</th><th>Статус</th></tr></thead><tbody id="rows"></tbody></table>
+<p id="message" role="status">Загружаем…</p><table><thead><tr><th>Очередь</th><th>Статус</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
 <script>
 (async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/thematic-batches',{credentials:'same-origin'});
 if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить очереди';return}
 const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr');
-for(const v of [item.batch_id||'Очередь','Сохранена']){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}rows.append(tr)}
+for(const v of [item.batch_id||'Очередь','Сохранена']){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}
+const action=document.createElement('td'),btn=document.createElement('button');btn.textContent='Убрать из кабинета';
+btn.addEventListener('click',async()=>{btn.disabled=true;try{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});
+if(res.ok){tr.remove();m.textContent='Очередь убрана из личного кабинета'}else{m.textContent='Не удалось убрать очередь';btn.disabled=false}}
+catch{m.textContent='Ошибка соединения';btn.disabled=false}});action.append(btn);tr.append(action);rows.append(tr)}
 m.textContent=data.length?'':'Очередей пока нет';}catch{m.textContent='Ошибка соединения'}})();
 </script>""")
 
