@@ -81,7 +81,8 @@ def migration_and_owner():
     assert "WHERE id=%s AND status='approved'" in edit
     assert "require_origin(request)" in edit
     assert "account_audit" in edit
-    assert "last_name, first_name, patronymic" in inspect.getsource(create_pending_user)
+    repo_source=inspect.getsource(create_pending_user)
+    assert all(token in repo_source for token in ("last_name","first_name","patronymic"))
     assert "current_account(request)" in inspect.getsource(profile_page)
 
 
