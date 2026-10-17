@@ -212,28 +212,40 @@ refresh();
 
 
 _GATEWAY_STYLE = """
-<style>
-*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:system-ui,-apple-system,Arial,sans-serif}
-body{background:linear-gradient(145deg,#102947,#1e538a);color:#19324e}
-.layout{min-height:100vh;display:flex;justify-content:center;align-items:center;padding:24px}
-.auth{background:white;width:min(480px,100%);border-radius:18px;padding:clamp(23px,5vw,36px);
-box-shadow:0 18px 65px #08152552}
-h1{font-size:26px;line-height:1.2;margin:0 0 9px}
-p{color:#52677c;line-height:1.5;font-size:14px}
-.tabs{display:flex;margin:24px 0 16px;border-radius:10px;background:#edf3fa;padding:4px}
-.tabs button{border:0;background:transparent;border-radius:8px;padding:12px;flex:1;
-font:600 15px system-ui;color:#35536e;cursor:pointer}
-.tabs button[aria-selected=true]{background:white;color:#17589b;box-shadow:0 2px 8px #132c411c}
-form[hidden]{display:none}
-label{display:block;margin:15px 0 6px;font-weight:600;font-size:14px}
-input{display:block;width:100%;border:1px solid #becdde;border-radius:9px;
-padding:12px;font:inherit;background:white}
-input:focus{outline:2px solid #7daada;outline-offset:1px}
-.submit{width:100%;padding:13px;border:0;border-radius:9px;background:#1b5c9e;
-color:#fff;font:600 16px system-ui;margin-top:20px;cursor:pointer}
-.submit:disabled{opacity:.55}
-#auth-status{min-height:26px;font-size:14px;color:#365b7c}
-.small{font-size:12px;text-align:center;color:#6a7d91}
+<style id="eis223-signin-style">
+:root{font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
+ --auth-ink:#203c32;--auth-border:#dce9e2;--auth-muted:#677b70}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;font-family:inherit}
+body{color:var(--auth-ink);background:radial-gradient(ellipse at 90% 0%,#e5f4eb,transparent 40%),
+ radial-gradient(ellipse at 0% 90%,#edf4f1,transparent 42%),#f5f8f5}
+.layout{min-height:100vh;display:flex;justify-content:center;align-items:center;padding:25px 16px}
+.auth{position:relative;overflow:hidden;background:#fff;width:min(490px,100%);
+ border:1px solid var(--auth-border);border-radius:23px;
+ padding:clamp(22px,4.5vw,38px);box-shadow:0 22px 65px #1a42331c}
+.auth:before{content:"";position:absolute;left:0;right:0;top:0;height:5px;
+ background:linear-gradient(90deg,#067969,#38baa0,#d2e7d7)}
+h1{font-size:clamp(24px,3vw,29px);line-height:1.2;letter-spacing:-.04em;
+ font-weight:800;color:#23433a;margin:7px 0 11px}
+p{font-size:14px;line-height:1.65;color:var(--auth-muted)}
+.tabs{display:flex;gap:5px;padding:5px;margin:23px 0 19px;
+ border-radius:12px;background:#f0f6f2}
+.tabs button{flex:1;min-height:44px;padding:10px 12px;background:transparent;border:0;
+ border-radius:9px;font:700 14px system-ui;cursor:pointer;color:#697e73}
+.tabs button[aria-selected=true]{background:#fff;color:#087c6c;box-shadow:0 2px 9px #2a4c380f}
+form[hidden]{display:none!important}
+label{display:block;font-size:13px;margin:15px 0 6px;color:#3b574e;font-weight:700}
+input{display:block;width:100%;background:white;color:#203b31;min-height:47px;
+ border:1px solid #ceddd5;border-radius:11px;padding:12px 14px;font:inherit}
+input:focus{border-color:#0e967f;outline:3px solid #c9ebe0;outline-offset:1px}
+.submit{width:100%;min-height:47px;margin-top:22px;padding:12px;border:0;border-radius:11px;
+ background:#087e71;color:#fff;font:700 15px system-ui;cursor:pointer}
+.submit:hover:not(:disabled){background:#04695e}
+.submit:disabled{opacity:.6;cursor:wait}
+#auth-status{min-height:24px;font-size:13px;color:#346a5c;margin:14px 0}
+.small{text-align:center;font-size:12px;color:#819187;margin:15px 0 0}
+:focus-visible{outline:3px solid #7dceb9;outline-offset:2px}
+@media(max-width:500px){.layout{align-items:flex-start;padding-top:8vh}.auth{border-radius:17px}}
 </style>
 """
 
@@ -246,8 +258,8 @@ def login_portal(initial_tab="login"):
 <title>Вход и регистрация · ЕИС Аудитор</title>''' + _GATEWAY_STYLE + '''
 </head><body><main class="layout"><section class="auth" role="dialog" aria-label="Вход на сайт">
 <h1>ЕИС Аудитор 223-ФЗ</h1>
-<p>Для просмотра закупок и результатов проверок войдите в аккаунт.
-Регистрация доступна по заявке с подтверждением администратора.</p>
+<p>Войдите с помощью электронной почты и пароля, чтобы открыть вашу рабочую область.
+Новые учётные записи подтверждает администратор.</p>
 <div class="tabs" role="tablist" aria-label="Способ входа">
 <button type="button" role="tab" id="tab-login" aria-selected="false">Войти</button>
 <button type="button" role="tab" id="tab-register" aria-selected="false">Регистрация</button>
@@ -305,11 +317,8 @@ finally{button.disabled=false}
 });
 }
 select('__INITIAL__',false);
-// A cross-site link may initially omit the Strict cookie. This same-origin
-// request restores an existing session without asking for credentials again.
-fetch('/auth/me',{credentials:'same-origin',cache:'no-store'}).then(response=>{
-if(response.ok)location.replace('/');
-}).catch(()=>{});
+// Login is intentionally never restored by a background /auth/me request.
+// The password form is always shown on an explicit visit to this page.
 })();
 </script></body></html>'''
     return markup.replace("__INITIAL__", escape(initial))
