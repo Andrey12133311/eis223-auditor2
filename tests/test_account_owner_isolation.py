@@ -57,6 +57,15 @@ class OwnerIsolationTests(unittest.TestCase):
         self.assertFalse(result['execution_started'])
         self.assertEqual(db.calls[-1][1], (OWNER_A, result['batch_id']))
 
+    def test_manual_personal_id_claim_is_rejected(self):
+        db = FakeDB()
+        batch_id = 'personal-' + uuid4().hex
+        with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'require_origin'):
+            with self.assertRaises(HTTPException) as caught:
+                private.save_batch(batch_id, object(), Response())
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(db.calls, [])
+
     def test_owned_personal_batch_status_does_not_start_engine(self):
         db = FakeDB()
         batch_id = 'personal-' + uuid4().hex
