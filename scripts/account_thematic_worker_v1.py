@@ -93,3 +93,44 @@ def process_one(connect, audit_callback):
         "attempts": attempts,
         "status": ("completed" if succeeded else "failed") if recorded else "stale",
     }
+
+
+def save_findings(db, user_id, batch_id, reg_number, attempts, findings):
+    """Persist evidence-backed findings only for the current running attempt.
+
+    The caller must commit this transaction before signaling successful audit.
+    This API never infers violations from missing documents.
+    """
+    if not isinstance(attempts, int) or attempts < 1:
+        raise ValueError("Invalid attempt number")
+    if not isinstance(findings, (list, tuple)) or len(findings) > 500:
+        raise ValueError("Invalid findings collection")
+    checked = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            raise ValueError("Invalid finding")
+        values = tuple(finding.get(k) for k in
+                       ("finding_key", "legal_basis", "description", "evidence_source"))
+        if any(not isinstance(v, str) or not v.strip() or len(v) > 8000 for v in values):
+            raise ValueError("A finding requires legal basis and evidence")
+        checked.append(values)
+    current = db.execute(
+        """SELECT 1 FROM account_thematic_jobs
+           WHERE user_id=%s AND batch_id=%s AND reg_number=%s
+             AND attempts=%s AND status='running' FOR UPDATE""",
+        (user_id, batch_id, reg_number, attempts),
+    ).fetchone()
+    if current is None:
+        return False
+    for key, basis, description, evidence in checked:
+        db.execute(
+            """INSERT INTO account_thematic_findings
+               (user_id,batch_id,reg_number,finding_key,legal_basis,description,evidence_source)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (user_id,batch_id,reg_number,finding_key)
+               DO UPDATE SET legal_basis=EXCLUDED.legal_basis,
+                             description=EXCLUDED.description,
+                             evidence_source=EXCLUDED.evidence_source""",
+            (user_id,batch_id,reg_number,key,basis,description,evidence),
+        )
+    return True
