@@ -58,6 +58,27 @@ SHARED_READ_PATTERNS = tuple(map(re.compile, (
 )))
 
 
+THEMATIC_CARD = re.compile(r"^/thematic/card/[0-9a-f]{24}/3[0-9]{10}/?$")
+THEMATIC_STATUS = re.compile(r"^/api/thematic/[0-9a-f]{24}(?:/stop)?$")
+THEMATIC_CLASSIFY = re.compile(r"^/api/thematic/classify/3[0-9]{10}$")
+
+
+def thematic_user_route(path, method):
+    """Allow the genuine thematic UI/API; endpoint checks ownership by session."""
+    if method in ("GET", "HEAD"):
+        return (path in ("/thematic", "/api/thematic/history")
+                or THEMATIC_CARD.fullmatch(path) is not None
+                or THEMATIC_CLASSIFY.fullmatch(path) is not None
+                or (THEMATIC_STATUS.fullmatch(path) is not None
+                    and not path.endswith("/stop")))
+    if method == "POST":
+        return path == "/api/thematic/start" or (
+            bool(THEMATIC_STATUS.fullmatch(path)) and path.endswith("/stop"))
+    if method == "DELETE":
+        return bool(THEMATIC_STATUS.fullmatch(path)) and not path.endswith("/stop")
+    return False
+
+
 def shared_read_route(path, method):
     return (method in ("GET", "HEAD") and (
         path in SHARED_READ_PATHS or
@@ -172,7 +193,7 @@ class ProductionAccountGate:
             await _answer(send, 403, b'{"detail":"Administrator required"}')
             return
         if account[1] != "admin" and not path.startswith(PRIVATE_PREFIXES):
-            if scope["type"] != "http" or not shared_read_route(path, method):
+            if scope["type"] != "http" or not (shared_read_route(path, method) or thematic_user_route(path, method)):
                 if scope["type"] == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
                 else:
