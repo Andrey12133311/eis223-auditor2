@@ -117,31 +117,139 @@ document.getElementById('login').addEventListener('submit',async e=>{
 });
 </script>""")
 
-HOME = page("Мои закупки", """
-<h1>Мой кабинет</h1><p>Ваши сохранённые закупки ЕИС.</p><nav aria-label="Разделы личного кабинета"><a href="/account/home">Мои закупки</a> · <a href="/account/thematic">Тематические проверки</a> · <a href="/account/memos">Служебные записки</a></nav>
-<p id="summary" role="status">Загружаем сводку личного кабинета…</p>
-<form id="add"><label>Номер закупки<input name="reg" pattern="3[0-9]{10}" required placeholder="32616412317"></label>
-<button>Добавить закупку</button></form>
-<p class="message" id="message" role="status"></p><table><thead><tr><th>Номер ЕИС</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
-<button id="logout">Выйти</button>
-<script>
-async function loadSummary(){try{const r=await fetch('/me/summary',{credentials:'same-origin'});if(!r.ok)return;const x=await r.json();document.getElementById('summary').textContent='Мои закупки: '+x.procurements+' · Тематические очереди: '+x.thematic_batches+' · Служебные записки: '+x.memos;}catch{document.getElementById('summary').textContent='Сводка временно недоступна'}}
-async function load(){const r=await fetch('/me/procurements',{credentials:'same-origin'});
- if(r.status===401){location.assign('/account/login');return}
- if(!r.ok)return;const data=await r.json(),tbody=document.getElementById('rows');tbody.replaceChildren();
- for(const item of data){const tr=document.createElement('tr'),td=document.createElement('td'),act=document.createElement('td');
- td.textContent=item.reg_number;const b=document.createElement('button');b.textContent='Удалить';
- b.addEventListener('click',async()=>{await fetch('/me/procurements/'+encodeURIComponent(item.reg_number),{method:'DELETE',credentials:'same-origin'});load()});
- act.append(b);tr.append(td,act);tbody.append(tr)}loadSummary();
+HOME = page("Мои самостоятельные проверки", """
+<style>
+.manual-head{display:flex;flex-wrap:wrap;align-items:flex-start;
+ justify-content:space-between;gap:10px;margin-bottom:16px}
+.manual-head h1{margin-bottom:5px}
+.manual-note{font-size:12px;color:#607b90;line-height:1.65;
+ padding:11px 13px;border-left:3px solid #468ec2;background:#f2f7fb;border-radius:5px}
+.manual-form{display:flex;gap:9px;align-items:end;flex-wrap:wrap;
+ padding:16px 17px;margin:18px 0 20px;border:1px solid #d9e6f0;border-radius:10px;background:#f8fbfd}
+.manual-form label{flex:1 1 220px;margin:0}
+.manual-form input{margin-top:5px}
+.manual-form button{margin:0 0 1px}
+.manual-summary{display:flex;align-items:center;justify-content:space-between;
+ flex-wrap:wrap;gap:8px;margin:12px 0}
+.manual-summary strong{color:#245875;font-size:15px}
+.manual-chip{display:inline-flex;align-items:center;border-radius:100px;padding:5px 9px;
+ font-size:11px;font-weight:750;border:1px solid #d4e4ef;background:#edf5fa;color:#356787}
+.manual-chip.fail{background:#fff4f2;border-color:#efddd8;color:#ab544a}
+.manual-chip.wait{background:#fef8e9;border-color:#f1e5c6;color:#946d24}
+.manual-actions{display:flex;flex-wrap:wrap;gap:7px}
+.manual-actions a{display:inline-flex;align-items:center;justify-content:center;
+ padding:7px 11px;border-radius:8px;background:#eaf3fa;
+ border:1px solid #d6e7f2;min-height:39px}
+.manual-actions button{background:#fff;border:1px solid #e4d5d8;color:#98494b;
+ margin:0;padding:7px 11px}
+.manual-actions button:hover:not(:disabled){background:#fff3f3}
+#manual-rows td:first-child{font-weight:750;color:#205580}
+#manual-rows td small{display:block;color:#6b8394;font-weight:500;font-size:11px}
+#manual-empty{background:#f6fafc;border:1px dashed #cadfec;border-radius:10px;
+ padding:18px;text-align:center;color:#688095}
+@media(max-width:720px){
+ .manual-form{padding:13px;align-items:stretch}
+ .manual-form button{flex:1}
+ table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+ th,td{white-space:normal;min-width:100px}
+ td:last-child{min-width:160px}
 }
-document.getElementById('add').addEventListener('submit',async e=>{e.preventDefault();
- const reg=new FormData(e.currentTarget).get('reg');
- const r=await fetch('/me/procurements/'+encodeURIComponent(reg),{method:'POST',credentials:'same-origin'});
- document.getElementById('message').textContent=r.ok?'Закупка добавлена':'Не удалось добавить закупку';
- if(r.ok)load();
+</style>
+<p><a href="/">← На главную / В личный кабинет</a></p>
+<div class="manual-head"><div>
+<h1>Самостоятельные проверки</h1>
+<p>Здесь находятся закупки, проверку которых вы запустили под своей учётной записью.</p>
+</div></div>
+<div class="manual-note">Сохранённый номер закупки сам по себе не считается проведённой проверкой.
+Статус задания, количество реально проверенных документов и подтверждённых нарушений показаны отдельно.</div>
+<form id="manual-add" class="manual-form">
+<label>Номер закупки ЕИС
+<input name="reg" aria-label="Номер закупки ЕИС" pattern="3[0-9]{10}" required
+ maxlength="11" inputmode="numeric" autocomplete="off" placeholder="32616412317"></label>
+<button type="submit">Запустить проверку</button>
+</form>
+<p id="manual-message" class="message" role="status" aria-live="polite"></p>
+<div class="manual-summary"><strong id="manual-total">Загрузка проверок…</strong>
+<button type="button" id="manual-refresh">Обновить данные</button></div>
+<div id="manual-empty" hidden>Вы ещё не запускали самостоятельных проверок через личный кабинет.</div>
+<table aria-label="История самостоятельных проверок" id="manual-table">
+<thead><tr><th>Закупка и дата</th><th>Состояние</th><th>Документы</th>
+<th>Нарушения</th><th>Действия</th></tr></thead>
+<tbody id="manual-rows"></tbody></table>
+<script>
+(()=>{
+const el=id=>document.getElementById(id);
+const state={queued:'В очереди',leased:'Загружаются данные ЕИС',
+ done:'Загрузка завершена',partial:'Частичная загрузка',
+ deferred:'Ожидает источник',error:'Ошибка загрузки',unknown:'Статус уточняется'};
+let loading=false;
+async function refresh(){
+ if(loading)return;loading=true;
+ try{
+ const response=await fetch('/me/manual-checks',{credentials:'same-origin',cache:'no-store'});
+ if(response.status===401){location.replace('/account/login');return}
+ if(!response.ok)throw Error('Не удалось загрузить проверки');
+ const data=await response.json();
+ if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
+ const rows=el('manual-rows');rows.replaceChildren();
+ el('manual-total').textContent='Самостоятельных проверок: '+data.length;
+ el('manual-empty').hidden=!!data.length;
+ el('manual-table').hidden=!data.length;
+ for(const item of data){
+  const tr=document.createElement('tr'),reg=document.createElement('td'),
+    status=document.createElement('td'),docs=document.createElement('td'),
+    violations=document.createElement('td'),actions=document.createElement('td');
+  reg.textContent='№ '+item.reg_number;
+  const date=document.createElement('small');const stamp=Date.parse(item.started_at||'');
+  date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'';
+  reg.append(date);
+  const label=document.createElement('span');label.className='manual-chip';
+  label.textContent=state[item.job_status]||'Проверяется';
+  if(['queued','deferred','leased'].includes(item.job_status))label.classList.add('wait');
+  if(item.job_status==='error')label.classList.add('fail');
+  status.append(label);
+  docs.textContent=String(Math.max(0,Number(item.documents_checked||0)))+' проверено';
+  violations.textContent=String(Math.max(0,Number(item.violations||0)));
+  const wrapper=document.createElement('div');wrapper.className='manual-actions';
+  const open=document.createElement('a');
+  open.href=item.card_available?'/check-new/'+encodeURIComponent(item.reg_number):'/';
+  open.textContent=item.card_available?'Открыть проверку':'На главную';
+  const remove=document.createElement('button');remove.type='button';remove.textContent='Убрать';
+  remove.title='Убрать из личного кабинета; сохранённые оригиналы и результаты остаются';
+  remove.onclick=async()=>{
+    if(!confirm('Убрать эту самостоятельную проверку из кабинета? Документы и результаты сохранятся.'))return;
+    remove.disabled=true;
+    try{
+      const result=await fetch('/me/manual-checks/'+encodeURIComponent(item.reg_number),
+      {method:'DELETE',credentials:'same-origin'});
+      if(!result.ok)throw Error('Ошибка удаления');
+      await refreshAfterAction();
+    }catch(error){el('manual-message').textContent=error.message;remove.disabled=false}
+  };
+  wrapper.append(open,remove);actions.append(wrapper);
+  tr.append(reg,status,docs,violations,actions);rows.append(tr);
+ }
+ }catch(error){el('manual-message').textContent=error.message}
+ finally{loading=false}
+}
+async function refreshAfterAction(){loading=false;await refresh()}
+el('manual-refresh').onclick=refresh;
+el('manual-add').addEventListener('submit',async event=>{
+ event.preventDefault();const form=event.currentTarget;
+ const number=String(new FormData(form).get('reg')||'').trim();
+ if(!/^3[0-9]{10}$/.test(number)){el('manual-message').textContent='Неверный номер ЕИС';return}
+ const button=form.querySelector('button');button.disabled=true;
+ try{
+  const res=await fetch('/me/manual-checks/'+encodeURIComponent(number),
+   {method:'POST',credentials:'same-origin'});
+  if(!res.ok)throw Error('Не удалось запустить проверку ЕИС');
+  el('manual-message').textContent='Задание проверки принято, ожидайте обработки документов.';
+  form.reset();await refresh();
+ }catch(error){el('manual-message').textContent=error.message}
+ finally{button.disabled=false}
 });
-document.getElementById('logout').addEventListener('click',async()=>{await fetch('/auth/logout',{method:'POST',credentials:'same-origin'});location.assign('/account/login')});
-load();
+refresh();
+})();
 </script>""")
 
 ADMIN = page("Заявки пользователей", """
