@@ -122,6 +122,7 @@ def user_only_violations():
     assert "SELECT batch_id,title" in src
     assert "require_admin" not in src
     assert "source_representations" in src
+    assert 'item.get("batch_id") or first_batch' in src
     assert "needs_review" in src
     assert "law_url" in src
     assert '"count":len(prepared[:500])' in src
