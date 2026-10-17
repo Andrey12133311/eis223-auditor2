@@ -28,3 +28,8 @@ This is **not** the EIS production startup and must not be attached to the exist
 ## Existing service
 
 Keep `scripts/railway_start_v282.py` and production environment unchanged. Never set `EIS223_AUTH_ENFORCE=true` on the existing service before completing the compatibility review.
+
+
+## Mail.ru sender for isolated staging
+
+Use dedicated sender `aol.vlal@mail.ru` with `EIS223_SMTP_HOST=smtp.mail.ru`, `EIS223_SMTP_PORT=465`, `EIS223_SMTP_USER=aol.vlal@mail.ru`, `EIS223_SMTP_FROM=aol.vlal@mail.ru`. Set `EIS223_SMTP_PASSWORD` only through protected Railway variables using a Mail.ru application-specific password; do not commit credentials. Users may register with addresses at any mail provider; email ownership requires clicking the verification link. Real SMTP delivery is unverified until staging credentials and a separate recipient mailbox are configured.
