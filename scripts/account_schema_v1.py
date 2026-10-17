@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS account_memos (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS account_memos_owner ON account_memos(user_id);
-CREATE TABLE IF NOT EXISTS account_audit (
+CREATE TABLE IF NOT EXISTS account_throttle (\n    bucket_key TEXT PRIMARY KEY,\n    attempts INTEGER NOT NULL,\n    started_at TIMESTAMPTZ NOT NULL\n);\nCREATE TABLE IF NOT EXISTS account_audit (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     actor_id UUID,
     subject_id UUID,
