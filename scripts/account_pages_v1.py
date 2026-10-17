@@ -59,7 +59,7 @@ document.getElementById('login').addEventListener('submit',async e=>{
 </script>""")
 
 HOME = page("Мои закупки", """
-<h1>Мой кабинет</h1><p>Ваши сохранённые закупки ЕИС.</p><nav aria-label="Разделы личного кабинета"><a href="/account/home">Мои закупки</a> · <a href="/account/thematic">Тематические проверки</a> · <a href="/account/memos">Служебные записки</a></nav>
+<h1>Мой кабинет</h1><p>Ваши сохранённые закупки ЕИС.</p><nav aria-label="Разделы личного кабинета"><a href="/">Общая проверка — все закупки и нарушения</a> · <a href="/account/home">Мои закупки</a> · <a href="/account/thematic">Тематические проверки</a> · <a href="/account/memos">Служебные записки</a></nav>
 <p id="summary" role="status">Загружаем сводку личного кабинета…</p>
 <form id="add"><label>Номер закупки<input name="reg" pattern="3[0-9]{10}" required placeholder="32616412317"></label>
 <button>Добавить закупку</button></form>
@@ -109,7 +109,7 @@ load();
 THEMATIC = page("Тематические проверки", """
 <h1>Мои тематические проверки</h1>
 <p>Сохранённые в вашем личном кабинете очереди. Добавление не запускает проверку.</p>
-<p><a href="/account/home">← Личный кабинет</a></p>
+<p><a href="/">Общая проверка</a> · <a href="/account/home">← Личный кабинет</a></p>
 <button id="create-personal" type="button">Создать личную очередь</button>
 <form id="add-batch"><label>Идентификатор тематической очереди
 <input name="batch" required maxlength="200"></label><button>Сохранить очередь</button></form>
