@@ -102,19 +102,42 @@ load();
 </script>""")
 
 THEMATIC = page("Тематические проверки", """
-<h1>Мои тематические проверки</h1><p>Здесь отображаются только ваши очереди тематических проверок.</p>
+<h1>Мои тематические проверки</h1>
+<p>Сохранённые в вашем личном кабинете очереди. Добавление не запускает проверку.</p>
 <p><a href="/account/home">← Личный кабинет</a></p>
-<p id="message" role="status">Загружаем…</p><table><thead><tr><th>Очередь</th><th>Статус</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
+<form id="add-batch"><label>Идентификатор тематической очереди
+<input name="batch" required maxlength="200"></label><button>Сохранить очередь</button></form>
+<p id="message" role="status"></p>
+<table><thead><tr><th>Очередь</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
 <script>
-(async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/thematic-batches',{credentials:'same-origin'});
-if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить очереди';return}
-const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr');
-for(const v of [item.batch_id||'Очередь','Сохранена']){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}
-const action=document.createElement('td'),btn=document.createElement('button');btn.textContent='Убрать из кабинета';
-btn.addEventListener('click',async()=>{btn.disabled=true;try{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});
-if(res.ok){tr.remove();m.textContent='Очередь убрана из личного кабинета'}else{m.textContent='Не удалось убрать очередь';btn.disabled=false}}
-catch{m.textContent='Ошибка соединения';btn.disabled=false}});action.append(btn);tr.append(action);rows.append(tr)}
-m.textContent=data.length?'':'Очередей пока нет';}catch{m.textContent='Ошибка соединения'}})();
+async function loadBatches(){
+ const m=document.getElementById('message');
+ try{
+ const r=await fetch('/me/thematic-batches',{credentials:'same-origin'});
+ if(r.status===401){location.assign('/account/login');return}
+ if(!r.ok){m.textContent='Не удалось получить очереди';return}
+ const data=await r.json(),rows=document.getElementById('rows');rows.replaceChildren();
+ for(const item of data){
+ const tr=document.createElement('tr'),name=document.createElement('td'),action=document.createElement('td');
+ name.textContent=item.batch_id;
+ const btn=document.createElement('button');btn.textContent='Удалить из моих';
+ btn.addEventListener('click',async()=>{
+ const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});
+ m.textContent=res.ok?'Очередь удалена из личного списка':'Ошибка удаления';
+ if(res.ok)loadBatches();
+ });action.append(btn);tr.append(name,action);rows.append(tr);
+ }
+ if(!data.length)m.textContent='Сохранённых очередей пока нет';
+ }catch{m.textContent='Ошибка соединения'}
+}
+document.getElementById('add-batch').addEventListener('submit',async e=>{
+ e.preventDefault();const m=document.getElementById('message');
+ const id=new FormData(e.currentTarget).get('batch');
+ const r=await fetch('/me/thematic-batches/'+encodeURIComponent(id),{method:'POST',credentials:'same-origin'});
+ m.textContent=r.ok?'Очередь сохранена':'Не удалось сохранить очередь';
+ if(r.ok){e.currentTarget.reset();loadBatches()}
+});
+loadBatches();
 </script>""")
 
 MEMOS = page("Служебные записки", """
