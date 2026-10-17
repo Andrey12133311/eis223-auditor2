@@ -36,7 +36,7 @@ MACHINE_PREFIXES = (
     "/api/v295/eis223/recheck-status/",
     "/api/v301/bridge/report/",
 )
-PRIVATE_PREFIXES = ("/auth/", "/account/", "/me/", "/admin/accounts/")
+PRIVATE_PREFIXES = ("/auth/", "/account/", "/me/", "/manager/", "/admin/accounts/")
 
 # Explicit read-only allowlist. Do not grant all GET requests to the legacy
 # engine: some GET handlers claim bridge jobs or trigger expensive checks.
@@ -241,6 +241,8 @@ def install(app):
     from scripts.account_workspace_v1 import router as workspace
     from scripts.v366_account_manual import router as real_manual_checks
     from scripts.v367_private_features import router as personal_features
+    from scripts.v368_manager_workflow import router as manager_workflow, employee_router as employee_assignments
+    from scripts.v368_manager_evidence import router as manager_evidence
     from scripts.account_page_routes_v1 import router as pages
     from scripts.account_private_api_v1 import router as private
     from scripts.account_migrations_v1 import initialize_schema
@@ -250,6 +252,9 @@ def install(app):
     app.include_router(workspace)
     app.include_router(real_manual_checks)
     app.include_router(personal_features)
+    app.include_router(manager_workflow)
+    app.include_router(manager_evidence)
+    app.include_router(employee_assignments)
     app.include_router(pages)
     app.include_router(private)
     app.add_middleware(ProductionAccountGate, connection=connect)
