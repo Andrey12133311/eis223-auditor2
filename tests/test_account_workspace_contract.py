@@ -20,6 +20,13 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('require_origin(request)',api)
         pages=(ROOT/'scripts/account_pages_v1.py').read_text()
         self.assertIn("Убрать из кабинета",pages)
+    def test_thematic_bookmark_requires_owner_and_origin(self):
+        api=(ROOT/'scripts/account_private_api_v1.py').read_text()
+        pages=(ROOT/'scripts/account_pages_v1.py').read_text()
+        self.assertIn('@router.post("/thematic-batches/{batch_id}"',api)
+        self.assertIn('require_origin(request)',api)
+        self.assertIn('VALUES (%s,%s) ON CONFLICT DO NOTHING',api)
+        self.assertIn("method:'DELETE'",pages)
     def test_no_email_confirmation_required(self):
         a=(ROOT/'scripts/account_api_v1.py').read_text()
         b=(ROOT/'scripts/account_repository_v1.py').read_text()
