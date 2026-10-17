@@ -72,13 +72,19 @@ def _link(doc):
 def _reg_doc(doc):
     title=str(doc.get("name") or "")
     heading=_text(doc)[:350]
-    return bool(RX_REG.search(title) or re.search(r"^\s*(?:утверждено.{0,150}?)?положени\w*\s+о\s+закупк",heading,re.I|re.S))
+    if re.search(r"документаци\w*|извещени\w*|проект\s+договора",title,re.I) and not RX_REG.search(title):
+        return False
+    return bool(RX_REG.search(title) or re.search(
+        r"^\s*(?:утверждено.{0,150}?)?положени\w*\s+о\s+закупк",heading,re.I|re.S))
 
 def _protocol_doc(doc):
     title=str(doc.get("name") or "")
     heading=_text(doc)[:220]
     if RX_EXCLUDE.search(title):return False
-    return bool(RX_PROT.search(title) or re.match(r"\s*протокол\s",heading,re.I))
+    doc_type=str(doc.get("type") or doc.get("doc_type") or "")
+    return bool(RX_PROT.search(title) or
+                ("protocol" in doc_type.casefold() and
+                 re.match(r"\s*протокол\s",heading,re.I)))
 
 def _competitive(p, doc):
     method=str(p.get("method") or p.get("purchase_method") or "")
