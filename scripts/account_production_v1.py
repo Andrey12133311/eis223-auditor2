@@ -23,12 +23,14 @@ MACHINE_EXACT = frozenset({
     "/api/v299/eis223/heartbeat",
     "/api/v299/eis223/known",
     "/api/v310/eis223/card-metadata",
+    "/api/v301/bridge/next",
 })
 MACHINE_PREFIXES = (
     "/api/v295/eis223/original/",
     "/api/v295/eis223/manifest/",
     "/api/v295/eis223/recheck/",
     "/api/v295/eis223/recheck-status/",
+    "/api/v301/bridge/report/",
 )
 PRIVATE_PREFIXES = ("/auth/", "/account/", "/me/", "/admin/accounts/")
 
