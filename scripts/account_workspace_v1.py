@@ -10,8 +10,9 @@ REG_NUMBER = re.compile(r"^3[0-9]{10}$")
 
 
 @router.get("/procurements")
-def my_procurements(request: Request):
+def my_procurements(request: Request, response: Response):
     user = current_account(request)
+    response.headers.update(no_store_headers())
     with connect() as db:
         rows = db.execute(
             PROCUREMENTS,
@@ -38,6 +39,8 @@ def add_procurement(reg_number: str, request: Request):
 @router.delete("/procurements/{reg_number}")
 def remove_procurement(reg_number: str, request: Request):
     require_origin(request)
+    if not REG_NUMBER.fullmatch(reg_number):
+        raise HTTPException(422, 'Некорректный номер закупки')
     user = current_account(request)
     with connect() as db:
         db.execute(
