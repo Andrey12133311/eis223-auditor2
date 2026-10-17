@@ -73,6 +73,8 @@ def _read_only_status(ns, entries):
         has_checks=bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checks'"
         ).fetchone())
+        finding_columns={col[1] for col in conn.execute("PRAGMA table_info(findings)")} if has_findings else set()
+        check_columns={col[1] for col in conn.execute("PRAGMA table_info(checks)")} if has_checks else set()
         data=[]
         for entry in entries:
             reg=entry["reg_number"]
@@ -99,12 +101,12 @@ def _read_only_status(ns, entries):
                     if has_inn:
                         customer_inn=str(customer_row["customer_inn"] or "")[:12]
             labels=set()
-            if has_findings:
+            if {"title","kind","reg_number"}<=finding_columns:
                 for value in conn.execute(
                     "SELECT DISTINCT title FROM findings WHERE reg_number=? "
                     "AND (kind='violation' OR kind='нарушение') LIMIT 40",(reg,)):
                     if value[0]:labels.add(str(value[0]).strip()[:160])
-            if has_checks:
+            if {"item","status","reg_number"}<=check_columns:
                 for value in conn.execute(
                     "SELECT DISTINCT item FROM checks WHERE reg_number=? "
                     "AND (status='violation' OR status='нарушение') LIMIT 40",(reg,)):
