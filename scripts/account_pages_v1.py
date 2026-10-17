@@ -157,7 +157,17 @@ async function loadBatches(){
  try{const deleted=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements/'+encodeURIComponent(procurement.reg_number),{method:'DELETE',credentials:'same-origin'});
  if(deleted.ok){line.remove();m.textContent='Закупка удалена из личной очереди'}else{m.textContent='Ошибка удаления закупки';remove.disabled=false}
  }catch{m.textContent='Ошибка соединения';remove.disabled=false}
- });line.append(label,remove);panel.append(line);
+ });line.append(label,remove);
+ const queue=document.createElement('button');queue.textContent='Поставить в очередь';
+ queue.addEventListener('click',async()=>{
+ queue.disabled=true;
+ try{
+ const response=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/jobs/'+encodeURIComponent(procurement.reg_number),{method:'POST',credentials:'same-origin'});
+ m.textContent=response.ok?'Задание сохранено. Исполнитель ЕИС пока не подключён':'Ошибка постановки задания';
+ if(!response.ok)queue.disabled=false;
+ }catch{m.textContent='Ошибка соединения';queue.disabled=false}
+ });
+ line.append(queue);panel.append(line);
  }
  const previous=document.getElementById('personal-procurements');if(previous)previous.remove();
  panel.id='personal-procurements';document.getElementById('rows').after(panel);
