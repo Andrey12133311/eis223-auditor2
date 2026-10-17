@@ -1,6 +1,6 @@
 """Contract tests for isolated personal thematic worker primitives."""
 import unittest
-from scripts.account_thematic_worker_v1 import claim_next, complete_job
+from scripts.account_thematic_worker_v1 import claim_next, complete_job, requeue_stale
 
 
 class FakeCursor:
@@ -8,6 +8,9 @@ class FakeCursor:
         self.row = row
 
     def fetchone(self):
+        return self.row
+
+    def fetchall(self):
         return self.row
 
 
@@ -43,6 +46,18 @@ class ThematicWorkerTests(unittest.TestCase):
 
     def test_stale_completion_is_rejected(self):
         self.assertFalse(complete_job(FakeDB(None), "owner", "batch", "32615969056", 1, False))
+
+    def test_stale_jobs_requeued_with_retry_limit(self):
+        db = FakeDB([("owner", "batch", "32615969056", "queued")])
+        rows = requeue_stale(db, max_attempts=3, stale_minutes=30)
+        self.assertEqual(rows[0][3], "queued")
+        self.assertEqual(db.params, (3, 3, 30))
+        self.assertIn("attempts >= %s", db.sql)
+        self.assertIn("j.status='running'", db.sql)
+
+    def test_invalid_stale_policy(self):
+        with self.assertRaises(ValueError):
+            requeue_stale(FakeDB([]), stale_minutes=0)
 
     def test_invalid_attempt(self):
         with self.assertRaises(ValueError):
