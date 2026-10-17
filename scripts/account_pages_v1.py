@@ -580,6 +580,22 @@ function render(){
     };
     actions.append(link);
    }
+   const verify=document.createElement('button');
+   verify.type='button';verify.textContent='Проверить записку';
+   verify.onclick=async()=>{
+    verify.disabled=true;
+    try{
+     const resp=await fetch('/me/workbench/memos/'+encodeURIComponent(item.id)+'/quality',
+       {credentials:'same-origin',cache:'no-store'});
+     const result=await resp.json().catch(()=>({}));
+     if(!resp.ok)throw Error(result.detail||'Не удалось проверить ODT');
+     el('memo-status').textContent=result.warnings?.length
+       ?'Проверка записки по закупке '+item.reg_number+': '+result.warnings.join('; ')
+       :'Формальные проверки ODT пройдены. Правовые выводы требуют подтверждения.';
+    }catch(e){el('memo-status').textContent=e.message}
+    finally{verify.disabled=false}
+   };
+   actions.append(verify);
    if(!decision||decision.status==='returned'){
     const button=document.createElement('button');button.type='button';
     button.textContent=decision?'Повторно на согласование':'Отправить руководителю';
