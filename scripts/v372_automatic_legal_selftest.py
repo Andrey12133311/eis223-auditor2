@@ -78,7 +78,7 @@ def test_regulation():
       assert c["status"]=="check"
       assert c["law_url"] in (LAW_REG,LAW_4)
       assert c["evidence"] and c["document"]==original["name"]
-    finds,review=evaluate(P,[official("КД.docx",reg_text)])
+    finds,review=evaluate(P,[official("Документация конкурентной закупки.docx",reg_text)])
     assert not finds
     assert not any(x["field_path"].startswith("v372-regulation") for x in review)
     assert evaluate(P,[official("Положение о закупке.docx",reg_text,False)])==([],[])
