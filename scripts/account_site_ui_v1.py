@@ -201,7 +201,7 @@ _STYLE = """
 
 
 def site_header(role="user"):
-    admin = '<a href="/account/admin">Заявки пользователей</a>' if role == "admin" else ""
+    admin = ""  # Administrator controls live inside the personal cabinet.
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
     return (_STYLE + '''
@@ -236,6 +236,16 @@ def site_header(role="user"):
 <a class="eis223-all-checks" href="/account/profile">Редактировать ФИО →</a>
 <p class="eis223-subtle">Самостоятельные и тематические проверки, документы и результаты в одном месте</p></div>
 <span class="eis223-panel-mark">Доступно только вашей учётной записи</span></div>
+''' + ('''
+<section class="eis223-feature" id="eis223-admin-controls" aria-label="Управление пользователями">
+<h3>Администрирование пользователей</h3>
+<p>Подтверждайте заявки и назначайте роли зарегистрированным сотрудникам.</p>
+<button type="button" id="eis223-admin-open" aria-expanded="false" aria-controls="eis223-admin-panel">Управление пользователями и ролями</button>
+<div id="eis223-admin-panel" hidden>
+<p role="status" id="eis223-admin-status"></p>
+<div id="eis223-admin-users"></div>
+</div></section>
+''' if role == "admin" else "") + '''
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
 <span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
@@ -298,6 +308,50 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <script>
 (()=>{
 const q=id=>document.getElementById(id);
+const adminButton=q('eis223-admin-open');
+if(adminButton){
+ adminButton.addEventListener('click',async()=>{
+  const panel=q('eis223-admin-panel');panel.hidden=!panel.hidden;
+  adminButton.setAttribute('aria-expanded',String(!panel.hidden));
+  if(panel.hidden)return;
+  const box=q('eis223-admin-users'),status=q('eis223-admin-status');
+  status.textContent='Загрузка пользователей…';
+  try{
+   const response=await fetch('/admin/roles/users',{credentials:'same-origin',cache:'no-store'});
+   if(!response.ok)throw Error('HTTP '+response.status);
+   const users=await response.json();box.replaceChildren();
+   for(const u of users){
+    const line=document.createElement('div');line.style.cssText='padding:12px 0;border-bottom:1px solid #e4ebf2;display:flex;gap:9px;flex-wrap:wrap;align-items:center';
+    const name=document.createElement('strong');name.textContent=(u.full_name||u.email)+' · '+u.email;
+    const role=document.createElement('select');role.setAttribute('aria-label','Роль '+u.email);
+    for(const [value,label] of [['user','Сотрудник'],['manager','Руководитель'],['admin','Администратор']]){
+     const option=document.createElement('option');option.value=value;option.textContent=label;role.append(option);
+    }
+    role.value=u.role;
+    const save=document.createElement('button');save.type='button';save.textContent='Сохранить';
+    const pending=u.status==='pending';
+    if(pending){
+     role.disabled=true;save.textContent='Подтвердить заявку';
+    }else if(u.status!=='approved'){role.disabled=true;save.disabled=true}
+    save.addEventListener('click',async()=>{
+     save.disabled=true;
+     try{
+      const url=pending?'/admin/accounts/'+encodeURIComponent(u.id)+'/approve':
+       '/admin/roles/users/'+encodeURIComponent(u.id);
+      const response=await fetch(url,{method:pending?'POST':'PUT',credentials:'same-origin',
+       headers:{'Content-Type':'application/json'},body:pending?undefined:JSON.stringify({role:role.value})});
+      if(!response.ok)throw Error('HTTP '+response.status);
+      status.textContent=pending?'Заявка подтверждена':'Роль сохранена. Пользователю нужно войти заново.';
+      panel.hidden=true;adminButton.click();
+     }catch(e){status.textContent='Не удалось сохранить: '+e.message;save.disabled=false}
+    });
+    line.append(name,role,save);box.append(line);
+   }
+   status.textContent='Пользователей: '+users.length;
+  }catch(e){status.textContent='Ошибка загрузки: '+e.message}
+ });
+}
+
 q('eis223-toggle-cabinet').addEventListener('click',()=>{
 const panel=q('eis223-cabinet');panel.hidden=!panel.hidden;
 q('eis223-toggle-cabinet').setAttribute('aria-expanded',String(!panel.hidden));
