@@ -46,7 +46,11 @@ class Inspector(HTMLParser):
 
 
 def check_permissions():
-    with patch.object(flow,"current_account",return_value=(OWNER,"user","approved")):
+    def ordinary_account(request,admin=False):
+        if admin:
+            raise HTTPException(403,"Administrator required")
+        return (OWNER,"user","approved")
+    with patch.object(flow,"current_account",side_effect=ordinary_account):
         try:flow.supervisor(SimpleNamespace())
         except HTTPException as exc:assert exc.status_code==403
         else:raise AssertionError("Worker got manager privileges")
