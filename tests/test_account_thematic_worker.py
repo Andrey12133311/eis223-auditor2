@@ -1,6 +1,6 @@
 """Contract tests for isolated personal thematic worker primitives."""
 import unittest
-from scripts.account_thematic_worker_v1 import claim_next, complete_job, requeue_stale
+from scripts.account_thematic_worker_v1 import claim_next, complete_job, requeue_stale, process_one
 
 
 class FakeCursor:
@@ -58,6 +58,54 @@ class ThematicWorkerTests(unittest.TestCase):
     def test_invalid_stale_policy(self):
         with self.assertRaises(ValueError):
             requeue_stale(FakeDB([]), stale_minutes=0)
+
+
+    def test_process_one_requires_trusted_callback(self):
+        with self.assertRaises(TypeError):
+            process_one(lambda: None, None)
+
+    def test_process_one_runs_and_records_completion(self):
+        class Transaction:
+            def __init__(self, row):
+                self.row = row
+                self.statements = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def execute(self, sql, params=None):
+                self.statements.append((sql, params))
+                return FakeCursor(self.row)
+        transactions = iter([
+            Transaction(("owner", "personal-batch", "32615969056", 1)),
+            Transaction(("completed",)),
+        ])
+        seen = []
+        result = process_one(lambda: next(transactions),
+                             lambda *args: seen.append(args) or True)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen, [("owner", "personal-batch", "32615969056")])
+
+    def test_process_one_records_callback_failure(self):
+        class Transaction:
+            def __init__(self, row):
+                self.row = row
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def execute(self, sql, params=None):
+                if params is not None:
+                    self.params = params
+                return FakeCursor(self.row)
+        first = Transaction(("owner", "batch", "32615969056", 1))
+        second = Transaction(("failed",))
+        transactions = iter([first, second])
+        def broken(*args):
+            raise RuntimeError("EIS unavailable")
+        result = process_one(lambda: next(transactions), broken)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(second.params[0], "failed")
 
     def test_invalid_attempt(self):
         with self.assertRaises(ValueError):
