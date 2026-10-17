@@ -196,7 +196,7 @@ CREATE INDEX IF NOT EXISTS account_manager_tasks_manager
     ON account_manager_tasks(manager_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS account_manager_tasks_user
     ON account_manager_tasks(user_id,status,due_date);
--- Server-side job links for assignments; never added to manual employee checks.
+-- Assigned jobs do not pollute independently entered employee checks.
 CREATE TABLE IF NOT EXISTS account_manager_task_eis_jobs (
     task_id UUID PRIMARY KEY REFERENCES account_manager_tasks(id) ON DELETE CASCADE,
     job_id TEXT NOT NULL,
@@ -313,96 +313,26 @@ CREATE TABLE IF NOT EXISTS account_staff_manual_findings (
 );
 CREATE INDEX IF NOT EXISTS account_staff_manual_findings_owner
     ON account_staff_manual_findings(user_id,reg_number,created_at DESC);
--- Personal review decisions are annotations, never modifications to the EIS findings.
+-- Employee decisions are independent of EIS findings.
 CREATE TABLE IF NOT EXISTS account_staff_finding_decisions (
     user_id UUID NOT NULL REFERENCES account_users(id),
-    finding_key TEXT NOT NULL CHECK (finding_key ~ '^[0-9a-f]{32}
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL,
-    author_id UUID NOT NULL REFERENCES account_users(id),
-    body TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS account_staff_discussions_case
-    ON account_staff_discussions(user_id,reg_number,created_at DESC);
-CREATE TABLE IF NOT EXISTS account_throttle (
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
-    reg_number TEXT NOT NULL CHECK (reg_number ~ '^3[0-9]{10}
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL,
-    author_id UUID NOT NULL REFERENCES account_users(id),
-    body TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS account_staff_discussions_case
-    ON account_staff_discussions(user_id,reg_number,created_at DESC);
-CREATE TABLE IF NOT EXISTS account_throttle (
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
-    decision TEXT NOT NULL CHECK (decision IN ('confirmed','rejected','recheck')),
+    finding_key TEXT NOT NULL CHECK(finding_key ~ '^[0-9a-f]{32}$'),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}$'),
+    decision TEXT NOT NULL CHECK(decision IN ('confirmed','rejected','recheck')),
     comment TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id,finding_key)
+    PRIMARY KEY(user_id,finding_key)
 );
 CREATE INDEX IF NOT EXISTS account_staff_finding_decisions_recent
     ON account_staff_finding_decisions(user_id,updated_at DESC);
--- Per-account private autosaved notes, separate from immutable case notes.
+-- Private autosaved employee draft, never an EIS original.
 CREATE TABLE IF NOT EXISTS account_staff_drafts (
     user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL,
-    author_id UUID NOT NULL REFERENCES account_users(id),
-    body TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS account_staff_discussions_case
-    ON account_staff_discussions(user_id,reg_number,created_at DESC);
-CREATE TABLE IF NOT EXISTS account_throttle (
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}$'),
     body TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(user_id,reg_number)
 );
--- Saved search phrases belong only to the signed-in employee.
 CREATE TABLE IF NOT EXISTS account_staff_saved_searches (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES account_users(id),
