@@ -75,11 +75,16 @@ def register(data: Credentials, request: Request):
         user_id = create_pending_user(db, email, encoded)
         token = create_challenge(db, user_id) if user_id else None
     if token:
-        send_verification_email(email, token)
-    return {"status": "pending", "message": "Проверьте почту для подтверждения адреса"}
+        try:
+            send_verification_email(email, token)
+        except (OSError, RuntimeError, KeyError, ValueError) as exc:
+            raise HTTPException(503, "Не удалось отправить письмо. Повторите позже или обратитесь к администратору") from exc
+    return {"status": "pending", "message": "Если заявка создана, проверьте почту для подтверждения адреса"}
 
 @router.get("/verify-email")
-def verify_email(token: str):
+def verify_email(token: str, response: Response):
+    response.headers.update(no_store_headers())
+    response.headers["Referrer-Policy"] = "no-referrer"
     with connect() as db:
         verified = verify_challenge(db, token)
     if not verified:
