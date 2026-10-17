@@ -32,3 +32,17 @@ This staging app is separate from the production EIS web service. Do not replace
 - Do not merge the account feature branch or enable production registration until isolation, download authorization, and deployment tests are complete.
 
 Keep `scripts/railway_start_v282.py` and the production Railway environment unchanged.
+
+## Personal thematic execution integration contract (not implemented)
+
+A queue entry is currently only a saved procurement number. The UI must not mark it as running, checked, or completed.
+
+Before enabling background processing:
+
+1. Store jobs with a composite owner/queue/procurement identity and a strict lifecycle (queued, running, completed, failed).
+2. Accept enqueue requests only after validating the authenticated owner and personal queue membership.
+3. Let an independently authenticated worker claim jobs atomically; use retry limits and crash recovery to prevent duplicate execution.
+4. Persist document provenance, verification timestamps, legal findings, and deduplication keys under the same owner and queue.
+5. Return only owner-scoped results; never resolve a personal queue through a shared queue identifier.
+6. Keep the existing EIS production ingestion service unchanged until staging integration tests and a rollback plan are complete.
+7. Expose job state separately from the existing saved-queue status, and never claim EIS processing has begun before a worker actually claims a job.
