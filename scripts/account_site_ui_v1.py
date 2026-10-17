@@ -313,6 +313,9 @@ for(const item of purchases.slice(0,8)){
  const open=document.createElement('a');open.href=item.card_available?
  '/check-new/'+encodeURIComponent(item.reg_number):'/account/home';
  open.textContent=item.card_available?'Карточка':'Подробности';li.append(open);
+ if(item.card_available){const dossier=document.createElement('a');
+ dossier.href='/me/cases/'+encodeURIComponent(item.reg_number);
+ dossier.textContent='Электронное дело';li.append(dossier);}
  const del=document.createElement('button');del.type='button';del.textContent='Убрать';
  del.title='Убрать из личного кабинета, не удаляя документы и результаты проверки';
  del.onclick=async()=>{
