@@ -244,6 +244,7 @@ def install(app):
     from scripts.v368_manager_workflow import router as manager_workflow, employee_router as employee_assignments
     from scripts.v368_manager_evidence import router as manager_evidence
     from scripts.v368_manager_quality import router as manager_quality
+    from scripts.v369_evidence_case import router as account_cases, manager_router as manager_case_notes
     from scripts.account_page_routes_v1 import router as pages
     from scripts.account_private_api_v1 import router as private
     from scripts.account_migrations_v1 import initialize_schema
@@ -256,6 +257,8 @@ def install(app):
     app.include_router(manager_workflow)
     app.include_router(manager_evidence)
     app.include_router(manager_quality)
+    app.include_router(account_cases)
+    app.include_router(manager_case_notes)
     app.include_router(employee_assignments)
     app.include_router(pages)
     app.include_router(private)
