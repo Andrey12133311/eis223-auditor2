@@ -246,6 +246,9 @@ def install(app):
     from scripts.v368_manager_quality import router as manager_quality
     from scripts.v369_evidence_case import router as account_cases, manager_router as manager_case_notes
     from scripts.v369_manager_report import router as manager_report
+    from scripts.v370_manager_campaigns import router as manager_campaigns, staff_router as staff_campaigns
+    from scripts.v370_staff_workbench import router as staff_workbench, team_router as manager_discussions
+    from scripts.v370_staff_documents import router as staff_documents
     from scripts.account_page_routes_v1 import router as pages
     from scripts.account_private_api_v1 import router as private
     from scripts.account_migrations_v1 import initialize_schema
@@ -261,6 +264,11 @@ def install(app):
     app.include_router(account_cases)
     app.include_router(manager_case_notes)
     app.include_router(manager_report)
+    app.include_router(manager_campaigns)
+    app.include_router(staff_campaigns)
+    app.include_router(staff_workbench)
+    app.include_router(manager_discussions)
+    app.include_router(staff_documents)
     app.include_router(employee_assignments)
     app.include_router(pages)
     app.include_router(private)
