@@ -13,7 +13,7 @@ from scripts.account_api_v1 import connect
 
 PUBLIC = frozenset({
     "/health", "/healthz", "/account/login", "/account/register",
-    "/auth/login", "/auth/register", "/eis223/collector.js",
+    "/auth/login", "/auth/register", "/account/setup", "/auth/setup", "/eis223/collector.js",
     "/api/v299/eis223/collector.js",
 })
 MACHINE_EXACT = frozenset({
@@ -133,10 +133,12 @@ def install(app):
     if not origin_matches(origin, origin):
         raise RuntimeError("An HTTPS public origin is required")
     from scripts.account_api_v1 import router as auth, admin_router
+    from scripts.account_setup_v1 import router as first_admin_setup
     from scripts.account_workspace_v1 import router as workspace
     from scripts.account_page_routes_v1 import router as pages
     from scripts.account_private_api_v1 import router as private
     from scripts.account_migrations_v1 import initialize_schema
+    app.include_router(first_admin_setup)
     app.include_router(auth)
     app.include_router(admin_router)
     app.include_router(workspace)
