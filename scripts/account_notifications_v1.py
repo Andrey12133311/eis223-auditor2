@@ -52,11 +52,12 @@ def enqueue_access(db, user_id, event, role="user"):
 
 
 def enqueue_role_change(db, user_id, role, event_id):
-    if role not in ("manager", "user"):
+    if role not in ("manager", "user", "admin"):
         raise ValueError("Invalid role")
     if not event_id:
         raise ValueError("Role change requires its audit id")
-    caption = "руководителя" if role == "manager" else "сотрудника"
+    caption = {"manager": "руководителя", "user": "сотрудника",
+               "admin": "администратора"}[role]
     body = "Ваши права в ЕИС Аудитор изменены. Установлена роль: " + caption + "."
     origin = os.getenv("EIS223_PUBLIC_ORIGIN", "").rstrip("/")
     if origin.startswith("https://"):

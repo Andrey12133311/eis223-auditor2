@@ -57,7 +57,7 @@ def _audit(db,actor,subject,kind,entity,action,details=""):
         (actor,subject,kind,str(entity),action,str(details)[:1500]))
 
 class RoleUpdate(BaseModel):
-    role:str=Field(pattern="^(user|manager)$")
+    role:str=Field(pattern="^(user|manager|admin)$")
 
 class Assignment(BaseModel):
     manager_id:UUID|None
@@ -103,21 +103,22 @@ def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
         ).fetchone()
         if not row or row[1]!="approved" or row[0]=="admin":
             raise HTTPException(404,"Действующая учётная запись сотрудника не найдена")
-        if row[0]=="manager" and data.role=="user":
+        if row[0]==data.role:
+            return {"id":str(target),"role":data.role,"changed":False}
+        if row[0]=="manager":
             members=db.execute(
                 "SELECT 1 FROM account_manager_teams WHERE manager_id=%s LIMIT 1",
                 (target,)).fetchone()
             if members:
                 raise HTTPException(409,"Сначала переназначьте сотрудников руководителя")
-        if data.role=="manager":
-            # An employee cannot simultaneously be another manager's team member.
+        if data.role in ("manager","admin"):
+            # Elevated roles cannot remain listed as ordinary staff.
             db.execute("DELETE FROM account_manager_teams WHERE user_id=%s",(target,))
         db.execute("UPDATE account_users SET role=%s WHERE id=%s",(data.role,target))
         _audit(db,admin,target,"role",target,"set_"+data.role)
-        if row[0] != data.role:
-            from scripts.account_notifications_v1 import enqueue_role_change
-            enqueue_role_change(db,target,data.role,uuid4().hex)
-    return {"id":str(target),"role":data.role}
+        from scripts.account_notifications_v1 import enqueue_role_change
+        enqueue_role_change(db,target,data.role,uuid4().hex)
+    return {"id":str(target),"role":data.role,"changed":True}
 
 @router.put("/admin/team/{user_id}")
 def admin_assign_team(user_id:str,data:Assignment,request:Request):

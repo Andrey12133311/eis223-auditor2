@@ -256,16 +256,28 @@ function renderAdmin(){
  const managers=cache.users.filter(x=>x.role==="manager"&&x.status==="approved"),rows=[];
  for(const person of cache.users.filter(x=>x.role!=="admin")){
   const tr=tag("tr");
-  tr.append(cell(person.email),cell(person.status),cell(person.role==="manager"?"Руководитель":"Сотрудник"));
+  const roleLabels={user:"Сотрудник",manager:"Руководитель",admin:"Администратор"};
+  tr.append(cell(person.full_name||person.email),cell(person.status),cell(roleLabels[person.role]||person.role));
   const controls=tag("div","mgr-actions");
   if(person.status==="approved"){
-   controls.append(action(person.role==="manager"?"Снять роль":"Назначить руководителем",
-     "mgr-outline",async()=>{
-       const next=person.role==="manager"?"user":"manager";
-       if(!confirm("Изменить роль пользователя "+person.email+"?"))return;
-       await api("/manager/admin/users/"+person.id+"/role","POST",{role:next});
-       await reload();
-     }));
+   const roleSelect=tag("select");
+   roleSelect.setAttribute("aria-label","Роль пользователя "+person.email);
+   for(const [value,label] of Object.entries(roleLabels)){
+     const option=tag("option","",label);option.value=value;roleSelect.append(option);
+   }
+   roleSelect.value=person.role;
+   roleSelect.style.maxWidth="175px";
+   controls.append(roleSelect,action("Назначить роль","mgr-primary",async()=>{
+     const next=roleSelect.value;
+     if(next===person.role){toast("Роль не изменилась");return}
+     const warning=next==="admin"
+       ?"Предоставить ПОЛНЫЕ права администратора пользователю "+person.email+"?"
+       :"Назначить роль «"+roleLabels[next]+"» пользователю "+person.email+"?";
+     if(!confirm(warning)){roleSelect.value=person.role;return}
+     await api("/manager/admin/users/"+person.id+"/role","POST",{role:next});
+     toast("Роль назначена. Пользователь получит уведомление на почту регистрации.");
+     await reload();
+   }));
    if(person.role==="user"){
     const select=document.createElement("select");
     select.setAttribute("aria-label","Назначить руководителя");
