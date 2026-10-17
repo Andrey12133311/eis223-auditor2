@@ -35,6 +35,13 @@ def initialize_identity_schema():
 
 @app.on_event("startup")
 def startup():
+    # A staging service must never start with anonymous access to private APIs.
+    if os.environ.get('EIS223_AUTH_ENFORCE', '').lower() != 'true':
+        raise RuntimeError('Staging accounts require EIS223_AUTH_ENFORCE=true')
+    if not os.environ.get('EIS223_IDENTITY_DATABASE_URL'):
+        raise RuntimeError('Staging identity database is required')
+    if not os.environ.get('EIS223_PUBLIC_ORIGIN', '').startswith('https://'):
+        raise RuntimeError('Staging HTTPS public origin is required')
     initialize_identity_schema()
 
 
