@@ -8,6 +8,8 @@ separate PostgreSQL account database.
 from __future__ import annotations
 
 from datetime import date
+from hashlib import sha256
+import json
 from uuid import UUID, uuid4
 import re
 import sqlite3
@@ -157,7 +159,15 @@ def _case_snapshot(ns,reg):
                 issues.append("Не определён документ-источник")
             if item.get("law") and not refs:
                 issues.append("Нет ссылки на точную норму")
+            # Match the same evidence-version identity used by manager review.
+            finding_key=sha256(json.dumps(
+                [reg,str(item.get("title") or ""),str(item.get("law") or ""),
+                 str(item.get("evidence") or ""),str(item.get("document") or ""),
+                 str(item.get("source_url") or "")],
+                ensure_ascii=False,separators=(",",":")).encode("utf-8")
+            ).hexdigest()
             findings.append({
+                "finding_key":finding_key,
                 "title":str(item.get("title") or "Нарушение")[:400],
                 "law":str(item.get("law") or "")[:450],
                 "evidence":str(item.get("evidence") or "")[:3200],
