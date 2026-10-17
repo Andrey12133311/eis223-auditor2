@@ -227,20 +227,7 @@ CREATE TABLE IF NOT EXISTS account_manager_campaign_targets (
     id UUID PRIMARY KEY,
     manager_id UUID NOT NULL REFERENCES account_users(id),
     user_id UUID NOT NULL REFERENCES account_users(id),
-    batch_id TEXT UNIQUE NOT NULL CHECK(batch_id ~ '^[0-9a-f]{24}
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
+    batch_id TEXT UNIQUE NOT NULL CHECK(batch_id ~ '^[0-9a-f]{24}$'),
     title TEXT NOT NULL,
     categories JSONB NOT NULL,
     legal_forms JSONB NOT NULL,
@@ -267,20 +254,7 @@ CREATE TABLE IF NOT EXISTS account_staff_templates (
 CREATE INDEX IF NOT EXISTS account_staff_templates_owner ON account_staff_templates(user_id);
 CREATE TABLE IF NOT EXISTS account_staff_checklists (
     user_id UUID NOT NULL REFERENCES account_users(id),
-    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}
-    bucket_key TEXT PRIMARY KEY,
-    attempts INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account_audit (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id UUID,
-    subject_id UUID,
-    action TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-),
+    reg_number TEXT NOT NULL CHECK(reg_number ~ '^3[0-9]{10}$'),
     question_key TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('pending','verified','needs_attention','not_applicable')),
     comment TEXT NOT NULL DEFAULT '',
