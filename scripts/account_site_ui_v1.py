@@ -214,7 +214,7 @@ def site_header(role="user"):
 <button type="button" id="eis223-logout">Выйти</button>
 <span id="eis223-logout-status" role="status"></span>
 </nav>
-<div id="eis223-profile-prompt" class="eis223-profile-prompt" hidden>
+<div id="eis223-profile-prompt" class="eis223-profile-prompt" role="dialog" aria-modal="true" aria-label="Первое заполнение ФИО" hidden>
  <form id="eis223-profile-prompt-form" aria-label="Указать фамилию имя отчество">
   <h2>Укажите ваше ФИО</h2>
   <p>Фамилия и имя будут показываться сразу после входа на главной странице и в кабинетах сотрудника или руководителя. Отчество указывать необязательно.</p>
@@ -794,7 +794,11 @@ const response=await fetch(path,{method:'POST',credentials:'same-origin',
 headers:{'Content-Type':'application/json'},
 body:JSON.stringify(Object.fromEntries(new FormData(form)))});
 if(response.ok&&tab==='login'){location.replace('/');return}
-if(response.ok){status.textContent='Заявка принята. Дождитесь одобрения администратора.';form.reset();return}
+if(response.ok){
+ const fio=['last_name','first_name','patronymic'].map(key=>String(form.elements.namedItem(key)?.value||'').trim()).filter(Boolean).join(' ');
+ status.textContent='Заявка принята. '+(fio?'ФИО: '+fio+'. ':'')+'После одобрения администратора эти данные будут видны сразу при входе в программу.';
+ form.reset();return;
+}
 const errors={401:'Неверный пароль или учётная запись не подтверждена.',
 403:'Доступ запрещён.',422:'Проверьте адрес почты и пароль.',429:'Слишком много попыток. Повторите позже.'};
 status.textContent=errors[response.status]||'Не удалось выполнить действие. Попробуйте позже.';
