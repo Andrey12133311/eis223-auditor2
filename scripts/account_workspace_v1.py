@@ -2,6 +2,7 @@
 import re
 from fastapi import APIRouter, HTTPException, Request
 from scripts.account_api_v1 import connect, current_account, require_origin
+from scripts.account_owner_queries_v1 import PROCUREMENTS
 
 router = APIRouter(prefix="/me", tags=["personal-workspace"])
 REG_NUMBER = re.compile(r"^3[0-9]{10}$")
@@ -12,8 +13,7 @@ def my_procurements(request: Request):
     user = current_account(request)
     with connect() as db:
         rows = db.execute(
-            """SELECT reg_number,created_at FROM account_procurements
-               WHERE user_id=%s ORDER BY created_at DESC LIMIT 500""",
+            PROCUREMENTS,
             (user[0],)
         ).fetchall()
     return [{"reg_number": r[0], "added_at": r[1].isoformat()} for r in rows]
