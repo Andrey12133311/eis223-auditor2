@@ -57,6 +57,13 @@ JS=r"""
 (()=>{
 const el=id=>document.getElementById(id),msg=text=>{el('staff-status').textContent=text};
 const regOK=x=>/^3[0-9]{10}$/.test(x);
+async function showName(){
+ try{
+  const r=await api('/me/profile');
+  el('staff-user-name').textContent=r.full_name||'ФИО не заполнено — укажите данные в профиле';
+ }catch{el('staff-user-name').textContent='Имя сотрудника недоступно'}
+}
+
 const stateNames={pending:"Не проверено",verified:"Проверено",needs_attention:"Требует внимания",not_applicable:"Не применяется"};
 const make=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=String(text);return n};
 const link=(url,text)=>{const a=make('a',text);a.href=url;return a};
@@ -91,29 +98,60 @@ async function reloadOverview(){
 }
 async function campaigns(){
  try{
-  const data=await api('/me/campaign-goals');
-  list('staff-campaign-list',data,item=>{
+  const [goals,result]=await Promise.all([
+   api('/me/campaign-goals'),api('/me/campaign-goals/violations')
+  ]);
+  // Progress is secondary; individual EIS violations are the main result.
+  list('staff-campaign-list',goals,item=>{
    const box=make("article");box.className="entry";
-   box.append(make("h3",item.title),make("p","Категории: "+item.category_names.join(", ")),
-    make("p","Формы заказчиков: "+item.legal_forms.join(", ")),
-    make("p","Руководитель установил план "+item.target_violations+
-     " нарушений. Фактически найдено: "+item.actual_violations+
-     ". Закупок в очереди: "+item.verified_procurements));
+   box.append(make("h3",item.title),
+    make("p","Проверяются категории: "+item.category_names.join(", ")+
+      "; формы заказчиков: "+item.legal_forms.join(", ")),
+    make("p","Найдено "+item.actual_violations+" / план "+item.target_violations+
+      " · закупок: "+item.verified_procurements));
    const pr=make("progress");pr.className="progress";pr.max=100;pr.value=item.progress_percent;
    box.append(pr,make("small","Срок: "+(item.due_date||"не установлен")+
-    " · задание: "+item.status+" · обработчик ЕИС: "+item.engine_status));
-   const row=make("div");row.className="action-row";
-   row.append(link('/account/thematic','Мои тематические проверки'),
-    link('/thematic#'+encodeURIComponent(item.batch_id),'Открыть настоящую очередь ЕИС'));
+    " · статус проверки ЕИС: "+item.engine_status));
    if(item.status==="active"){
-    const submit=make("button","Передать руководителю");submit.className="outline";
-    submit.onclick=async()=>{if(!confirm("Передать фактические результаты, даже если план не выполнен?"))return;
-      try{await api('/me/campaign-goals/'+item.id+'/submit','POST');await campaigns()}
-      catch(e){msg(e.message)}};
-    row.append(submit);
+    const send=make("button","Передать фактические результаты руководителю");
+    send.className="outline";
+    send.onclick=async()=>{
+     if(!confirm("Передать результаты без изменения количества нарушений?"))return;
+     try{await api('/me/campaign-goals/'+item.id+'/submit','POST');await campaigns()}
+     catch(e){msg(e.message)}
+    };
+    box.append(send);
    }
-   box.append(row);return box;
+   return box;
   });
+  el('staff-violations-title').textContent=
+   'Нарушения · '+result.count+(result.truncated?' (показана часть)':'');
+  list('staff-thematic-findings',result.findings||[],item=>{
+   const card=make("article");card.className="entry";
+   const label=make("span","Карточка нарушения");label.className="pill";
+   card.append(label,make("h3",item.title),
+    make("p","Закупка № "+item.reg_number+" · "+(item.law||"Правовая норма требует уточнения")));
+   const evidence=make("div",item.evidence||"Доказательства в анализаторе отсутствуют");
+   evidence.className="notice";evidence.style.whiteSpace="pre-wrap";card.append(evidence);
+   if(item.document)card.append(make("small","Документ: "+item.document));
+   if(item.needs_review)card.append(make("p","Необходимо проверить полноту доказательств"));
+   const actions=make("div");actions.className="action-row";
+   if(item.law_url){
+    const law=link(item.law_url,"Статья закона · КонсультантПлюс ↗");
+    law.target="_blank";law.rel="noopener noreferrer";actions.append(law);
+   }
+   if(item.source_url){
+    const source=link(item.source_url,"Оригинал ЕИС ↗");
+    source.target="_blank";source.rel="noopener noreferrer";actions.append(source);
+   }
+   if(item.batch_id&&/^3[0-9]{10}$/.test(item.reg_number)){
+    actions.append(link('/thematic/card/'+encodeURIComponent(item.batch_id)+
+     '/'+item.reg_number,'Карточка проверки'));
+   }
+   card.append(actions);
+   return card;
+  });
+  msg("Нарушения отображаются из реальных тематических проверок ЕИС; повторные записи объединены.");
  }catch(e){msg(e.message)}
 }
 async function templates(){
@@ -378,6 +416,7 @@ async function loadLibrary(){
  }catch(e){msg(e.message)}
 }
 loadCalendar();loadHistory();loadLibrary();
+showName();
 options().catch(e=>msg(e.message));
 reloadOverview();campaigns();templates();
 })();
@@ -386,8 +425,10 @@ reloadOverview();campaigns();templates();
 PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Рабочее место сотрудника — ЕИС Аудитор</title>__CSS__</head>
-<body><header><strong>ЕИС Аудитор · Рабочее место сотрудника</strong>
-<a href="/">← В личный кабинет</a></header>
+<body><header><div><strong>ЕИС Аудитор · Рабочее место сотрудника</strong>
+<div id="staff-user-name" style="font-size:12px;color:#d9e9f3">ФИО: загрузка…</div></div>
+<div class="action-row"><a href="/account/profile">Моё ФИО</a>
+<a href="/">← В личный кабинет</a></div></header>
 <main>
 <h1>Моё рабочее пространство</h1>
 <p>Здесь находятся только реальные проверки, поручения и материалы вашей учётной записи.</p>
@@ -400,7 +441,7 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <div class="metric"><small>Служебные записки</small><strong id="staff-memos">—</strong></div>
 </div>
 <nav class="tabs" aria-label="Разделы рабочего места">
-<button type="button" data-staff-tab="goals" aria-selected="true">Поручения руководителя</button>
+<button type="button" data-staff-tab="goals" aria-selected="true">Нарушения тематических проверок</button>
 <button type="button" data-staff-tab="bulk" aria-selected="false">Массовая проверка</button>
 <button type="button" data-staff-tab="templates" aria-selected="false">Мои шаблоны</button>
 <button type="button" data-staff-tab="case" aria-selected="false">Контроль закупки</button>
@@ -408,9 +449,13 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <button type="button" data-staff-tab="library" aria-selected="false">База нарушений</button>
 </nav>
 <section class="panel" data-staff-section="goals">
-<h2>Тематические задания от руководителя</h2>
-<p class="notice">Вы видите выбранные категории и формы заказчиков, план и реальные нарушения.
-Недостижение целевого показателя не считается нарушением сотрудника и не создаёт ложных результатов.</p>
+<h2>Нарушения тематических проверок</h2>
+<p class="notice">Все подтверждённые анализатором эпизоды отображаются как обычные нарушения:
+с доказательствами, нормами закона и ссылками на ЕИС. Цель руководителя не влияет
+на количество и не создаёт искусственных результатов.</p>
+<h3 id="staff-violations-title">Нарушения</h3>
+<div id="staff-thematic-findings"></div>
+<h3>Параметры проверки, заданные руководителем</h3>
 <div id="staff-campaign-list"></div>
 <div class="action-row"><a href="/account/home">Мои самостоятельные проверки</a>
 <a href="/account/thematic">Мои тематические проверки</a>
