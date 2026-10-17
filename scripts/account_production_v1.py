@@ -92,6 +92,8 @@ def user_session(headers, connection):
         token = item.value if item else ""
     except Exception:
         token = ""
+    if len(token) < 40:
+        return None
     with connection() as db:
         return resolve_session(db, token)
 
@@ -127,6 +129,14 @@ class ProductionAccountGate:
             await send(message)
 
         if scope["type"] == "http" and path in PUBLIC:
+            if path in ("/account/login", "/account/register") and method in ("GET", "HEAD"):
+                try:
+                    account = user_session(headers, self.connection)
+                except Exception:
+                    account = None
+                if account:
+                    await _answer(send, 303, b"", location="/")
+                    return
             await self.app(scope, receive, no_cache_send)
             return
         if scope["type"] == "http" and method == "OPTIONS" and machine_path(path):
@@ -139,12 +149,15 @@ class ProductionAccountGate:
         try:
             account = user_session(headers, self.connection)
         except Exception:
-            await _answer(send, 503, b'{"detail":"Identity service unavailable"}')
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1013})
+            else:
+                await _answer(send, 503, b'{"detail":"Identity service unavailable"}')
             return
         if not account:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
-            elif method == "GET" and (path == "/" or path.startswith("/account/")):
+            elif method in ("GET", "HEAD") and (path == "/" or path.startswith("/account/")):
                 await _answer(send, 303, b"", location="/account/login")
             else:
                 await _answer(send, 401, b'{"detail":"Authentication required"}')
@@ -162,23 +175,29 @@ class ProductionAccountGate:
                     await _answer(send, 403, b'{"detail":"Shared audit is read-only for users"}')
                 return
         if scope["type"] == "http" and path == "/" and method == "GET":
-            is_html = False
+            start_message = None
+            body = bytearray()
             async def authenticated_home_send(message):
-                nonlocal is_html
+                nonlocal start_message
                 if message["type"] == "http.response.start":
                     received = message.get("headers", [])
-                    is_html = (message.get("status") == 200 and
+                    if (message.get("status") == 200 and
                         any(k.lower() == b"content-type" and b"text/html" in v.lower()
                             for k, v in received) and
-                        not any(k.lower() == b"content-encoding" for k, v in received))
-                    if is_html:
-                        message = {**message, "headers": [
-                            (k, v) for k, v in received if k.lower() != b"content-length"
-                        ]}
-                elif message["type"] == "http.response.body" and is_html:
-                    message = {**message, "body": add_account_navigation(
-                        message.get("body", b""), account[1]
-                    )}
+                        not any(k.lower() == b"content-encoding" for k, v in received)):
+                        start_message = message
+                        return
+                elif message["type"] == "http.response.body" and start_message:
+                    body.extend(message.get("body", b""))
+                    if message.get("more_body", False):
+                        return
+                    result = add_account_navigation(bytes(body), account[1])
+                    response_headers = [(k, v) for k, v in start_message.get("headers", [])
+                                        if k.lower() not in (b"content-length", b"etag", b"content-md5")]
+                    response_headers.append((b"content-length", str(len(result)).encode("ascii")))
+                    await no_cache_send({**start_message, "headers": response_headers})
+                    await send({**message, "body": result})
+                    return
                 await no_cache_send(message)
             await self.app(scope, receive, authenticated_home_send)
         else:

@@ -49,6 +49,7 @@ def site_header(role="user"):
 <a href="/account/home">Мои закупки</a>
 ''' + admin + '''
 <button type="button" id="eis223-logout">Выйти</button>
+<span id="eis223-logout-status" role="status"></span>
 </nav>
 <section class="eis223-personal" aria-label="Мой личный кабинет">
 <h2>Мой личный кабинет</h2>
@@ -97,9 +98,14 @@ for(const item of batches.slice(0,10)){
 }catch{show('eis223-personal-summary','Личные данные временно недоступны. Общая проверка сохранена.')}
 }
 q('eis223-logout').addEventListener('click',async()=>{
-try{await fetch('/auth/logout',{method:'POST',credentials:'same-origin'})}finally{
+const button=q('eis223-logout');button.disabled=true;
+try{
+const response=await fetch('/auth/logout',{method:'POST',credentials:'same-origin'});
+if(!response.ok)throw Error('Ошибка выхода');
 location.replace('/account/login');
-}});
+}catch{button.disabled=false;show('eis223-logout-status','Не удалось выйти. Повторите попытку.')}
+});
+window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
 q('eis223-add-procurement').addEventListener('submit',async event=>{
 event.preventDefault();const form=event.currentTarget;
 const reg=String(new FormData(form).get('reg')||'').trim();
@@ -158,7 +164,7 @@ def login_portal(initial_tab="login"):
     markup = '''<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Вход и регистрация · ЕИС Аудитор</title>''' + _GATEWAY_STYLE + '''
-</head><body><main class="layout"><section class="auth" aria-label="Вход на сайт">
+</head><body><main class="layout"><section class="auth" role="dialog" aria-label="Вход на сайт">
 <h1>ЕИС Аудитор 223-ФЗ</h1>
 <p>Для просмотра закупок и результатов проверок войдите в аккаунт.
 Регистрация доступна по заявке с подтверждением администратора.</p>
@@ -219,6 +225,11 @@ finally{button.disabled=false}
 });
 }
 select('__INITIAL__',false);
+// A cross-site link may initially omit the Strict cookie. This same-origin
+// request restores an existing session without asking for credentials again.
+fetch('/auth/me',{credentials:'same-origin',cache:'no-store'}).then(response=>{
+if(response.ok)location.replace('/');
+}).catch(()=>{});
 })();
 </script></body></html>'''
     return markup.replace("__INITIAL__", escape(initial))

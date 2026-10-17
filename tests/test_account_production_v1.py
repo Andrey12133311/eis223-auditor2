@@ -72,7 +72,7 @@ class ProductionLoginTests(unittest.TestCase):
                        return_value=("account","user","approved")):
                 asyncio.run(ProductionAccountGate(html_app)(scope,receive,send))
         self.assertEqual(messages[0]["status"],200)
-        self.assertNotIn(b"content-length",dict(messages[0]["headers"]))
+        self.assertEqual(int(dict(messages[0]["headers"])[b"content-length"]),len(messages[1]["body"]))
         self.assertIn(b'/me/summary', messages[1]["body"])
         self.assertIn(b'General audit', messages[1]["body"])
 
@@ -80,6 +80,12 @@ class ProductionLoginTests(unittest.TestCase):
         for path in ("/health", "/healthz", "/account/login",
                      "/account/register", "/auth/register", "/eis223/collector.js"):
             self.assertEqual(request(path)[0], 200)
+
+    def test_existing_session_skips_entry_forms(self):
+        for path in ("/account/login", "/account/register"):
+            code, headers = request(path, account=("id", "user", "approved"))
+            self.assertEqual(code, 303)
+            self.assertEqual(headers[b"location"], b"/")
 
     def test_every_audit_view_requires_prior_login(self):
         code,headers=request("/")
