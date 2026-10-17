@@ -1,10 +1,15 @@
 import unittest
 from scripts.account_staging_app import app, application
+from fastapi.routing import APIRoute
 
 
 class AccountStagingAppTests(unittest.TestCase):
     def test_staging_app_has_expected_routes(self):
-        paths = {route.path for route in app.routes if hasattr(route, 'path')}
+        paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
+        for included in app.routes:
+            router = getattr(included, 'router', None)
+            if router is not None:
+                paths.update(route.path for route in router.routes if isinstance(route, APIRoute))
         for path in (
             "/auth/register", "/auth/login", "/auth/logout", "/auth/me",
             "/admin/accounts/pending", "/admin/accounts/{user_id}/approve",
