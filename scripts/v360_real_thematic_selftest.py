@@ -58,6 +58,9 @@ def check_scope():
     assert not thematic_user_route("/api/thematic/" + "a" * 24 + "/stop", "GET")
     assert not thematic_user_route("/api/thematic/" + "a" * 24, "POST")
     assert not thematic_user_route("/api/thematic/bad", "DELETE")
+    assert not thematic_user_route("/api/thematic/unassigned", "GET")
+    assert not thematic_user_route("/api/thematic/adopt/" + "a" * 24, "POST")
+    assert "Привязать к моему кабинету" in THEMATIC
     assert b"eis223-new-batch" not in site_header()
     assert b"'/api/thematic/history'" in site_header()
     assert "/api/thematic/history" in THEMATIC
@@ -90,6 +93,12 @@ def check_owner_fail_closed():
         else:
             raise AssertionError("Anonymous thematic access was granted")
         assert owners.account_id(Request("user-1")) == "user-1"
+        try:
+            owners.already_assigned(Request("user-1"))
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("Non-admin may adopt historical thematic campaigns")
 
 
 if __name__ == "__main__":
