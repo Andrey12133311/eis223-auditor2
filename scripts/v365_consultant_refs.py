@@ -129,8 +129,9 @@ def references(row):
                 segments.extend(after.split(";"))
             if article not in ARTICLES:
                 continue
-            if not any(REF_PART.search(v) or REF_POINT.search(v) for v in segments):
-                segments=[""]
+            specified=[piece for piece in segments
+                       if REF_PART.search(piece) or REF_POINT.search(piece)]
+            segments=specified if specified else [""]
             for piece in segments:
                 part_match=REF_PART.search(piece)
                 point_match=REF_POINT.search(piece)
