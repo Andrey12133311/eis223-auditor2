@@ -243,6 +243,9 @@ def main():
         print("V312 ARCHIVE_SELFTEST_FAIL "+type(exc).__name__+": "+str(exc)[:180],flush=True)
     print('V305 BOOT_UI_FIXED memo_format=odt-only filters=canonical card_nav=working',flush=True)
     print('V282_SAFE_PATCH_READY',digest[:12],'RESTORED_ENV_KEYS',count,flush=True)
+    if os.environ.get("EIS223_ACCOUNTS_MOUNT","").lower()=="true":
+        from scripts.account_production_v1 import install as mount_accounts_to_eis
+        mount_accounts_to_eis(entry.app)
     _guard_disk_full_startup(entry.app)
     if '--verify-only' in sys.argv:return
     # Railway cannot reach EIS SOAP; do not launch repeated network probes.
