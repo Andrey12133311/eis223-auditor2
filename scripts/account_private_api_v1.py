@@ -85,6 +85,8 @@ def save_batch(batch_id: str, request: Request, response: Response):
     response.headers.update(no_store_headers())
     if not batch_id or len(batch_id) > 200 or not batch_id.isascii() or not all(c.isalnum() or c in '-_' for c in batch_id):
         raise HTTPException(422, "Некорректный идентификатор очереди")
+    if batch_id.startswith("personal-"):
+        raise HTTPException(409, "Используйте создание личной очереди")
     with connect() as db:
         db.execute(
             """INSERT INTO account_thematic_batches(user_id,batch_id)
