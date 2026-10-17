@@ -54,8 +54,15 @@ class Credentials(BaseModel):
     password: str = Field(min_length=12, max_length=256)
 
 
+class Registration(Credentials):
+    # Backwards-compatible for existing clients; website collects full name.
+    last_name: str = Field(default="", max_length=80)
+    first_name: str = Field(default="", max_length=80)
+    patronymic: str = Field(default="", max_length=80)
+
+
 @router.post("/register", status_code=202)
-def register(data: Credentials, request: Request):
+def register(data: Registration, request: Request):
     require_origin(request)
     try:
         email = normalize_email(data.email)
@@ -69,9 +76,18 @@ def register(data: Credentials, request: Request):
         validate_email(email, check_deliverability=True)
     except EmailNotValidError:
         raise HTTPException(422, "Адрес почты некорректен или его домен не принимает почту")
+    from scripts.v371_profile import normalize_name
+    try:
+        surname = normalize_name(data.last_name, required=bool(data.last_name))
+        name = normalize_name(data.first_name, required=bool(data.first_name))
+        middle = normalize_name(data.patronymic, required=False)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if bool(surname) != bool(name):
+        raise HTTPException(422,"Укажите фамилию и имя вместе")
     encoded = hash_password(data.password)
     with connect() as db:
-        user_id = create_pending_user(db, email, encoded)
+        user_id = create_pending_user(db, email, encoded, surname, name, middle)
     return {"status": "pending", "message": "Заявка передана администратору"}
 
 
