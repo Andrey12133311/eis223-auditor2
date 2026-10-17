@@ -45,6 +45,12 @@ _STYLE = """
 .eis223-tile li{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:7px 0;padding:10px 12px;
  background:#fff;border:1px solid #e4ecf4;border-radius:10px;overflow-wrap:anywhere}
 .eis223-tile li a{color:#215b93;font-weight:650}
+.eis223-check-desc{flex:1 1 180px;display:grid;gap:3px;min-width:0}
+.eis223-check-desc strong{font-size:13px;color:#1b476e}
+.eis223-check-desc small{font-size:12px;color:#708197;line-height:1.5}
+.eis223-workspace a.eis223-all-checks{display:inline-block;color:#235f99;
+ padding:8px 2px;text-decoration:none;font-weight:700}
+.eis223-workspace a.eis223-all-checks:hover{text-decoration:underline}
 .eis223-tile li button{margin-left:auto!important}
 .eis223-tile form{display:flex;gap:9px;flex-wrap:wrap;align-items:stretch}
 .eis223-workspace .eis223-tile input{font:inherit;min-width:150px;min-height:43px;flex:1;
@@ -97,7 +103,7 @@ def site_header(role="user"):
 <section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
 <p class="eis223-kicker">Персональное пространство</p>
 <h2>Личный кабинет</h2>
-<p class="eis223-subtle">Ваши сохранённые закупки и тематические подборки. Данные доступны только вашей учётной записи.</p>
+<p class="eis223-subtle">Сохранённые закупки и реальные тематические проверки, запущенные под вашей учётной записью.</p>
 <p id="eis223-personal-summary" role="status">Загрузка данных…</p>
 <div class="eis223-columns">
 <div class="eis223-tile"><h3>Мои сохранённые закупки</h3>
@@ -110,7 +116,7 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 </div>
 <div class="eis223-tile"><h3>Мои тематические проверки</h3>
 <ul id="eis223-my-batches"><li>Загрузка…</li></ul>
-<button type="button" id="eis223-new-batch">Создать подборку</button>
+<a class="eis223-all-checks" href="/account/thematic">Посмотреть все мои проверки →</a>
 <p role="status" id="eis223-batch-status"></p>
 </div>
 </div></section></div>
@@ -127,9 +133,10 @@ if(!r.ok)throw Error('Ошибка загрузки');return await r.json();
 async function refresh(){
 try{
 const [summary,purchases,batches]=await Promise.all([
-get('/me/summary'),get('/me/procurements'),get('/me/thematic-batches')]);
+get('/me/summary'),get('/me/procurements'),get('/api/thematic/history')]);
+const realBatches=batches.batches||[];
 show('eis223-personal-summary','Сохранённые закупки: '+summary.procurements+
-' · Тематические очереди: '+summary.thematic_batches+' · Служебные записки: '+summary.memos);
+' · Тематические проверки: '+realBatches.length+' · Служебные записки: '+summary.memos);
 const pl=q('eis223-my-procurements');pl.replaceChildren();
 if(!purchases.length){const li=document.createElement('li');li.textContent='Пока нет закупок';pl.append(li)}
 for(const item of purchases.slice(0,10)){
@@ -137,13 +144,33 @@ for(const item of purchases.slice(0,10)){
  a.href='/';a.textContent=item.reg_number;li.append(a);pl.append(li);
 }
 const bl=q('eis223-my-batches');bl.replaceChildren();
-if(!batches.length){const li=document.createElement('li');li.textContent='Очереди не созданы';bl.append(li)}
-for(const item of batches){
+if(!realBatches.length){const li=document.createElement('li');li.textContent='Запущенных вами тематических проверок пока нет';bl.append(li)}
+const categoryNames={dates:'Сроки',docs:'Документация',national:'Национальный режим',
+security:'Обеспечение',sme:'МСП',access:'Участники',protocols:'Протоколы',
+contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
+for(const item of realBatches){
  const li=document.createElement('li');
- const label=document.createElement('span');label.textContent='Тематическая проверка';li.append(label);
- const details=document.createElement('a');details.href='/account/thematic';details.textContent=' · Открыть';li.append(details);
- const del=document.createElement('button');del.type='button';del.textContent='Удалить';del.style.marginLeft='8px';
- del.onclick=async()=>{if(!confirm('Убрать выбранную тематическую проверку из личного кабинета?'))return;del.disabled=true;try{const resp=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});if(!resp.ok)throw Error();await refresh();}catch{del.disabled=false;show('eis223-batch-status','Не удалось удалить проверку');}};
+ const summary=document.createElement('div');summary.className='eis223-check-desc';
+ const title=document.createElement('strong');
+ const cats=(item.categories||[]).map(code=>categoryNames[code]||code);
+ title.textContent=cats.length?cats.slice(0,3).join(' · '):'Тематическая проверка';
+ const meta=document.createElement('small');
+ const date=Date.parse(item.created_at);
+ meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleDateString('ru-RU')+' · ':'')+
+ 'Закупок: '+Number(item.purchases||0)+' · Нарушений: '+Number(item.violations||0)+
+ (item.status==='active'?' · Выполняется':' · Остановлена');
+ summary.append(title,meta);li.append(summary);
+ const details=document.createElement('a');details.href='/thematic#'+encodeURIComponent(item.id);
+ details.textContent='Открыть';li.append(details);
+ const del=document.createElement('button');del.type='button';del.textContent='Удалить';
+ del.onclick=async()=>{
+ if(!confirm('Удалить выбранную тематическую проверку и её тематические результаты? Действие нельзя отменить.'))return;
+ del.disabled=true;
+ try{
+  const resp=await fetch('/api/thematic/'+encodeURIComponent(item.id),{method:'DELETE',credentials:'same-origin'});
+  if(!resp.ok)throw Error();await refresh();
+ }catch{del.disabled=false;show('eis223-batch-status','Не удалось удалить проверку')}
+ };
  li.append(del);bl.append(li);
 }
 }catch{show('eis223-personal-summary','Личные данные временно недоступны. Общая проверка сохранена.')}
@@ -169,13 +196,7 @@ show('eis223-add-status',r.ok?'Закупка сохранена':'Не удал
 if(r.ok){form.reset();await refresh()}
 }catch{show('eis223-add-status','Ошибка соединения')}finally{btn.disabled=false}
 });
-q('eis223-new-batch').addEventListener('click',async()=>{
-const b=q('eis223-new-batch');b.disabled=true;
-try{const r=await fetch('/me/thematic-batches',{method:'POST',credentials:'same-origin'});
-show('eis223-batch-status',r.ok?'Подборка сохранена. Запуск проверки выполняется отдельно.':'Не удалось создать подборку');
-if(r.ok)await refresh();
-}catch{show('eis223-batch-status','Ошибка соединения')}finally{b.disabled=false}
-});
+
 refresh();
 })();
 </script>
