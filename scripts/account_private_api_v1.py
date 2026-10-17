@@ -68,3 +68,20 @@ def unlink_batch(batch_id: str, request: Request, response: Response):
     if row is None:
         raise HTTPException(404, "Очередь не найдена")
     return {"removed": True, "batch_id": row[0]}
+
+
+@router.post("/thematic-batches/{batch_id}", status_code=201)
+def save_batch(batch_id: str, request: Request, response: Response):
+    """Save a queue identifier in the current user's private workspace."""
+    require_origin(request)
+    owner_id = current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not batch_id or len(batch_id) > 200:
+        raise HTTPException(422, "Некорректный идентификатор очереди")
+    with connect() as db:
+        db.execute(
+            """INSERT INTO account_thematic_batches(user_id,batch_id)
+               VALUES (%s,%s) ON CONFLICT DO NOTHING""",
+            (owner_id, batch_id),
+        )
+    return {"saved": True, "batch_id": batch_id}
