@@ -12,6 +12,7 @@ from scripts.account_passwords_v1 import hash_password, verify_password
 from scripts.account_security_v1 import normalize_email
 from scripts.account_gate_v1 import origin_matches
 from scripts.account_session_policy_v1 import cookie_options, no_store_headers
+from scripts.account_throttle_v1 import request_allowed
 from scripts.account_repository_v1 import (
     create_pending_user, pending_users, approve_user, reject_user, block_user
 )
@@ -61,6 +62,10 @@ def register(data: Credentials, request: Request):
     except ValueError:
         raise HTTPException(422, "Некорректный адрес почты или пароль")
     with connect() as db:
+        allowed = request_allowed(db, request, email, "register")
+    if not allowed:
+        raise HTTPException(429, "Слишком много попыток. Повторите позже")
+    with connect() as db:
         create_pending_user(db, email, encoded)
     return {"status": "pending", "message": "Заявка ожидает подтверждения администратора"}
 
@@ -72,6 +77,10 @@ def login(data: Credentials, request: Request, response: Response):
         email = normalize_email(data.email)
     except ValueError:
         raise HTTPException(422, "Некорректный адрес почты")
+    with connect() as db:
+        allowed = request_allowed(db, request, email, "login")
+    if not allowed:
+        raise HTTPException(429, "Слишком много попыток. Повторите позже")
     with connect() as db:
         row = db.execute(
             "SELECT id,password_hash,status FROM account_users WHERE lower(email)=%s",
