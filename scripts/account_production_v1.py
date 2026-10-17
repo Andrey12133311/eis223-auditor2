@@ -11,6 +11,7 @@ import re
 from http.cookies import SimpleCookie
 
 from scripts.account_sessions_v1 import resolve_session
+from scripts.account_session_policy_v1 import SESSION_COOKIE
 from scripts.account_api_v1 import connect
 from scripts.account_site_ui_v1 import site_header
 from scripts.v361_home_shell import home_shell
@@ -114,7 +115,7 @@ def user_session(headers, connection):
     cookies = SimpleCookie()
     try:
         cookies.load(headers.get(b"cookie", b"").decode("latin1"))
-        item = cookies.get("eis223_session")
+        item = cookies.get(SESSION_COOKIE)
         token = item.value if item else ""
     except Exception:
         token = ""
@@ -155,14 +156,8 @@ class ProductionAccountGate:
             await send(message)
 
         if scope["type"] == "http" and path in PUBLIC:
-            if path in ("/account/login", "/account/register") and method in ("GET", "HEAD"):
-                try:
-                    account = user_session(headers, self.connection)
-                except Exception:
-                    account = None
-                if account:
-                    await _answer(send, 303, b"", location="/")
-                    return
+            # Login and registration pages must always be visible when requested.
+            # Never silently bypass the password form using a stale session.
             await self.app(scope, receive, no_cache_send)
             return
         if scope["type"] == "http" and method == "OPTIONS" and machine_path(path):
