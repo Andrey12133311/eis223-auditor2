@@ -119,21 +119,21 @@ def _read_purchase(ns,reg):
         p=dict(zip(names,row))
         cur=c.execute(
             "SELECT * FROM findings WHERE reg_number=? AND kind='violation' "
-            "ORDER BY id DESC LIMIT 30",(reg,))
+            "ORDER BY id DESC LIMIT 180",(reg,))
         names=[d[0] for d in cur.description]
         findings=[dict(zip(names,x)) for x in cur.fetchall()]
-        # A weak potential issue must never be promoted to established wrongdoing.
-        accepted=[]
-        seen=set()
+        # Distinct facts survive; repeated representations do not enter the memo.
+        from v352_dashboard_truth import collapse_legal_events
+        from v365_consultant_refs import enrich
+        documented=[]
         for finding in findings:
             title=str(finding.get("title") or "").strip()
             evidence=str(finding.get("evidence") or "").strip()
-            if not title or not evidence or re.search(r"риск|требует проверки|не найдена информация",title,re.I):
+            if not title or not evidence or re.search(
+                 r"риск|требует проверки|не найдена информация",title,re.I):
                 continue
-            key=re.sub(r"[^а-яёa-z0-9]+","",title.casefold().replace("ё","е"))  # one legal issue per memo
-            if key in seen:continue
-            seen.add(key);accepted.append(finding)
-            if len(accepted)>=MAX_FINDINGS:break
+            documented.append(finding)
+        accepted=[enrich(f) for f in collapse_legal_events(documented)[:MAX_FINDINGS]]
         if not accepted:
             raise HTTPException(409,"Служебная записка не формируется: нет нарушения с документальными основаниями")
         return p,accepted
@@ -217,6 +217,20 @@ def _text(element):
 def _set_paragraph(par,new):
     for child in list(par):par.remove(child)
     par.text=str(new)
+
+def _append_consultant_links(par, finding):
+    """Clickable statute link in ODT; leave all legal and evidentiary text as is."""
+    from v365_consultant_refs import references
+    refs=references(finding)
+    for ref in refs[:3]:
+        if not len(par):
+            par.text=(par.text or "")+" "
+        link=ET.SubElement(par,"{"+TX+"}a",{
+            "{"+XL+"}type":"simple",
+            "{"+XL+"}href":ref["url"]})
+        link.text="КонсультантПлюс: "+ref["label"]
+        link.tail=" "
+
 
 def _nonbreaking(text):
     preps=r"в|во|на|по|из|с|со|к|ко|о|об|от|за|до|у|и|а|но|не|для|при|без|над|под|перед|между|после"
@@ -308,6 +322,7 @@ def _render_odt(template,p,findings,organization,fields):
         _set_paragraph(paras[24],
             ("Правовое основание выявленного нарушения: "+law+".")
             if law else "Правовое основание устанавливается по конкретным положениям Закона о закупках.")
+        _append_consultant_links(paras[24],main)
         _set_paragraph(paras[25],
             "Приведённые ниже обстоятельства установлены по тексту "
             "полученных оригиналов документов закупки.")
@@ -317,7 +332,9 @@ def _render_odt(template,p,findings,organization,fields):
         other=findings[1]
         _set_paragraph(paras[27],
            "Дополнительно выявлено: "+str(other.get("title") or "")[:210]+
-           ". "+str(other.get("evidence") or "")[:650])
+           ". "+str(other.get("evidence") or "")[:650]+
+           ". Правовое основание: "+str(other.get("law") or "требует уточнения")[:300]+".")
+        _append_consultant_links(paras[27],other)
     else:
         _set_paragraph(paras[27],
            "Указанные обстоятельства установлены непосредственно по "
