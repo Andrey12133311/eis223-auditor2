@@ -245,6 +245,17 @@ SCRIPT='''<script id="v302-modern-js">
     by('v302-reg-form').addEventListener('submit',e=>{e.preventDefault();submit('reg',by('v302-reg').value)});
     by('v302-inn-form').addEventListener('submit',e=>{e.preventDefault();submit('inn',by('v302-inn').value)});
     const inn=by('inn');if(inn&&/^[0-9]{10}([0-9]{2})?$/.test(inn.value))by('v302-inn').value=inn.value;
+    // A customer favorite is an explicit, user-initiated search. Remove the
+    // one-use parameter so reloading cannot submit it another time.
+    const params=new URLSearchParams(location.search);
+    const favoriteInn=params.get('favorite_inn');
+    if(favoriteInn&&/^[0-9]{10}([0-9]{2})?$/.test(favoriteInn)){
+      by('v302-inn').value=favoriteInn;
+      params.delete('favorite_inn');
+      const query=params.toString();
+      history.replaceState(null,'',location.pathname+(query?'?'+query:'')+location.hash);
+      by('v302-inn-form').requestSubmit();
+    }
     bridge();
     setInterval(()=>{if(!document.hidden)bridge()},12000);
   }
