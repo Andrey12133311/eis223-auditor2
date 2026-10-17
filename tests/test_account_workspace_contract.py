@@ -39,6 +39,13 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('def my_procurements(request: Request, response: Response):',api)
         self.assertIn('response.headers.update(no_store_headers())',api)
         self.assertIn("if not REG_NUMBER.fullmatch(reg_number):",api)
+    def test_personal_thematic_queue_controls(self):
+        page=(ROOT/'scripts/account_pages_v1.py').read_text()
+        api=(ROOT/'scripts/account_private_api_v1.py').read_text()
+        self.assertIn("add.textContent='Добавить закупку'",page)
+        self.assertIn("show.textContent='Закупки'",page)
+        self.assertIn('@router.get("/thematic-batches/{batch_id}/procurements")',api)
+        self.assertIn('@router.post("/thematic-batches/{batch_id}/procurements/{reg_number}"',api)
     def test_no_email_confirmation_required(self):
         a=(ROOT/'scripts/account_api_v1.py').read_text()
         b=(ROOT/'scripts/account_repository_v1.py').read_text()
