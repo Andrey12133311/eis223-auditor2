@@ -12,6 +12,7 @@ from scripts.account_private_api_v1 import router as private_resources
 from scripts.account_migrations_v1 import initialize_schema
 from scripts.account_asgi_gate_v1 import AccountGateMiddleware
 from scripts.account_api_v1 import connect
+from scripts.account_gate_v1 import origin_matches
 
 app = FastAPI(title="ЕИС Аудитор — тестирование личных кабинетов")
 app.include_router(auth)
@@ -40,7 +41,8 @@ def startup():
         raise RuntimeError('Staging accounts require EIS223_AUTH_ENFORCE=true')
     if not os.environ.get('EIS223_IDENTITY_DATABASE_URL'):
         raise RuntimeError('Staging identity database is required')
-    if not os.environ.get('EIS223_PUBLIC_ORIGIN', '').startswith('https://'):
+    origin = os.environ.get('EIS223_PUBLIC_ORIGIN', '')
+    if not origin_matches(origin, origin):
         raise RuntimeError('Staging HTTPS public origin is required')
     initialize_identity_schema()
 
