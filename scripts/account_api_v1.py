@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from scripts.account_passwords_v1 import hash_password, verify_password
 from scripts.account_security_v1 import normalize_email
+from scripts.account_gate_v1 import origin_matches
 from scripts.account_repository_v1 import (
     create_pending_user, pending_users, approve_user, reject_user, block_user
 )
@@ -28,9 +29,9 @@ def connect():
 
 
 def require_origin(request):
-    expected = os.getenv("EIS223_PUBLIC_ORIGIN", "").rstrip("/")
-    origin = request.headers.get("origin", "").rstrip("/")
-    if not expected or origin != expected:
+    expected = os.getenv("EIS223_PUBLIC_ORIGIN", "")
+    origin = request.headers.get("origin", "")
+    if not origin_matches(origin, expected):
         raise HTTPException(403, "Invalid origin")
 
 
