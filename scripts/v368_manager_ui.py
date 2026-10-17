@@ -250,6 +250,21 @@ function renderTeam(){
  mountRows("mgr-team-rows",rows);
  $("mgr-team-empty").classList.toggle("mgr-hidden",!!rows.length);
 }
+async function renderMailStatus(){
+ if(ROLE!=="admin")return;
+ const note=$("mgr-mail-status");
+ const button=$("mgr-mail-test");
+ if(!note||!button)return;
+ try{
+  const result=await api("/manager/admin/mail/status");
+  button.disabled=!result.configured;
+  note.textContent=result.configured
+   ?"Отправка через "+(result.provider==="resend"?"Resend HTTPS":"SMTP")+
+    ". Принято сервисом: "+result.accepted+", ожидают: "+result.pending+
+    ", исчерпали попытки: "+result.failed+"."
+   :"Почта не настроена. Для Railway Hobby требуются EIS223_RESEND_API_KEY и EIS223_RESEND_FROM.";
+ }catch(error){button.disabled=true;note.textContent="Не удалось проверить очередь писем: "+error.message}
+}
 function renderAdmin(){
  const root=$("mgr-admin-section");root.classList.toggle("mgr-hidden",ROLE!=="admin");
  if(ROLE!=="admin")return;
@@ -294,6 +309,7 @@ function renderAdmin(){
   tr.append(cell(controls));rows.push(tr);
  }
  mountRows("mgr-admin-rows",rows);
+ renderMailStatus();
 }
 function renderCampaignOptions(){
  if(!cache.options)return;
@@ -612,6 +628,17 @@ async function reload(){
  populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
  $("mgr-refresh").disabled=false;
 }
+if(ROLE==="admin"){
+ const mailTest=$("mgr-mail-test");
+ if(mailTest)mailTest.onclick=async()=>{
+  mailTest.disabled=true;
+  try{
+   const result=await api("/manager/admin/mail/test","POST");
+   toast(result.note||"Тестовое письмо поставлено в очередь");
+  }catch(error){toast(error.message)}
+  finally{await renderMailStatus()}
+ };
+}
 const mgrToday=new Date();
 $("mgr-report-form").elements.namedItem("to").value=mgrToday.toISOString().slice(0,10);
 const mgrPast=new Date(mgrToday.getTime()-29*86400000);
@@ -778,7 +805,13 @@ __STYLE__</head><body>
 затем выберите его в строке сотрудника и сохраните.</p>
 <div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
 <th>Учётная запись</th><th>Доступ</th><th>Роль</th><th>Управление</th>
-</tr></thead><tbody id="mgr-admin-rows"></tbody></table></div></div>
+</tr></thead><tbody id="mgr-admin-rows"></tbody></table></div>
+<div style="margin-top:14px;background:#f7fafc;border:1px solid #dce6ed;border-radius:10px;padding:16px">
+<h3 style="margin:0 0 6px;font-size:15px">Почтовые уведомления</h3>
+<p id="mgr-mail-status" class="mgr-muted" role="status" aria-live="polite">Проверяю настройки отправки…</p>
+<button id="mgr-mail-test" class="mgr-outline" type="button" disabled>Отправить тестовое письмо на мою почту</button>
+<p class="mgr-muted">Используется регистрационный адрес администратора. Счётчик отправки означает принятие письма почтовым сервисом.</p>
+</div></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="reports">
 <div class="mgr-card"><h2>Отчёт подразделения</h2>

@@ -1,8 +1,8 @@
 """Durable registration-address email alerts for access and thematic findings.
 
 All enqueue operations use the caller's PostgreSQL transaction.  Messages
-remain queued if SMTP is unavailable and are retried; never send from a
-web request or include original procurement evidence in an email.
+remain queued if an email provider is unavailable and are retried; never
+send from a web request or include original procurement evidence in an email.
 """
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
-from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +20,62 @@ SMTP_FIELDS = ("EIS223_SMTP_HOST", "EIS223_SMTP_USER",
 
 def smtp_configured():
     return all(os.getenv(k, "").strip() for k in SMTP_FIELDS)
+
+
+def resend_configured():
+    return bool(os.getenv("EIS223_RESEND_API_KEY", "").strip()
+                and os.getenv("EIS223_RESEND_FROM", "").strip())
+
+
+def email_provider():
+    """HTTPS APIs work on Railway Hobby; SMTP requires Railway Pro."""
+    if resend_configured():
+        return "resend"
+    if smtp_configured():
+        return "smtp"
+    return None
+
+
+def send_resend(address, subject, body, message_id):
+    """Send with an outbox-scoped stable idempotency key via Resend HTTPS."""
+    if not resend_configured():
+        raise RuntimeError("Resend mail is not configured")
+    import httpx
+    try:
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": "Bearer " + os.environ["EIS223_RESEND_API_KEY"],
+                "Content-Type": "application/json",
+                "Idempotency-Key": "eis223-outbox-" + str(message_id),
+            },
+            json={
+                "from": os.environ["EIS223_RESEND_FROM"],
+                "to": [address],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=12.0,
+        )
+    except httpx.RequestError as exc:
+        raise OSError("Mail HTTPS provider temporarily unavailable") from exc
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError("Mail HTTPS provider returned HTTP " + str(response.status_code))
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Mail HTTPS provider returned invalid JSON") from exc
+    if not isinstance(payload, dict) or not payload.get("id"):
+        raise RuntimeError("Mail HTTPS provider did not acknowledge receipt")
+
+
+def send_email(address, subject, body, message_id):
+    provider = email_provider()
+    if provider == "resend":
+        return send_resend(address, subject, body, message_id)
+    if provider == "smtp":
+        return send_smtp(address, subject, body)
+    raise RuntimeError("Mail provider is not configured")
 
 
 def enqueue(db, user_id, event_key, subject, body, batch_id=None):
@@ -89,10 +144,10 @@ def send_smtp(address, subject, body):
 def dispatch_pending(connect, limit=3):
     """Dispatch with SKIP LOCKED to coordinate replicas and retry failures.
 
-    A crash after the SMTP server accepts a message but before DB commit can
-    cause a second send. Database unique keys prevent normal repeat alerts.
+    Resend receives a stable per-message Idempotency-Key across retries.
+    Database unique keys prevent repeated event notifications.
     """
-    if not smtp_configured():
+    if not email_provider():
         return 0
     sent = 0
     with connect() as db:
@@ -111,7 +166,7 @@ def dispatch_pending(connect, limit=3):
         ).fetchall()
         for identifier, address, subject, body in rows:
             try:
-                send_smtp(address, subject, body)
+                send_email(address, subject, body, identifier)
             except (OSError, smtplib.SMTPException, RuntimeError, ValueError) as exc:
                 # Only the exception type, never credentials or message bodies.
                 log.warning("Mail send failed: %s", type(exc).__name__)

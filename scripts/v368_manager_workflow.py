@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID,uuid4
 import re
+import time
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -76,6 +77,41 @@ class TaskDecision(BaseModel):
 class MemoDecision(BaseModel):
     decision:str=Field(pattern="^(approved|returned|rejected)$")
     comment:str=Field(default="",max_length=1500)
+
+@router.get("/admin/mail/status")
+def admin_mail_status(request:Request,response:Response):
+    administrator(request)
+    response.headers.update(no_store_headers())
+    from scripts.account_notifications_v1 import email_provider
+    with connect() as db:
+        metrics=db.execute(
+            """SELECT COUNT(*) FILTER (WHERE sent_at IS NULL AND attempts < 12),
+                      COUNT(*) FILTER (WHERE sent_at IS NOT NULL),
+                      COUNT(*) FILTER (WHERE sent_at IS NULL AND attempts >= 12)
+               FROM account_mail_outbox"""
+        ).fetchone()
+    provider=email_provider()
+    return {"configured":bool(provider),"provider":provider,
+            "pending":int(metrics[0]),"accepted":int(metrics[1]),
+            "failed":int(metrics[2]),
+            "note":"Принято сервисом отправки — не подтверждение доставки во входящие."}
+
+
+@router.post("/admin/mail/test",status_code=202)
+def admin_mail_test(request:Request):
+    require_origin(request)
+    admin=administrator(request)
+    from scripts.account_notifications_v1 import enqueue,email_provider
+    if not email_provider():
+        raise HTTPException(503,"Почтовый сервис не настроен в Railway")
+    window=int(time.time()//600)
+    with connect() as db:
+        enqueue(db,admin,"test:email:"+str(window),
+                "ЕИС Аудитор — проверка почтовых уведомлений",
+                "Проверка отправки писем из ЕИС Аудитор. "
+                "Это письмо направлено на адрес, указанный при регистрации.")
+    return {"queued":True,"note":"Тестовое письмо поставлено в очередь на почту регистрации."}
+
 
 @router.get("/admin/users")
 def admin_users(request:Request,response:Response):
