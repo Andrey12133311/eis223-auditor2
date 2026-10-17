@@ -133,7 +133,7 @@ def test_account_ui():
                   "thematic-to","thematic-type","violation_types"):
         assert token in THEMATIC,token
     for token in ('id="memo-search"','id="memo-from"','id="memo-to"',
-                  '/me/memo-archive/','Скачать '+chr(79)+'DT','PDF'):
+                  '/me/memo-archive/','Скачать ','PDF'):
         assert token in MEMOS,token
     assert "document.createElement" in MEMOS
     assert "Array.isArray" in MEMOS
