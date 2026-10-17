@@ -250,6 +250,9 @@ async function refresh(){
   const open=document.createElement('a');
   open.href=item.card_available?'/check-new/'+encodeURIComponent(item.reg_number):'/';
   open.textContent=item.card_available?'Открыть проверку':'На главную';
+  const dossier=document.createElement('a');
+  dossier.href='/me/cases/'+encodeURIComponent(item.reg_number);
+  dossier.textContent='Электронное дело';
   const remove=document.createElement('button');remove.type='button';remove.textContent='Убрать';
   remove.title='Убрать из личного кабинета; сохранённые оригиналы и результаты остаются';
   remove.onclick=async()=>{
@@ -271,7 +274,7 @@ async function refresh(){
    }catch{el('manual-message').textContent='Не удалось добавить в избранное'}
    finally{favorite.disabled=false}
   };
-  wrapper.append(open,favorite,remove);actions.append(wrapper);
+  wrapper.append(open,dossier,favorite,remove);actions.append(wrapper);
   tr.append(reg,status,docs,violations,actions);rows.append(tr);
  }
  }catch(error){el('manual-message').textContent=error.message}
