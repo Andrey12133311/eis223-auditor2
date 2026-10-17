@@ -8,77 +8,134 @@ from html import escape
 
 _STYLE = """
 <style id="eis223-ui-refresh">
-:root{--acct-ink:#17342d;--acct-muted:#698077;--acct-main:#087e71;--acct-line:#dfeae4}
-.eis223-workspace{position:relative;z-index:5;color:var(--acct-ink);
- background:#fff;border-bottom:1px solid var(--acct-line);padding:12px clamp(14px,3vw,45px);
- font:14px/1.55 Inter,"Segoe UI",system-ui,-apple-system,sans-serif;box-sizing:border-box}
+.eis223-workspace{
+ position:relative;z-index:6;background:#fff;color:#24435a;
+ font:14px/1.5 Inter,"Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+ box-sizing:border-box;border-bottom:1px solid #dae5ed;
+ box-shadow:0 2px 8px #163f5a08}
 .eis223-workspace *{box-sizing:border-box}
-.eis223-menu{max-width:1560px;margin:auto;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-.eis223-brand{display:flex;align-items:center;gap:10px;color:#24453b;font-size:16px;
- font-weight:800;letter-spacing:-.025em;margin-right:auto}
-.eis223-brand-icon{height:37px;width:37px;display:grid;place-items:center;
- color:white;border-radius:12px;background:linear-gradient(155deg,#0b9e89,#075b56);
- box-shadow:0 5px 12px #07877924;font-weight:900;font-size:18px}
-.eis223-workspace .eis223-menu button,.eis223-workspace .eis223-menu a{
- font:650 13px system-ui,sans-serif;min-height:42px;padding:9px 15px;
- border:1px solid #d5e4dc!important;border-radius:10px!important;
- background:#fff!important;color:#2b675b!important;cursor:pointer;
- display:inline-flex;justify-content:center;align-items:center;box-shadow:none!important}
-.eis223-workspace .eis223-menu button:hover{background:#eff8f3!important}
-.eis223-workspace .eis223-menu #eis223-toggle-cabinet{background:#eaf6f0!important;
- color:#086e60!important;border-color:#c7e6d9!important}
-.eis223-workspace .eis223-menu #eis223-toggle-cabinet[aria-expanded=true]{
- background:#087e71!important;color:white!important;border-color:#087e71!important}
-.eis223-workspace .eis223-menu #eis223-logout{background:#fff!important;color:#60776d!important;
- border-color:transparent!important}
+.eis223-menu{
+ background:#174c76;padding:10px clamp(13px,3vw,45px);
+ display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+ min-height:65px}
+.eis223-brand{
+ color:#fff!important;display:inline-flex;align-items:center;gap:11px;
+ margin-right:auto;min-width:170px}
+.eis223-brand-icon{
+ width:43px;height:43px;flex:none;display:grid;place-items:center;
+ background:#ffffff16;border:1px solid #ffffff50;border-radius:9px;
+ color:#fff;font-size:14px;font-weight:850;letter-spacing:-.04em}
+.eis223-brand-copy{display:flex;flex-direction:column;gap:1px}
+.eis223-brand-name{font-size:18px;font-weight:780;letter-spacing:-.03em;line-height:1.15}
+.eis223-brand-sub{font-size:10px;color:#c6dfed;letter-spacing:.025em}
+.eis223-menu button,.eis223-menu a{
+ display:inline-flex;align-items:center;justify-content:center;
+ cursor:pointer;min-height:40px;font:670 13px system-ui,sans-serif;
+ border-radius:8px!important;padding:9px 14px!important;
+ text-decoration:none;transition:background .15s,border-color .15s}
+.eis223-workspace .eis223-menu button#eis223-toggle-cabinet{
+ color:#184b70!important;background:#fff!important;border:1px solid #fff!important;
+ box-shadow:none!important}
+.eis223-workspace .eis223-menu button#eis223-toggle-cabinet[aria-expanded=true]{
+ color:#fff!important;background:#126594!important;border:1px solid #86b9dc!important}
+.eis223-workspace .eis223-menu button#eis223-toggle-cabinet:hover{background:#eaf4fb!important}
+.eis223-workspace .eis223-menu button#eis223-logout{
+ color:#e5f1fa!important;background:#ffffff12!important;
+ border:1px solid #ffffff47!important;box-shadow:none!important}
+.eis223-workspace .eis223-menu button#eis223-logout:hover{background:#ffffff26!important}
+.eis223-workspace .eis223-menu a{color:#f4faff!important;border:1px solid #ffffff30}
+.eis223-workspace [role=status]{color:#527087;font-size:12px}
+#eis223-logout-status:not(:empty){color:#fff}
 .eis223-personal[hidden]{display:none!important}
-.eis223-personal{max-width:1560px;margin:13px auto 4px;padding:clamp(18px,2.8vw,30px);
- background:linear-gradient(125deg,#fff,#f9fcfa);border:1px solid #dce9e3;border-radius:19px;
- box-shadow:0 12px 38px #153b2d10}
-.eis223-kicker{color:#0f8576;font-size:11px;font-weight:800;letter-spacing:.13em;
- margin:0 0 5px;text-transform:uppercase}
-.eis223-personal h2{font-size:clamp(23px,2.4vw,29px);font-weight:800;letter-spacing:-.04em;
- color:#22473c!important;margin:0 0 6px}
-.eis223-personal .eis223-subtle{font-size:13px;color:#667b72;line-height:1.65;margin:0 0 17px}
-.eis223-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-.eis223-tile{min-width:0;padding:18px;background:#fff;border:1px solid #e0ebe5;
- border-radius:15px;box-shadow:0 4px 12px #183a2c07}
-.eis223-tile h3{font-size:16px!important;font-weight:780!important;letter-spacing:-.02em;
- color:#26463d!important;margin:0 0 14px}
-.eis223-tile ul{list-style:none;margin:0 0 13px;padding:0;max-height:245px;overflow-y:auto}
-.eis223-tile li{display:flex;gap:9px;align-items:center;flex-wrap:wrap;
- background:#f8fbf9;border:1px solid #e6eee9;padding:10px 11px;margin:7px 0;
- border-radius:10px;overflow-wrap:anywhere;line-height:1.4}
-.eis223-tile li a{font-weight:650;color:#0b786a}
-.eis223-check-desc{flex:1 1 150px;min-width:0;display:grid;gap:3px}
-.eis223-check-desc strong{color:#23493d;font-size:13px}
-.eis223-check-desc small{font-size:12px;color:#6b7e75;line-height:1.5}
-.eis223-workspace a.eis223-all-checks{color:#087b6d;font-weight:750;
- text-decoration:none;display:inline-block;padding:9px 1px}
+.eis223-personal{
+ background:#f5f8fb;max-width:none;width:100%;margin:0;
+ padding:clamp(16px,3vw,32px) clamp(12px,3vw,44px) clamp(18px,3vw,30px);
+ border:0;border-bottom:1px solid #d8e3ec;box-shadow:inset 0 1px #fff}
+.eis223-cabinet-heading{display:flex;gap:12px;justify-content:space-between;
+ align-items:flex-start;flex-wrap:wrap;margin-bottom:13px}
+.eis223-personal h2{
+ font-weight:780!important;color:#204d71!important;letter-spacing:-.035em;
+ font-size:clamp(23px,2.4vw,30px)!important;margin:0 0 4px}
+.eis223-kicker{font-size:10px;font-weight:780;letter-spacing:.13em;
+ text-transform:uppercase;color:#397cad;margin:0 0 4px}
+.eis223-personal .eis223-subtle{
+ margin:0;color:#6a7e8e;font-size:13px;line-height:1.6}
+.eis223-panel-mark{display:inline-flex;align-items:center;gap:6px;
+ color:#637f92;background:#e9f2f8;border:1px solid #d6e6f1;
+ border-radius:8px;padding:7px 11px;font-size:11px}
+.eis223-panel-mark:before{content:"";width:6px;height:6px;border-radius:50%;background:#4789b3}
+.eis223-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+ gap:10px;margin:15px 0 16px}
+.eis223-overview>span{padding:12px 14px;background:#fff;border:1px solid #dae6ee;
+ border-radius:10px;box-shadow:0 2px 8px #1a4a6906;min-width:0}
+.eis223-overview b{display:block;color:#1a527a;line-height:1.2;
+ font-size:23px;font-weight:790;font-variant-numeric:tabular-nums}
+.eis223-overview small{display:block;color:#718493;font-size:11px;margin-top:4px}
+.eis223-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+ align-items:start;gap:12px}
+.eis223-tile{
+ background:#fff;border:1px solid #dce6ee;border-radius:11px;
+ padding:18px;min-width:0;box-shadow:0 4px 15px #19446309}
+.eis223-tile-head{display:flex;gap:10px;align-items:flex-start;margin:0 0 14px}
+.eis223-tile-number{flex:none;width:34px;height:34px;display:grid;place-items:center;
+ border:1px solid #d6e6f2;border-radius:9px;background:#edf5fa;
+ color:#2c6b99;font-size:12px;font-weight:800}
+.eis223-tile h3{margin:0 0 4px;color:#234e72!important;
+ font-size:15px!important;font-weight:760!important}
+.eis223-tile-sub{margin:0;font-size:11px;color:#718798;line-height:1.5}
+.eis223-tile ul{
+ margin:0 0 11px;padding:0;list-style:none;min-height:55px;
+ max-height:240px;overflow-y:auto}
+.eis223-tile li{
+ display:flex;align-items:center;flex-wrap:wrap;gap:8px;
+ border-bottom:1px solid #ebf0f4;padding:10px 3px;margin:0;
+ font-size:12px;overflow-wrap:anywhere}
+.eis223-tile li:last-child{border-bottom:0}
+.eis223-tile li a{color:#195f93!important;text-decoration:none;font-weight:690}
+.eis223-tile li a:hover{text-decoration:underline}
+.eis223-check-desc{flex:1 1 155px;min-width:0;display:grid;gap:4px}
+.eis223-check-desc strong{font-size:12px;color:#214b6d}
+.eis223-check-desc small{font-size:11px;color:#728796;line-height:1.5}
+.eis223-workspace a.eis223-all-checks{
+ display:inline-flex;gap:6px;align-items:center;font-size:12px;font-weight:750;
+ color:#185d91;text-decoration:none;padding:10px 0 3px}
 .eis223-workspace a.eis223-all-checks:hover{text-decoration:underline}
-.eis223-tile form{display:flex;flex-wrap:wrap;gap:9px;align-items:stretch}
-.eis223-workspace .eis223-tile input{flex:1;min-width:125px;font:inherit;
- border:1px solid #d2e0d9!important;color:#263e37!important;
- border-radius:10px!important;background:#fff!important;padding:10px 12px!important;min-height:43px}
-.eis223-workspace .eis223-tile button{cursor:pointer;min-height:40px;
- background:#087e71!important;color:#fff!important;border:1px solid #087e71!important;
- border-radius:10px!important;padding:9px 13px!important;font-weight:700!important}
-.eis223-workspace .eis223-tile button:hover:not(:disabled){background:#04695e!important}
-.eis223-workspace .eis223-tile button:disabled{opacity:.6}
-.eis223-tile li button{margin-left:auto;background:#fff!important;color:#995058!important;
- border-color:#eed8da!important}
-.eis223-tile li button:hover:not(:disabled){background:#fff1f2!important}
-.eis223-workspace [role=status]{font-size:12px;color:#677e74;margin:8px 0}
-.eis223-workspace :is(button,input,a):focus-visible{outline:3px solid #99decd!important;outline-offset:2px}
-@media(max-width:1020px){.eis223-columns{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:670px){
- .eis223-workspace{padding:11px 13px}
- .eis223-menu{gap:7px}
- .eis223-brand{flex-basis:100%;font-size:15px}
- .eis223-workspace .eis223-menu button{flex:1}
- .eis223-personal{padding:16px;border-radius:15px;margin-top:10px}
- .eis223-columns{grid-template-columns:minmax(0,1fr);gap:11px}
- .eis223-tile{padding:15px}
+.eis223-tile form{display:flex;flex-wrap:wrap;gap:7px}
+.eis223-workspace .eis223-tile input{
+ background:#fff!important;color:#244458!important;flex:1;min-width:125px;
+ min-height:42px;font-size:13px!important;padding:9px 11px!important;
+ border:1px solid #cddce6!important;border-radius:8px!important}
+.eis223-workspace .eis223-tile button{
+ color:#fff!important;background:#165b8b!important;border:1px solid #165b8b!important;
+ min-height:40px;border-radius:8px!important;cursor:pointer;
+ padding:8px 11px!important;font-size:12px!important;font-weight:690!important}
+.eis223-workspace .eis223-tile button:hover:not(:disabled){background:#114870!important}
+.eis223-workspace .eis223-tile button:disabled{opacity:.6;cursor:wait}
+.eis223-workspace .eis223-tile li button{
+ margin-left:auto;background:#fff!important;color:#995052!important;
+ border:1px solid #e6cccf!important}
+.eis223-workspace .eis223-tile li button:hover{background:#fff3f3!important}
+.eis223-workspace :is(button,a,input):focus-visible{
+ outline:3px solid #86bfdf!important;outline-offset:2px}
+@media(max-width:1100px){.eis223-columns{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:660px){
+ .eis223-menu{padding:9px 12px;gap:7px}
+ .eis223-brand{width:100%;margin-bottom:4px}
+ .eis223-brand-icon{height:36px;width:36px}
+ .eis223-brand-name{font-size:16px}
+ .eis223-brand-sub{font-size:10px}
+ .eis223-menu button{flex:1}
+ .eis223-personal{padding:16px 11px}
+ .eis223-panel-mark{display:none}
+ .eis223-overview{gap:7px}
+ .eis223-overview>span{padding:10px 9px}
+ .eis223-overview b{font-size:20px}
+ .eis223-overview small{font-size:10px}
+ .eis223-columns{grid-template-columns:minmax(0,1fr);gap:10px}
+ .eis223-tile{padding:14px}
+}
+@media(max-width:375px){
+ .eis223-overview{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(prefers-reduced-motion:reduce){.eis223-workspace *{transition:none!important}}
 </style>
@@ -90,19 +147,23 @@ def site_header(role="user"):
     return (_STYLE + '''
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
-<span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">Е</span>ЕИС Аудитор</span>
+<span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
 <button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет</button>
 ''' + admin + '''
 <button type="button" id="eis223-logout">Выйти</button>
 <span id="eis223-logout-status" role="status"></span>
 </nav>
 <section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
-<p class="eis223-kicker">Персональное пространство</p>
+<div class="eis223-cabinet-heading">
+<div><p class="eis223-kicker">Персональное пространство</p>
 <h2>Личный кабинет</h2>
-<p class="eis223-subtle">Личные закупки, запущенные вами тематические проверки и служебные записки — в одном месте.</p>
-<p id="eis223-personal-summary" role="status">Загрузка данных…</p>
+<p class="eis223-subtle">Ваши закупки, тематические проверки и служебные записки</p></div>
+<span class="eis223-panel-mark">Доступно только вашей учётной записи</span></div>
+<div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
+<span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
-<div class="eis223-tile"><h3>Сохранённые закупки</h3>
+<div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">01</span>
+<div><h3>Сохранённые закупки</h3><p class="eis223-tile-sub">Добавленные вами номера ЕИС</p></div></div>
 <ul id="eis223-my-procurements"><li>Загрузка…</li></ul>
 <form id="eis223-add-procurement">
 <input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
@@ -110,12 +171,14 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <button type="submit">Добавить</button></form>
 <p role="status" id="eis223-add-status"></p>
 </div>
-<div class="eis223-tile"><h3>Мои тематические проверки</h3>
+<div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">02</span>
+<div><h3>Тематические проверки</h3><p class="eis223-tile-sub">Запущенные под вашей учётной записью</p></div></div>
 <ul id="eis223-my-batches"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/thematic">Посмотреть все мои проверки →</a>
 <p role="status" id="eis223-batch-status"></p>
 </div>
-<div class="eis223-tile"><h3>Служебные записки</h3>
+<div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">03</span>
+<div><h3>Служебные записки</h3><p class="eis223-tile-sub">Сохранённые документы и проекты</p></div></div>
 <ul id="eis223-my-memos"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/memos">Посмотреть служебные записки →</a>
 <p role="status" id="eis223-memo-status"></p>
@@ -136,8 +199,17 @@ try{
 const [summary,purchases,batches,memos]=await Promise.all([
 get('/me/summary'),get('/me/procurements'),get('/api/thematic/history'),get('/me/memos')]);
 const realBatches=batches.batches||[];
-show('eis223-personal-summary','Сохранённые закупки: '+summary.procurements+
-' · Тематические проверки: '+realBatches.length+' · Служебные записки: '+summary.memos);
+const overview=q('eis223-personal-summary');overview.replaceChildren();
+const counters=[
+ ['Закупки',summary.procurements],['Тематические проверки',realBatches.length],
+ ['Служебные записки',summary.memos]];
+for(const [label,value] of counters){
+ const chip=document.createElement('span'),number=document.createElement('b');
+ const caption=document.createElement('small');
+ const numberValue=Number(value);
+ number.textContent=Number.isFinite(numberValue)&&numberValue>=0?String(numberValue):'—';
+ caption.textContent=label;chip.append(number,caption);overview.append(chip);
+}
 const pl=q('eis223-my-procurements');pl.replaceChildren();
 if(!purchases.length){const li=document.createElement('li');li.textContent='Пока нет закупок';pl.append(li)}
 for(const item of purchases.slice(0,10)){
@@ -181,7 +253,7 @@ for(const memo of memos.slice(0,7)){
  link.href='/account/memos';link.textContent='Закупка № '+memo.reg_number;
  li.append(link);ml.append(li);
 }
-}catch{show('eis223-personal-summary','Личные данные временно недоступны. Общая проверка сохранена.')}
+}catch{show('eis223-personal-summary','Личные данные временно недоступны. Попробуйте открыть кабинет ещё раз.')}
 }
 q('eis223-logout').addEventListener('click',async()=>{
 const button=q('eis223-logout');button.disabled=true;
