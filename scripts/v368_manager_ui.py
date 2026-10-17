@@ -254,12 +254,12 @@ function renderAdmin(){
  const root=$("mgr-admin-section");root.classList.toggle("mgr-hidden",ROLE!=="admin");
  if(ROLE!=="admin")return;
  const managers=cache.users.filter(x=>x.role==="manager"&&x.status==="approved"),rows=[];
- for(const person of cache.users.filter(x=>x.role!=="admin")){
+ for(const person of cache.users){
   const tr=tag("tr");
   const roleLabels={user:"Сотрудник",manager:"Руководитель",admin:"Администратор"};
   tr.append(cell(person.full_name||person.email),cell(person.status),cell(roleLabels[person.role]||person.role));
   const controls=tag("div","mgr-actions");
-  if(person.status==="approved"){
+  if(person.status==="approved"&&!person.is_self){
    const roleSelect=tag("select");
    roleSelect.setAttribute("aria-label","Роль пользователя "+person.email);
    for(const [value,label] of Object.entries(roleLabels)){

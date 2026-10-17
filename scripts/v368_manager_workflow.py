@@ -79,7 +79,7 @@ class MemoDecision(BaseModel):
 
 @router.get("/admin/users")
 def admin_users(request:Request,response:Response):
-    administrator(request)
+    actor=administrator(request)
     response.headers.update(no_store_headers())
     with connect() as db:
         rows=db.execute(
@@ -90,7 +90,8 @@ def admin_users(request:Request,response:Response):
                ORDER BY lower(u.email) ASC LIMIT 250""").fetchall()
     return [{"id":str(r[0]),"email":r[1],"role":r[2],
              "status":r[3],"manager_id":str(r[4]) if r[4] else None,
-             "full_name":" ".join(x for x in (r[5],r[6],r[7]) if x)} for r in rows]
+             "full_name":" ".join(x for x in (r[5],r[6],r[7]) if x),
+             "is_self":r[0]==actor} for r in rows]
 
 @router.post("/admin/users/{user_id}/role")
 def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
@@ -101,7 +102,7 @@ def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
         row=db.execute(
             "SELECT role,status FROM account_users WHERE id=%s FOR UPDATE",(target,)
         ).fetchone()
-        if not row or row[1]!="approved" or row[0]=="admin":
+        if not row or row[1]!="approved":
             raise HTTPException(404,"Действующая учётная запись сотрудника не найдена")
         if row[0]==data.role:
             return {"id":str(target),"role":data.role,"changed":False}
