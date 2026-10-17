@@ -142,6 +142,13 @@ def test_account_ui():
     for token in ('id="memo-search"','id="memo-from"','id="memo-to"',
                   '/me/memo-archive/','Скачать ','PDF'):
         assert token in MEMOS,token
+    # The favorite's INN link must be consumed exactly once on the home search.
+    assert "'/?favorite_inn='" in shell
+    from pathlib import Path
+    home_search=Path(__file__).with_name("v302_eis_modern_ui.py").read_text(encoding="utf-8")
+    assert "params.get('favorite_inn')" in home_search
+    assert "params.delete('favorite_inn')" in home_search
+    assert "by('v302-inn-form').requestSubmit()" in home_search
     assert "document.createElement" in MEMOS
     assert "Array.isArray" in MEMOS
     for table in ("account_favorites","account_alert_snapshots",
