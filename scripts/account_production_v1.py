@@ -59,6 +59,30 @@ def shared_read_route(path, method):
     ))
 
 
+_ACCOUNT_NAV = (
+    b'<nav data-eis223-account-nav="1" aria-label="Навигация ЕИС Аудитор" '
+    b'style="padding:12px 5%;background:#eef3f8;border-bottom:1px solid #d5e0ec;'
+    b'font:600 14px system-ui;display:flex;gap:20px;flex-wrap:wrap">'
+    b'<a href="/">Общая проверка</a>'
+    b'<a href="/account/login">Войти</a>'
+    b'<a href="/account/register">Регистрация</a>'
+    b'<a href="/account/home">Личный кабинет</a></nav>'
+)
+
+
+def add_account_navigation(html):
+    """Add same-domain account entry points without modifying legacy UI code."""
+    if not isinstance(html, bytes) or b'data-eis223-account-nav' in html:
+        return html
+    start = html.lower().find(b'<body')
+    if start < 0:
+        return html
+    end = html.find(b'>', start)
+    if end < 0:
+        return html
+    return html[:end + 1] + _ACCOUNT_NAV + html[end + 1:]
+
+
 
 def machine_path(path):
     return path in MACHINE_EXACT or any(path.startswith(p) for p in MACHINE_PREFIXES)
@@ -118,7 +142,27 @@ class ProductionAccountGate:
         # Public procurement evidence is shared with visitors, not tied to a
         # personal session. PostgreSQL outages must not hide public audits.
         if scope["type"] == "http" and shared_read_route(path, method):
-            await self.app(scope, receive, no_cache_send)
+            if path == "/" and method == "GET":
+                is_html = False
+                async def shared_home_send(message):
+                    nonlocal is_html
+                    if message["type"] == "http.response.start":
+                        headers = message.get("headers", [])
+                        is_html = any(k.lower() == b"content-type" and
+                                      b"text/html" in v.lower() for k, v in headers)
+                        if is_html:
+                            message = {**message, "headers": [
+                                (k, v) for k, v in headers
+                                if k.lower() != b"content-length"
+                            ]}
+                    elif message["type"] == "http.response.body" and is_html:
+                        message = {**message, "body": add_account_navigation(
+                            message.get("body", b"")
+                        )}
+                    await no_cache_send(message)
+                await self.app(scope, receive, shared_home_send)
+            else:
+                await self.app(scope, receive, no_cache_send)
             return
         if scope["type"] == "http" and method == "OPTIONS" and machine_path(path):
             await self.app(scope, receive, send)
