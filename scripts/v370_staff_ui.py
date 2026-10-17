@@ -117,8 +117,16 @@ function section(tab){
  if(tab==='goals')campaigns();
  if(tab==='activity')loadHistory();
  if(tab==='overview')loadDashboard();
+ if(tab==='library')loadLibrary();
 }
 document.querySelectorAll('[data-staff-tab]').forEach(x=>x.onclick=()=>section(x.dataset.staffTab));
+el('staff-refresh').addEventListener('click',()=>{
+ const current=document.querySelector('[data-staff-tab][aria-selected="true"]');
+ const tab=current?.dataset.staffTab||'overview';
+ section(tab);
+ if(tab==='overview')reloadOverview();
+ msg('Обновление данных запущено');
+});
 function list(root,items,build){
  const node=el(root);node.replaceChildren();
  if(!items.length)node.append(make("p","Записей пока нет"));
@@ -635,7 +643,7 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <main>
 <div class="staff-hero"><div><h1 id="staff-hello">Моё рабочее пространство</h1>
 <p>Собственные проверки, поручения и нарушения по реальным данным ЕИС. Без дублирования результатов.</p></div>
-<button id="staff-refresh" type="button" class="outline" onclick="location.reload()">↻ Обновить данные</button></div>
+<button id="staff-refresh" type="button" class="outline">↻ Обновить данные</button></div>
 <div class="grid">
 <div class="metric"><small>Самостоятельные проверки</small><strong id="staff-checks">—</strong></div>
 <div class="metric"><small>Завершён анализ</small><strong id="staff-complete">—</strong></div>
