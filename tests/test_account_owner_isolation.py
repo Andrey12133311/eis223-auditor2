@@ -57,6 +57,23 @@ class OwnerIsolationTests(unittest.TestCase):
         self.assertFalse(result['execution_started'])
         self.assertEqual(db.calls[-1][1], (OWNER_A, result['batch_id']))
 
+    def test_owned_personal_batch_status_does_not_start_engine(self):
+        db = FakeDB()
+        batch_id = 'personal-' + uuid4().hex
+        with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_A, 'user', 'approved')), patch.object(private, 'owns_batch', return_value=True):
+            result = private.batch_details(batch_id, object(), Response())
+        self.assertEqual(result['status'], 'saved')
+        self.assertFalse(result['execution_started'])
+        self.assertFalse(result['results_available'])
+
+    def test_unowned_personal_batch_is_hidden(self):
+        db = FakeDB()
+        batch_id = 'personal-' + uuid4().hex
+        with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'owns_batch', return_value=False):
+            with self.assertRaises(HTTPException) as caught:
+                private.batch_details(batch_id, object(), Response())
+        self.assertEqual(caught.exception.status_code, 404)
+
     def test_unowned_memo_download_returns_not_found(self):
         db = FakeDB()
         with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'owned_memo_key', return_value=None) as lookup:
