@@ -492,14 +492,139 @@ refresh();loadHistorical();
 })();
 </script>""")
 
-MEMOS = page("Служебные записки", """
-<h1>Мои служебные записки</h1><p>Документы, сохранённые за вашей учётной записью. Перейти сюда можно из личного кабинета на главной странице.</p>
-<p><a href="/account/home">← Личный кабинет</a></p>
-<p id="message" role="status">Загружаем…</p><table><thead><tr><th>Документ</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
+MEMOS = page("Архив служебных записок", """
+<style>
+.memo-archive-form{display:flex;align-items:end;gap:11px;flex-wrap:wrap;padding:16px;
+ border:1px solid #dae7f1;border-radius:10px;background:#f8fbfe;margin:17px 0}
+.memo-archive-form label{margin:0;flex:1 1 215px}
+.memo-archive-form button{margin:0 0 1px}
+.memo-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));
+ align-items:end;gap:10px;padding:14px;margin:18px 0;border:1px solid #dce9f3;
+ border-radius:10px;background:#f7fafc}
+.memo-filters label{margin:0}
+.memo-filters button{background:#fff;color:#24618c;border:1px solid #cedeeb}
+.memo-action{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.memo-action button,.memo-action a{min-height:37px;padding:8px 11px;border-radius:8px;
+ font-weight:690;font-size:12px}
+.memo-action a{display:inline-flex;align-items:center;background:#eaf4fb;
+ border:1px solid #d2e5f3;color:#195d90}
+.memo-legacy{font-size:12px;color:#946a2e}
+@media(max-width:700px){.memo-archive-form button{flex:1}#memo-table td:last-child{min-width:190px}}
+</style>
+<p><a href="/">← На главную / Личный кабинет</a></p>
+<h1>Архив служебных записок</h1>
+<p>Здесь сохраняются подготовленные по проверенным нарушениям документы в формате ODT.
+Для сохранённых оригиналов доступно скачивание ODT и преобразование в PDF через LibreOffice.</p>
+<form id="memo-save" class="memo-archive-form">
+<label>Создать и сохранить служебную записку по закупке
+<input type="text" name="reg" inputmode="numeric" pattern="3[0-9]{10}" maxlength="11"
+ required autocomplete="off" placeholder="Введите номер ЕИС"></label>
+<button type="submit">Сформировать и сохранить</button>
+</form>
+<p id="memo-status" role="status" aria-live="polite">Загружаем архив…</p>
+<div class="memo-filters" aria-label="Поиск в архиве">
+<label>Номер закупки<input id="memo-search" type="search" placeholder="Номер ЕИС"></label>
+<label>Дата с<input id="memo-from" type="date"></label>
+<label>Дата по<input id="memo-to" type="date"></label>
+<button type="button" id="memo-reset">Сбросить фильтры</button>
+</div>
+<div id="memo-count" role="status"></div>
+<table id="memo-table" aria-label="Архив служебных записок">
+<thead><tr><th>Закупка</th><th>Дата создания</th><th>Документ</th><th>Действия</th></tr></thead>
+<tbody id="memo-rows"></tbody></table>
 <script>
-(async()=>{const m=document.getElementById('message');try{const r=await fetch('/me/memos',{credentials:'same-origin'});
-if(r.status===401){location.assign('/account/login');return}if(!r.ok){m.textContent='Не удалось получить документы';return}
-const data=await r.json();const rows=document.getElementById('rows');for(const item of data){const tr=document.createElement('tr'),td=document.createElement('td');
-td.textContent=String('Служебная записка · '+item.reg_number);tr.append(td);rows.append(tr)}
-m.textContent=data.length?'':'Документов пока нет';}catch{m.textContent='Ошибка соединения'}})();
+(()=>{
+const el=id=>document.getElementById(id);
+let cache=[],busy=false;
+function render(){
+ const search=el('memo-search').value.trim(),from=el('memo-from').value,to=el('memo-to').value;
+ const data=cache.filter(x=>{
+   const day=(x.created_at||'').slice(0,10);
+   return (!search||x.reg_number.includes(search))&&(!from||(day&&day>=from))&&
+    (!to||(day&&day<=to));
+ });
+ const rows=el('memo-rows');rows.replaceChildren();
+ el('memo-count').textContent='Показано: '+data.length+' из '+cache.length;
+ for(const item of data){
+  const tr=document.createElement('tr'),reg=document.createElement('td'),
+   date=document.createElement('td'),state=document.createElement('td'),
+   action=document.createElement('td');
+  reg.textContent='№ '+item.reg_number;
+  const stamp=Date.parse(item.created_at);
+  date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'—';
+  const actions=document.createElement('div');actions.className='memo-action';
+  if(item.downloadable){
+   state.textContent='Сохранённый ODT';
+   for(const fmt of ['odt','pdf']){
+    const link=document.createElement('a');link.href='/me/memo-archive/'+encodeURIComponent(item.id)+'/'+fmt;
+    link.textContent='Скачать '+fmt.toUpperCase();link.setAttribute('download','memo_'+item.reg_number+'.'+fmt);
+    link.onclick=async event=>{
+     event.preventDefault();link.style.pointerEvents='none';
+     try{
+      const r=await fetch(link.href,{credentials:'same-origin',cache:'no-store'});
+      if(!r.ok)throw Error(fmt==='pdf'?'Не удалось создать PDF. Проверьте LibreOffice.':'Документ временно недоступен');
+      const data=await r.blob();
+      const objectURL=URL.createObjectURL(data);
+      const a=document.createElement('a');a.href=objectURL;
+      a.download='memo_'+item.reg_number+'.'+fmt;document.body.append(a);a.click();a.remove();
+      setTimeout(()=>URL.revokeObjectURL(objectURL),30000);
+      el('memo-status').textContent='Документ '+fmt.toUpperCase()+' подготовлен';
+     }catch(error){el('memo-status').textContent=error.message}
+     finally{link.style.pointerEvents=''}
+    };
+    actions.append(link);
+   }
+  }else{
+   state.textContent='Старый архив: файл не был сохранён';
+   state.className='memo-legacy';
+   const button=document.createElement('button');button.type='button';button.textContent='Создать заново';
+   button.onclick=()=>{el('memo-save').querySelector('input').value=item.reg_number;
+     el('memo-save').scrollIntoView({behavior:'smooth',block:'center'})};
+   actions.append(button);
+  }
+  action.append(actions);tr.append(reg,date,state,action);rows.append(tr);
+ }
+ if(!data.length){const tr=document.createElement('tr'),td=document.createElement('td');
+   td.colSpan=4;td.textContent=cache.length?'По фильтрам документы не найдены':'Архив пока пуст';
+   tr.append(td);rows.append(tr)}
+}
+async function refresh(){
+ if(busy)return;busy=true;
+ try{
+  const r=await fetch('/me/memo-archive',{credentials:'same-origin',cache:'no-store'});
+  if(r.status===401){location.replace('/account/login');return}
+  if(!r.ok)throw Error('Не удалось получить архив');
+  const data=await r.json();if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
+  cache=data;render();
+  el('memo-status').textContent='Архив вашей учётной записи. Доступ к чужим запискам закрыт.';
+ }catch(error){el('memo-status').textContent=error.message}
+ finally{busy=false}
+}
+for(const id of ['memo-search','memo-from','memo-to']){
+ el(id).addEventListener('input',render);el(id).addEventListener('change',render)
+}
+el('memo-reset').onclick=()=>{
+ for(const id of ['memo-search','memo-from','memo-to'])el(id).value='';
+ render();
+};
+el('memo-save').addEventListener('submit',async event=>{
+ event.preventDefault();const form=event.currentTarget;
+ const reg=String(new FormData(form).get('reg')||'').trim();
+ if(!/^3[0-9]{10}$/.test(reg))return;
+ const button=form.querySelector('button');button.disabled=true;
+ el('memo-status').textContent='Формируется служебная записка по подтверждённым нарушениям…';
+ try{
+  const response=await fetch('/me/memo-archive/'+encodeURIComponent(reg),
+    {method:'POST',credentials:'same-origin'});
+  if(!response.ok){
+   const data=await response.json().catch(()=>({}));
+   throw Error(typeof data.detail==='string'?data.detail:'Не удалось сформировать ODT');
+  }
+  form.reset();await refresh();
+  el('memo-status').textContent='Служебная записка сохранена. Доступны ODT и PDF.';
+ }catch(error){el('memo-status').textContent=error.message}
+ finally{button.disabled=false}
+});
+refresh();
+})();
 </script>""")
