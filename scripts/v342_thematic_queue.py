@@ -6,7 +6,7 @@ from datetime import datetime,timezone
 from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from scripts import v360_thematic_ownership as ownership
+import v360_thematic_ownership as ownership
 
 WORKER_TASK=None
 WORKER_STATE={"last_cycle_at":None,"last_cycle_finished_at":None,"last_error":None}
