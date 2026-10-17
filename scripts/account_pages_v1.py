@@ -145,123 +145,85 @@ async function load(){const r=await fetch('/admin/accounts/pending',{credentials
 load();
 </script>""")
 
-THEMATIC = page("Тематические проверки", """
+THEMATIC = page("Мои тематические проверки", """
+<style>
+.eis-my-checks{display:grid;gap:14px;margin-top:22px}
+.eis-my-check{padding:18px 20px;background:linear-gradient(135deg,#fff,#f8fbff);
+ border:1px solid #dce8f3;border-radius:15px}
+.eis-my-check h2{font-size:17px;margin:0 0 7px;color:#1c476d}
+.eis-my-check .eis-meta{font-size:13px;color:#60768a;margin:8px 0 12px}
+.eis-my-actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px}
+.eis-my-actions a{display:inline-flex;min-height:41px;align-items:center;padding:9px 14px;
+ background:#2568a5;border:1px solid #2568a5;color:white;border-radius:10px;text-decoration:none;font-size:14px}
+.eis-my-actions a:hover{background:#174c7c}
+.eis-my-actions button{background:#fff;color:#943a48;border:1px solid #f0d3d9;margin:0}
+.eis-my-actions button:hover:not(:disabled){background:#fff2f4}
+.eis-empty{border:1px dashed #c8d9ea;border-radius:14px;padding:26px;background:#f8fbff;color:#637c93}
+.eis-pill{display:inline-block;padding:4px 10px;border-radius:100px;background:#edf4ff;color:#225d91;
+ font-size:12px;font-weight:700}
+@media(max-width:650px){.eis-my-check{padding:16px}.eis-my-actions a,.eis-my-actions button{flex:1;justify-content:center}}
+</style>
+<p><a href="/">← На главную</a></p>
 <h1>Мои тематические проверки</h1>
-<p>Здесь автоматически отображаются тематические проверки, привязанные к вашей учётной записи. Идентификаторы вводить не нужно.</p>
-<p><a href="/account/home">← Личный кабинет</a></p>
-<button id="create-personal" type="button">Создать подборку</button>
-
-<p id="message" role="status"></p>
-<table><thead><tr><th>Очередь</th><th>Действие</th></tr></thead><tbody id="rows"></tbody></table>
+<p>Здесь автоматически отображаются только реальные тематические проверки, которые вы запускали под своей учётной записью. Никаких идентификаторов или отдельных очередей создавать не требуется.</p>
+<p id="thematic-status" role="status" aria-live="polite">Загружаем ваши проверки…</p>
+<div id="real-thematic-list" class="eis-my-checks" aria-label="Тематические проверки"></div>
 <script>
-async function loadBatches(){
- const m=document.getElementById('message');
+(()=>{
+const holder=document.getElementById('real-thematic-list');
+const status=document.getElementById('thematic-status');
+const labels={dates:'Сроки закупки и разъяснений',docs:'Документация',national:'Национальный режим',
+ security:'Обеспечение',sme:'МСП',access:'Требования к участникам',protocols:'Протоколы',
+ contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
+let busy=false;
+async function refresh(){
+ if(busy)return;busy=true;
  try{
- const r=await fetch('/me/thematic-batches',{credentials:'same-origin'});
- if(r.status===401){location.assign('/account/login');return}
- if(!r.ok){m.textContent='Не удалось получить очереди';return}
- const data=await r.json(),rows=document.getElementById('rows');rows.replaceChildren();
- for(const item of data){
- const tr=document.createElement('tr'),name=document.createElement('td'),action=document.createElement('td');
- name.textContent='Тематическая проверка';
- if(item.batch_id.startsWith('personal-')){
- const details=document.createElement('button');details.textContent='Статус';
- details.addEventListener('click',async()=>{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{credentials:'same-origin'});
- if(!res.ok){m.textContent='Не удалось получить статус';return}
- const info=await res.json();m.textContent=info.execution_started?'Проверка выполняется':'Очередь сохранена, проверка ещё не запущена';});
- action.append(details);
- const add=document.createElement('button');add.textContent='Добавить закупку';
- add.addEventListener('click',async()=>{
- const reg=prompt('Номер закупки ЕИС (11 цифр, начинается с 3)');
- if(reg===null)return;
- if(!/^3[0-9]{10}$/.test(reg)){m.textContent='Некорректный номер ЕИС';return}
- add.disabled=true;
- try{const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements/'+reg,{method:'POST',credentials:'same-origin'});
- m.textContent=res.ok?'Закупка добавлена в личную очередь. Проверка ещё не запущена':'Не удалось добавить закупку';
- }catch{m.textContent='Ошибка соединения'}finally{add.disabled=false}
- });action.append(add);
- const show=document.createElement('button');show.textContent='Закупки';
- show.addEventListener('click',async()=>{try{
- const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements',{credentials:'same-origin'});
- if(!res.ok){m.textContent='Не удалось получить список закупок';return}
- const list=await res.json();m.textContent=list.length?'Закупок в очереди: '+list.length:'В очереди пока нет закупок';
- const panel=document.createElement('div');panel.setAttribute('role','region');
- const heading=document.createElement('p');heading.textContent='Закупки очереди '+item.batch_id;panel.append(heading);
- for(const procurement of list){
- const line=document.createElement('div'),label=document.createElement('span'),remove=document.createElement('button');
- label.textContent=procurement.reg_number+' ';remove.textContent='Убрать закупку';
- remove.addEventListener('click',async()=>{
- remove.disabled=true;
- try{const deleted=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/procurements/'+encodeURIComponent(procurement.reg_number),{method:'DELETE',credentials:'same-origin'});
- if(deleted.ok){line.remove();m.textContent='Закупка удалена из личной очереди'}else{m.textContent='Ошибка удаления закупки';remove.disabled=false}
- }catch{m.textContent='Ошибка соединения';remove.disabled=false}
- });line.append(label,remove);
- const queue=document.createElement('button');queue.textContent='Поставить в очередь';
- queue.addEventListener('click',async()=>{
- queue.disabled=true;
- try{
- const response=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/jobs/'+encodeURIComponent(procurement.reg_number),{method:'POST',credentials:'same-origin'});
- m.textContent=response.ok?'Задание сохранено. Исполнитель ЕИС пока не подключён':'Ошибка постановки задания';
- if(!response.ok)queue.disabled=false;
- }catch{m.textContent='Ошибка соединения';queue.disabled=false}
- });
- line.append(queue);panel.append(line);
- }
- const previous=document.getElementById('personal-procurements');if(previous)previous.remove();
- panel.id='personal-procurements';document.getElementById('rows').after(panel);
- }catch{m.textContent='Ошибка соединения'}});action.append(show);
- const jobs=document.createElement('button');jobs.textContent='Статусы заданий';
- jobs.addEventListener('click',async()=>{
- jobs.disabled=true;
- try{
- const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/jobs',{credentials:'same-origin'});
- if(!res.ok){m.textContent='Не удалось загрузить статусы';return}
- const data=await res.json();
- const labels={queued:'В очереди',running:'Выполняется',completed:'Завершено',failed:'Ошибка'};
- m.textContent=data.length?data.map(j=>j.reg_number+' — '+(labels[j.status]||'Неизвестный статус')+'; попыток: '+j.attempts).join(' | '):'Заданий пока нет';
- }catch{m.textContent='Ошибка соединения'}finally{jobs.disabled=false}
- });action.append(jobs);
- const findings=document.createElement('button');findings.textContent='Нарушения';
- findings.addEventListener('click',async()=>{
- findings.disabled=true;
- try{
- const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id)+'/findings',{credentials:'same-origin'});
- if(!res.ok){m.textContent='Не удалось загрузить нарушения';return}
- const data=await res.json();
- const panel=document.createElement('section');panel.id='personal-findings';
- const heading=document.createElement('h2');heading.textContent='Нарушения тематической проверки';panel.append(heading);
- for(const finding of data){
- const entry=document.createElement('article');
- const title=document.createElement('strong');title.textContent=finding.reg_number+' — '+finding.legal_basis;
- const description=document.createElement('p');description.textContent=finding.description;
- const evidence=document.createElement('p');evidence.textContent='Источник: '+finding.evidence_source;
- entry.append(title,description,evidence);panel.append(entry);
- }
- const previous=document.getElementById('personal-findings');if(previous)previous.remove();
- document.getElementById('rows').after(panel);
- m.textContent=data.length?'Найдено нарушений: '+data.length:'Подтверждённых нарушений пока нет';
- }catch{m.textContent='Ошибка соединения'}finally{findings.disabled=false}
- });action.append(findings);
- }
- const btn=document.createElement('button');btn.textContent='Удалить из моих';
- btn.addEventListener('click',async()=>{
- const res=await fetch('/me/thematic-batches/'+encodeURIComponent(item.batch_id),{method:'DELETE',credentials:'same-origin'});
- m.textContent=res.ok?'Очередь удалена из личного списка':'Ошибка удаления';
- if(res.ok)loadBatches();
- });action.append(btn);tr.append(name,action);rows.append(tr);
- }
- if(!data.length)m.textContent='Сохранённых очередей пока нет';
- }catch{m.textContent='Ошибка соединения'}
+  const response=await fetch('/api/thematic/history',{credentials:'same-origin',cache:'no-store'});
+  if(response.status===401){location.assign('/account/login');return}
+  if(!response.ok)throw Error('Не удалось получить тематические проверки');
+  const data=await response.json();
+  const batches=Array.isArray(data.batches)?data.batches:[];
+  holder.replaceChildren();
+  status.textContent='Ваших тематических проверок: '+batches.length;
+  if(!batches.length){
+   const empty=document.createElement('div');empty.className='eis-empty';
+   empty.textContent='Проверки, запущенные вами в разделе «Тематическая проверка», появятся здесь автоматически.';
+   holder.append(empty);return;
+  }
+  for(const check of batches){
+   const card=document.createElement('article');card.className='eis-my-check';
+   const title=document.createElement('h2');
+   const categories=(check.categories||[]).map(id=>labels[id]||id);
+   title.textContent=categories.length?categories.join(' · '):'Тематическая проверка';
+   const state=document.createElement('span');state.className='eis-pill';
+   state.textContent=check.status==='active'?'Выполняется':'Остановлена';
+   const meta=document.createElement('p');meta.className='eis-meta';
+   const timestamp=Date.parse(check.created_at);
+   meta.textContent=(Number.isFinite(timestamp)?'Запущена: '+new Date(timestamp).toLocaleString('ru-RU')+' · ':'')+
+     'Закупок: '+Number(check.purchases||0)+' · Подтверждённых нарушений: '+Number(check.violations||0);
+   const actions=document.createElement('div');actions.className='eis-my-actions';
+   const open=document.createElement('a');open.href='/thematic#'+encodeURIComponent(check.id);open.textContent='Открыть результаты';
+   const remove=document.createElement('button');remove.type='button';remove.textContent='Удалить проверку';
+   remove.onclick=async()=>{
+    if(!confirm('Удалить эту тематическую проверку и сохранённые тематические результаты? Действие нельзя отменить. Оригиналы ЕИС и общие проверки останутся.'))return;
+    remove.disabled=true;
+    try{
+     const res=await fetch('/api/thematic/'+encodeURIComponent(check.id),
+       {method:'DELETE',credentials:'same-origin'});
+     if(!res.ok)throw Error('Не удалось удалить проверку');
+     await refreshAfterDelete();
+    }catch(error){status.textContent=error.message;remove.disabled=false}
+   };
+   actions.append(open,remove);card.append(title,state,meta,actions);holder.append(card);
+  }
+ }catch(error){status.textContent=error.message}
+ finally{busy=false}
 }
-document.getElementById('create-personal').addEventListener('click',async()=>{
- const m=document.getElementById('message'),button=document.getElementById('create-personal');button.disabled=true;try{
- const r=await fetch('/me/thematic-batches',{method:'POST',credentials:'same-origin'});
- m.textContent=r.ok?'Личная очередь создана. Проверка ещё не запущена.':'Не удалось создать очередь';
- if(r.ok)loadBatches();
- }catch{m.textContent='Ошибка соединения'}finally{button.disabled=false}
-});
-
-loadBatches();
+async function refreshAfterDelete(){busy=false;await refresh()}
+setInterval(()=>{if(!document.hidden)refresh()},30000);
+refresh();
+})();
 </script>""")
 
 MEMOS = page("Служебные записки", """
