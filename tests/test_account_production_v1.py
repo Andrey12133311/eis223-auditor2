@@ -36,10 +36,20 @@ class ProductionLoginTests(unittest.TestCase):
                      "/account/register", "/auth/register", "/eis223/collector.js"):
             self.assertEqual(request(path)[0], 200)
 
-    def test_anonymous_dashboard_redirects_to_login(self):
-        code, headers = request("/")
-        self.assertEqual(code, 303)
-        self.assertEqual(headers[b"location"], b"/account/login")
+    def test_general_audit_is_public_without_registration(self):
+        for path in ("/", "/api/status", "/api/dashboard", "/api/procurements",
+                     "/api/purchases/32615969056",
+                     "/api/v334/violation-ledger/summary",
+                     "/files/32615969056/original/notice.pdf"):
+            code, headers = request(path)
+            self.assertEqual(code, 200, path)
+            self.assertEqual(headers[b"cache-control"], b"no-store")
+
+    def test_guest_cannot_mutate_shared_audit(self):
+        for path, method in (("/api/scan-now", "POST"),
+                             ("/api/purchases/32615969056/recheck", "POST"),
+                             ("/api/v301/bridge/next", "GET")):
+            self.assertEqual(request(path, method=method)[0], 401, path)
 
     def test_anonymous_private_api_is_denied(self):
         self.assertEqual(request("/me/procurements")[0], 401)
@@ -91,7 +101,7 @@ class ProductionLoginTests(unittest.TestCase):
         self.assertEqual(request("/api/v294/eis223/archive", method="POST", token=token)[0], 200)
         self.assertEqual(request("/api/v301/bridge/next", token=token)[0], 200)
         self.assertEqual(request("/api/v301/bridge/report/0123456789abcdef01234567", method="POST", token=token)[0], 200)
-        self.assertEqual(request("/api/purchases", token=token)[0], 401)
+        self.assertEqual(request("/api/scan-now", method="POST", token=token)[0], 401)
         self.assertEqual(request("/api/v301/bridge/next", token="bad")[0], 401)
         self.assertEqual(request("/api/v294/eis223/archive", method="POST", token="bad")[0], 401)
 
