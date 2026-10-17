@@ -95,7 +95,7 @@ def pages():
         (site_header("user").decode("utf-8"),
          ["eis223-owner-fullname","eis223-manager-goals"]),
         (login_portal("register"),["register-last-name","register-first-name",
-                                    "register-patronymic"])
+                                    "register-middle-name"])
     ):
         parsed=Elements();parsed.feed(markup)
         assert not parsed.duplicates,parsed.duplicates
