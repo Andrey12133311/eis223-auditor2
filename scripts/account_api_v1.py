@@ -6,6 +6,7 @@ legacy APIs must be completed before this router is mounted publicly.
 """
 import os
 from fastapi import APIRouter, HTTPException, Request, Response
+from uuid import UUID
 from pydantic import BaseModel, Field
 from scripts.account_passwords_v1 import hash_password, verify_password
 from scripts.account_security_v1 import normalize_email
@@ -52,8 +53,11 @@ class Credentials(BaseModel):
 @router.post("/register", status_code=202)
 def register(data: Credentials, request: Request):
     require_origin(request)
-    email = normalize_email(data.email)
-    encoded = hash_password(data.password)
+    try:
+        email = normalize_email(data.email)
+        encoded = hash_password(data.password)
+    except ValueError:
+        raise HTTPException(422, "Некорректный адрес почты или пароль")
     with connect() as db:
         create_pending_user(db, email, encoded)
     return {"status": "pending", "message": "Заявка ожидает подтверждения администратора"}
@@ -62,7 +66,10 @@ def register(data: Credentials, request: Request):
 @router.post("/login")
 def login(data: Credentials, request: Request, response: Response):
     require_origin(request)
-    email = normalize_email(data.email)
+    try:
+        email = normalize_email(data.email)
+    except ValueError:
+        raise HTTPException(422, "Некорректный адрес почты")
     with connect() as db:
         row = db.execute(
             "SELECT id,password_hash,status FROM account_users WHERE lower(email)=%s",
@@ -104,8 +111,12 @@ def list_pending(request: Request):
 def approve(user_id: str, request: Request):
     require_origin(request)
     actor = current_account(request, admin=True)
+    try:
+        uid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(422, "Некорректный идентификатор")
     with connect() as db:
-        success = approve_user(db, actor[0], user_id)
+        success = approve_user(db, actor[0], uid)
     if not success:
         raise HTTPException(409, "Заявка уже рассмотрена или не найдена")
     return {"status": "approved"}
@@ -115,8 +126,12 @@ def approve(user_id: str, request: Request):
 def reject(user_id: str, request: Request):
     require_origin(request)
     actor = current_account(request, admin=True)
+    try:
+        uid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(422, "Некорректный идентификатор")
     with connect() as db:
-        success = reject_user(db, actor[0], user_id)
+        success = reject_user(db, actor[0], uid)
     if not success:
         raise HTTPException(409, "Заявка уже рассмотрена или не найдена")
     return {"status": "rejected"}
@@ -128,8 +143,12 @@ def block(user_id: str, request: Request):
     actor = current_account(request, admin=True)
     if str(actor[0]) == user_id:
         raise HTTPException(400, "Нельзя заблокировать себя")
+    try:
+        uid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(422, "Некорректный идентификатор")
     with connect() as db:
-        success = block_user(db, actor[0], user_id)
+        success = block_user(db, actor[0], uid)
     if not success:
         raise HTTPException(404, "Пользователь не найден")
     return {"status": "blocked"}
