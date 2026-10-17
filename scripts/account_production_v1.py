@@ -1,7 +1,8 @@
 """Secure opt-in mount of personal accounts into the legacy EIS web app.
 
-Shared EIS audit results are readable by everyone, including guests; mutations
-stay admin-only. Personal resources remain owner-scoped. Existing EIS intake endpoints keep their independent token auth.
+The full EIS dashboard and shared findings require an approved login. Every
+approved user can read shared audit results; writes remain admin-only and
+personal data remains owner-scoped. EIS intake retains token authentication.
 Call install(app) *before* starting Uvicorn; disabled by default.
 """
 import hmac
@@ -11,6 +12,7 @@ from http.cookies import SimpleCookie
 
 from scripts.account_sessions_v1 import resolve_session
 from scripts.account_api_v1 import connect
+from scripts.account_site_ui_v1 import site_header
 
 PUBLIC = frozenset({
     "/health", "/healthz", "/account/login", "/account/register",
@@ -59,19 +61,8 @@ def shared_read_route(path, method):
     ))
 
 
-_ACCOUNT_NAV = (
-    '<nav data-eis223-account-nav="1" aria-label="Навигация ЕИС Аудитор" '
-    'style="padding:12px 5%;background:#eef3f8;border-bottom:1px solid #d5e0ec;'
-    'font:600 14px system-ui;display:flex;gap:20px;flex-wrap:wrap">'
-    '<a href="/">Общая проверка</a>'
-    '<a href="/account/login">Войти</a>'
-    '<a href="/account/register">Регистрация</a>'
-    '<a href="/account/home">Личный кабинет</a></nav>'
-).encode("utf-8")
-
-
-def add_account_navigation(html):
-    """Add same-domain account entry points without modifying legacy UI code."""
+def add_account_navigation(html, role="user"):
+    """Show an integrated personal workspace on the shared homepage."""
     if not isinstance(html, bytes) or b'data-eis223-account-nav' in html:
         return html
     start = html.lower().find(b'<body')
@@ -80,8 +71,7 @@ def add_account_navigation(html):
     end = html.find(b'>', start)
     if end < 0:
         return html
-    return html[:end + 1] + _ACCOUNT_NAV + html[end + 1:]
-
+    return html[:end + 1] + site_header(role) + html[end + 1:]
 
 
 def machine_path(path):
@@ -136,33 +126,8 @@ class ProductionAccountGate:
                 message = {**message, "headers": original + [(b"cache-control", b"no-store")]}
             await send(message)
 
-        if path in PUBLIC or path.startswith("/static/"):
-            await self.app(scope, receive, send)
-            return
-        # Public procurement evidence is shared with visitors, not tied to a
-        # personal session. PostgreSQL outages must not hide public audits.
-        if scope["type"] == "http" and shared_read_route(path, method):
-            if path == "/" and method == "GET":
-                is_html = False
-                async def shared_home_send(message):
-                    nonlocal is_html
-                    if message["type"] == "http.response.start":
-                        headers = message.get("headers", [])
-                        is_html = any(k.lower() == b"content-type" and
-                                      b"text/html" in v.lower() for k, v in headers)
-                        if is_html:
-                            message = {**message, "headers": [
-                                (k, v) for k, v in headers
-                                if k.lower() != b"content-length"
-                            ]}
-                    elif message["type"] == "http.response.body" and is_html:
-                        message = {**message, "body": add_account_navigation(
-                            message.get("body", b"")
-                        )}
-                    await no_cache_send(message)
-                await self.app(scope, receive, shared_home_send)
-            else:
-                await self.app(scope, receive, no_cache_send)
+        if scope["type"] == "http" and path in PUBLIC:
+            await self.app(scope, receive, no_cache_send)
             return
         if scope["type"] == "http" and method == "OPTIONS" and machine_path(path):
             await self.app(scope, receive, send)
@@ -196,7 +161,28 @@ class ProductionAccountGate:
                 else:
                     await _answer(send, 403, b'{"detail":"Shared audit is read-only for users"}')
                 return
-        await self.app(scope, receive, no_cache_send)
+        if scope["type"] == "http" and path == "/" and method == "GET":
+            is_html = False
+            async def authenticated_home_send(message):
+                nonlocal is_html
+                if message["type"] == "http.response.start":
+                    received = message.get("headers", [])
+                    is_html = (message.get("status") == 200 and
+                        any(k.lower() == b"content-type" and b"text/html" in v.lower()
+                            for k, v in received) and
+                        not any(k.lower() == b"content-encoding" for k, v in received))
+                    if is_html:
+                        message = {**message, "headers": [
+                            (k, v) for k, v in received if k.lower() != b"content-length"
+                        ]}
+                elif message["type"] == "http.response.body" and is_html:
+                    message = {**message, "body": add_account_navigation(
+                        message.get("body", b""), account[1]
+                    )}
+                await no_cache_send(message)
+            await self.app(scope, receive, authenticated_home_send)
+        else:
+            await self.app(scope, receive, no_cache_send)
 
 
 def install(app):
@@ -226,14 +212,14 @@ def install(app):
 
     @app.on_event("startup")
     def start_identity():
-        # A temporary PostgreSQL outage must never take down the public
-        # procurement dashboard or the existing EIS audit workers.
+        # A temporary PostgreSQL outage must not crash the EIS collector.
+        # Private requests fail closed until the identity database recovers.
         import logging
         try:
             with connect() as db:
                 initialize_schema(db)
         except Exception:
             logging.getLogger(__name__).exception(
-                "Account database unavailable; public EIS audit stays online"
+                "Account database unavailable; private sign-in is temporarily blocked"
             )
     return True
