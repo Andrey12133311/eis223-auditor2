@@ -475,6 +475,8 @@ def install(ns):
                      "X-Company-Name-Source":source,
                      "Cache-Control":"no-store"})
 
+    app.state.eis223_build_memo=build_memo
+
     @app.get("/api/v304/memo/{reg}.odt")
     async def memo_file(reg:str):
         return await build_memo(reg)
