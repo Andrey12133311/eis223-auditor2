@@ -154,6 +154,10 @@ HOME = page("Мои самостоятельные проверки", """
 #manual-rows td small{display:block;color:#6b8394;font-weight:500;font-size:11px}
 #manual-empty{background:#f6fafc;border:1px dashed #cadfec;border-radius:10px;
  padding:18px;text-align:center;color:#688095}
+.manual-inn-section{margin:20px 0 24px;padding-bottom:20px;border-bottom:1px solid #dbe8f2}
+.manual-inn-section h2{margin-bottom:6px}.manual-inn-section .manual-form{margin:12px 0}
+#manual-inn-results td:first-child{font-weight:650}
+#manual-inn-results td small{display:block;color:#607b90;font-weight:400}
 @media(max-width:720px){
  .manual-form{padding:13px;align-items:stretch}
  .manual-form button{flex:1}
@@ -175,8 +179,24 @@ HOME = page("Мои самостоятельные проверки", """
  maxlength="11" inputmode="numeric" autocomplete="off" placeholder="32616412317"></label>
 <button type="submit">Запустить проверку</button>
 </form>
+<section class="manual-inn-section" aria-labelledby="manual-inn-heading">
+<h2 id="manual-inn-heading">Поиск закупок по ИНН заказчика</h2>
+<p>Поиск в ЕИС, получение данных закупок и документов выполняются через VPS.
+Чтобы добавить найденную закупку в свои самостоятельные проверки, нажмите «Проверить».</p>
+<form id="manual-inn-search" class="manual-form">
+<label for="manual-inn">ИНН заказчика
+<input id="manual-inn" name="inn" inputmode="numeric" autocomplete="off" maxlength="12"
+ pattern="[0-9]{10}|[0-9]{12}" required placeholder="10 или 12 цифр"></label>
+<button type="submit" id="manual-inn-submit">Проверить по ИНН</button>
+</form>
+<p id="manual-inn-message" class="message" role="status" aria-live="polite"></p>
+<table id="manual-inn-table" aria-label="Закупки, найденные по ИНН заказчика" hidden>
+<thead><tr><th>Закупка</th><th>Заказчик</th><th>Действие</th></tr></thead>
+<tbody id="manual-inn-results"></tbody></table>
+</section>
+<h2>Мои самостоятельные проверки</h2>
 <div class="manual-filter-area" aria-label="Фильтры самостоятельных проверок">
-<label>Закупка / заказчик / ИНН<input type="search" id="manual-search" placeholder="Поиск"></label>
+<label>Поиск среди своих проверок<input type="search" id="manual-search" placeholder="Номер, заказчик или ИНН"></label>
 <label>Статус<select id="manual-status"><option value="">Все</option>
 <option value="queued">В очереди</option><option value="leased">Загружается ЕИС</option>
 <option value="done">Загрузка завершена</option><option value="partial">Частично</option>
@@ -241,6 +261,7 @@ function renderManual(){
  const rows=el('manual-rows');rows.replaceChildren();
  el('manual-total').textContent='Показано: '+data.length+' из '+allData.length;
  el('manual-empty').hidden=!!data.length;
+ el('manual-empty').textContent=allData.length?'По заданным фильтрам проверки не найдены.':'Вы ещё не запускали самостоятельных проверок через личный кабинет.';
  el('manual-table').hidden=!data.length;
  for(const item of data){
   const tr=document.createElement('tr'),reg=document.createElement('td'),
@@ -303,9 +324,112 @@ for(const id of filterNames){
  field.addEventListener('input',handler);field.addEventListener('change',handler);
 }
 el('manual-filters-reset').onclick=()=>{
+ clearTimeout(filterTimer);
  for(const id of filterNames){const field=el(id);if(field.type==='checkbox')field.checked=false;else field.value=''}
+ el('manual-message').textContent='Фильтры сброшены';
  renderManual();
 };
+let innSearchTimer=null,innSearchSequence=0;
+async function innRequest(url,options={}){
+ const response=await fetch(url,{credentials:'same-origin',cache:'no-store',...options});
+ if(response.status===401){location.replace('/account/login');const error=Error('Войдите в личный кабинет');error.status=401;throw error}
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok){const error=Error(typeof data.detail==='string'?data.detail:'Не удалось получить результат поиска. Попробуйте ещё раз.');error.status=response.status;throw error}
+ return data;
+}
+function renderInnResults(items){
+ const rows=el('manual-inn-results');rows.replaceChildren();
+ const seen=new Set();
+ for(const item of Array.isArray(items)?items:[]){
+  const number=String(item.reg_number||'');
+  if(!/^3[0-9]{10}$/.test(number)||seen.has(number))continue;
+  seen.add(number);
+  const row=document.createElement('tr'),purchase=document.createElement('td'),
+   customer=document.createElement('td'),action=document.createElement('td');
+  purchase.textContent='№ '+number;
+  if(item.title){const title=document.createElement('small');title.textContent=item.title;purchase.append(title)}
+  customer.textContent=item.customer||'Заказчик';
+  const button=document.createElement('button');button.type='button';button.textContent='Проверить';
+  button.onclick=async()=>{
+   button.disabled=true;button.textContent='Запускаем…';
+   try{
+    await innRequest('/me/manual-checks/'+encodeURIComponent(number),{method:'POST'});
+    button.textContent='Добавлено в мои проверки';
+    el('manual-message').textContent='Закупка '+number+' добавлена в ваши самостоятельные проверки. Задание принято.';
+    await refresh(true);
+   }catch(error){button.disabled=false;button.textContent='Проверить';el('manual-inn-message').textContent=error.message}
+  };
+  action.append(button);row.append(purchase,customer,action);rows.append(row);
+ }
+ el('manual-inn-table').hidden=!seen.size;
+ return seen.size;
+}
+function innStatus(data,initial=false){
+ const status=data.job?.status||data.status||'queued';
+ const bridge=data.bridge||{};
+ const count=renderInnResults(data.existing);
+ const pending=Number(data.verification_pending||0),pages=Number(data.search_pages_pending||0);
+ let message,complete=false;
+ if(status==='error'){
+  message='Поиск не завершён: '+(data.job?.detail||'VPS не смог получить ответ ЕИС. Повторите поиск позже.');complete=true;
+ }else if(!initial&&['done','partial'].includes(status)&&pending===0&&pages===0){
+  complete=true;
+  if(status==='partial'||data.pagination_limited||Number(data.search_pages_failed||0)>0||Number(data.unresolved_candidates||0)>0){
+   message='Поиск выполнен частично. Показаны закупки с подтверждённым ИНН заказчика; результат может быть неполным.';
+  }else{
+   message=count?'Поиск по ИНН завершён. Найдено закупок: '+count+'.':'Поиск завершён. Закупки с подтверждённым ИНН заказчика не найдены.';
+  }
+ }else if(bridge.server_active===false){
+  message='Поиск сохранён. VPS сейчас не на связи; задание продолжится после подключения.';
+ }else if(bridge.inn_search_available===false){
+  message='Поиск сохранён. Для выполнения требуется обновление загрузчика VPS.';
+ }else if(pending>0){
+  message='Найдены кандидаты: VPS проверяет ИНН заказчика по данным ЕИС. Ожидают подтверждения: '+pending+'.';
+ }else if(status==='done'&&pages>0){
+  message='VPS ищет закупки на следующих страницах ЕИС.';
+ }else if(status==='leased'){
+  message='VPS ищет закупки по ИНН заказчика в ЕИС.';
+ }else{
+  message='Поиск сохранён в очереди VPS. Данные закупок и документы будут получены автоматически.';
+ }
+ if(!complete&&count)message+=' Уже подтверждено закупок: '+count+'.';
+ el('manual-inn-message').textContent=message;
+ return complete;
+}
+function pollInn(id,sequence,delay=5000){
+ clearTimeout(innSearchTimer);
+ innSearchTimer=setTimeout(async()=>{
+  if(sequence!==innSearchSequence)return;
+  try{
+   const data=await innRequest('/me/inn-search/'+encodeURIComponent(id));
+   if(sequence!==innSearchSequence)return;
+   if(!innStatus(data))pollInn(id,sequence);
+  }catch(error){
+   if(sequence!==innSearchSequence)return;
+   el('manual-inn-message').textContent=error.message;
+   if(![401,403,404].includes(error.status))pollInn(id,sequence,10000);
+  }
+ },delay);
+}
+el('manual-inn-search').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const inn=el('manual-inn').value.trim();
+ if(!/^(?:[0-9]{10}|[0-9]{12})$/.test(inn)){
+  el('manual-inn-message').textContent='Введите ИНН заказчика: 10 или 12 цифр.';return;
+ }
+ const sequence=++innSearchSequence;clearTimeout(innSearchTimer);
+ const button=el('manual-inn-submit');button.disabled=true;
+ renderInnResults([]);el('manual-inn-message').textContent='Сохраняем поиск по ИНН…';
+ try{
+  const data=await innRequest('/me/inn-search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({inn})});
+  if(sequence!==innSearchSequence)return;
+  if(!data.id)throw Error('Сервер не подтвердил сохранение поиска. Попробуйте ещё раз.');
+  innStatus(data,true);pollInn(data.id,sequence,1000);
+ }catch(error){if(sequence===innSearchSequence)el('manual-inn-message').textContent=error.message}
+ finally{if(sequence===innSearchSequence)button.disabled=false}
+});
+const requestedInn=new URLSearchParams(location.search||'').get('inn')||'';
+if(/^(?:[0-9]{10}|[0-9]{12})$/.test(requestedInn))el('manual-inn').value=requestedInn;
 el('manual-add').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
  const number=String(new FormData(form).get('reg')||'').trim();

@@ -9,6 +9,7 @@ import hmac
 import os
 import re
 from http.cookies import SimpleCookie
+from urllib.parse import parse_qs, urlencode
 
 from scripts.account_sessions_v1 import resolve_session
 from scripts.account_session_policy_v1 import SESSION_COOKIE
@@ -94,6 +95,17 @@ def shared_read_route(path, method):
         path in SHARED_READ_PATHS or
         any(pattern.fullmatch(path) for pattern in SHARED_READ_PATTERNS)
     ))
+
+
+def personal_manual_location(query_string=b""):
+    """Keep valid buyer shortcuts while retiring the shared manual page."""
+    try:
+        query=parse_qs(query_string[:2048].decode("utf-8",errors="replace"),max_num_fields=20)
+    except ValueError:
+        query={}
+    inn=query.get("inn",[""])[0]
+    return "/account/home"+("?"+urlencode({"inn":inn})
+        if re.fullmatch(r"(?:[0-9]{10}|[0-9]{12})",inn) else "")
 
 
 def add_account_navigation(html, role="user"):
@@ -187,13 +199,17 @@ class ProductionAccountGate:
         if not account:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
-            elif method in ("GET", "HEAD") and (path == "/" or path.startswith("/account/")):
+            elif method in ("GET", "HEAD") and (path == "/" or path.startswith("/account/")
+                                                  or path.rstrip("/")=="/manual-purchases"):
                 await _answer(send, 303, b"", location="/account/login")
             else:
                 await _answer(send, 401, b'{"detail":"Authentication required"}')
             return
         scope["eis223_account_id"] = account[0]
         scope["eis223_account_role"] = account[1]
+        if scope["type"]=="http" and method in ("GET","HEAD") and path.rstrip("/")=="/manual-purchases":
+            await _answer(send,303,b"",location=personal_manual_location(scope.get("query_string",b"")))
+            return
         if account[1] != "admin" and (path.startswith("/admin/accounts/") or path == "/account/admin"):
             await _answer(send, 403, b'{"detail":"Administrator required"}')
             return
@@ -248,7 +264,7 @@ def install(app):
     from scripts.account_api_v1 import router as auth, admin_router
     from scripts.account_setup_v1 import router as first_admin_setup
     from scripts.account_workspace_v1 import router as workspace
-    from scripts.v366_account_manual import router as real_manual_checks
+    from scripts.v366_account_manual import router as real_manual_checks, inn_router as personal_inn_search
     from scripts.v367_private_features import router as personal_features
     from scripts.v368_manager_workflow import router as manager_workflow, employee_router as employee_assignments
     from scripts.v368_manager_evidence import router as manager_evidence
@@ -272,6 +288,7 @@ def install(app):
     app.include_router(role_router)
     app.include_router(workspace)
     app.include_router(real_manual_checks)
+    app.include_router(personal_inn_search)
     app.include_router(personal_features)
     app.include_router(manager_workflow)
     app.include_router(manager_evidence)

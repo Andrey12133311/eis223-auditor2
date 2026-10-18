@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS account_manual_checks (
 );
 CREATE INDEX IF NOT EXISTS account_manual_checks_owner_recent
     ON account_manual_checks (user_id, last_started_at DESC);
+CREATE TABLE IF NOT EXISTS account_inn_searches (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    job_id TEXT NOT NULL CHECK (job_id ~ '^[0-9a-f]{24}$'),
+    inn TEXT NOT NULL CHECK (inn ~ '^([0-9]{10}|[0-9]{12})$'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id, job_id)
+);
+CREATE INDEX IF NOT EXISTS account_inn_searches_owner_recent
+    ON account_inn_searches (user_id, last_started_at DESC);
 CREATE TABLE IF NOT EXISTS account_thematic_batches (
     user_id UUID NOT NULL REFERENCES account_users(id),
     batch_id TEXT NOT NULL,

@@ -59,7 +59,7 @@ function harness(source, exposed, responder) {
     querySelectorAll: () => [], querySelector: () => null,
   };
   const context = {
-    document, console, URL, location: {replace() {}, assign() {}},
+    document, console, URL, URLSearchParams, location: {search: '', replace() {}, assign() {}},
     confirm: () => true, prompt: () => '',
     setTimeout: callback => { const id = nextTimer++; timers.set(id, callback); return id; },
     clearTimeout: id => timers.delete(id), setInterval: callback => intervals.push(callback),
