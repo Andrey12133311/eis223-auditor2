@@ -9,6 +9,7 @@ import re
 from v333_dedup_ui import issue_key,_different_fact,_proof
 from v352_dashboard_truth import _common_event
 from v341_eis_facts import DATE_TOKEN,parse_day
+from v348_cross_document_legal import finding_protocol_number
 
 DATED_RULES=("223-3.2-3-CLARIFICATION-","223-4-12-PROTOCOL-",
              "223-3.2-6-CANCELLATION-","223-4-11-")
@@ -30,6 +31,13 @@ def same_episode(old,new):
     a=str(old.get("code") or old.get("field_path") or "")
     b=str(new.get("code") or new.get("field_path") or "")
     matching_rule=bool(a and b and a==b)
+    # Identical dates can belong to different protocols. Preserve their
+    # independently evidenced numbers across repeated audits and persistence;
+    # dates alone are not an identity when both originals say otherwise.
+    if "PROTOCOL-" in a and "PROTOCOL-" in b:
+        old_number,new_number=finding_protocol_number(old),finding_protocol_number(new)
+        if old_number and new_number and old_number!=new_number:
+            return False
     if not matching_rule and (not left or left!=right):
         return False
     la=str(old.get("law") or "").strip().casefold()

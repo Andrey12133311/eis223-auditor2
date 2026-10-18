@@ -4,6 +4,8 @@ Styles and a compact, semantic page heading only. The official EIS website
 is a visual reference, not an implied institutional affiliation.
 All real counters, filters, document links and legal checks remain untouched.
 """
+from scripts.account_visual_polish_v1 import home_style
+
 STYLE = r"""
 <style id="eis361-home-style">
 :root{
@@ -195,4 +197,4 @@ SCRIPT = r"""
 
 
 def home_shell():
-    return (STYLE + SCRIPT).encode("utf-8")
+    return (STYLE + home_style() + SCRIPT).encode("utf-8")

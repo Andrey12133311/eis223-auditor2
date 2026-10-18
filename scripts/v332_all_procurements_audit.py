@@ -23,7 +23,7 @@ from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
-RULE_REVISION="2026-10-17-v372-auto-regulation-protocols-receipt-verified"
+RULE_REVISION="2026-10-18-v380-v372-protocol-identity-evidence"
 DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")

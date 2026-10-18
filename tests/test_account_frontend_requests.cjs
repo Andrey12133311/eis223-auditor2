@@ -1,0 +1,431 @@
+/* Executable embedded-JS regressions. No browser, package install or live API required.
+ * Run: node tests/test_account_frontend_requests.cjs
+ * The small DOM double exercises real page scripts and records mocked HTTP calls.
+ */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const root = path.join(__dirname, '..');
+const read = file => fs.readFileSync(path.join(root, 'scripts', file), 'utf8');
+const embedded = (file, assignment) => {
+  const source = read(file);
+  const start = source.indexOf(assignment);
+  assert.ok(start >= 0, assignment);
+  return source.slice(start).split('<script>')[1].split('</script>')[0];
+};
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return {promise, resolve};
+};
+class Element {
+  constructor(tag = 'div') {
+    this.tagName = tag.toUpperCase(); this.nodeType = 1; this.children = [];
+    this.value = ''; this.textContent = ''; this.dataset = {}; this.style = {};
+    this.checked = false; this.disabled = false; this.listeners = {}; this.attrs = {};
+    this.classList = {add() {}, remove() {}, toggle() {}};
+    this.elements = {namedItem: name => this.querySelector(name)};
+    this.formValues = {}; this.resetCount = 0;
+  }
+  get options() { return this.children; }
+  get childElementCount() { return this.children.length; }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.children = nodes; }
+  setAttribute(name, value) { this.attrs[name] = value; }
+  getAttribute(name) { return this.attrs[name]; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  querySelector(selector) {
+    this.queries ||= {};
+    return this.queries[selector] ||= new Element(selector.includes('button') ? 'button' : 'input');
+  }
+  querySelectorAll(selector) {
+    return selector === 'input,select,textarea,button' ? Object.values(this.queries || {}) : [];
+  }
+  reset() { this.resetCount++; this.formValues = {}; }
+  scrollIntoView() {}
+}
+function harness(source, exposed, responder) {
+  const nodes = new Map(), calls = [], timers = new Map(), intervals = [];
+  let nextTimer = 1;
+  const get = id => {
+    if (!nodes.has(id)) nodes.set(id, new Element());
+    return nodes.get(id);
+  };
+  const document = {
+    hidden: false, getElementById: get, createElement: tag => new Element(tag),
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  const context = {
+    document, console, URL, location: {replace() {}, assign() {}},
+    confirm: () => true, prompt: () => '',
+    setTimeout: callback => { const id = nextTimer++; timers.set(id, callback); return id; },
+    clearTimeout: id => timers.delete(id), setInterval: callback => intervals.push(callback),
+    FormData: class {
+      constructor(form) { this.values = form.formValues; }
+      get(key) { return this.values[key]; }
+      getAll(key) { return [].concat(this.values[key] || []); }
+      entries() { return Object.entries(this.values); }
+    },
+    fetch: async (url, options = {}) => {
+      const call = {url, method: options.method || 'GET', options}; calls.push(call);
+      const answer = await responder(call);
+      const status = answer?.httpStatus || 200;
+      return {ok: status < 400, status, json: async () => answer?.httpStatus ? answer.body : answer};
+    },
+  };
+  context.window = context;
+  source = source.replace('__ROLE__', '"admin"');
+  const end = source.lastIndexOf('})();');
+  assert.ok(end >= 0);
+  source = source.slice(0, end) + `globalThis.testAPI={${exposed}};\n` + source.slice(end);
+  vm.runInNewContext(source, context, {timeout: 1000});
+  return {
+    get, calls, intervals, context, api: context.testAPI,
+    count: url => calls.filter(call => call.url === url).length,
+    flushTimers: async () => {
+      const pending = [...timers.values()]; timers.clear();
+      for (const callback of pending) await callback();
+      await flush();
+    },
+  };
+}
+const manualRows = [
+  {reg_number: '32616412317', customer: 'Alpha', customer_inn: '1', job_status: 'done',
+    violations: 2, violation_types: ['Сроки'], started_at: '2026-10-18T12:00:00Z'},
+  {reg_number: '32616412318', customer: 'Beta', customer_inn: '2', job_status: 'queued',
+    violations: 0, violation_types: [], started_at: '2026-10-17T12:00:00Z'},
+];
+
+async function testManualFiltersAndRefreshRace() {
+  let held = null, responseRows = manualRows;
+  const ui = harness(embedded('account_pages_v1.py', 'HOME ='), 'refresh', async call => {
+    if (call.method !== 'GET') return {};
+    if (held) return held.promise;
+    return responseRows;
+  });
+  await flush();
+  assert.equal(ui.count('/me/manual-checks'), 1);
+  assert.equal(ui.get('manual-rows').children.length, 2);
+  ui.get('manual-search').value = 'alpha';
+  ui.get('manual-search').listeners.input();
+  await ui.flushTimers();
+  assert.equal(ui.get('manual-rows').children.length, 1);
+  ui.get('manual-status').value = 'queued';
+  ui.get('manual-status').listeners.change();
+  await ui.flushTimers();
+  assert.equal(ui.get('manual-rows').children.length, 0);
+  ui.get('manual-filters-reset').onclick();
+  assert.equal(ui.get('manual-rows').children.length, 2);
+  assert.equal(ui.count('/me/manual-checks'), 1, 'all local filters and reset must avoid GETs');
+
+  held = deferred();
+  const pending = ui.api.refresh();
+  const same = ui.api.refresh();
+  assert.equal(pending, same, 'ordinary overlapping reads share one request');
+  const afterMutation = ui.api.refresh(true);
+  assert.equal(ui.count('/me/manual-checks'), 2, 'mutation refresh must wait for old GET');
+  const release = held; held = null; responseRows = [manualRows[1]];
+  release.resolve(manualRows);
+  await afterMutation;
+  assert.equal(ui.count('/me/manual-checks'), 3, 'mutation queues one fresh GET');
+  assert.equal(ui.get('manual-rows').children.length, 1, 'post-mutation data wins');
+}
+
+async function testThematicFiltersAndDeniedPolling() {
+  const batches = manualRows.map((row, i) => ({id: String(i), customers: [row.customer],
+    status: i ? 'stopped' : 'active', created_at: row.started_at, violation_types: row.violation_types}));
+  const ui = harness(embedded('account_pages_v1.py', 'THEMATIC ='), 'refresh,loadHistorical', async call =>
+    call.url.endsWith('/unassigned') ? {httpStatus: 403, body: {}} : {batches});
+  await flush();
+  ui.get('thematic-customer').value = 'alpha';
+  ui.get('thematic-customer').listeners.input();
+  await ui.flushTimers();
+  assert.equal(ui.get('real-thematic-list').children.length, 1);
+  assert.match(ui.get('thematic-status').textContent, /1 из 2/);
+  ui.get('thematic-reset').onclick();
+  assert.equal(ui.count('/api/thematic/history'), 1, 'thematic filters use cached data');
+  assert.equal(ui.get('real-thematic-list').children.length, 2);
+  for (const poll of ui.intervals) poll();
+  await flush();
+  assert.equal(ui.count('/api/thematic/unassigned'), 1, '403 stops migration-list polling');
+  assert.equal(ui.count('/api/thematic/history'), 2, 'owned history still refreshes');
+}
+
+function staffResponse(call) {
+  const {url, method} = call;
+  if (method !== 'GET') return {batch_id: 'batch-1'};
+  if (url === '/me/profile') return {full_name: 'Employee', role: 'user'};
+  if (url === '/me/center/dashboard') return {tasks: [], campaigns: [], as_of: '2026-10-18T12:00:00Z'};
+  if (url.endsWith('/progress')) return {available: true, checks: [], note: ''};
+  if (url.endsWith('/overview')) return {};
+  if (url.endsWith('/violations')) return {count: 0, findings: []};
+  if (url.endsWith('/templates')) return [{id: 'template-1', name: 'Template', categories: ['dates'], legal_forms: ['ООО']}];
+  if (url.endsWith('/options')) return {categories: {dates: 'Сроки'}, legal_forms: {ООО: 'ООО'}};
+  if (url.endsWith('/preferences')) return {priority_regs: []};
+  if (url.endsWith('/related')) return {purchases: []};
+  if (url.endsWith('/versions')) return {groups: [], note: ''};
+  if (url.includes('/draft/')) return {body: url.slice(-11)};
+  return [];
+}
+
+async function testStaffRequestsAndAsyncForms() {
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='),
+    'section,templates,loadCase,loadDashboard,loadToday', staffResponse);
+  await flush();
+  assert.equal(ui.calls.length, 6, 'startup only loads profile and visible overview data');
+  assert.equal(ui.count('/me/campaign-goals'), 0);
+  assert.equal(ui.count('/me/workbench/history'), 0);
+  await ui.api.section('templates');
+  const card = ui.get('staff-template-list').children[0];
+  const launch = card.children.at(-1).children[1];
+  await launch.onclick();
+  assert.equal(ui.count('/me/workbench/templates/template-1/start'), 1);
+  assert.equal(ui.count('/me/campaign-goals'), 1, 'launch triggers one campaign read');
+  assert.equal(ui.count('/me/campaign-goals/violations'), 1);
+  await ui.api.section('templates');
+  assert.equal(ui.count('/me/workbench/options'), 1, 'static form options preserve edits on reentry');
+
+  const reg = '32616412317'; ui.get('staff-reg').value = reg;
+  await ui.api.loadCase();
+  for (const [id, values, resource] of [
+    ['staff-manual-form', {title: 'Manual finding', evidence: 'Evidence'}, 'manual-findings'],
+    ['staff-message-form', {body: 'A discussion message'}, 'discussion'],
+  ]) {
+    const form = ui.get(id); form.formValues = values;
+    const beforeReset = form.resetCount;
+    const event = {currentTarget: form, preventDefault() {}};
+    const pending = form.onsubmit(event);
+    event.currentTarget = null; // Native DOM clears this as soon as dispatch returns.
+    await pending;
+    assert.equal(form.resetCount, beforeReset + 1, `${id} resets after successful asynchronous POST`);
+    assert.equal(form.querySelector('button').disabled, false);
+    assert.equal(ui.calls.filter(call => call.url.endsWith('/'+resource) && call.method === 'POST').length, 1);
+    assert.equal(ui.calls.filter(call => call.url.endsWith('/'+resource) && call.method === 'GET').length, 2);
+  }
+}
+
+async function testParallelCaseReadsIgnoreOlderResponses() {
+  const held = deferred(), oldReg = '32616412317', newReg = '32616412318';
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadCase', async call => {
+    if (call.url.includes(oldReg)) { await held.promise; }
+    return staffResponse(call);
+  });
+  await flush();
+  ui.get('staff-reg').value = oldReg;
+  const first = ui.api.loadCase();
+  assert.equal(ui.calls.filter(call => call.url.includes(oldReg)).length, 6,
+    'all six case-specific reads start before any resolves, plus shared preferences');
+  assert.equal(ui.count('/me/workbench/preferences'), 1);
+  ui.get('staff-reg').value = newReg;
+  await ui.api.loadCase();
+  assert.equal(ui.get('staff-case-draft').value, newReg);
+  held.resolve(); await first;
+  assert.equal(ui.get('staff-case-draft').value, newReg, 'old case response cannot replace current draft');
+  assert.equal(ui.get('staff-case-draft').dataset.reg, newReg);
+}
+
+async function testDashboardSharingAndMutationRefresh() {
+  let held = null;
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadDashboard,loadToday', async call => {
+    if (held && call.url === '/me/center/dashboard') await held.promise;
+    return staffResponse(call);
+  });
+  await flush(); held = deferred();
+  const first = ui.api.loadDashboard(), second = ui.api.loadToday();
+  const fresh = ui.api.loadDashboard(true);
+  assert.equal(ui.count('/me/center/dashboard'), 2, 'concurrent views share one GET');
+  held.resolve(); held = null;
+  await Promise.all([first, second, fresh]);
+  assert.equal(ui.count('/me/center/dashboard'), 3, 'mutation forces a new read after in-flight GET');
+}
+
+async function testManagerSearchAndReloadQueue() {
+  let held = null;
+  const ui = harness(embedded('v368_manager_ui.py', 'SCRIPT='), 'reload', async call => {
+    if (held && call.url === '/manager/dashboard') await held.promise;
+    if (call.url === '/me/profile') return {full_name: 'Admin'};
+    if (call.url === '/manager/dashboard') return {tasks_by_day: []};
+    if (call.url.endsWith('/mail/status')) return {configured: true};
+    if (call.url.endsWith('/options')) return {categories: {}, legal_forms: {}};
+    if (call.url.endsWith('/quality')) return {issues: []};
+    return [];
+  });
+  await flush();
+  assert.equal(ui.count('/manager/admin/mail/status'), 1);
+  ui.get('mgr-admin-search').value = 'admin';
+  for (let i = 0; i < 6; i++) ui.get('mgr-admin-search').listeners.input();
+  ui.get('mgr-admin-status').listeners.change();
+  await flush();
+  assert.equal(ui.count('/manager/admin/mail/status'), 1, 'user filters never refetch mail status');
+  held = deferred();
+  const first = ui.api.reload();
+  const second = ui.api.reload(), third = ui.api.reload();
+  assert.equal(first, second); assert.equal(second, third);
+  assert.equal(ui.count('/manager/dashboard'), 2, 'overlapping reloads do not fan out');
+  assert.equal(ui.count('/manager/admin/users'), 2, 'admin list starts in the main parallel batch');
+  held.resolve(); held = null;
+  await first;
+  assert.equal(ui.count('/manager/dashboard'), 3, 'queued refresh runs once after the first batch');
+}
+
+async function testHistoricalAdoptionQueuesFreshRead() {
+  let held = null, rows = [{id: 'legacy-1', categories: [], created_at: '2026-10-18'}];
+  const ui = harness(embedded('account_pages_v1.py', 'THEMATIC ='), 'loadHistorical', async call => {
+    if (call.url.endsWith('/unassigned')) return held ? held.promise : {batches: rows};
+    return {batches: []};
+  });
+  await flush();
+  const button = ui.get('unassigned-list').children[0].children.at(-1);
+  held = deferred();
+  const oldRead = ui.api.loadHistorical();
+  const adopted = button.onclick();
+  await flush();
+  assert.equal(ui.count('/api/thematic/unassigned'), 2, 'adoption waits for in-flight read');
+  const release = held; held = null; rows = [];
+  release.resolve({batches: [{id: 'legacy-1', categories: []}]});
+  await Promise.all([oldRead, adopted]);
+  assert.equal(ui.count('/api/thematic/unassigned'), 3, 'adoption queues fresh migration list');
+  assert.equal(ui.get('unassigned-list').children.length, 0);
+}
+
+async function testCaseSwitchDisablesOldDraftAndControls() {
+  const oldReg = '32616412317', nextReg = '32616412318';
+  let held = null;
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadCase', async call => {
+    if (held && call.url.includes(nextReg)) await held.promise;
+    if (call.url === '/me/center/draft/' + nextReg) return {httpStatus: 503, body: {}};
+    return staffResponse(call);
+  });
+  await flush();
+  const manualButton = ui.get('staff-manual-form').querySelector('button');
+  ui.get('staff-reg').value = oldReg; await ui.api.loadCase();
+  assert.equal(ui.get('staff-case-draft').dataset.reg, oldReg);
+  assert.equal(manualButton.disabled, false);
+  ui.get('staff-checklist').append(new Element('button'));
+  held = deferred(); ui.get('staff-reg').value = nextReg;
+  const pending = ui.api.loadCase();
+  assert.equal(ui.get('staff-case-draft').value, '');
+  assert.equal(ui.get('staff-case-draft').dataset.reg, '');
+  assert.equal(ui.get('staff-case-draft').disabled, true);
+  assert.equal(manualButton.disabled, true);
+  assert.equal(ui.get('staff-checklist').children.length, 0);
+  ui.get('staff-case-draft').listeners.input();
+  await ui.flushTimers();
+  assert.equal(ui.calls.filter(call => call.method === 'PUT').length, 0, 'unloaded draft cannot autosave');
+  held.resolve(); held = null; await pending;
+  assert.equal(ui.get('staff-case-draft').disabled, true, 'failed draft load remains disabled');
+  assert.equal(ui.get('staff-case-draft').dataset.reg, '');
+  assert.equal(manualButton.disabled, false, 'successfully loaded independent section stays usable');
+  ui.get('staff-reg').value = oldReg; // Merely editing the selector does not change the open case.
+  const form = ui.get('staff-message-form'); form.formValues = {body: 'For the loaded case'};
+  await form.onsubmit({currentTarget: form, preventDefault() {}});
+  assert.equal(ui.calls.filter(call => call.method === 'POST').at(-1).url,
+    '/me/workbench/' + nextReg + '/discussion');
+}
+
+async function testDirtyDraftSurvivesRefreshAndCaseSwitch() {
+  const firstReg = '32616412317', secondReg = '32616412318';
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadCase', staffResponse);
+  await flush();
+  ui.get('staff-reg').value = firstReg; await ui.api.loadCase();
+  const draft = ui.get('staff-case-draft');
+  draft.value = 'Unsaved first case'; draft.listeners.input();
+  await ui.api.loadCase();
+  assert.equal(draft.value, 'Unsaved first case', 'same-case refresh preserves debounce-pending text');
+  ui.get('staff-reg').value = secondReg; await ui.api.loadCase();
+  draft.value = 'Unsaved second case'; draft.listeners.input();
+  ui.get('staff-reg').value = firstReg; await ui.api.loadCase();
+  assert.equal(draft.value, 'Unsaved first case', 'A to B to A restores pending local draft');
+  await ui.flushTimers();
+  const writes = ui.calls.filter(call => call.method === 'PUT');
+  assert.equal(writes.length, 2, 'editing B does not cancel A autosave');
+  assert.deepEqual(writes.map(call => [call.url, JSON.parse(call.options.body).body]), [
+    ['/me/center/draft/' + firstReg, 'Unsaved first case'],
+    ['/me/center/draft/' + secondReg, 'Unsaved second case'],
+  ]);
+}
+
+async function testOldSubmissionCannotResetNewCaseForm() {
+  for (const [id, resource] of [['staff-manual-form', 'manual-findings'], ['staff-message-form', 'discussion']]) {
+    const oldReg = '32616412317', nextReg = '32616412318';
+    const post = deferred(), nextReads = deferred();
+    const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadCase', async call => {
+      if (call.method === 'POST') await post.promise;
+      if (call.method === 'GET' && call.url.includes(nextReg)) await nextReads.promise;
+      return staffResponse(call);
+    });
+    await flush();
+    const form = ui.get(id), button = form.querySelector('button');
+    ui.get('staff-reg').value = oldReg; await ui.api.loadCase();
+    form.formValues = {title: 'Old case', body: 'Old discussion'};
+    const submission = form.onsubmit({currentTarget: form, preventDefault() {}});
+    ui.get('staff-reg').value = nextReg; const opening = ui.api.loadCase();
+    const resets = form.resetCount;
+    form.formValues = {title: 'New case text', body: 'New discussion text'};
+    post.resolve(); await submission;
+    assert.equal(form.resetCount, resets, `${resource}: older POST must not reset new form`);
+    assert.equal(form.formValues.title, 'New case text');
+    assert.equal(button.disabled, true, `${resource}: older POST must not unlock loading controls`);
+    nextReads.resolve(); await opening;
+    assert.equal(button.disabled, false);
+  }
+}
+
+async function testAutosavesStayOrdered() {
+  const held = deferred(), reg = '32616412317';
+  let writes = 0;
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadCase', async call => {
+    if (call.method === 'PUT' && ++writes === 1) await held.promise;
+    return staffResponse(call);
+  });
+  await flush(); ui.get('staff-reg').value = reg; await ui.api.loadCase();
+  const draft = ui.get('staff-case-draft');
+  draft.value = 'First version'; draft.listeners.input();
+  const saving = ui.flushTimers();
+  draft.value = 'Second version'; draft.listeners.input();
+  await ui.flushTimers();
+  assert.equal(writes, 1, 'second save cannot race the first write');
+  await ui.api.loadCase();
+  assert.equal(draft.value, 'Second version', 'pending write protects newer edit on refresh');
+  held.resolve(); await saving;
+  const bodies = ui.calls.filter(call => call.method === 'PUT').map(call => JSON.parse(call.options.body).body);
+  assert.deepEqual(bodies, ['First version', 'Second version']);
+}
+
+async function testOlderCaseSearchesCannotRenderIntoNewCase() {
+  const held = deferred(), oldReg = '32616412317', nextReg = '32616412318';
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadCase', async call => {
+    if (call.url.includes('?')) {
+      await held.promise;
+      return {results: [{type: 'document', excerpt: 'Old excerpt', name: 'Old document', fragment: 'Old text'}],
+        diff: ['+Old version'], note: '', scope: ''};
+    }
+    return staffResponse(call);
+  });
+  await flush(); ui.get('staff-reg').value = oldReg; await ui.api.loadCase();
+  const searches = [];
+  for (const id of ['staff-search-form', 'staff-original-search']) {
+    const form = ui.get(id); form.formValues = {q: 'search phrase'};
+    searches.push(form.onsubmit({currentTarget: form, preventDefault() {}}));
+  }
+  ui.get('staff-version-left').value = '1'; ui.get('staff-version-right').value = '2';
+  searches.push(ui.get('staff-version-compare').onclick());
+  ui.get('staff-reg').value = nextReg; await ui.api.loadCase();
+  held.resolve(); await Promise.all(searches);
+  for (const id of ['staff-search-results', 'staff-original-results', 'staff-version-diff'])
+    assert.equal(ui.get(id).children.length, 0, id + ' must not show older case response');
+}
+
+(async () => {
+  for (const test of [testManualFiltersAndRefreshRace, testThematicFiltersAndDeniedPolling,
+    testHistoricalAdoptionQueuesFreshRead, testStaffRequestsAndAsyncForms, testParallelCaseReadsIgnoreOlderResponses,
+    testCaseSwitchDisablesOldDraftAndControls, testDirtyDraftSurvivesRefreshAndCaseSwitch,
+    testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
+    testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue]) {
+    await test(); console.log('PASS', test.name);
+  }
+  console.log('Account frontend request/race regressions: 12 scenarios passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

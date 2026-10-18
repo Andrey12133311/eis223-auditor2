@@ -1,6 +1,8 @@
 """Standalone HTML for staged user accounts (not mounted in production)."""
 from html import escape
 
+from scripts.account_visual_polish_v1 import account_page_style
+
 
 def page(title, body):
     return """<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -74,7 +76,7 @@ td button{margin:4px 5px 4px 0}
  th,td{padding:10px 11px}
 }
 @media(prefers-reduced-motion:reduce){button{transition:none}}
-</style></head><body><header>ЕИС Аудитор · Личный кабинет</header>
+</style>""" + account_page_style() + """</head><body><header>ЕИС Аудитор · Личный кабинет</header>
 <main><section class="panel">""" + body + """</section></main></body></html>"""
 
 
@@ -198,15 +200,26 @@ const el=id=>document.getElementById(id);
 const state={queued:'В очереди',leased:'Загружаются данные ЕИС',
  done:'Загрузка завершена',partial:'Частичная загрузка',
  deferred:'Ожидает источник',error:'Ошибка загрузки',unknown:'Статус уточняется'};
-let loading=false;
-async function refresh(){
- if(loading)return;loading=true;
- try{
- const response=await fetch('/me/manual-checks',{credentials:'same-origin',cache:'no-store'});
- if(response.status===401){location.replace('/account/login');return}
- if(!response.ok)throw Error('Не удалось загрузить проверки');
- const allData=await response.json();
- if(!Array.isArray(allData))throw Error('Некорректный ответ сервера');
+let manualCache=[],manualRefresh=null,manualRefreshQueued=false;
+function refresh(force=false){
+ if(manualRefresh){if(force===true)manualRefreshQueued=true;return manualRefresh}
+ manualRefresh=(async()=>{
+  do{
+   manualRefreshQueued=false;
+   try{
+    const response=await fetch('/me/manual-checks',{credentials:'same-origin',cache:'no-store'});
+    if(response.status===401){location.replace('/account/login');return}
+    if(!response.ok)throw Error('Не удалось загрузить проверки');
+    const data=await response.json();
+    if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
+    manualCache=data;renderManual();
+   }catch(error){el('manual-message').textContent=error.message}
+  }while(manualRefreshQueued);
+ })().finally(()=>{manualRefresh=null});
+ return manualRefresh;
+}
+function renderManual(){
+ const allData=manualCache;
  const select=el('manual-violation-type'),selected=select.value;
  const kinds=[...new Set(allData.flatMap(x=>x.violation_types||[]))].sort((a,b)=>a.localeCompare(b,'ru'));
  select.replaceChildren();
@@ -277,22 +290,21 @@ async function refresh(){
   wrapper.append(open,dossier,favorite,remove);actions.append(wrapper);
   tr.append(reg,status,docs,violations,actions);rows.append(tr);
  }
- }catch(error){el('manual-message').textContent=error.message}
- finally{loading=false}
+
 }
-async function refreshAfterAction(){loading=false;await refresh()}
+async function refreshAfterAction(){await refresh(true)}
 el('manual-refresh').onclick=refresh;
 const filterNames=['manual-search','manual-status','manual-date-start','manual-date-end',
                    'manual-violation-type','manual-only-violations'];
 let filterTimer;
 for(const id of filterNames){
  const field=el(id);
- const handler=()=>{clearTimeout(filterTimer);filterTimer=setTimeout(refresh,150)};
+ const handler=()=>{clearTimeout(filterTimer);filterTimer=setTimeout(renderManual,150)};
  field.addEventListener('input',handler);field.addEventListener('change',handler);
 }
 el('manual-filters-reset').onclick=()=>{
  for(const id of filterNames){const field=el(id);if(field.type==='checkbox')field.checked=false;else field.value=''}
- refresh();
+ renderManual();
 };
 el('manual-add').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
@@ -304,7 +316,7 @@ el('manual-add').addEventListener('submit',async event=>{
    {method:'POST',credentials:'same-origin'});
   if(!res.ok)throw Error('Не удалось запустить проверку ЕИС');
   el('manual-message').textContent='Задание проверки принято, ожидайте обработки документов.';
-  form.reset();await refresh();
+  form.reset();await refresh(true);
  }catch(error){el('manual-message').textContent=error.message}
  finally{button.disabled=false}
 });
@@ -413,15 +425,26 @@ const status=document.getElementById('thematic-status');
 const labels={dates:'Сроки закупки и разъяснений',docs:'Документация',national:'Национальный режим',
  security:'Обеспечение',sme:'МСП',access:'Требования к участникам',protocols:'Протоколы',
  contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
-let busy=false;
-async function refresh(){
- if(busy)return;busy=true;
- try{
-  const response=await fetch('/api/thematic/history',{credentials:'same-origin',cache:'no-store'});
-  if(response.status===401){location.assign('/account/login');return}
-  if(!response.ok)throw Error('Не удалось получить тематические проверки');
-  const data=await response.json();
-  const allBatches=Array.isArray(data.batches)?data.batches:[];
+let thematicCache=[],thematicRefresh=null,thematicRefreshQueued=false;
+function refresh(force=false){
+ if(thematicRefresh){if(force===true)thematicRefreshQueued=true;return thematicRefresh}
+ thematicRefresh=(async()=>{
+  do{
+   thematicRefreshQueued=false;
+   try{
+    const response=await fetch('/api/thematic/history',{credentials:'same-origin',cache:'no-store'});
+    if(response.status===401){location.assign('/account/login');return}
+    if(!response.ok)throw Error('Не удалось получить тематические проверки');
+    const data=await response.json();
+    thematicCache=Array.isArray(data.batches)?data.batches:[];
+    renderThematic();
+   }catch(error){status.textContent=error.message}
+  }while(thematicRefreshQueued);
+ })().finally(()=>{thematicRefresh=null});
+ return thematicRefresh;
+}
+function renderThematic(){
+ const allBatches=thematicCache;
   const control=document.getElementById('thematic-type'),previous=control.value;
   const types=[...new Set(allBatches.flatMap(b=>b.violation_types||[]))]
       .sort((a,b)=>a.localeCompare(b,'ru'));
@@ -475,14 +498,22 @@ async function refresh(){
    };
    actions.append(open,remove);card.append(title,state,meta,actions);holder.append(card);
   }
- }catch(error){status.textContent=error.message}
- finally{busy=false}
+
 }
-async function refreshAfterDelete(){busy=false;await refresh()}
-async function loadHistorical(){
+async function refreshAfterDelete(){await refresh(true)}
+let historicalAllowed=true,historicalRequest=null,historicalQueued=false;
+function loadHistorical(force=false){
+ if(!historicalAllowed)return Promise.resolve();
+ if(historicalRequest){if(force===true)historicalQueued=true;return historicalRequest}
+ historicalRequest=(async()=>{
+  do{historicalQueued=false;await fetchHistorical()}while(historicalAllowed&&historicalQueued);
+ })().finally(()=>{historicalRequest=null});
+ return historicalRequest;
+}
+async function fetchHistorical(){
  try{
   const response=await fetch('/api/thematic/unassigned',{credentials:'same-origin',cache:'no-store'});
-  if(response.status===403)return;
+  if(response.status===403){historicalAllowed=false;return}
   if(!response.ok)return;
   const data=await response.json();
   const items=Array.isArray(data.batches)?data.batches:[];
@@ -506,7 +537,7 @@ async function loadHistorical(){
      const result=await fetch('/api/thematic/adopt/'+encodeURIComponent(check.id),
        {method:'POST',credentials:'same-origin'});
      if(!result.ok)throw Error('Не удалось привязать проверку. Возможно, она уже принадлежит другой учётной записи.');
-     await refresh();await loadHistorical();
+     await Promise.all([refresh(true),loadHistorical(true)]);
     }catch(error){status.textContent=error.message;btn.disabled=false}
    };
    card.append(h,meta,btn);list.append(card);
@@ -516,13 +547,13 @@ async function loadHistorical(){
 let pendingFilter;
 for(const id of ['thematic-customer','thematic-filter-status','thematic-from','thematic-to','thematic-type']){
  const input=document.getElementById(id);
- const handler=()=>{clearTimeout(pendingFilter);pendingFilter=setTimeout(refresh,180)};
+ const handler=()=>{clearTimeout(pendingFilter);pendingFilter=setTimeout(renderThematic,180)};
  input.addEventListener('input',handler);input.addEventListener('change',handler);
 }
 document.getElementById('thematic-reset').onclick=()=>{
  for(const id of ['thematic-customer','thematic-filter-status','thematic-from','thematic-to','thematic-type'])
   document.getElementById(id).value='';
- refresh();
+ renderThematic();
 };
 setInterval(()=>{if(!document.hidden){refresh();loadHistorical()}},30000);
 refresh();loadHistorical();

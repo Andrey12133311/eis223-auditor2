@@ -32,14 +32,17 @@ def dashboard(request: Request, response: Response):
             (uid,),
         ).fetchone()
         tasks = db.execute(
-            """SELECT id,reg_number,title,status,due_date,updated_at
+            """SELECT id,reg_number,title,status,due_date,updated_at,
+                      COUNT(*) FILTER (WHERE status IN
+                        ('assigned','returned','in_progress','submitted')) OVER ()
                FROM account_manager_tasks WHERE user_id=%s
                ORDER BY CASE WHEN status IN ('assigned','returned') THEN 0
                              WHEN status='in_progress' THEN 1 ELSE 2 END,
                         updated_at DESC LIMIT 70""", (uid,),
         ).fetchall()
         campaigns = db.execute(
-            """SELECT id,title,status,target_violations,due_date,batch_id,created_at
+            """SELECT id,title,status,target_violations,due_date,batch_id,created_at,
+                      COUNT(*) FILTER (WHERE status IN ('active','submitted')) OVER ()
                FROM account_manager_campaign_targets WHERE user_id=%s
                ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END,
                         created_at DESC LIMIT 60""", (uid,),
@@ -72,12 +75,11 @@ def dashboard(request: Request, response: Response):
          "batch_id": x[5]}
         for x in campaigns
     ]
-    active = ("assigned", "returned", "in_progress", "submitted")
     return {
         "full_name": " ".join(x for x in (person or ()) if x).strip(),
         "tasks": task_data, "campaigns": campaign_data,
-        "task_active": sum(t["status"] in active for t in task_data),
-        "campaign_active": sum(c["status"] in ("active", "submitted") for c in campaign_data),
+        "task_active": int(tasks[0][6]) if tasks else 0,
+        "campaign_active": int(campaigns[0][7]) if campaigns else 0,
         "unread_notifications": int(alerts), "manual_checks": int(manual_count),
         "memo_reviews": dict(memo_review), "finding_decisions": dict(decisions),
         "as_of": datetime.now(timezone.utc).isoformat(),
