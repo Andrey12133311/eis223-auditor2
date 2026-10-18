@@ -42,15 +42,18 @@ def _legal_items(ns,reg):
             "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('findings','checks')")}
         if "findings" in tables:
             for r in c.execute(
-                """SELECT title,law,evidence,document,source_url,code
-                   FROM findings WHERE reg_number=? AND kind='violation' LIMIT 200""",(reg,)):
+                """SELECT * FROM findings WHERE reg_number=? AND kind='violation'
+                   ORDER BY rowid DESC LIMIT 350""",(reg,)):
                 rows.append(dict(r))
         if "checks" in tables:
             for r in c.execute(
-                """SELECT item AS title,law,evidence,document,source_url
-                   FROM checks WHERE reg_number=? AND status='violation' LIMIT 200""",
+                """SELECT * FROM checks WHERE reg_number=? AND status IN ('violation','check')
+                   ORDER BY rowid DESC LIMIT 350""",
                 (reg,)):
-                rows.append(dict(r))
+                if r["status"] == "violation":
+                    item=dict(r)
+                    item["title"]=item.get("item") or "Нарушение"
+                    rows.append(item)
         result=[]
         for item in collapse_legal_events(rows):
             legal=str(item.get("law") or "").strip()
@@ -103,6 +106,10 @@ def finding_list(user_id:str,reg_number:str,request:Request,response:Response):
             """SELECT finding_key,decision,comment,reviewer_id,updated_at
                FROM account_manager_finding_reviews
                WHERE user_id=%s AND reg_number=%s""",(worker,reg_number)).fetchall()
+        submissions=db.execute(
+            "SELECT finding_key,status,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s",
+            (worker,reg_number)).fetchall()
+    submission_by_key={r[0]:{"status":r[1],"version":r[2]} for r in submissions}
     approved={r[0]:{"decision":r[1],"comment":r[2],
                     "reviewer_id":str(r[3]),"updated_at":r[4].isoformat()} for r in saved}
     try:items=_legal_items(_db_state(request),reg_number)
@@ -110,12 +117,14 @@ def finding_list(user_id:str,reg_number:str,request:Request,response:Response):
         raise HTTPException(503,"Не удалось открыть доказательства ЕИС") from exc
     for item in items:
         item["review"]=approved.get(item["finding_key"])
+        item["submission"]=submission_by_key.get(item["finding_key"])
     return {"reg_number":reg_number,"user_id":str(worker),"findings":items,
             "generated_from":"current_eis_evidence",
             "note":"Автоматическое выявление и решение руководителя учитываются отдельно"}
 
 
 class FindingDecision(BaseModel):
+    submission_version:int|None=Field(default=None,ge=1)
     decision:str=Field(pattern="^(approved|returned|rejected)$")
     comment:str=Field(default="",max_length=1500)
 
@@ -131,6 +140,21 @@ def finding_decision(user_id:str,reg_number:str,finding_key:str,
         raise HTTPException(422,"Укажите причину возврата или отклонения")
     with connect() as db:
         worker=_authorized_reg(db,actor,role,user_id,reg_number)
+        # Serialize with employee submissions, including first-time inserts.
+        db.execute("SELECT 1 FROM account_manual_checks WHERE user_id=%s AND reg_number=%s FOR UPDATE",
+                   (worker,reg_number)).fetchone()
+        submission=db.execute(
+            "SELECT status,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s AND finding_key=%s",
+            (worker,reg_number,finding_key)).fetchone()
+        if submission:
+            if data.decision == "returned":
+                raise HTTPException(422,"Для направленного нарушения доступны согласование или отказ с причиной")
+            if data.submission_version != submission[1]:
+                raise HTTPException(409,"Согласование изменилось; обновите очередь")
+            if submission[0] == data.decision:
+                return {"decision":data.decision,"evidence_unchanged":True,"already_reviewed":True}
+            if submission[0] != "submitted":
+                raise HTTPException(409,"Окончательное решение по нарушению уже сохранено")
         # The key must still match a verified live finding; stale approvals
         # cannot be silently carried to modified evidence.
         try:items=_legal_items(_db_state(request),reg_number)
@@ -153,6 +177,8 @@ def finding_decision(user_id:str,reg_number:str,finding_key:str,
             (worker,reg_number,finding_key,row["title"],row["law"],
              sha256(row["evidence"].encode("utf-8")).hexdigest(),
              actor,data.decision,data.comment.strip()))
+        db.execute("UPDATE account_finding_submissions SET status=%s WHERE user_id=%s AND reg_number=%s AND finding_key=%s",
+                   (data.decision,worker,reg_number,finding_key))
         _audit(db,actor,worker,"finding",finding_key,data.decision,
                f"{reg_number}: {data.comment.strip()}")
     return {"decision":data.decision,"evidence_unchanged":True}

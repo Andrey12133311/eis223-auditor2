@@ -22,6 +22,8 @@ COPY tests/test_extraction_throughput.py tests/test_v381_audit_scheduling.py tes
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_extraction_throughput.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_audit_scheduling.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_requisites.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_organization_display.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_memo_layout.py'
 COPY tests/test_customer_name_completion.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_customer_name_completion.py'
+COPY tests/test_v382_finding_submissions.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v382_finding_submissions.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

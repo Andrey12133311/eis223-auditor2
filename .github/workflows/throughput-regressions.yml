@@ -7,6 +7,9 @@ on:
       - 'tests/test_v381*.py'
       - 'tests/test_organization_display.py'
       - 'tests/test_memo_requisites.py'
+      - 'tests/test_v382_finding_submissions.py'
+      - 'tests/test_v343_card_presentation.py'
+      - 'tests/test_account_frontend_requests.cjs'
       - 'tests/memo_fixture.py'
       - '.github/workflows/throughput-regressions.yml'
   push:
@@ -22,6 +25,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Verify bounded processing, evidence reuse and private memo fields
         env:
           PYTHONPATH: '.:scripts:tests'
@@ -32,3 +38,6 @@ jobs:
           python -m unittest discover -s tests -p 'test_customer_name_completion.py'
           python -m unittest discover -s tests -p 'test_memo_requisites.py'
           python -m unittest discover -s tests -p 'test_eis*.py'
+          python -m unittest discover -s tests -p 'test_v382_finding_submissions.py'
+          python -m unittest discover -s tests -p 'test_v343_card_presentation.py'
+          node tests/test_account_frontend_requests.cjs

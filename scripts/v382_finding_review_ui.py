@@ -1,0 +1,121 @@
+"""Shared account-only controls for submitting one canonical legal finding."""
+from hashlib import sha256
+from html import escape
+import json
+
+STYLE = r"""<style>
+.eis-finding-review{margin-top:14px;padding:12px;border:1px solid #cfdfeb;border-radius:9px;background:#f2f8fc;color:#284b65;font:13px/1.55 system-ui;overflow-wrap:anywhere}
+.eis-finding-review strong{display:block;margin-bottom:6px}
+.eis-finding-review p{margin:5px 0;font-size:12px;white-space:pre-wrap}
+.eis-finding-review button{min-height:40px;padding:9px 12px;margin:7px 8px 0 0;border:1px solid #176397;border-radius:8px;background:#176397;color:white;font:700 12px system-ui;cursor:pointer}
+.eis-finding-review button.secondary{background:white;color:#245e87;border-color:#c8dce9}
+.eis-finding-review button:disabled{opacity:.6;cursor:default}
+.eis-finding-review a{display:inline-block;margin-top:7px;font-size:12px}
+.eis-finding-review :focus-visible{outline:3px solid #8fc2e0;outline-offset:2px}
+</style>"""
+
+SCRIPT = r"""<script>
+(()=>{
+if(window.EISFindingReview)return;
+const states=new Map();
+const labels={submitted:'Отправлено на согласование',approved:'Согласовано руководителем',
+ rejected:'Отклонено руководителем',returned:'Возвращено на доработку'};
+const node=(tag,value)=>{const el=document.createElement(tag);el.textContent=value;return el};
+function state(reg){
+ if(!states.has(reg))states.set(reg,{items:null,manager:false,error:'',request:null,queued:false,
+  version:0,busy:new Set(),messages:new Map()});
+ return states.get(reg);
+}
+async function api(url,method='GET'){
+ const r=await fetch(url,{method,credentials:'same-origin',cache:'no-store'});
+ const data=await r.json().catch(()=>({}));
+ if(r.status===401){location.replace('/account/login');throw Error('Войдите в учётную запись')}
+ if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:'Ошибка запроса '+r.status);
+ return data;
+}
+function draw(box,reg,s){
+ const key=box.dataset.findingReview,item=s.items?.find(x=>x.finding_key===key);
+ box.replaceChildren();
+ if(!s.items){
+  box.append(node('p',s.error||'Загружаем состояние согласования…'));
+ }else if(!item){
+  box.append(node('p','Версия доказательства изменилась или пока недоступна для отправки. Откройте электронное дело и проверьте актуальную карточку.'));
+  const link=node('a','Открыть электронное дело →');link.href='/me/cases/'+encodeURIComponent(reg);box.append(link);
+ }else{
+  const status=item.submission?.status||item.review?.decision||'',busy=s.busy.has(key);
+  box.append(node('strong',labels[status]||'Ещё не отправлено на согласование'));
+  if(item.submission?.submitted_at){
+   box.append(node('p','Отправлено: '+new Date(item.submission.submitted_at).toLocaleString('ru-RU')));
+  }
+  if(item.review?.comment){
+   box.append(node('p',(status==='submitted'&&item.review.decision==='returned'?
+    'Предыдущее замечание руководителя: ':'Комментарий руководителя: ')+item.review.comment));
+  }
+  const submit=node('button',busy?'Отправляем…':'Направить на согласование руководителю');
+  submit.type='button';submit.disabled=busy||!s.manager||['submitted','approved','rejected','returned'].includes(status);
+  submit.onclick=()=>send(reg,key);
+  box.append(submit);
+  if(!s.manager)box.append(node('p','Руководитель не назначен. Обратитесь к администратору, чтобы отправить нарушение на согласование.'));
+  if(s.messages.has(key))box.append(node('p',s.messages.get(key)));
+ }
+ if(s.error&&s.items)box.append(node('p','Не удалось обновить состояние: '+s.error));
+ const refresh=node('button',s.request?'Обновляем…':'Обновить статус');
+ refresh.type='button';refresh.className='secondary';refresh.disabled=!!s.request||s.busy.size>0;
+ refresh.onclick=()=>load(reg,true);box.append(refresh);
+}
+function paint(reg){
+ const s=state(reg);
+ document.querySelectorAll('[data-finding-review]').forEach(box=>{
+  if(box.dataset.reviewReg===reg)draw(box,reg,s);
+ });
+}
+function control(reg,key){
+ const box=node('div','');box.className='eis-finding-review';
+ box.dataset.findingReview=key;box.dataset.reviewReg=reg;
+ box.setAttribute('role','status');box.setAttribute('aria-live','polite');
+ draw(box,reg,state(reg));return box;
+}
+function load(reg,fresh=false){
+ const s=state(reg);
+ if(s.request){if(fresh)s.queued=true;return s.request}
+ s.request=(async()=>{
+  do{
+   s.queued=false;const version=s.version;
+   try{
+    const data=await api('/me/finding-submissions/'+encodeURIComponent(reg));
+    if(version===s.version){s.items=Array.isArray(data.findings)?data.findings:[];s.manager=data.manager_assigned===true;s.error=''}
+   }catch(e){if(version===s.version)s.error=e.message}
+  }while(s.queued);
+ })().finally(()=>{s.request=null;paint(reg)});
+ paint(reg);return s.request;
+}
+async function send(reg,key){
+ const s=state(reg),item=s.items?.find(x=>x.finding_key===key);
+ const current=item?.submission?.status||item?.review?.decision||'';
+ if(!item||!s.manager||s.busy.has(key)||['submitted','approved','rejected','returned'].includes(current))return;
+ s.busy.add(key);s.version++;s.messages.delete(key);paint(reg);
+ try{
+  const result=await api('/me/finding-submissions/'+encodeURIComponent(reg)+'/'+encodeURIComponent(key)+'/submit','POST');
+  item.submission={...(item.submission||{}),status:result.status};
+  s.messages.set(key,result.already_submitted?'Это нарушение уже отправлено. Дубликат не создан.':'Нарушение отправлено руководителю.');
+ }catch(e){s.messages.set(key,'Не удалось отправить: '+e.message)}
+ finally{
+  // A GET begun before this POST cannot replace the mutation result.
+  s.version++;await load(reg,true);s.busy.delete(key);paint(reg);
+ }
+}
+window.EISFindingReview={control,load};
+const regs=new Set();document.querySelectorAll('[data-finding-review]').forEach(box=>regs.add(box.dataset.reviewReg));
+regs.forEach(reg=>{if(/^3[0-9]{10}$/.test(reg))load(reg)});
+})();
+</script>"""
+
+
+def finding_control(reg, item):
+    """Exact identity only; the private API verifies this key before enabling submit."""
+    values = [str(reg)] + [str(item.get(key) or "").strip()
+                           for key in ("title", "law", "evidence", "document", "source_url")]
+    key = sha256(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return ('<div class="eis-finding-review" role="status" aria-live="polite" '
+            'data-finding-review="' + key + '" data-review-reg="' + escape(str(reg), quote=True) +
+            '">Загружаем состояние согласования…</div>')
