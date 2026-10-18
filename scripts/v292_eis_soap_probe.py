@@ -3,8 +3,6 @@ import datetime
 import os
 import threading
 import uuid
-from xml.sax.saxutils import escape
-from urllib.parse import urlsplit
 
 def probe():
     token=os.getenv("EIS_TOKEN","").strip()
@@ -19,7 +17,7 @@ def probe():
     body=('<?xml version="1.0" encoding="utf-8"?>'
           '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
           'xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">'
-          '<soapenv:Header><individualPerson_token>'+escape(token)+'</individualPerson_token></soapenv:Header>'
+          '<soapenv:Header/>'
           '<soapenv:Body><ws:getDocsByReestrNumberRequest>'
           '<index><id>'+str(uuid.uuid4())+'</id><createDateTime>'+
           datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")+
@@ -29,7 +27,11 @@ def probe():
           '</ws:getDocsByReestrNumberRequest></soapenv:Body></soapenv:Envelope>')
     try:
         with httpx.Client(timeout=httpx.Timeout(20.0,connect=10.0),follow_redirects=False,trust_env=False) as client:
-            r=client.post(endpoint,content=body.encode(),headers={"Content-Type":"text/xml; charset=utf-8"})
+            r=client.post(endpoint,content=body.encode(),headers={
+                "Content-Type":"text/xml; charset=utf-8",
+                "SOAPAction":'"http://zakupki.gov.ru/fz44/queue/ws/get-docs-ip"',
+                "individualPerson_token":token,
+            })
         import xml.etree.ElementTree as ET
         try:
             root=ET.fromstring(r.content[:1000000])
