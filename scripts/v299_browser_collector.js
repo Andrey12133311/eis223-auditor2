@@ -6,9 +6,10 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "342"; // Buyer INN, labelled subjects and Unicode repair
+  const COLLECTOR_VERSION = "376"; // Backend recovery without losing completion reports
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
+  const BACKEND_RETRY_MS = 60000;
   const BACKOFF = 1200000; // 20 мин при блокировке ЕИС
   const MAX_BUYS = 2;
   const MAX_FILES = 20;
@@ -38,6 +39,7 @@
   key = key.trim();
   let active = true, timer = null, busy = false;
   let manualTimer = null, manualBusy = false, pausedUntil = 0;
+  let pendingReport = null, backendPausedUntil = 0;
   let cycles = 0, uploaded = 0, admitted = 0, rotatingIndex = 0;
   const log = (...args) => console.log("[ЕИС-5мин]", ...args);
   const wait = ms => new Promise(ok => setTimeout(ok, ms));
@@ -55,6 +57,7 @@
     },
     status() {
       return {active, busy, manualBusy, cycles, admitted, uploaded,
+        paused_until:pausedUntil, pending_report:!!pendingReport,
         next_check: timer ? "через примерно 5 минут" : "после текущего цикла"};
     }
   };
@@ -76,23 +79,58 @@
       controller.signal.removeEventListener("abort",onStop);
     }
   }
+  function backendFailure(message, response, body = {}) {
+    // A backend outage says nothing about the availability of EIS originals.
+    // Share the cooldown across manual and background loops.
+    const raw=body.retry_after_seconds || response?.headers?.get("Retry-After");
+    const seconds=Number(raw);
+    const delay=Number.isFinite(seconds)&&seconds>0
+      ? Math.max(BACKEND_RETRY_MS,Math.min(1800000,seconds*1000))
+      : BACKEND_RETRY_MS;
+    backendPausedUntil=Math.max(backendPausedUntil,Date.now()+delay);
+    pausedUntil=Math.max(pausedUntil,backendPausedUntil);
+    return Object.assign(new Error(message),{backend:true,retryMs:delay});
+  }
   async function api(path, method, data) {
     const headers = {"x-eis223-upload-token":key,
       "x-eis223-collector-version":COLLECTOR_VERSION};
     if (data !== undefined) headers["content-type"] =
       data instanceof ArrayBuffer ? "application/octet-stream" : "application/json";
-    const r = await request(RAIL + path,
-      {method:method || "GET", headers,
-        body:data === undefined ? undefined :
-          data instanceof ArrayBuffer ? data : JSON.stringify(data)},
-      60000);
+    let r;
+    try {
+      r = await request(RAIL + path,
+        {method:method || "GET", headers,
+          body:data === undefined ? undefined :
+            data instanceof ArrayBuffer ? data : JSON.stringify(data)},
+        60000);
+    } catch(e) {
+      if(!active||controller.signal.aborted)throw e;
+      throw backendFailure("Railway временно недоступен: "+String(e.message).slice(0,120));
+    }
     let body = {};
     try {body = await r.json();} catch (e) {
+      if(r.ok || r.status>=500 || [408,429].includes(r.status))
+        throw backendFailure("Railway ответил не JSON: HTTP " + r.status,r);
       throw new Error("Railway ответил не JSON: HTTP " + r.status);
     }
-    if (!r.ok) throw new Error("Railway HTTP " + r.status + " " +
-      String(body.detail || "").slice(0,160));
+    if(!body || typeof body!=="object" || Array.isArray(body)) {
+      if(r.ok)throw backendFailure("Railway вернул некорректный ответ: HTTP "+r.status,r);
+      body={};
+    }
+    if (!r.ok) {
+      const message="Railway HTTP " + r.status + " " + String(body.detail || "").slice(0,160);
+      if(r.status>=500 || [408,429].includes(r.status) || body.code==="EIS223_STORAGE_FULL")
+        throw backendFailure(message,r,body);
+      throw new Error(message);
+    }
     return body;
+  }
+  async function flushPendingReport() {
+    if(!pendingReport)return;
+    const saved=pendingReport;
+    await api("/api/v301/bridge/report/"+saved.id,"POST",saved.report);
+    // Do not lease another job until the server acknowledges this report.
+    if(pendingReport===saved)pendingReport=null;
   }
   async function eisHtml(path) {
     await wait(PAUSE_MS);
@@ -625,6 +663,7 @@
       if(result.accepted)log(reg,"Поля карточки ЕИС сохранены:",
                            item.prices.length,"видов цены;",Object.keys(item.fields).length,"полей проверки");
     }catch(e){
+      if(e.backend)throw e;
       log(reg,"не удалось сохранить цену ЕИС:",String(e.message).slice(0,110));
     }
   }
@@ -641,6 +680,7 @@
       if(result.accepted)
         log(reg,"заказчик установлен из ЕИС:",(customer.name||"").slice(0,95));
     }catch(e){
+      if(e.backend)throw e;
       log(reg,"сведения о заказчике пока не сохранены:",String(e.message).slice(0,100));
     }
   }
@@ -710,7 +750,7 @@
           }
           problems.push("Карточка ЕИС не подтвердила точный номер");
         }catch(e){
-          if(e.backoff)throw e;
+          if(e.backoff||e.backend)throw e;
           problems.push("Архивная карточка ЕИС: "+String(e.message).slice(0,100));
         }
       }
@@ -728,7 +768,7 @@
         if(validatedSearchLinks.length)
           log(reg,"найдена действительная ссылка карточки ЕИС");
       }catch(e){
-        if(e.backoff)throw e;
+        if(e.backoff||e.backend)throw e;
         problems.push("поиск ЕИС: "+String(e.message).slice(0,80));
       }
     }
@@ -750,7 +790,7 @@
           ? directLanding : await eisHtml(url.pathname+url.search);
       }
       catch(e){
-        if(e.backoff)throw e;
+        if(e.backoff||e.backend)throw e;
         problems.push(url.pathname+": "+String(e.message).slice(0,75));
         continue;
       }
@@ -780,7 +820,7 @@
           }
           problems.push(u.pathname+" — на странице отсутствуют файлы");
         }catch(e){
-          if(e.backoff)throw e;
+          if(e.backoff||e.backend)throw e;
           problems.push("ссылка вкладки ЕИС: "+String(e.message).slice(0,85));
         }
       }
@@ -943,7 +983,7 @@
         if(await uploadOriginalData(reg,{...item,name:detectedName},downloaded.buffer))
           uploadedNow++;
       }catch(e){
-        if(e.backoff)throw e;
+        if(e.backoff||e.backend)throw e;
         unresolved++;
         log(reg,item.name,"невозможно получить оригинал:",String(e.message).slice(0,170));
       }
@@ -980,7 +1020,7 @@
   }
   async function run() {
     if(!active || busy)return;
-    if(manualBusy || Date.now()<pausedUntil){
+    if(manualBusy || pendingReport || Date.now()<pausedUntil){
       timer=setTimeout(run,Math.max(30000,Math.min(300000,pausedUntil-Date.now())));
       return;
     }
@@ -1022,7 +1062,7 @@
           if(!active)break;
           try{const result=await handleRegistry(n,search);if(result.uploaded>0)added++;}
           catch(e){
-            if(e.backoff)throw e;
+            if(e.backoff||e.backend)throw e;
             failures++;
             lastError=String(e.message).slice(0,230);
             log(n,"не удалось обработать:",lastError);
@@ -1031,12 +1071,12 @@
       }
       if(added===0&&failures>0)status="no_downloadable_originals";
     } catch(e) {
-      status=e.backoff?"rate_limited":"fetch_error";
+      status=e.backend?"backend_unavailable":e.backoff?"rate_limited":"fetch_error";
       lastError=String(e.message).slice(0,230);
-      if(e.backoff)delay=BACKOFF;
+      if(e.backoff){delay=BACKOFF;pausedUntil=Math.max(pausedUntil,Date.now()+BACKOFF);}
+      if(e.backend)delay=e.retryMs;
       log("Ошибка цикла:",lastError);
     } finally {
-      busy=false;
       if(active){
         await heartbeat(status,added,uploaded-downloadedStart,lastError);
         log("Цикл окончен. Новых карточек:",added,"оригиналов:",
@@ -1044,16 +1084,20 @@
           Math.round(delay/60000),"мин.");
         timer=setTimeout(run,delay);
       }
+      busy=false;
     }
   }
   /* Manual searches are always first priority. Poll only Railway's queue,
    * not EIS, every 8s. EIS itself is queried only for a real new job. */
   async function pollManual() {
-    if(!active || busy || manualBusy || Date.now()<pausedUntil)return;
+    if(!active || busy || manualBusy || Date.now()<backendPausedUntil)return;
     manualBusy=true;
     let job=null;
     let report=null;
     try{
+      await flushPendingReport();
+      // EIS cooldown blocks new searches, but not delivery of saved reports.
+      if(Date.now()<pausedUntil)return;
       const next=await api("/api/v301/bridge/next");
       job=next.job;
       if(!job)return;
@@ -1110,7 +1154,10 @@
       }
       if(!report)report={status:"error",detail:"Неизвестный вид задания"};
     }catch(e){
-      if(e.backoff){
+      if(e.backend){
+        report={status:"deferred",defer:Math.ceil(e.retryMs/1000),
+          detail:"Railway временно недоступен. Загрузка продолжится после восстановления хранилища или соединения"};
+      }else if(e.backoff){
         pausedUntil=Date.now()+BACKOFF;
         report={status:"deferred",defer:1200,detail:"ЕИС ограничила запросы. Повтор через 20 минут"};
       }else{
@@ -1119,19 +1166,23 @@
       log("Самостоятельный поиск",job?.target||"",String(e.message||e).slice(0,170));
     }finally{
       if(job){
-        try{
-          await api("/api/v301/bridge/report/"+job.id,"POST",report||
-            {status:"error",detail:"Загрузка прервана"});
-        }catch(e){log("Отчёт о самостоятельном поиске не отправлен",e.message);}
+        pendingReport={id:job.id,report:report||
+          {status:"error",detail:"Загрузка прервана"}};
+        // During a known outage keep the result in memory and retry it first
+        // after the cooldown. Never replace a successful result with partial.
+        if(active && Date.now()>=backendPausedUntil){
+          try{await flushPendingReport();}
+          catch(e){log("Отчёт сохранён для повторной отправки",e.message);}
+        }
       }
       manualBusy=false;
     }
   }
   manualTimer=setInterval(pollManual,8000);
-  pollManual();
   log("Старт. Приоритетный поиск по номеру и ИНН опрашивает Railway каждые 8 секунд.");
   log("Фоновый поиск ЕИС: одна страница каждые 5 минут, до двух закупок.");
   log("Не закрывай вкладку; остановка: __eis223_five_minutes.stop()");
   await heartbeat("collector_started",0,0);
+  pollManual();
   run();
 })();
