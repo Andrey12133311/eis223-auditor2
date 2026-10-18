@@ -122,13 +122,54 @@ class VpsOnlyIntakeTests(unittest.TestCase):
         claimed = server.claim(self.ns, identity, 2)
         self.assertEqual({job['id'] for job in claimed}, {browser['id'], running['id']})
 
-    def test_old_inn_search_gets_explicit_outcome_without_deleting_history(self):
+    def test_old_inn_search_is_restored_without_resurrecting_other_errors(self):
         previous, _ = jobs._enqueue(self.ns, 'inn', '1234567890')
-        policy.release_browser_leases(self.ns)
+        other, _ = jobs._enqueue(self.ns, 'inn', '9876543210')
         with self.ns['conn']() as db:
-            result = db.execute('SELECT status,detail,target FROM v301_search_jobs WHERE id=?',
+            db.execute("UPDATE v301_search_jobs SET status='error',attempts=4,detail=? WHERE id=?",
+                       ('В режиме VPS укажите номер закупки ЕИС.', previous['id']))
+            db.execute("UPDATE v301_search_jobs SET status='error',detail='eis_http_403' WHERE id=?",
+                       (other['id'],))
+        self.assertEqual(policy.release_browser_leases(self.ns), 1)
+        self.assertEqual(policy.release_browser_leases(self.ns), 0)
+        with self.ns['conn']() as db:
+            result = db.execute('SELECT status,attempts,target FROM v301_search_jobs WHERE id=?',
                                 (previous['id'],)).fetchone()
-        self.assertEqual(result, ('error', 'В режиме VPS укажите номер закупки ЕИС.', '1234567890'))
+            untouched = db.execute('SELECT status,detail FROM v301_search_jobs WHERE id=?',
+                                   (other['id'],)).fetchone()
+        self.assertEqual(result, ('queued', 0, '1234567890'))
+        self.assertEqual(untouched, ('error', 'eis_http_403'))
+
+    def test_inn_restore_deduplicates_active_search_and_releases_browser_lease(self):
+        previous, _ = jobs._enqueue(self.ns, 'inn', '1234567890')
+        with self.ns['conn']() as db:
+            db.execute("UPDATE v301_search_jobs SET status='error',detail=? WHERE id=?",
+                       ('В режиме VPS укажите номер закупки ЕИС.', previous['id']))
+        pending, _ = jobs._enqueue(self.ns, 'inn', '1234567890')
+        claimed = jobs._claim(self.ns, 378)
+        self.assertEqual(claimed['id'], pending['id'])
+        self.assertEqual(policy.release_browser_leases(self.ns), 1)
+        self.assertEqual(policy.release_browser_leases(self.ns), 0)
+        with self.ns['conn']() as db:
+            active = db.execute("SELECT id FROM v301_search_jobs WHERE kind='inn' AND status='queued'").fetchall()
+        self.assertEqual(active, [(pending['id'],)])
+
+    def test_inn_results_ignore_conflicting_legacy_search_associations(self):
+        with self.ns['conn']() as db:
+            db.execute('''CREATE TABLE purchases(reg_number TEXT,title TEXT,customer TEXT,
+              price TEXT,price_num REAL,violations INTEGER,documents_checked INTEGER,
+              documents_found INTEGER,customer_inn TEXT,last_seen TEXT)''')
+            db.executemany('INSERT INTO purchases VALUES(?,?,?,?,?,?,?,?,?,?)', [
+                (REG, '', '', '', 0, 0, 0, 0, '1234567890', '2026-10-18'),
+                ('32610000001', '', '', '', 0, 0, 0, 0, '9876543210', '2026-10-18'),
+                ('32610000002', '', '', '', 0, 0, 0, 0, '', '2026-10-18'),
+            ])
+            db.executemany('INSERT INTO v301_inn_purchases VALUES(?,?,?)', [
+                ('1234567890', '32610000001', '2026-10-18'),
+                ('1234567890', '32610000002', '2026-10-18'),
+            ])
+        found = jobs._local_results(self.ns, 'inn', '1234567890')
+        self.assertEqual([item['reg_number'] for item in found], [REG])
 
 
 if __name__ == '__main__':

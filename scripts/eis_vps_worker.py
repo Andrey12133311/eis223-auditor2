@@ -31,7 +31,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 ENDPOINT = "https://int.zakupki.gov.ru/eis-integration/services/getDocsIP"
 SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 API_NS = "http://zakupki.gov.ru/fz44/get-docs-ip/ws"
@@ -39,6 +39,7 @@ MAX_ZIP = 15 * 1024 * 1024
 MAX_FILE = 25 * 1024 * 1024
 MAX_XML = 2 * 1024 * 1024
 REG = re.compile(r"[0-9]{11,20}\Z")
+INN = re.compile(r"(?:[0-9]{10}|[0-9]{12})\Z")
 UID = re.compile(r"[0-9A-F]{32}\Z")
 STOP = False
 SEARCH_URL = "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?" + urllib.parse.urlencode({
@@ -48,40 +49,164 @@ SEARCH_URL = "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?" + u
 
 
 class RegistryLinks(HTMLParser):
+    """Bounded discovery from official notice links, never buyer association."""
+    VOID = frozenset(("area", "base", "br", "col", "embed", "hr", "img", "input",
+                      "link", "meta", "param", "source", "track", "wbr"))
+    ROW_CLASSES = frozenset(("search-registry-entry-block", "registry-entry",
+                             "registry-entry__form", "search-registry-entry-block__form"))
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.numbers = []
+        self.numbers, self.controls, self.visible, self.links = [], [], [], []
+        self.stack, self.anchor, self.row = [], None, None
+        self.node_count = 0
 
-    def handle_starttag(self, tag, attrs):
-        if tag != "a":
-            return
-        href = dict(attrs).get("href", "")
+    def add_number(self, value):
+        if re.fullmatch(r"3[0-9]{10}", value) and value not in self.numbers and len(self.numbers) < 40:
+            self.numbers.append(value)
+
+    def notice_url(self, href):
         try:
             url = urllib.parse.urljoin(SEARCH_URL, href)
             official_url(url)
             parsed = urllib.parse.urlsplit(url)
-            if "223" not in parsed.path:
-                return
-            numbers = urllib.parse.parse_qs(parsed.query).get("regNumber", [])
-            if len(numbers) == 1 and re.fullmatch(r"3[0-9]{10}", numbers[0]):
-                if numbers[0] not in self.numbers and len(self.numbers) < 40:
-                    self.numbers.append(numbers[0])
+            if not re.fullmatch(r"/(?:223/purchase/public/purchase/info|epz/order/notice/notice223)/(?:common-?info|documents)\.html", parsed.path):
+                return None
+            params = urllib.parse.parse_qs(parsed.query)
+            if not any(len(params.get(key, [])) == 1 and re.fullmatch(r"[0-9]+", params[key][0])
+                       for key in ("regNumber", "noticeId", "noticeInfoId")):
+                return None
+            return url
         except (WorkerError, ValueError):
-            pass
+            return None
+
+    def handle_starttag(self, tag, attrs):
+        self.node_count += 1
+        if self.node_count > 100000 or len(self.stack) > 100:
+            raise WorkerError("eis_search_markup_limit")
+        attrs = dict(attrs)
+        ignored = (bool(self.stack and self.stack[-1][1]) or tag in ("script", "style", "template")
+                   or "hidden" in attrs or attrs.get("aria-hidden") == "true"
+                   or bool(re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", attrs.get("style", ""), re.I)))
+        if tag == "input" and attrs.get("name") == "customerInn":
+            self.controls.append(attrs.get("value", "").strip())
+        if tag not in self.VOID:
+            self.stack.append((tag, ignored))
+        if ignored:
+            return
+        if self.row is None and (set(attrs.get("class", "").split()) & self.ROW_CLASSES):
+            self.row = {"depth": len(self.stack), "text": [], "notice_link": False}
+        if tag == "a":
+            href = attrs.get("href", "")
+            self.links.append(href)
+            url = self.notice_url(href)
+            if url:
+                self.anchor = {"depth": len(self.stack), "text": [], "url": url}
+                if self.row is not None:
+                    self.row["notice_link"] = True
+                values = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("regNumber", [])
+                if len(values) == 1:
+                    self.add_number(values[0])
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self.VOID:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data):
+        if self.stack and self.stack[-1][1]:
+            return
+        self.visible.append(data)
+        if self.anchor is not None:
+            self.anchor["text"].append(data)
+        if self.row is not None:
+            self.row["text"].append(data)
+
+    def handle_endtag(self, tag):
+        index = next((i for i in range(len(self.stack)-1, -1, -1) if self.stack[i][0] == tag), None)
+        if index is None:
+            return
+        if self.anchor is not None and self.anchor["depth"] > index:
+            text = " ".join(self.anchor["text"])
+            if len(text) <= 300:
+                found = set(re.findall(r"(?<![0-9])(3[0-9]{10})(?![0-9])", text))
+                if len(found) == 1:
+                    self.add_number(found.pop())
+            self.anchor = None
+        if self.row is not None and self.row["depth"] > index:
+            text = " ".join(self.row["text"])
+            found = set(re.findall(r"(?<![0-9])(3[0-9]{10})(?![0-9])", text))
+            if self.row["notice_link"] and len(found) == 1:
+                self.add_number(found.pop())
+            self.row = None
+        del self.stack[index:]
 
 
-def discovery_numbers(data):
+def search_parser(data):
     if len(data) > 6 * 1024 * 1024:
         raise WorkerError("search_response_size_limit", 1200)
     text = data.decode("utf-8", errors="replace")
-    beginning = text[:10000].casefold()
-    if any(word in beginning for word in ("captcha", "доступ временно ограничен", "подтвердите, что вы не робот")):
-        raise WorkerError("eis_search_browser_challenge", 1200)
     parser = RegistryLinks()
     parser.feed(text)
+    parser.close()
+    visible = " ".join(" ".join(parser.visible).split()).casefold()
+    if (any(word in visible for word in ("captcha", "доступ временно ограничен",
+                                       "подтвердите, что вы не робот", "verify you are human"))
+            or not parser.numbers and "captcha" in text[:10000].casefold()):
+        raise WorkerError("eis_search_browser_challenge", 1200)
+    return parser
+
+
+def discovery_numbers(data):
+    parser = search_parser(data)
     if not parser.numbers:
         raise WorkerError("eis_search_no_verified_links", 1200)
     return parser.numbers
+
+
+def inn_search_url(inn, page):
+    if not isinstance(inn, str) or not INN.fullmatch(inn) or type(page) is not int or not 1 <= page <= 10:
+        raise WorkerError("invalid_inn_job")
+    return "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?" + urllib.parse.urlencode({
+        "searchString": "", "morphology": "on", "openMode": "USE_DEFAULT_PARAMS",
+        "pageNumber": page, "sortDirection": "false", "recordsPerPage": "_20",
+        "showLotsInfoHidden": "false", "fz223": "on", "af": "on", "ca": "on",
+        "pc": "on", "pa": "on", "customerInn": inn, "sortBy": "UPDATE_DATE",
+        "currencyIdGeneral": "-1"})
+
+
+def inn_candidates(data, inn, page, source_url):
+    # Request controls confirm the page, not the buyer identity of its entries.
+    inn_search_url(inn, page)
+    parsed = urllib.parse.urlsplit(official_url(source_url))
+    params = urllib.parse.parse_qs(parsed.query)
+    if (parsed.hostname != "zakupki.gov.ru" or parsed.path != "/epz/order/extendedsearch/results.html"
+            or params.get("customerInn") != [inn] or params.get("fz223") != ["on"]
+            or params.get("pageNumber") != [str(page)]):
+        raise WorkerError("eis_inn_search_url_mismatch")
+    parser = search_parser(data)
+    if any(value and value != inn for value in parser.controls):
+        raise WorkerError("eis_inn_filter_mismatch")
+    numbers = parser.numbers[:20]
+    has_more = len(parser.numbers) >= 20
+    for href in parser.links:
+        try:
+            link = urllib.parse.urlsplit(official_url(urllib.parse.urljoin(source_url, href)))
+            query = urllib.parse.parse_qs(link.query)
+            if (link.path == parsed.path and query.get("customerInn") == [inn]
+                    and query.get("pageNumber") == [str(page + 1)]):
+                has_more = True
+        except (WorkerError, ValueError):
+            continue
+    if numbers:
+        return numbers, has_more
+    visible = " ".join(" ".join(parser.visible).split()).casefold()
+    explicit_zero = any(text in visible for text in (
+        "по вашему запросу ничего не найдено", "по заданным параметрам ничего не найдено",
+        "по указанным параметрам ничего не найдено", "по вашему запросу не найдено записей"))
+    if inn not in parser.controls or not explicit_zero or has_more:
+        raise WorkerError("eis_inn_search_unrecognized_empty")
+    return [], False
 
 
 class WorkerError(Exception):
@@ -380,6 +505,18 @@ class State:
         self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (name, str(value)))
         self.db.commit()
 
+    def take_search_slot(self):
+        now = time.time()
+        allowed_at = float(self.get("search_not_before", "0"))
+        if now < allowed_at:
+            raise WorkerError("eis_search_cooldown", max(1, int(allowed_at - now + 1)))
+        # Commit before the request so crashes/restarts cannot duplicate a page fetch.
+        self.set("search_not_before", now + 300)
+
+    def defer_search(self, seconds):
+        self.set("search_not_before", max(float(self.get("search_not_before", "0")),
+                                         time.time() + max(300, seconds)))
+
     def pending_reports(self):
         return [(row[0], json.loads(row[1])) for row in self.db.execute("SELECT job_id,payload FROM reports")]
 
@@ -529,7 +666,7 @@ class Worker:
         if not force and time.monotonic() - self.last_heartbeat < 60:
             return
         body = {"worker_id": self.worker_id, "version": VERSION,
-                "status": "working" if job else "idle",
+                "status": "working" if job else "idle", "capabilities": ["inn_search"],
                 "discovery_status": self.discovery_status, "discovery_error": self.discovery_error}
         if job:
             body.update(current_job_id=job["id"], lease_token=job["lease_token"])
@@ -539,6 +676,12 @@ class Worker:
     def discover(self):
         if float(self.state.get("discovery_backoff_until", "0")) > time.time():
             return
+        try:
+            self.state.take_search_slot()
+        except WorkerError as exc:
+            if exc.code == "eis_search_cooldown":
+                return
+            raise
         try:
             raw = self.http.request(SEARCH_URL, eis=True, limit=6 * 1024 * 1024, send_token=False)
             numbers = discovery_numbers(raw)
@@ -550,6 +693,7 @@ class Worker:
         except WorkerError as exc:
             self.discovery_status = "blocked" if exc.retry_after >= 1200 else "error"
             self.discovery_error = exc.code
+            self.state.defer_search(exc.retry_after)
             self.state.set("discovery_backoff_until", time.time() + max(300, exc.retry_after))
             log("discovery_error", code=exc.code)
         self.state.set("discovery_status", self.discovery_status)
@@ -558,7 +702,9 @@ class Worker:
     def retry_reports(self):
         for job_id, payload in self.state.pending_reports():
             try:
-                result = self.http.site("/api/eis-worker/jobs/" + urllib.parse.quote(job_id, safe="") + "/report", payload)
+                kind = "inn" if payload.get("kind") == "inn" else "reg"
+                collection = "inn-jobs" if kind == "inn" else "jobs"
+                result = self.http.site("/api/eis-worker/" + collection + "/" + urllib.parse.quote(job_id, safe="") + "/report", payload)
                 if result.get("received") is not True:
                     raise WorkerError("site_report_not_accepted")
             except WorkerError as exc:
@@ -570,11 +716,17 @@ class Worker:
                 raise
             self.state.remove_report(job_id)
             accepted_status = result.get("status")
-            if accepted_status not in ("done", "queued", "partial"):
+            if accepted_status not in ("done", "queued", "partial", "error"):
                 accepted_status = "unknown"
-            log("report_ack", reg_number=payload["reg_number"], status=accepted_status,
-                download_complete=result.get("download_complete") is True,
-                audit_complete=False)
+            if payload.get("kind") == "inn":
+                log("inn_report_ack", inn=payload["inn"], page=payload["page"], status=accepted_status,
+                    search_complete=result.get("search_complete") is True,
+                    candidate_count=result.get("candidate_count", 0),
+                    pagination_limited=result.get("pagination_limited") is True, audit_complete=False)
+            else:
+                log("report_ack", reg_number=payload["reg_number"], status=accepted_status,
+                    download_complete=result.get("download_complete") is True,
+                    audit_complete=False)
 
     def get_file(self, reg, identity, url, limit):
         key = cache_key(reg, identity, url)
@@ -583,6 +735,31 @@ class Worker:
             data = self.http.download(official_url(url), limit)
             self.state.cache(key, data)
         return key, data
+
+    def process_inn(self, job):
+        inn, page = str(job.get("target") or job.get("inn") or ""), job.get("page")
+        url = inn_search_url(inn, page)
+        if not job.get("id") or not job.get("lease_token"):
+            raise WorkerError("invalid_inn_job")
+        report = {"kind": "inn", "worker_id": self.worker_id, "lease_token": job["lease_token"],
+                  "inn": inn, "page": page, "status": "error", "reg_numbers": [],
+                  "has_more": False, "source_url": "", "error_code": "", "retry_after_seconds": 300}
+        try:
+            self.heartbeat(job, force=True)
+            self.state.take_search_slot()
+            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
+            source_url = getattr(self.http, "last_response_url", url)
+            numbers, more = inn_candidates(raw, inn, page, source_url)
+            report.update(status="completed" if numbers else "no_data", reg_numbers=numbers,
+                          has_more=more, source_url=source_url, retry_after_seconds=0)
+            self.discovery_status, self.discovery_error = "ok", ""
+        except WorkerError as exc:
+            report.update(error_code=exc.code, retry_after_seconds=exc.retry_after)
+            if exc.code != "eis_search_cooldown":
+                self.state.defer_search(exc.retry_after)
+                self.discovery_status = "blocked" if exc.retry_after >= 1200 else "error"
+                self.discovery_error = exc.code
+        return report
 
     def process(self, job):
         reg = str(job.get("reg_number", ""))
@@ -682,25 +859,33 @@ class Worker:
             self.heartbeat(force=True)
             return
         self.heartbeat(force=True)
-        self.discover()
         result = self.http.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(
-            {"limit": 2, "worker_id": self.worker_id}))
+            {"limit": 2, "worker_id": self.worker_id, "capabilities": "inn_search"}))
         jobs = result.get("jobs", [])
-        if not isinstance(jobs, list) or len(jobs) > 2:
+        if (not isinstance(jobs, list) or len(jobs) > 2
+                or sum(j.get("kind") == "inn" for j in jobs) > 1):
             raise WorkerError("invalid_jobs_response")
         for job in jobs:
             if STOP:
                 break
-            report = self.process(job)
+            is_inn = job.get("kind") == "inn"
+            report = self.process_inn(job) if is_inn else self.process(job)
             self.state.save_report(job["id"], report)
-            log("delivery_attempt", reg_number=report["reg_number"], requested_status=report["status"],
-                archives=report["archives_uploaded"], originals=report["originals_uploaded"],
-                error_code=report["error_code"])
-            if global_backoff(report["error_code"]):
+            if is_inn:
+                log("inn_search_attempt", inn=report["inn"], page=report["page"],
+                    requested_status=report["status"], candidates=len(report["reg_numbers"]),
+                    buyer_verified=False, error_code=report["error_code"])
+            else:
+                log("delivery_attempt", reg_number=report["reg_number"], requested_status=report["status"],
+                    archives=report["archives_uploaded"], originals=report["originals_uploaded"],
+                    error_code=report["error_code"])
+            if not is_inn and global_backoff(report["error_code"]):
                 self.state.set("backoff_until", time.time() + report["retry_after_seconds"])
             self.retry_reports()
             if float(self.state.get("backoff_until", "0")) > time.time():
                 break
+        if not STOP and float(self.state.get("backoff_until", "0")) <= time.time():
+            self.discover()
         self.heartbeat(force=True)
 
 

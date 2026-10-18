@@ -1,4 +1,4 @@
-"""One offline contract test of VPS -> real site queue -> persisted originals.
+"""Offline contracts of VPS -> real site queue -> persisted originals/buyer facts.
 
 All EIS XML, archives, tokens and original files below are SYNTHETIC fixtures.
 No user document or credential is included and no external request is made.
@@ -31,6 +31,7 @@ import eis_vps_only as intake_policy
 import eis_vps_worker as worker
 import v294_eis_bridge as archives
 import v295_eis_originals as originals
+import v298_eis_only as offline
 import v301_search_jobs as jobs
 
 
@@ -50,7 +51,7 @@ ORIGINAL_BYTES = tuple(
 )
 
 
-def synthetic_zip():
+def synthetic_zip(reg=REG, buyer_inn=None):
     """Official 16.3 envelope shape, but deliberately invented fixture data."""
     kind = "purchaseNoticeKESMBO"
     q = lambda name: "{" + PURCHASE_NS + "}" + name
@@ -58,10 +59,14 @@ def synthetic_zip():
     body = ET.SubElement(root, q("body"))
     item = ET.SubElement(body, q("item"))
     data = ET.SubElement(item, q(kind + "Data"))
-    for name, value in (("registrationNumber", REG), ("version", "1"),
+    for name, value in (("registrationNumber", reg), ("version", "1"),
                         ("publicationDateTime", "2026-10-18T10:00:00+03:00"),
                         ("name", "Synthetic integration fixture; not a real procurement")):
         ET.SubElement(data, q(name)).text = value
+    if buyer_inn:
+        buyer = ET.SubElement(ET.SubElement(data, q("customer")), q("mainInfo"))
+        ET.SubElement(buyer, q("fullName")).text = "Общество с ограниченной ответственностью «Синтетический заказчик»"
+        ET.SubElement(buyer, q("inn")).text = buyer_inn
     attachments = ET.SubElement(data, q("attachments"))
     for index, url in enumerate(ORIGINAL_URLS, start=1):
         document = ET.SubElement(attachments, q("document"))
@@ -70,7 +75,7 @@ def synthetic_zip():
             ET.SubElement(document, q(name)).text = value
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(f"{kind}_{REG}_1_synthetic.xml",
+        archive.writestr(f"{kind}_{reg}_1_synthetic.xml",
                          ET.tostring(root, encoding="utf-8", xml_declaration=True))
     return stream.getvalue()
 
@@ -150,7 +155,154 @@ class InProcessTransport(worker.Transport):
         self.last_file_at = 0.0
 
 
+class SyntheticInnEisOpener:
+    """A search intentionally includes one procurement belonging to another buyer."""
+    def __init__(self, testcase, inn, buyers):
+        self.testcase = testcase
+        self.inn = inn
+        self.buyers = buyers
+        self.soap_registries = []
+        self.archives = {
+            f"https://int.zakupki.gov.ru/dstore/ip/download/RI223/synthetic-{reg}.zip":
+                synthetic_zip(reg, buyer_inn)
+            for reg, buyer_inn in buyers.items()
+        }
+
+    def open(self, request, timeout):
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.testcase.assertNotIn("x-eis223-upload-token", headers)
+        if request.full_url == worker.inn_search_url(self.inn, 1):
+            self.testcase.assertNotIn("individualperson_token", headers)
+            links = "".join(
+                f'<a href="/epz/order/notice/notice223/common-info.html?regNumber={reg}">№ {reg}</a>'
+                for reg in self.buyers
+            )
+            html = f'<html><body><input name="customerInn" value="{self.inn}">{links}</body></html>'
+            return MemoryResponse(html.encode(), {"Content-Type": "text/html"}, request.full_url)
+        self.testcase.assertEqual(headers["individualperson_token"], EIS_TOKEN)
+        if request.full_url == worker.ENDPOINT:
+            envelope = ET.fromstring(request.data)
+            operation = envelope.find("{" + worker.SOAP_NS + "}Body")[0]
+            reg = operation.findtext("selectionParams/reestrNumber")
+            self.testcase.assertIn(reg, self.buyers)
+            self.testcase.assertEqual(operation.findtext("selectionParams/subsystemType"), "RI223")
+            self.soap_registries.append(reg)
+            archive_url = f"https://int.zakupki.gov.ru/dstore/ip/download/RI223/synthetic-{reg}.zip"
+            raw = (f'<soap:Envelope xmlns:soap="{worker.SOAP_NS}"><soap:Body>'
+                   f'<ws:getDocsByReestrNumberResponse xmlns:ws="{worker.API_NS}">'
+                   f'<dataInfo><archiveUrl>{archive_url}</archiveUrl></dataInfo>'
+                   '</ws:getDocsByReestrNumberResponse></soap:Body></soap:Envelope>').encode()
+            return MemoryResponse(raw, {"Content-Type": "text/xml"}, request.full_url)
+        if request.full_url in self.archives:
+            return MemoryResponse(self.archives[request.full_url], {"Content-Type": "application/zip"}, request.full_url)
+        self.testcase.assertIn(request.full_url, ORIGINAL_URLS)
+        return MemoryResponse(ORIGINAL_BYTES[ORIGINAL_URLS.index(request.full_url)], url=request.full_url)
+
+
 class VpsPipelineIntegrationTest(unittest.TestCase):
+    def test_inn_candidates_need_soap_buyer_proof_and_old_worker_claims_only_regs(self):
+        target_inn, other_inn = "9900000017", "9900000024"
+        other_reg = "32616233662"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = {"EIS223_DATA_DIR": str(root / "data"), "EIS223_UPLOAD_TOKEN": SITE_TOKEN,
+                   "EIS223_SOURCE_MODE": "OFFICIAL_EIS_VPS_ONLY"}
+            with patch.dict(os.environ, env):
+                db_path = root / "site.sqlite3"
+
+                def connect():
+                    db = sqlite3.connect(db_path, timeout=2)
+                    db.row_factory = sqlite3.Row
+                    return db
+
+                with connect() as db:
+                    db.executescript("""
+                        CREATE TABLE purchases(reg_number TEXT PRIMARY KEY, title TEXT,
+                          customer TEXT, customer_inn TEXT, price TEXT, price_num REAL,
+                          violations INTEGER DEFAULT 0, documents_checked INTEGER DEFAULT 0,
+                          documents_found INTEGER DEFAULT 0, last_seen TEXT, card_fields_json TEXT,
+                          source TEXT, card_source_status TEXT);
+                        CREATE TABLE v313_migrations(marker TEXT PRIMARY KEY, migrated_at TEXT NOT NULL);
+                        INSERT INTO v313_migrations VALUES('repair_404_noticeId','synthetic-test');
+                    """)
+                    db.execute("INSERT INTO purchases(reg_number,title) VALUES(?,?)",
+                               (other_reg, "Synthetic candidate without buyer evidence"))
+                ns = {"app": FastAPI(), "conn": connect}
+                archives.install(ns)
+                originals.install(ns)
+                offline.install(ns)
+                jobs.install(ns)
+                server.install(ns)
+                intake_policy.install(ns)
+                # An old mapping must not turn an unverified candidate into an INN result.
+                with connect() as db:
+                    db.execute("INSERT INTO v301_inn_purchases(inn,reg,found_at) VALUES(?,?,?)",
+                               (target_inn, other_reg, "synthetic-stale-mapping"))
+                eis = SyntheticInnEisOpener(self, target_inn, {REG: target_inn, other_reg: other_inn})
+                config = {"site_url": SITE, "site_token": SITE_TOKEN, "eis_token": EIS_TOKEN,
+                          "timeout_seconds": 10, "interval_seconds": 300}
+                state = worker.State(root / "worker-state")
+                try:
+                    with TestClient(ns["app"]) as client:
+                        transport = InProcessTransport(config, client, eis)
+                        runner = worker.Worker(config, state, transport=transport)
+                        submitted = client.post("/api/v301/search", json={"kind": "inn", "value": target_inn})
+                        self.assertEqual(submitted.status_code, 200, submitted.text)
+                        search_id = submitted.json()["id"]
+                        self.assertEqual(submitted.json()["existing"], [])
+
+                        query = {"limit": 2, "worker_id": state.worker_id}
+                        legacy = transport.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(query))
+                        self.assertEqual(legacy["jobs"], [], "Worker 1.0.1 must never receive an INN job")
+                        capable = transport.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(
+                            {**query, "capabilities": "inn_search"}))
+                        self.assertEqual([j["kind"] for j in capable["jobs"]], ["inn"])
+                        report = runner.process_inn(capable["jobs"][0])
+                        self.assertEqual(report["status"], "completed", report)
+                        self.assertEqual(set(report["reg_numbers"]), {REG, other_reg})
+                        self.assertEqual(eis.soap_registries, [], "Search must not masquerade as SOAP proof")
+                        state.save_report(search_id, report)
+                        runner.retry_reports()
+                        self.assertEqual(state.pending_reports(), [])
+
+                        candidate_status = client.get("/api/v301/job/" + search_id).json()
+                        self.assertEqual(candidate_status["candidate_count"], 2)
+                        self.assertEqual(candidate_status["verification_pending"], 2)
+                        self.assertEqual(candidate_status["verified_matches"], 0)
+                        self.assertEqual(candidate_status["existing"], [])
+                        with connect() as db:
+                            self.assertEqual(db.execute("SELECT COUNT(*) FROM v301_inn_purchases").fetchone()[0], 1)
+                            self.assertEqual(db.execute("SELECT COUNT(*) FROM v319_manual_inputs").fetchone()[0], 0)
+
+                        # Another higher-priority INN request remains invisible to an old worker.
+                        repeated = client.post("/api/v301/search", json={"kind": "inn", "value": target_inn})
+                        self.assertNotEqual(repeated.json()["id"], search_id)
+                        downloaded = transport.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(query))
+                        self.assertEqual({j["reg_number"] for j in downloaded["jobs"]}, {REG, other_reg})
+                        self.assertTrue(all(j["kind"] == "reg" for j in downloaded["jobs"]))
+                        for job in downloaded["jobs"]:
+                            delivery = runner.process(job)
+                            self.assertEqual(delivery["status"], "completed", delivery)
+                            state.save_report(job["id"], delivery)
+                            runner.retry_reports()
+                            for url in ORIGINAL_URLS:
+                                self.assertIsNotNone(originals.saved_document(job["reg_number"], originals.uid_from_url(url)))
+
+                        result = client.get("/api/v301/job/" + search_id).json()
+                        self.assertEqual([r["reg_number"] for r in result["existing"]], [REG])
+                        self.assertEqual(result["verified_matches"], 1)
+                        self.assertEqual(result["excluded_candidates"], 1)
+                        self.assertEqual(result["verification_pending"], 0)
+                        self.assertEqual(result["queued_downloads"], 0)
+                        self.assertEqual(set(eis.soap_registries), {REG, other_reg})
+                        with connect() as db:
+                            buyers = dict(db.execute("SELECT reg_number,customer_inn FROM purchases"))
+                            self.assertEqual(buyers, {REG: target_inn, other_reg: other_inn})
+                            self.assertEqual(db.execute("SELECT SUM(documents_checked),SUM(violations) FROM purchases").fetchone()[:], (0, 0))
+                            self.assertEqual(db.execute("SELECT COUNT(*) FROM v319_manual_inputs").fetchone()[0], 0)
+                finally:
+                    state.db.close()
+
     def test_real_queue_partial_resume_duplicate_and_delivery_are_not_audit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

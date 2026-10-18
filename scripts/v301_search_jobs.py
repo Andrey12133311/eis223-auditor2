@@ -1,7 +1,6 @@
-"""Persistent manual 223-FZ search queue for an EIS-origin browser bridge.
+"""Persistent 223-FZ search queue; deployed EIS retrieval runs on the VPS.
 
-Only the browser at zakupki.gov.ru contacts EIS. Server checks validated original
-bytes locally and never fabricates documents, searches or violation counts.
+The site validates delivered original bytes and performs local checks.
 """
 from __future__ import annotations
 import asyncio
@@ -124,6 +123,13 @@ def _local_results(ns,kind,target):
             rows=db.execute(
                 "SELECT reg_number,title,customer,price,price_num,violations,documents_checked,documents_found "
                 "FROM purchases WHERE reg_number=?",(target,)).fetchall()
+        elif os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY":
+            # Search-page candidates and legacy associations are not evidence
+            # of the buyer. Official XML intake supplies customer_inn.
+            rows=db.execute(
+                "SELECT p.reg_number,p.title,p.customer,p.price,p.price_num,p.violations,p.documents_checked,p.documents_found "
+                "FROM purchases p WHERE p.customer_inn=? ORDER BY p.last_seen DESC LIMIT 250",
+                (target,)).fetchall()
         else:
             rows=db.execute(
                 "SELECT DISTINCT p.reg_number,p.title,p.customer,p.price,p.price_num,p.violations,p.documents_checked,p.documents_found "
@@ -349,6 +355,7 @@ def _bridge(ns):
                 "intake_mode":"vps_only" if vps_only else "server_and_browser",
                 "server_last_seen":server.get("last_seen"),
                 "server_status":server.get("status"),
+                "inn_search_available":server.get("inn_search_available",False),
                 "discovery_status":server.get("discovery_status"),
                 "last_seen":max(row["seen_at"] if row and not vps_only else 0,
                                 server.get("last_seen") or 0) or None,
@@ -378,8 +385,6 @@ def install(ns):
         if kind=="reg":
             if not REG.fullmatch(value):raise HTTPException(422,"Номер закупки 223-ФЗ должен содержать 11 цифр и начинаться с 3")
         elif kind=="inn":
-            if os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY":
-                raise HTTPException(422,"В режиме VPS укажите номер закупки ЕИС.")
             if not INN.fullmatch(value):raise HTTPException(422,"ИНН должен содержать 10 или 12 цифр")
         else:raise HTTPException(422,"Выберите поиск по номеру или ИНН")
         prior=await asyncio.to_thread(_local_results,ns,kind,value)
@@ -433,12 +438,17 @@ def install(ns):
         finally:db.close()
         existing=await asyncio.to_thread(_local_results,ns,job["kind"],job["target"])
         audit=None
+        search_progress={}
         if job["kind"]=="reg":
             from v257_features import manual_progress
             checked=int(existing[0].get("documents_checked") or 0) if existing else 0
             audit=await asyncio.to_thread(manual_progress,job["target"],checked,job["status"])
+        elif os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY":
+            from eis_server_worker import inn_progress
+            search_progress=await asyncio.to_thread(inn_progress,ns,job_id)
         return {"job":{k:v for k,v in job.items() if k not in ("lease_until","lease_owner","lease_token")},
                 "existing":existing[:100],"total_existing":len(existing),
+                **search_progress,
                 "audit":audit,"bridge":await asyncio.to_thread(_bridge,ns)}
 
     @app.get("/api/v301/bridge/status")

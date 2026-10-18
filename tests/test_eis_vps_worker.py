@@ -16,6 +16,7 @@ from unittest.mock import patch
 from scripts import eis_vps_worker as w
 
 REG = '32616233661'
+INN = '6501309746'
 TOKEN = 'fixture-eis-secret'
 UID = 'A' * 32
 URL = 'https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid=' + UID
@@ -44,6 +45,7 @@ class FakeTransport:
         self.fail_discovery = False
         self.unresolved = 0
         self.jobs = []
+        self.search_html = None
         self.last_response_url = w.SEARCH_URL
 
     def site(self, path, data=None, method=None):
@@ -54,6 +56,9 @@ class FakeTransport:
         if path.endswith('/report'):
             if self.fail_report:
                 raise w.WorkerError('site_connection_error')
+            if '/inn-jobs/' in path:
+                return {'received': True, 'status': 'done', 'search_complete': True,
+                        'candidate_count': len(data.get('reg_numbers', []))}
             return {'received': True, 'status': 'done' if self.received else 'queued', 'download_complete': self.received}
         if path.startswith('/api/eis-worker/jobs/next'):
             jobs, self.jobs = self.jobs, []
@@ -80,9 +85,10 @@ class FakeTransport:
 
     def request(self, url, **kwargs):
         self.calls.append(('request', url))
+        self.last_response_url = url
         if self.fail_discovery:
             raise w.WorkerError('eis_http_403', 1200)
-        return b'<a href="/epz/order/notice/notice223/common-info.html?regNumber=32616233661">Link</a>'
+        return self.search_html or b'<a href="/epz/order/notice/notice223/common-info.html?regNumber=32616233661">Link</a>'
 
 
 class MultiOriginalTransport(FakeTransport):
@@ -377,6 +383,141 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(w.discovery_numbers(html), [REG])
         with self.assertRaises(w.WorkerError):
             w.discovery_numbers(b'<p>captcha</p>')
+
+    def inn_job(self, page=1):
+        return {'id': 'inn-job-1', 'kind': 'inn', 'target': INN,
+                'page': page, 'lease_token': 'inn-lease-fixture'}
+
+    def test_inn_query_uses_customer_filter_and_bounded_ten_page_protocol(self):
+        url = w.inn_search_url(INN, 10)
+        values = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query, keep_blank_values=True)
+        self.assertEqual(values['customerInn'], [INN])
+        self.assertEqual(values['searchString'], [''])
+        self.assertEqual(values['recordsPerPage'], ['_20'])
+        self.assertEqual(values['pageNumber'], ['10'])
+        for page in (0, 11, True, '1'):
+            with self.subTest(page=page), self.assertRaises(w.WorkerError):
+                w.inn_search_url(INN, page)
+
+    def test_inn_candidates_accept_visible_notice_ids_not_arbitrary_digits(self):
+        html = (f'<input name="customerInn" value="{INN}"><p>39999999999</p>'
+                '<a href="https://evil.test/epz/order/notice/notice223/common-info.html?regNumber=31111111111">bad</a>'
+                '<a href="/223/filestore/file.html?regNumber=32222222222">not a notice</a>'
+                '<a hidden href="/epz/order/notice/notice223/common-info.html?regNumber=33333333333">hidden</a>'
+                f'<div class="search-registry-entry-block"><a href="/epz/order/notice/notice223/common-info.html?noticeId=888"><span>№ {REG}</span></a></div>'
+                '<div class="registry-entry"><a href="/epz/order/notice/notice223/common-info.html?noticeInfoId=999">Карточка</a><span>№ 32616467074</span></div>')
+        candidates, more = w.inn_candidates(html.encode(), INN, 1, w.inn_search_url(INN, 1))
+        self.assertEqual(candidates, [REG, '32616467074'])
+        self.assertFalse(more)
+
+    def test_inn_filter_and_empty_response_are_never_buyer_proof_or_false_no_data(self):
+        url = w.inn_search_url(INN, 1)
+        mismatch = b'<input name="customerInn" value="1111111111"><a href="/epz/order/notice/notice223/common-info.html?regNumber=32616233661">Notice</a>'
+        with self.assertRaises(w.WorkerError) as error:
+            w.inn_candidates(mismatch, INN, 1, url)
+        self.assertEqual(error.exception.code, 'eis_inn_filter_mismatch')
+        for html in (f'<input name="customerInn" value="{INN}">',
+                     f'<input name="customerInn" value="{INN}"><div hidden>По вашему запросу ничего не найдено</div>',
+                     f'<input name="customerInn" value="{INN}"><script>По вашему запросу ничего не найдено</script>',
+                     '<input name="customerInn" value=""><p>По вашему запросу ничего не найдено</p>',
+                     '<p>По вашему запросу ничего не найдено</p>'):
+            with self.subTest(html=html), self.assertRaises(w.WorkerError):
+                w.inn_candidates(html.encode(), INN, 1, url)
+        valid_zero = f'<input name="customerInn" value="{INN}"><p>По вашему запросу ничего не найдено</p>'
+        self.assertEqual(w.inn_candidates(valid_zero.encode(), INN, 1, url), ([], False))
+        with self.assertRaises(w.WorkerError):
+            w.inn_candidates(valid_zero.encode(), INN, 1, w.inn_search_url('1111111111', 1))
+        with self.assertRaises(w.WorkerError):
+            w.inn_candidates(b'<p>captcha</p>', INN, 1, url)
+
+    def test_captcha_script_reference_does_not_hide_real_search_results(self):
+        html = (f'<script src="/captcha-library.js">var captchaEnabled = true;</script>'
+                f'<a href="/epz/order/notice/notice223/common-info.html?regNumber={REG}">Notice</a>')
+        self.assertEqual(w.inn_candidates(html.encode(), INN, 1, w.inn_search_url(INN, 1)), ([REG], False))
+
+    def test_inn_pagination_remains_explicitly_limited_at_tenth_page(self):
+        html = ''.join(f'<a href="/epz/order/notice/notice223/common-info.html?regNumber={32616233000+i}">Notice</a>' for i in range(25))
+        candidates, more = w.inn_candidates(html.encode(), INN, 10, w.inn_search_url(INN, 10))
+        self.assertEqual(len(candidates), 20)
+        self.assertTrue(more)
+        next_link = (f'<a href="/epz/order/notice/notice223/common-info.html?regNumber={REG}">Notice</a>'
+                     f'<a href="{w.inn_search_url(INN, 2)}">Далее</a>')
+        self.assertTrue(w.inn_candidates(next_link.encode(), INN, 1, w.inn_search_url(INN, 1))[1])
+
+    def test_shared_search_budget_survives_worker_restart(self):
+        with patch('scripts.eis_vps_worker.time.time', return_value=1000):
+            self.state.take_search_slot()
+        restarted = w.State(self.temp.name)
+        try:
+            with patch('scripts.eis_vps_worker.time.time', return_value=1001):
+                with self.assertRaises(w.WorkerError) as error:
+                    restarted.take_search_slot()
+                self.assertEqual(error.exception.code, 'eis_search_cooldown')
+            with patch('scripts.eis_vps_worker.time.time', return_value=1300):
+                restarted.take_search_slot()
+        finally:
+            restarted.db.close()
+
+    def test_inn_priority_capability_and_shared_discovery_budget(self):
+        self.http.jobs = [self.inn_job(), self.job]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        requests = [call for call in self.http.calls if call[0] == 'request']
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0][1], w.inn_search_url(INN, 1))
+        claim = next(c for c in self.http.calls if c[0] == 'site' and '/jobs/next?' in c[1])
+        self.assertIn('capabilities=inn_search', claim[1])
+        heartbeat = next(c for c in self.http.calls if c[0] == 'site' and c[1].endswith('/heartbeat'))
+        self.assertEqual(heartbeat[2]['capabilities'], ['inn_search'])
+        reported = next(c[2] for c in self.http.calls if c[0] == 'site' and '/inn-jobs/' in c[1])
+        self.assertEqual(reported['reg_numbers'], [REG])
+        self.assertNotIn('customer_inn', reported)
+        self.assertNotIn('candidates', reported)
+        self.assertIn(('soap', REG), self.http.calls)
+
+    def test_inn_public_search_block_does_not_block_soap_jobs(self):
+        self.http.fail_discovery = True
+        self.http.jobs = [self.inn_job(), self.job]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        self.assertIn(('soap', REG), self.http.calls)
+        self.assertEqual(len([c for c in self.http.calls if c[0] == 'request']), 1)
+        self.assertGreater(float(self.state.get('search_not_before')), w.time.time() + 1100)
+        self.assertEqual(self.state.get('backoff_until', '0'), '0')
+
+    def test_inn_report_is_durable_and_uses_separate_endpoint(self):
+        report = self.worker.process_inn(self.inn_job())
+        self.assertEqual(report['status'], 'completed')
+        self.assertFalse(any(c[0] in ('soap', 'download', 'upload') for c in self.http.calls))
+        self.state.save_report('inn-job-1', report)
+        self.http.fail_report = True
+        with self.assertRaises(w.WorkerError):
+            self.worker.retry_reports()
+        self.assertEqual(self.state.pending_reports()[0][1]['kind'], 'inn')
+        restarted = w.State(self.temp.name)
+        self.http.fail_report = False
+        try:
+            worker = w.Worker({'interval_seconds': 300}, restarted, self.http)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                worker.retry_reports()
+            self.assertEqual(json.loads(output.getvalue())['event'], 'inn_report_ack')
+            self.assertEqual(restarted.pending_reports(), [])
+        finally:
+            restarted.db.close()
+        self.assertTrue(any(c[0] == 'site' and c[1] == '/api/eis-worker/inn-jobs/inn-job-1/report' for c in self.http.calls))
+
+    def test_cooldown_defers_inn_without_request_and_no_data_requires_explicit_page(self):
+        self.state.take_search_slot()
+        report = self.worker.process_inn(self.inn_job())
+        self.assertEqual(report['status'], 'error')
+        self.assertEqual(report['error_code'], 'eis_search_cooldown')
+        self.assertFalse(any(c[0] == 'request' for c in self.http.calls))
+        self.state.set('search_not_before', 0)
+        self.http.search_html = f'<input name="customerInn" value="{INN}"><p>По вашему запросу ничего не найдено</p>'.encode()
+        report = self.worker.process_inn(self.inn_job())
+        self.assertEqual(report['status'], 'no_data')
+        self.assertEqual(report['reg_numbers'], [])
+        self.assertFalse(report['has_more'])
 
     def test_token_validation_identifies_bad_field_without_exposing_value(self):
         cases = [

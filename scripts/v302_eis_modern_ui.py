@@ -146,7 +146,6 @@ SCRIPT='''<script id="v302-modern-js">
  let seq=0;
  async function submit(kind,value){
   const i=++seq;value=digits(value);
-  if(VPS_ONLY&&kind==='inn')return notice('В режиме VPS укажите номер закупки ЕИС.','error');
   if(kind==='reg'&&!/^3[0-9]{10}$/.test(value))
     return notice('Введите номер закупки 223-ФЗ из 11 цифр.','error');
   if(kind==='inn'&&!/^(?:[0-9]{10}|[0-9]{12})$/.test(value))
@@ -161,18 +160,22 @@ SCRIPT='''<script id="v302-modern-js">
     if(kind==='reg')window.dispatchEvent(new Event('eis223:manual-input'));
     if(i!==seq)return;
     const connected=VPS_ONLY?!!r.bridge?.server_active:!!r.bridge?.active;
+    const requiresUpdate=VPS_ONLY&&kind==='inn'&&r.bridge?.inn_search_available===false;
+    const updateMessage='Поиск сохранён. Для выполнения требуется обновление загрузчика VPS.';
     notice('<strong>Запрос '+escape(value)+' поставлен в приоритетную очередь.</strong> '+
       (VPS_ONLY?
-       (connected?'Загрузчик VPS подключён. Документы поступят автоматически в одном из ближайших циклов.':
+       (requiresUpdate?updateMessage:
+        connected?(kind==='inn'?'Поиск закупок и загрузка документов выполнятся автоматически через VPS.':
+         'Загрузчик VPS подключён. Документы поступят автоматически в одном из ближайших циклов.'):
         'Загрузчик VPS сейчас не на связи. Задание сохранено и продолжится после восстановления соединения.'):
        (connected?'Мост ЕИС активен, загрузка начнётся в ближайшие секунды.':
         'Чтобы получить новые документы, запустите браузерный мост во вкладке zakupki.gov.ru.'))+
       (kind==='reg'?'<p><a href="/check-new/'+encodeURIComponent(value)+
        '">Открыть проверку →</a></p>':'')+
       '<p id="v302-task-status">Ожидание ЕИС…</p><div id="v302-task-items">'+rows(r.existing)+'</div>',
-      connected?'ok':'');
+      connected&&!requiresUpdate?'ok':'');
     bridge();
-    for(let k=0;k<85;k++){
+    for(let k=0;k<(kind==='inn'?720:85);k++){
       if(seq!==i)return;
       await new Promise(ok=>setTimeout(ok,k===0?1700:5000));
       try{
@@ -183,6 +186,10 @@ SCRIPT='''<script id="v302-modern-js">
           error:'Ошибка получения',deferred:'Ожидает повтор'};
         const el=by('v302-task-status');
         const audit=j.audit;
+        const verificationPending=kind==='inn'&&Number(j.verification_pending)>0;
+        const searchPagesPending=kind==='inn'&&Number(j.search_pages_pending)>0;
+        const pagesFailed=kind==='inn'?Math.max(0,Number(j.search_pages_failed)||0):0;
+        const unresolvedCandidates=kind==='inn'?Math.max(0,Number(j.unresolved_candidates)||0):0;
         let message=labels[state]||state;
         if(kind==='reg'){
           if(audit?.audit_complete)
@@ -196,14 +203,29 @@ SCRIPT='''<script id="v302-modern-js">
           if(audit?.originals_expected>0)
             message+=' · получено оригиналов: '+audit.originals_received+'/'+audit.originals_expected;
         }else if(state==='done'){
-          message='Поиск закупок по ИНН завершён. Документы ещё проверяются в отдельной очереди';
+          message=verificationPending?
+            'Кандидаты найдены; проверяем ИНН заказчика по данным ЕИС':
+            searchPagesPending?'Поиск следующих страниц на VPS…':
+            'Поиск закупок по ИНН завершён. Загрузка документов и их проверка продолжаются в отдельной очереди';
+          if(!verificationPending&&!searchPagesPending&&j.pagination_limited)
+            message+=' Достигнут лимит: 10 страниц поиска.';
+        }else if(VPS_ONLY&&kind==='inn'&&['queued','deferred'].includes(state)&&
+                 j.bridge?.inn_search_available===false){
+          message=updateMessage;
+        }
+        if(kind==='inn'&&!verificationPending&&!searchPagesPending&&
+           (pagesFailed>0||unresolvedCandidates>0)){
+          message='Поиск выполнен частично: часть данных ЕИС получить не удалось'+
+            ' · страниц с ошибками: '+pagesFailed+
+            ' · закупок без подтверждённых данных: '+unresolvedCandidates;
+          if(j.pagination_limited)message+=' · Достигнут лимит: 10 страниц поиска.';
         }
         if(el)el.textContent=message+
           (state==='error'&&j.job?.detail?' — '+j.job.detail:'')+
           (kind==='inn'?' · закупок с данными в базе: '+j.total_existing:'');
         const list=by('v302-task-items');if(list)list.innerHTML=rows(j.existing);
         if(state==='error'||kind==='reg'&&audit?.audit_complete)break;
-        if(state==='done'&&kind==='inn')break;
+        if(state==='done'&&kind==='inn'&&!verificationPending&&!searchPagesPending)break;
         if(state==='done'&&kind==='reg'&&k>=5)break;
         if(state==='partial'&&k>=5)break;
       }catch(e){if(k>3)break}
@@ -221,22 +243,20 @@ SCRIPT='''<script id="v302-modern-js">
       '<span class="v302-title"><strong>Контроль закупок по 223-ФЗ</strong>',
       '<small>Независимый аналитический сервис · ЕИС · документальная проверка нарушений</small></span>',
       '<span id="v302-connect" class="v302-connect">Проверка подключения ЕИС…</span></div>',
-      '<div class="v302-grid"'+(VPS_ONLY?' style="grid-template-columns:1fr"':'')+'>',
+      '<div class="v302-grid">',
       '<form id="v302-reg-form" class="v302-box"><label for="v302-reg">По номеру закупки ЕИС</label>',
       '<p>Загрузка извещения и всех доступных оригиналов, затем юридическая проверка.</p>',
       '<div class="v302-inputs"><input id="v302-reg" inputmode="numeric" maxlength="11" ',
       'placeholder="Например: 32616440427" required>',
       '<button type="submit" id="v302-reg-submit">Проверить</button></div></form>',
-      VPS_ONLY?'':[
       '<form id="v302-inn-form" class="v302-box"><label for="v302-inn">По ИНН заказчика</label>',
-      '<p>Поиск всех закупок заказчика в ЕИС и приоритетное получение документов.</p>',
+      '<p>Поиск закупок заказчика в ЕИС и приоритетное получение документов.</p>',
       '<div class="v302-inputs"><input id="v302-inn" inputmode="numeric" maxlength="12" ',
       'placeholder="ИНН из 10 или 12 цифр" required>',
-      '<button type="submit" id="v302-inn-submit">Найти закупки</button></div></form>'
-      ].join(''),
+      '<button type="submit" id="v302-inn-submit">Найти закупки</button></div></form>',
       '</div>',
       '<div id="v302-search-result" role="status" aria-live="polite"></div>',
-      '<div class="v302-links"><span>'+(VPS_ONLY?'Документы из ЕИС поступают автоматически через VPS':
+      '<div class="v302-links"><span>'+(VPS_ONLY?'Данные закупок и документы из ЕИС поступают автоматически через VPS':
         'Официальный источник: только ЕИС, без ЭТП и агрегаторов')+'</span>',
       '<a href="https://zakupki.gov.ru/epz/main/public/home.html" target="_blank" rel="noopener noreferrer">Открыть ЕИС ↗</a>',
       VPS_ONLY?'':'<a href="/api/v299/eis223/collector.js" target="_blank" rel="noopener noreferrer">Открыть код подключения</a>',
@@ -257,13 +277,13 @@ SCRIPT='''<script id="v302-modern-js">
       }
     });
     by('v302-reg-form').addEventListener('submit',e=>{e.preventDefault();submit('reg',by('v302-reg').value)});
-    if(!VPS_ONLY)by('v302-inn-form').addEventListener('submit',e=>{e.preventDefault();submit('inn',by('v302-inn').value)});
-    const inn=by('inn');if(!VPS_ONLY&&inn&&/^[0-9]{10}([0-9]{2})?$/.test(inn.value))by('v302-inn').value=inn.value;
+    by('v302-inn-form').addEventListener('submit',e=>{e.preventDefault();submit('inn',by('v302-inn').value)});
+    const inn=by('inn');if(inn&&/^[0-9]{10}([0-9]{2})?$/.test(inn.value))by('v302-inn').value=inn.value;
     // A customer favorite is an explicit, user-initiated search. Remove the
     // one-use parameter so reloading cannot submit it another time.
     const params=new URLSearchParams(location.search);
     const favoriteInn=params.get('favorite_inn');
-    if(!VPS_ONLY&&favoriteInn&&/^[0-9]{10}([0-9]{2})?$/.test(favoriteInn)){
+    if(favoriteInn&&/^[0-9]{10}([0-9]{2})?$/.test(favoriteInn)){
       by('v302-inn').value=favoriteInn;
       params.delete('favorite_inn');
       const query=params.toString();
@@ -284,7 +304,6 @@ SCRIPT='''<script id="v302-modern-js">
     },true);
   }
   const b=by('v257-inn-search');
-  if(VPS_ONLY&&b){b.style.display='none';b.disabled=true;}
   if(b&&!b.dataset.v302Hook){
     b.dataset.v302Hook='yes';
     b.addEventListener('click',e=>{
@@ -329,5 +348,4 @@ def install(ns):
             headers['Cache-Control']='no-store'
             return HTMLResponse(html,status_code=200,headers=headers)
     app.add_middleware(ModernLayout)
-    print('V302 MODERN_EIS_LAYOUT_READY search_reg=True search_inn='+
-          str(os.environ.get('EIS223_SOURCE_MODE')!='OFFICIAL_EIS_VPS_ONLY'),flush=True)
+    print('V302 MODERN_EIS_LAYOUT_READY search_reg=True search_inn=True',flush=True)
