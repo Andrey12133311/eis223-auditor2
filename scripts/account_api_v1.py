@@ -22,13 +22,19 @@ from scripts.account_sessions_v1 import create_session, resolve_session, revoke_
 router = APIRouter(prefix="/auth", tags=["accounts"])
 admin_router = APIRouter(prefix="/admin/accounts", tags=["accounts"])
 
+# The marker is process-local, never accepted from cookies or request headers.
+# It reuses one database decision only inside this ASGI request, not between
+# requests: revocation, account blocking and role changes remain immediate.
+_REQUEST_ACCOUNT_MARKER = object()
+
+
+def _remember_request_account(scope, account):
+    scope["_eis223_verified_account"] = (_REQUEST_ACCOUNT_MARKER, tuple(account))
+
 
 def connect():
-    import psycopg
-    dsn = os.getenv("EIS223_IDENTITY_DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("Identity database is not configured")
-    return psycopg.connect(dsn)
+    from scripts.account_connection_pool_v1 import connect as pooled_connect
+    return pooled_connect()
 
 
 def require_origin(request):
@@ -39,9 +45,14 @@ def require_origin(request):
 
 
 def current_account(request, admin=False):
-    token = request.cookies.get(SESSION_COOKIE, "")
-    with connect() as db:
-        row = resolve_session(db, token)
+    verified = getattr(request, "scope", {}).get("_eis223_verified_account")
+    if (isinstance(verified, tuple) and len(verified) == 2
+            and verified[0] is _REQUEST_ACCOUNT_MARKER):
+        row = verified[1]
+    else:
+        token = request.cookies.get(SESSION_COOKIE, "")
+        with connect() as db:
+            row = resolve_session(db, token)
     if not row:
         raise HTTPException(401, "Authentication required")
     if admin and row[1] != "admin":

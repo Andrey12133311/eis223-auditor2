@@ -444,7 +444,7 @@ def report(ns, identifier, data):
                 attempt = max(0, attempt-1)
                 db.execute("INSERT OR REPLACE INTO eis_server_backoff VALUES(?,?)", (identifier, deferrals+1))
         state = "done" if complete else "queued" if attempt < MAX_ATTEMPTS else "partial"
-        delay = min(3600, max(60, retry or 900)) if state == "queued" else 0
+        delay = min(86400, max(60, retry or 900)) if state == "queued" else 0
         if complete:
             detail = ("Официальные XML ЕИС получены; сведения карточки обновлены" if metadata_only else
                       "Все учтённые оригиналы ЕИС сохранены; переданы на проверку на сервере")

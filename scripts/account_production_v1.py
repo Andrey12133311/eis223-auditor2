@@ -10,10 +10,11 @@ import os
 import re
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlencode
+from starlette.concurrency import run_in_threadpool
 
 from scripts.account_sessions_v1 import resolve_session
 from scripts.account_session_policy_v1 import SESSION_COOKIE
-from scripts.account_api_v1 import connect
+from scripts.account_api_v1 import connect, _remember_request_account
 from scripts.account_site_ui_v1 import site_header
 from scripts.v361_home_shell import home_shell
 
@@ -193,7 +194,10 @@ class ProductionAccountGate:
             await self.app(scope, receive, send)
             return
         try:
-            account = user_session(headers, self.connection)
+            # PostgreSQL connection/lookup may wait on I/O. Starlette's
+            # bounded worker pool is separate from the audit executor, so a
+            # slow identity service cannot freeze health, uploads or the UI.
+            account = await run_in_threadpool(user_session, headers, self.connection)
         except Exception:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1013})
@@ -211,6 +215,7 @@ class ProductionAccountGate:
             return
         scope["eis223_account_id"] = account[0]
         scope["eis223_account_role"] = account[1]
+        _remember_request_account(scope, account)
         if scope["type"]=="http" and method in ("GET","HEAD") and path.rstrip("/")=="/manual-purchases":
             await _answer(send,303,b"",location=personal_manual_location(scope.get("query_string",b"")))
             return
@@ -330,4 +335,9 @@ def install(app):
             logging.getLogger(__name__).exception(
                 "Account database unavailable; private sign-in is temporarily blocked"
             )
+
+    @app.on_event("shutdown")
+    async def stop_identity():
+        from scripts.account_connection_pool_v1 import close_pool
+        await run_in_threadpool(close_pool)
     return True

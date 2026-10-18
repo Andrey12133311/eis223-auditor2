@@ -317,6 +317,15 @@ class ServerWorkerTests(unittest.TestCase):
         self.report(job, status="error", retry_after_seconds=1200, error_code="eis_http_429")
         self.assertEqual(self.row(job["id"])["attempts"], 1)
 
+    def test_long_remote_retry_is_not_shortened_to_one_hour(self):
+        self.enqueue()
+        job = self.claim()
+        now = int(time.time())
+        with patch.object(worker.time, 'time', return_value=now):
+            response = self.report(job, status="error", retry_after_seconds=86400, error_code="eis_http_429")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.row(job["id"])["not_before"], now + 86400)
+
     def test_discovery_is_bounded_rate_limited_and_not_manual(self):
         self.enqueue()
         body = {"worker_id": self.identity, "reg_numbers": [REG, "32610000001", "32610000001"],

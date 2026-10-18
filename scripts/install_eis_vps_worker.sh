@@ -104,8 +104,11 @@ def setup():
     parser.add_argument('--worker-sha256', help='SHA256 проверенного eis_vps_worker.py; обязателен для --revision')
     parser.add_argument('--site-url', default='https://web-production-1c2ea.up.railway.app')
     parser.add_argument('--configure', action='store_true', help='Заново запросить оба токена')
+    parser.add_argument('--interval-seconds', type=int, help='Интервал очереди от 30 до 3600 секунд; по умолчанию 30, заданный вручную интервал сохраняется')
     parser.add_argument('--bootstrap-reg', default='32616233661')
     args = parser.parse_args()
+    if args.interval_seconds is not None and not 30 <= args.interval_seconds <= 3600:
+        parser.error('--interval-seconds must be between 30 and 3600')
     os.umask(0o077)
     if os.geteuid() != 0:
         raise RuntimeError('Root is required')
@@ -135,7 +138,16 @@ def setup():
         print('Ключ сайта находится в Railway → проект eis223-auditor → web → Variables → EIS223_UPLOAD_TOKEN.')
         print('Скопируй значение переменной, которое открывается в Railway. Само название EIS223_UPLOAD_TOKEN вводить не нужно.')
         config = {'site_url': args.site_url.rstrip('/')}
-    config.update(ca_file=str(CA), interval_seconds=300, timeout_seconds=30)
+    # Upgrade the former fixed 300-second default. Explicit custom rates from
+    # this installer remain stable on subsequent upgrades.
+    if args.interval_seconds is not None:
+        config.update(interval_seconds=args.interval_seconds, interval_custom=True)
+    elif config.get('interval_custom') is not True:
+        if config.get('interval_seconds', 300) in (30, 300):
+            config.update(interval_seconds=30, interval_custom=False)
+        else:
+            config['interval_custom'] = True
+    config.update(ca_file=str(CA), timeout_seconds=30)
     # No service/configuration mutation before both authenticated connections pass.
     with tempfile.TemporaryDirectory(prefix='eis223-install-') as temporary:
         temp = Path(temporary)
@@ -239,7 +251,8 @@ WantedBy=multi-user.target
         if was_active:
             subprocess.run(['systemctl', 'restart', 'eis223-worker.service'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         raise
-    print('Фоновый загрузчик запущен. Новая выдача ЕИС и до двух закупок — раз в 5 минут.')
+    print('Фоновый загрузчик запущен. Интервал очереди: ' + str(config['interval_seconds']) + ' секунд; до двух заданий и 48 оригиналов за цикл.')
+    print('Публичный поиск ЕИС по-прежнему выполняется не чаще одной страницы в 5 минут; ограничения ЕИС соблюдаются.')
     print('Проверка состояния: systemctl status eis223-worker --no-pager')
     print('Последние события: journalctl -u eis223-worker -n 25 --no-pager')
     print('В журнале report_ack/download_complete=true подтверждает получение; результат проверки формируется на сайте отдельно.')

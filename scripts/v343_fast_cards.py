@@ -393,6 +393,12 @@ def render(reg,data,thematic=None,account_review=False):
      +'<section class="panel"><h2>Документы ЕИС ('+str(dtotal)+')</h2>'+docs_html+'</section>'
      +'</main>'+review_assets+'</body></html>')
 
+def read_and_render(ns, reg, account_review=False):
+    # Legal reconciliation and HTML construction can take longer than the
+    # indexed SQLite read. Keep both outside the shared HTTP event loop.
+    return render(reg, read(ns, reg), account_review=account_review)
+
+
 class FastCardASGI:
     def __init__(self,app,ns):
         self.app=app
@@ -403,8 +409,9 @@ class FastCardASGI:
             return await self.app(scope,receive,send)
         reg=match.group(1)
         try:
-            data=await asyncio.wait_for(asyncio.to_thread(read,self.ns,reg),timeout=6)
-            result=HTMLResponse(render(reg,data,account_review=bool(scope.get("eis223_account_id"))),headers={"Cache-Control":"no-store","X-Audit-Card":"saved-evidence-v343"})
+            body=await asyncio.wait_for(asyncio.to_thread(
+                read_and_render,self.ns,reg,bool(scope.get("eis223_account_id"))),timeout=6)
+            result=HTMLResponse(body,headers={"Cache-Control":"no-store","X-Audit-Card":"saved-evidence-v343"})
         except (sqlite3.Error,TimeoutError,ValueError) as e:
             result=HTMLResponse(
              '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Карточка проверки</title>'

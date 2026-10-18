@@ -13,6 +13,8 @@ import hashlib
 from html.parser import HTMLParser
 import io
 import json
+import math
+from email.utils import parsedate_to_datetime
 import os
 from pathlib import Path
 import re
@@ -31,7 +33,10 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
+DEFAULT_INTERVAL_SECONDS = 30
+MAX_ORIGINALS_PER_CYCLE = 48
+MAX_JOBS_PER_CYCLE = 2
 ENDPOINT = "https://int.zakupki.gov.ru/eis-integration/services/getDocsIP"
 SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 API_NS = "http://zakupki.gov.ru/fz44/get-docs-ip/ws"
@@ -219,8 +224,27 @@ class WorkerError(Exception):
 
 def global_backoff(code):
     return code in {"eis_http_403", "eis_http_429", "site_http_403", "site_http_429",
+                    "eis_http_503", "site_http_503",
                     "eis_service_5", "eis_service_13", "eis_service_24",
                     "eis_service_34", "eis_service_35", "eis_service_38"}
+
+
+def retry_after_delay(value, fallback):
+    """Honor both HTTP forms; malformed/past values cannot shorten our pause."""
+    if not isinstance(value, str) or len(value) > 128:
+        return fallback
+    value = value.strip()
+    try:
+        if value.isascii() and value.isdigit():
+            seconds = int(value)
+        else:
+            parsed = parsedate_to_datetime(value)
+            if parsed.tzinfo is None:
+                return fallback
+            seconds = math.ceil(parsed.timestamp() - time.time())
+        return max(fallback, seconds)
+    except (ValueError, TypeError, OverflowError):
+        return fallback
 
 
 def log(event, **fields):
@@ -370,7 +394,7 @@ def load_config(path):
     except ValueError as exc:
         raise WorkerError("site_url_must_be_https_origin") from exc
     config["site_url"] = url
-    config["interval_seconds"] = max(300, int(config.get("interval_seconds", 300)))
+    config["interval_seconds"] = max(DEFAULT_INTERVAL_SECONDS, int(config.get("interval_seconds", DEFAULT_INTERVAL_SECONDS)))
     config["timeout_seconds"] = min(60, max(10, int(config.get("timeout_seconds", 30))))
     return config
 
@@ -422,7 +446,8 @@ class Transport:
                         raise WorkerError("response_deadline")
                 return b"".join(chunks)
         except urllib.error.HTTPError as exc:
-            retry = 1200 if exc.code in (403, 429) else 300
+            retry = retry_after_delay(exc.headers.get("Retry-After") if exc.headers else None,
+                                      1200 if exc.code in (403, 429) else 300)
             # Never emit server response, request URL, or exception repr (tokens may be there).
             raise WorkerError(("eis" if eis else "site") + "_http_" + str(exc.code), retry) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -505,6 +530,12 @@ class State:
         self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (name, str(value)))
         self.db.commit()
 
+    def defer_requests(self, seconds, *, site=False):
+        until = time.time() + seconds
+        self.set("backoff_until", max(float(self.get("backoff_until", "0")), until))
+        if site:
+            self.set("site_backoff_until", max(float(self.get("site_backoff_until", "0")), until))
+
     def take_search_slot(self):
         now = time.time()
         allowed_at = float(self.get("search_not_before", "0"))
@@ -578,7 +609,7 @@ class OriginalPipeline:
     """One look-ahead download; SQLite and all uploads stay on the main thread.
 
     The current original and at most one prefetched original are resident.
-    Neither download concurrency nor the 12-attempt cycle budget increases.
+    Download concurrency stays one; the shared cycle budget bounds all attempts.
     On failure, a file already in flight is cached for the ordinary retry.
     """
     def __init__(self, worker, reg, documents):
@@ -589,7 +620,7 @@ class OriginalPipeline:
         self.pending = None
 
     def prefetch(self):
-        if self.pending is not None or STOP or self.worker.files_this_cycle >= 12:
+        if self.pending is not None or STOP or self.worker.files_this_cycle >= MAX_ORIGINALS_PER_CYCLE:
             return
         for item in self.documents:
             if item.get("received") is True:
@@ -663,6 +694,8 @@ class Worker:
         self.discovery_error = state.get("discovery_error", "")
 
     def heartbeat(self, job=None, force=False):
+        if float(self.state.get("site_backoff_until", "0")) > time.time():
+            return
         if not force and time.monotonic() - self.last_heartbeat < 60:
             return
         body = {"worker_id": self.worker_id, "version": VERSION,
@@ -670,7 +703,12 @@ class Worker:
                 "discovery_status": self.discovery_status, "discovery_error": self.discovery_error}
         if job:
             body.update(current_job_id=job["id"], lease_token=job["lease_token"])
-        self.http.site("/api/eis-worker/heartbeat", body)
+        try:
+            self.http.site("/api/eis-worker/heartbeat", body)
+        except WorkerError as exc:
+            if global_backoff(exc.code):
+                self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
+            raise
         self.last_heartbeat = time.monotonic()
 
     def discover(self):
@@ -693,6 +731,8 @@ class Worker:
         except WorkerError as exc:
             self.discovery_status = "blocked" if exc.retry_after >= 1200 else "error"
             self.discovery_error = exc.code
+            if exc.code.startswith("site_") and global_backoff(exc.code):
+                self.state.defer_requests(exc.retry_after, site=True)
             self.state.defer_search(exc.retry_after)
             self.state.set("discovery_backoff_until", time.time() + max(300, exc.retry_after))
             log("discovery_error", code=exc.code)
@@ -708,6 +748,8 @@ class Worker:
                 if result.get("received") is not True:
                     raise WorkerError("site_report_not_accepted")
             except WorkerError as exc:
+                if global_backoff(exc.code):
+                    self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
                 if exc.code in ("site_http_409", "site_http_410", "site_http_404"):
                     # A new lease will consult server receipts and safely resume delivery.
                     self.state.remove_report(job_id)
@@ -754,7 +796,7 @@ class Worker:
                           has_more=more, source_url=source_url, retry_after_seconds=0)
             self.discovery_status, self.discovery_error = "ok", ""
         except WorkerError as exc:
-            report.update(error_code=exc.code, retry_after_seconds=exc.retry_after)
+            report.update(error_code=exc.code, retry_after_seconds=min(86400, exc.retry_after))
             if exc.code != "eis_search_cooldown":
                 self.state.defer_search(exc.retry_after)
                 self.discovery_status = "blocked" if exc.retry_after >= 1200 else "error"
@@ -817,9 +859,11 @@ class Worker:
                         self.state.delivered(reg, "original", uid, data, key)
                         report["originals_uploaded"] += 1
                     except WorkerError as exc:
+                        if global_backoff(exc.code):
+                            self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
                         report["originals_failed"] += 1
-                        report.update(error_code=exc.code, retry_after_seconds=exc.retry_after)
-                        if (exc.retry_after >= 1200 or exc.code.startswith("site_")
+                        report.update(error_code=exc.code, retry_after_seconds=min(86400, exc.retry_after))
+                        if (global_backoff(exc.code) or exc.retry_after >= 1200 or exc.code.startswith("site_")
                                 or exc.code == "invalid_manifest_uid"):
                             raise
             # Server receipts, not local successful calls, are authoritative.
@@ -846,29 +890,45 @@ class Worker:
                 report.update(status="completed", detail="Все оригиналы переданы; проверка выполняется отдельно.",
                               review_status=str(review.get("status", "queued"))[:50], retry_after_seconds=0)
         except WorkerError as exc:
+            if global_backoff(exc.code):
+                # Keep the full remote pause locally, even beyond the report's
+                # one-day wire limit. A subsequent cycle must not shorten it.
+                self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
             report.update(status="partial" if report["archives_uploaded"] else "error",
-                          error_code=exc.code, retry_after_seconds=exc.retry_after,
+                          error_code=exc.code, retry_after_seconds=min(86400, exc.retry_after),
                           detail="Загрузка будет продолжена после повторной попытки.")
         return report
 
     def cycle(self):
         self.files_this_cycle = 0
+        if float(self.state.get("site_backoff_until", "0")) > time.time():
+            return
         self.retry_reports()
         now = time.time()
         if float(self.state.get("backoff_until", "0")) > now:
             self.heartbeat(force=True)
             return
         self.heartbeat(force=True)
-        result = self.http.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(
-            {"limit": 2, "worker_id": self.worker_id, "capabilities": "inn_search"}))
-        jobs = result.get("jobs", [])
-        if (not isinstance(jobs, list) or len(jobs) > 2
-                or sum(j.get("kind") == "inn" for j in jobs) > 1):
-            raise WorkerError("invalid_jobs_response")
-        for job in jobs:
-            if STOP:
+        inn_processed = False
+        for _ in range(MAX_JOBS_PER_CYCLE):
+            if STOP or self.files_this_cycle >= MAX_ORIGINALS_PER_CYCLE:
                 break
+            # Claim only when ready to process: a large first procurement must
+            # not let the second procurement's unused 15-minute lease expire.
+            result = self.http.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(
+                {"limit": 1, "worker_id": self.worker_id,
+                 "capabilities": "" if inn_processed else "inn_search"}))
+            jobs = result.get("jobs", [])
+            if (not isinstance(jobs, list) or len(jobs) > 1
+                    or any(not isinstance(job, dict) for job in jobs)):
+                raise WorkerError("invalid_jobs_response")
+            if not jobs:
+                break
+            job = jobs[0]
             is_inn = job.get("kind") == "inn"
+            if is_inn and inn_processed:
+                raise WorkerError("invalid_jobs_response")
+            inn_processed = inn_processed or is_inn
             report = self.process_inn(job) if is_inn else self.process(job)
             self.state.save_report(job["id"], report)
             if is_inn:
@@ -880,7 +940,12 @@ class Worker:
                     archives=report["archives_uploaded"], originals=report["originals_uploaded"],
                     error_code=report["error_code"])
             if not is_inn and global_backoff(report["error_code"]):
-                self.state.set("backoff_until", time.time() + report["retry_after_seconds"])
+                self.state.set("backoff_until", max(float(self.state.get("backoff_until", "0")),
+                                                    time.time() + report["retry_after_seconds"]))
+            # Site Retry-After covers reports too. Keep the report on disk;
+            # an expired lease will safely reconcile with server receipts.
+            if float(self.state.get("site_backoff_until", "0")) > time.time():
+                break
             self.retry_reports()
             if float(self.state.get("backoff_until", "0")) > time.time():
                 break
@@ -907,6 +972,8 @@ def main(argv=None):
         except BlockingIOError:
             raise WorkerError("worker_already_running") from None
         worker = Worker(config, state)
+        log("worker_started", version=VERSION, interval_seconds=config["interval_seconds"],
+            originals_per_cycle=MAX_ORIGINALS_PER_CYCLE, search_interval_seconds=300)
         for reg in args.bootstrap_reg:
             if not REG.fullmatch(reg):
                 raise WorkerError("invalid_registry_number")
@@ -918,7 +985,7 @@ def main(argv=None):
             except WorkerError as exc:
                 log("cycle_error", code=exc.code)
                 if global_backoff(exc.code):
-                    state.set("backoff_until", time.time() + exc.retry_after)
+                    state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
             if args.once:
                 break
             # Bounded waits permit orderly systemd shutdown.

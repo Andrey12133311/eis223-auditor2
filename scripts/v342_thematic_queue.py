@@ -391,7 +391,7 @@ DASHBOARD_CLEANUP = r'''<script id="thematic-dashboard-cleanup">
 def install(ns):
  init(ns);app=ns["app"]
  @app.get("/api/thematic/classify/{reg}")
- async def classify(reg:str):
+ def classify(reg:str):
   if not re.fullmatch(r"3[0-9]{10}",reg):raise HTTPException(422,"Некорректный номер ЕИС")
   c=db(ns)
   try:
@@ -416,31 +416,37 @@ def install(ns):
   except (ValueError,KeyError,TypeError):raise HTTPException(422,"Некорректный запрос")
   if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORIES) or any(x not in CATEGORIES for x in cats):raise HTTPException(422,"Некорректные категории")
   if not isinstance(forms,list) or not forms or len(forms)>len(LEGAL_FORMS) or any(not isinstance(x,str) or x not in LEGAL_FORMS for x in forms):raise HTTPException(422,"Некорректные организационно-правовые формы")
-  identifier=secrets.token_hex(12);c=db(ns)
-  linked=False
-  try:
-   if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
-    raise HTTPException(429,"Одновременно допускается не более трёх тематических очередей")
-   # Assign the real campaign to its authenticated creator before activation.
-   ownership.link_started(request,identifier)
-   linked=True
-   c.execute("INSERT INTO thematic_batches(id,categories,created_at,legal_forms) VALUES(?,?,?,?)",
-             (identifier,json.dumps(sorted(set(cats))),now(),
-              json.dumps(sorted(set(forms)),ensure_ascii=False)))
-   c.commit()
-  except Exception:
-   c.rollback()
-   if linked:
-    try:ownership.unlink(request,identifier)
-    except HTTPException:pass
-   raise
-  finally:c.close()
+  identifier=secrets.token_hex(12)
+  def persist_start():
+   # Keep the connection and complete transaction in the same worker thread.
+   # PostgreSQL ownership and SQLite lock waits must not stop HTTP serving.
+   c=db(ns);linked=False
+   try:
+    # Concurrent HTTP starts must share the same three-campaign limit.
+    c.execute("BEGIN IMMEDIATE")
+    if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
+     raise HTTPException(429,"Одновременно допускается не более трёх тематических очередей")
+    # Assign the real campaign to its authenticated creator before activation.
+    ownership.link_started(request,identifier)
+    linked=True
+    c.execute("INSERT INTO thematic_batches(id,categories,created_at,legal_forms) VALUES(?,?,?,?)",
+              (identifier,json.dumps(sorted(set(cats))),now(),
+               json.dumps(sorted(set(forms)),ensure_ascii=False)))
+    c.commit()
+   except Exception:
+    c.rollback()
+    if linked:
+     try:ownership.unlink(request,identifier)
+     except HTTPException:pass
+    raise
+   finally:c.close()
+  await asyncio.to_thread(persist_start)
   # New campaigns should not inherit another campaign's 90-second index wait.
   WORKER_STATE["index_at"]=0
   audit_signals(ns).notify("thematic")
   return {"id":identifier,"status":"active"}
  @app.post("/api/thematic/{batch}/stop")
- async def stop(batch:str,request:Request):
+ def stop(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
   ownership.protect_write(request)
   ownership.require_owned(request,batch)
@@ -450,7 +456,7 @@ def install(ns):
   finally:c.close()
   return {"id":batch,"status":"stopped"}
  @app.delete("/api/thematic/{batch}")
- async def delete_thematic(batch:str,request:Request):
+ def delete_thematic(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
   ownership.protect_write(request)
   ownership.require_owned(request,batch)
@@ -471,20 +477,20 @@ def install(ns):
   ownership.unlink(request,batch)
   return {"id":batch,"deleted":True}
  @app.get("/api/thematic/history")
- async def thematic_history(request:Request):
-  # Potentially large older evidence sets are scanned outside the HTTP loop,
-  # with cached counts reused on the frequent 12-second dashboard refresh.
-  return await asyncio.to_thread(thematic_history_records,ns,ownership.linked_ids(request))
+ def thematic_history(request:Request):
+  # FastAPI runs this whole sync handler in its bounded worker pool, including
+  # PostgreSQL ownership lookup as well as the potentially large evidence scan.
+  return thematic_history_records(ns,ownership.linked_ids(request))
  @app.get("/api/thematic/unassigned")
- async def unassigned_history(request:Request):
+ def unassigned_history(request:Request):
   # Administrator-assisted migration for real older checks with no recorded
   # owner. Never silently attribute legacy campaigns to the current user.
   claimed=ownership.already_assigned(request)
-  result=await asyncio.to_thread(thematic_history_records,ns)
+  result=thematic_history_records(ns)
   return {"batches":[x for x in result["batches"] if x["id"] not in claimed]}
 
  @app.post("/api/thematic/adopt/{batch}")
- async def adopt_real_batch(batch:str,request:Request):
+ def adopt_real_batch(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(422,"Некорректная проверка")
   ownership.protect_write(request)
   ownership.already_assigned(request)  # administrator gate and identity DB health
@@ -535,10 +541,10 @@ def install(ns):
   script="<script>window.print()</script>" if printable else ""
   return HTMLResponse("<!doctype html><html lang='ru'><meta charset='utf-8'><title>"+title+"</title><style>body{font:16px Georgia,serif;max-width:850px;margin:35px auto;padding:20px;color:#203247}h1{font-size:25px}section{break-inside:avoid}a{color:#175e9a}@media print{body{margin:0;max-width:none}a{display:none}}</style><h1>"+title+"</h1>"+actions+"<p><b>Номер закупки ЕИС:</b> "+escape(reg)+"</p><p><b>Заказчик:</b> "+customer+"</p><p><b>Статус:</b> "+escape(str(item["status"]))+"</p>"+notice+(rows or "<p>Подтверждённых нарушений по выбранным категориям пока нет.</p>")+script+"</html>")
  @app.get("/api/thematic/{batch}")
- async def status(batch:str,request:Request):
+ def status(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
   ownership.require_owned(request,batch)
-  return await asyncio.to_thread(overview,ns,batch)
+  return overview(ns,batch)
  class ThemeNav(BaseHTTPMiddleware):
   async def dispatch(self,request,call_next):
    response=await call_next(request)
