@@ -19,7 +19,7 @@ from scripts.v361_home_shell import home_shell
 PUBLIC = frozenset({
     "/health", "/healthz", "/account/login", "/account/register",
     "/auth/login", "/auth/register", "/account/setup", "/auth/setup", "/eis223/collector.js",
-    "/api/v299/eis223/collector.js",
+    "/api/v299/eis223/collector.js", "/eis223/worker-version",
 })
 MACHINE_EXACT = frozenset({
     "/api/v294/eis223/archive",
@@ -33,6 +33,9 @@ MACHINE_EXACT = frozenset({
     "/api/v322/eis223/price",
     "/api/v341/eis223/card-facts",
     "/api/v301/bridge/next",
+    "/api/eis-worker/jobs/next", "/api/eis-worker/jobs",
+    "/api/eis-worker/discovered", "/api/eis-worker/heartbeat",
+    "/api/eis-worker/status",
 })
 MACHINE_PREFIXES = (
     "/api/v295/eis223/original/",
@@ -107,7 +110,8 @@ def add_account_navigation(html, role="user"):
 
 
 def machine_path(path):
-    return path in MACHINE_EXACT or any(path.startswith(p) for p in MACHINE_PREFIXES)
+    return (path in MACHINE_EXACT or any(path.startswith(p) for p in MACHINE_PREFIXES)
+            or re.fullmatch(r"/api/eis-worker/jobs/[0-9a-f]{24}/report",path) is not None)
 
 
 def verified_machine(headers):

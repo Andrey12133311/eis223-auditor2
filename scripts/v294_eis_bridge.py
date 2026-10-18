@@ -1,12 +1,11 @@
 """Safe official EIS 223-FZ ZIP/XML inbox; never count metadata as audited documents."""
 from __future__ import annotations
-import hashlib, hmac, io, json, os, re, tempfile, zipfile
+import asyncio, hashlib, hmac, io, json, os, re, tempfile, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
-from xml.etree import ElementTree as ET
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from eis223_soap_xml import parse_document
 
 MAX_UPLOAD = 15*1024*1024
 MAX_UNCOMPRESSED = 50*1024*1024
@@ -32,42 +31,39 @@ def parse_notices(data):
         if not 1<=len(items)<=100: raise ValueError("Invalid ZIP entry count")
         if sum(m.file_size for m in items)>MAX_UNCOMPRESSED:
             raise ValueError("Archive decompression size limit")
-        notices=[]
+        notices=[];names=set()
         for m in items:
             fn=m.filename
             if m.flag_bits&1 or m.file_size>MAX_XML:
                 raise ValueError("Encrypted or oversized member")
-            if ("/" in fn or "\\" in fn or ".." in fn or not
-                    re.fullmatch(r"purchaseNotice_[0-9]{11,20}_[A-Za-z0-9_-]{1,120}[.]xml",fn)):
-                raise ValueError("Expected official purchaseNotice XML only")
-            xml=archive.read(m)
-            if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
-                raise ValueError("XML entities are disabled")
-            try: root=ET.fromstring(xml)
-            except ET.ParseError as exc: raise ValueError("Malformed XML") from exc
-            if _name(root.tag)!="purchaseNotice" or not root.tag.startswith("{http://zakupki.gov.ru/223fz/purchase/"):
-                raise ValueError("Not an EIS 223-FZ purchaseNotice")
-            nums={(e.text or "").strip() for e in root.iter() if _name(e.tag)=="registrationNumber"}
-            if len(nums)!=1: raise ValueError("Ambiguous registry number")
-            reg=nums.pop()
-            if not REG.fullmatch(reg) or not fn.startswith("purchaseNotice_"+reg+"_"):
-                raise ValueError("Registry number and ZIP filename differ")
-            docs=[];seen=set()
-            for d in root.iter():
-                if _name(d.tag)!="document": continue
-                name,url=_child(d,"fileName"),_child(d,"url")
-                if not url or url in seen: continue
-                p=urlsplit(url)
-                if (p.scheme!="https" or p.hostname not in ("zakupki.gov.ru","int.zakupki.gov.ru")
-                    or p.username or p.password):
-                    raise ValueError("Unexpected document source host")
-                seen.add(url)
-                docs.append({"name":name[:255] or "Документ ЕИС","url":url})
-            notices.append({"reg_number":reg,"xml_filename":fn,
-                "xml_sha256":hashlib.sha256(xml).hexdigest(),
-                "documents_referenced":len(docs),"documents":docs})
+            if ("/" in fn or "\\" in fn or ".." in fn or fn in names
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{1,240}[.]xml",fn)):
+                raise ValueError("Unsafe or duplicate XML filename")
+            names.add(fn)
+            try: xml=archive.read(m)
+            except (zipfile.BadZipFile,RuntimeError,NotImplementedError) as exc:
+                raise ValueError("Unreadable ZIP member") from exc
+            notice,_data=parse_document(xml,fn)
+            notices.append(notice)
         if len({n["reg_number"] for n in notices})!=1:
             raise ValueError("Mixed registry numbers in archive")
+        # Match the existing binary-original intake contract exactly. Retain
+        # unsupported metadata in the immutable archive, but expose blockers
+        # so a worker cannot call a truncated manifest a completed download.
+        from v295_eis_originals import uid_from_url, EXT
+        for notice in notices:
+            unsupported=[]
+            for document in notice["documents"]:
+                name=document["name"]
+                if (not uid_from_url(document["url"]) or Path(name).name!=name
+                        or Path(name).suffix.lower() not in EXT):
+                    unsupported.append({"name":name,"url":document["url"],
+                                        "reason":"unsupported_original_upload_reference"})
+            notice["unsupported_attachments"]=unsupported
+            notice["unsupported_attachment_count"]=len(unsupported)
+            notice["unresolved_attachment_count"]=len(notice["unresolved_attachments"])
+            notice["total_attachment_count"]=(len(notice["documents"])
+                                               +len(notice["unresolved_attachments"]))
         return notices
     finally: archive.close()
 
@@ -134,11 +130,29 @@ def install(ns):
             record={"source":"official_eis_soap_archive","reg_number":reg,
                "archive_sha256":sha,"received_at":datetime.now(timezone.utc).isoformat(),
                "notices":notices,"original_files_verified":0,
+               "total_attachment_count":sum(n["total_attachment_count"] for n in notices),
+               "unresolved_attachment_count":sum(n["unresolved_attachment_count"] for n in notices),
+               "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
                "audited_documents_increment":0,"status":"metadata_only"}
             _atomic(json_path,json.dumps(record,ensure_ascii=False).encode("utf-8"))
+        metadata_import="pending"
+        import_metadata=ns.get("_v379_import_soap_metadata")
+        if callable(import_metadata):
+            try:
+                metadata=await asyncio.to_thread(import_metadata,reg)
+                metadata_import="stored" if metadata.get("stored") else "pending"
+            except Exception as exc:
+                # The durable archive is acknowledged; a retry can repair the
+                # card without losing bytes or claiming a completed audit.
+                print(f"V379 SOAP_METADATA_PENDING reg={reg} type={type(exc).__name__}",flush=True)
         print(f"V294 EIS_INBOX reg={reg} metadata={len(notices)} links={sum(n['documents_referenced'] for n in notices)} duplicate={not was_new} verified_originals=0",flush=True)
         return JSONResponse({"accepted":True,"reg_number":reg,"metadata_xmls":len(notices),
+            "archive_sha256":sha,"metadata_import":metadata_import,
             "document_links":sum(n["documents_referenced"] for n in notices),
+            "notice_xmls":sum(n["xml_family"]=="notice" for n in notices),
+            "protocol_xmls":sum(n["xml_family"]=="protocol" for n in notices),
+            "unresolved_attachment_count":sum(len(n["unresolved_attachments"]) for n in notices),
+            "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
             "already_received":not was_new,"status":"metadata_only",
             "original_files_verified":0,"audited_documents_increment":0},headers=_cors(origin))
 
@@ -150,7 +164,7 @@ def install(ns):
 input,button{display:block;margin:1rem 0;padding:.7rem}input[type=password]{width:90%}
 pre{white-space:pre-wrap;background:#eee;padding:1rem}</style>
 <h1>Архив ЕИС: приём XML-извещения</h1>
-<p>Принимается официальный ZIP с purchaseNotice. XML и ссылки на документы сохраняются;
+<p>Принимается официальный ZIP с извещениями и протоколами ЕИС. Все XML, редакции и ссылки на документы сохраняются;
 оригиналы DOC/PDF/XLSX не считаются проверенными.</p>
 <label>Ключ EIS223_UPLOAD_TOKEN из Railway<input id="key" type="password" autocomplete="off"></label>
 <label>ZIP от ЕИС<input id="archive" type="file" accept=".zip,application/zip"></label>

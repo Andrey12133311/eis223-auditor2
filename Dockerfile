@@ -16,6 +16,8 @@ RUN python -m py_compile scripts/v371_profile.py scripts/v371_profile_ui.py scri
 RUN python -m py_compile scripts/v372_auto_regulation_protocols.py scripts/v372_automatic_legal_selftest.py scripts/railway_start_v282.py scripts/v332_all_procurements_audit.py && PYTHONPATH=/app:/app/scripts python scripts/v372_automatic_legal_selftest.py
 RUN python -m py_compile scripts/account_notifications_v1.py scripts/v373_thematic_email_notifications.py scripts/v374_email_delivery_selftest.py scripts/account_api_v1.py scripts/v368_manager_workflow.py scripts/account_schema_v1.py scripts/railway_start_v282.py && PYTHONPATH=/app:/app/scripts python scripts/v374_email_delivery_selftest.py
 RUN python -m py_compile scripts/v375_staff_center.py scripts/v375_task_autoload.py scripts/v375_staff_center_selftest.py scripts/v370_staff_ui.py scripts/v370_manager_campaigns.py scripts/v368_manager_workflow.py scripts/account_schema_v1.py scripts/account_migrations_v1.py scripts/account_production_v1.py && PYTHONPATH=/app:/app/scripts python scripts/v375_staff_center_selftest.py
+COPY tests/test_eis223_soap_archive.py tests/test_eis_server_worker.py tests/test_eis_vps_worker.py tests/test_eis_vps_pipeline.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_eis*.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

@@ -32,6 +32,7 @@ import v298_eis_only
 import v299_browser_intake
 import v300_violation_ui
 import v301_search_jobs
+import eis_server_worker
 import v302_eis_modern_ui
 import v303_dashboard_fixes
 import v304_official_memo_odt
@@ -213,6 +214,7 @@ def main():
     v298_eis_only.install(vars(entry))
     v300_violation_ui.install(vars(entry))
     v301_search_jobs.install(vars(entry))
+    eis_server_worker.install(vars(entry))
     v302_eis_modern_ui.install(vars(entry))
     v303_dashboard_fixes.install(vars(entry))
     v304_official_memo_odt.install(vars(entry))
