@@ -12,11 +12,14 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 MIN_FREE = 64 * 1024 * 1024
+RETRY_AFTER_SECONDS = 60
 BRIDGE_PREFIXES = (
     "/api/v301/bridge/",
     "/api/v299/eis223/heartbeat",
     "/api/v299/eis223/public-manifest",
     "/api/v310/eis223/card-metadata",
+    "/api/v311/eis223/customer",
+    "/api/v341/eis223/card-facts",
     "/api/v295/eis223/",
 )
 
@@ -66,23 +69,36 @@ def inspect_disk(root="/data", max_files=120000, max_seconds=18):
         print(f"V357_STORAGE_DIR {name!r} bytes={size} files={counts[name]}",flush=True)
     print(f"V357_STORAGE_DONE files={scanned} elapsed_s={time.monotonic()-start:.2f}",flush=True)
 
+def _storage_full_response(request, detail, free=None):
+    payload={"detail":detail,"code":"EIS223_STORAGE_FULL",
+             "retry_after_seconds":RETRY_AFTER_SECONDS}
+    if free is not None:
+        payload["free_bytes"]=free
+    resp=JSONResponse(payload,status_code=507)
+    resp.headers["retry-after"]=str(RETRY_AFTER_SECONDS)
+    resp.headers["cache-control"]="no-store"
+    if request.headers.get("origin")=="https://zakupki.gov.ru":
+        resp.headers["access-control-allow-origin"]="https://zakupki.gov.ru"
+        resp.headers["access-control-expose-headers"]="Retry-After"
+        resp.headers["vary"]="Origin"
+    return resp
+
+
 def install(ns):
     app=ns["app"]
 
     async def storage_guard(request, call_next):
         route=request.url.path
+        # This guard wraps CORS. Let CORS answer preflight so the actual
+        # request can receive a readable, structured storage-full response.
+        if request.method=="OPTIONS":
+            return await call_next(request)
         if route.startswith(BRIDGE_PREFIXES):
             free=free_bytes()
             if free is not None and free<MIN_FREE:
-                resp=JSONResponse(
-                    {"detail":"Хранилище Railway заполнено. Сохранённые документы не удалены. Освободите или расширьте /data.",
-                     "code":"EIS223_STORAGE_FULL","free_bytes":free},
-                    status_code=507)
-                if request.headers.get("origin")=="https://zakupki.gov.ru":
-                    resp.headers["access-control-allow-origin"]="https://zakupki.gov.ru"
-                    resp.headers["vary"]="Origin"
-                resp.headers["cache-control"]="no-store"
-                return resp
+                return _storage_full_response(request,
+                    "Хранилище Railway заполнено. Сохранённые документы не удалены. Освободите или расширьте /data.",
+                    free)
         try:
             return await call_next(request)
         except (sqlite3.OperationalError,OSError) as exc:
@@ -90,12 +106,8 @@ def install(ns):
                 and "no space left on device" not in str(exc).lower()
                 and getattr(exc,"errno",None)!=28):
                 raise
-            resp=JSONResponse({"detail":"Хранилище /data заполнено; повторите после освобождения места.",
-                               "code":"EIS223_STORAGE_FULL"},status_code=507)
-            if request.headers.get("origin")=="https://zakupki.gov.ru":
-                resp.headers["access-control-allow-origin"]="https://zakupki.gov.ru"
-                resp.headers["vary"]="Origin"
-            return resp
+            return _storage_full_response(request,
+                "Хранилище /data заполнено; повторите после освобождения места.")
 
     app.add_middleware(BaseHTTPMiddleware,dispatch=storage_guard)
     print("V357_BRIDGE_STORAGE_GUARD_READY no_deletions=True",flush=True)

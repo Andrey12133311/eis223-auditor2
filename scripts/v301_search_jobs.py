@@ -185,6 +185,11 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         nb=int(time.time())+min(1800,max(60,defer)) if status=="deferred" else 0
         effective="queued" if status=="deferred" else status
         attempts=int(row["attempts"])
+        # A deferred infrastructure/rate-limit attempt did not establish an
+        # unavailable original. Refund only the active lease, so replaying a
+        # report after a lost HTTP response cannot refund the budget twice.
+        if status=="deferred" and row["status"]=="leased":
+            attempts=max(0,attempts-1)
         if row["kind"]=="reg" and status=="partial":
             # Retry without overloading EIS. Every genuinely imported original
             # is progress and renews the bounded retry budget. A procurement
