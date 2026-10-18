@@ -12,12 +12,15 @@ import re
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 from scripts.v342_identity import organization_display_name
 
 router = APIRouter(prefix="/me/manual-checks", tags=["personal-manual-checks"])
+inn_router = APIRouter(prefix="/me/inn-search", tags=["personal-inn-search"])
 REG = re.compile(r"^3[0-9]{10}$")
+INN = re.compile(r"^(?:[0-9]{10}|[0-9]{12})$")
 
 MANUAL_OWNED = """
 SELECT reg_number, job_id, created_at, last_started_at
@@ -44,6 +47,105 @@ def link_run(owner_id, reg_number, job_id):
                  last_started_at=CURRENT_TIMESTAMP""",
             (owner_id, reg_number, job_id)
         )
+
+
+class InnSearchRequest(BaseModel):
+    inn: str = Field(strict=True, pattern=r"^(?:[0-9]{10}|[0-9]{12})$")
+
+
+def _link_inn_search(owner, inn, job_id):
+    """Own a real search request without adding candidates to manual history."""
+    with connect() as db:
+        db.execute(
+            """INSERT INTO account_inn_searches(user_id,job_id,inn)
+               VALUES (%s,%s,%s)
+               ON CONFLICT(user_id,job_id) DO UPDATE SET
+                 last_started_at=CURRENT_TIMESTAMP""", (owner,job_id,inn))
+
+
+def _owned_inn_search(owner, job_id):
+    with connect() as db:
+        row=db.execute(
+            "SELECT inn FROM account_inn_searches WHERE user_id=%s AND job_id=%s",
+            (owner,job_id)).fetchone()
+    if not row:
+        raise HTTPException(404,"Поиск по ИНН не найден")
+    return row[0]
+
+
+def _verified_inn_results(ns, inn):
+    from v301_search_jobs import _local_results
+    rows=_local_results(ns,"inn",inn)
+    # Buyer identity must come from stored procurement facts. An older bridge
+    # association or search-page filter alone cannot establish the buyer.
+    if not rows:
+        return []
+    db=ns["conn"]()
+    try:
+        verified={row[0] for row in db.execute(
+            "SELECT reg_number FROM purchases WHERE customer_inn=?",(inn,))}
+    finally:
+        db.close()
+    return [row for row in rows if row["reg_number"] in verified]
+
+
+def _inn_namespace(request):
+    ns=getattr(request.app.state,"eis223_manual_ns",None)
+    if ns is None:
+        raise HTTPException(503,"Серверный загрузчик ЕИС не подключён")
+    return ns
+
+
+@inn_router.post("",status_code=202)
+async def start_inn_search(data:InnSearchRequest, request:Request, response:Response):
+    require_origin(request)
+    owner=current_account(request)[0]
+    response.headers.update(no_store_headers())
+    # Keep runtime validation explicit for direct calls as well as HTTP input.
+    if not INN.fullmatch(data.inn):
+        raise HTTPException(422,"ИНН заказчика: 10 или 12 цифр")
+    ns=_inn_namespace(request)
+    from v301_search_jobs import _enqueue, _bridge
+    job,created=await asyncio.to_thread(_enqueue,ns,"inn",data.inn,1,0,"",False)
+    try:
+        await asyncio.to_thread(_link_inn_search,owner,data.inn,job["id"])
+    except Exception as exc:
+        raise HTTPException(503,
+            "Поиск ЕИС принят, но сохранение в личном кабинете не удалось. "
+            "Повторите запуск; ожидающий поиск не дублируется.") from exc
+    existing=await asyncio.to_thread(_verified_inn_results,ns,data.inn)
+    return {"id":job["id"],"kind":"inn","target":data.inn,"status":job["status"],
+            "new_request":created,"local_recheck":False,"existing":existing[:50],
+            "bridge":await asyncio.to_thread(_bridge,ns)}
+
+
+def _inn_search_snapshot(ns, identifier, inn):
+    from v301_search_jobs import _db, _bridge
+    from eis_server_worker import inn_progress
+    db=_db(ns)
+    try:
+        row=db.execute("SELECT * FROM v301_search_jobs WHERE id=? AND kind='inn' AND target=?",
+                       (identifier,inn)).fetchone()
+        if not row:
+            raise HTTPException(404,"Поиск по ИНН не найден")
+        public_fields=("id","kind","target","page","status","priority","created_at",
+                       "updated_at","not_before","attempts","detail","found","accepted","parent_id")
+        job={name:row[name] for name in public_fields}
+    finally:
+        db.close()
+    existing=_verified_inn_results(ns,inn)
+    return {"job":job,"existing":existing[:100],"total_existing":len(existing),
+            **(inn_progress(ns,identifier) or {}),"audit":None,"bridge":_bridge(ns)}
+
+
+@inn_router.get("/{identifier}")
+async def get_inn_search(identifier:str, request:Request, response:Response):
+    owner=current_account(request)[0]
+    response.headers.update(no_store_headers())
+    if not re.fullmatch(r"[0-9a-f]{24}",identifier):
+        raise HTTPException(404,"Поиск по ИНН не найден")
+    inn=await asyncio.to_thread(_owned_inn_search,owner,identifier)
+    return await asyncio.to_thread(_inn_search_snapshot,_inn_namespace(request),identifier,inn)
 
 
 def _read_only_status(ns, entries):

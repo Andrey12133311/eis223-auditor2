@@ -80,10 +80,21 @@ function reset(){
  if(!pageMain())return;
  const form=$('filters');
  if(!form)return;
- form.reset();
- for(const id of ['query','inn','min','max']){
-  const el=$(id);if(el){el.value='';el.dispatchEvent(new Event('input',{bubbles:false}))}
- }
+ // The button with id="reset" is a named form property. Calling form.reset()
+ // therefore calls that button instead of the native method and aborts here.
+ HTMLFormElement.prototype.reset.call(form);
+ // Reset means no filters, including restored defaults and fields added by
+ // later UI modules. Read the DOM only after every field has been cleared.
+ form.querySelectorAll('input,select,textarea').forEach(field=>{
+  if(field.matches('input[type="checkbox"],input[type="radio"]')){
+   field.checked=false;
+  }else if(field.tagName==='SELECT'){
+   if(field.multiple){for(const option of field.options)option.selected=false}
+   else{field.value='';if(field.selectedIndex<0)field.selectedIndex=0}
+  }else if(!field.matches('input[type="hidden"],input[type="submit"],input[type="reset"],input[type="button"]')){
+   field.value='';
+  }
+ });
  const type=$('v257-violation-type');if(type)type.value='';
  const kind=$('kind');if(kind){kind.value='';if(kind.value!=='')kind.selectedIndex=0}
  form.querySelectorAll('input[type="checkbox"]').forEach(box=>box.checked=false);
