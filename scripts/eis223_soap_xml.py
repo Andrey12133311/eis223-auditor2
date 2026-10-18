@@ -81,11 +81,26 @@ def parse_document(raw, filename):
     # The official transport envelope is body/item/<type>Data. Historical
     # direct <type>Data fixtures/exports are accepted too, but never multiple
     # competing payloads or a foreign-namespace lookalike.
-    payloads = [node for node in root.iter()
-                if node.tag == "{" + PURCHASE_NS + "}" + kind + "Data"]
+    data_name = kind + "Data"
+    payloads = [node for node in root.iter() if local_name(node) == data_name]
     if len(payloads) != 1:
         raise ValueError("Missing or ambiguous official XML data")
     data = payloads[0]
+    if data.tag not in (data_name, "{" + PURCHASE_NS + "}" + data_name):
+        raise ValueError("Foreign official XML data namespace")
+    # Preserve legacy handling of unqualified payloads under a trusted root.
+    # The uploaded TFF specifies the envelope but does not prove a stricter
+    # Data elementFormDefault. Do not accept payloads hidden in arbitrary
+    # extension/signature/attachment subtrees.
+    positions = list(root)
+    for body in root:
+        if body.tag not in ("body", "{" + PURCHASE_NS + "}body"):
+            continue
+        for item in body:
+            if item.tag in ("item", "{" + PURCHASE_NS + "}item"):
+                positions.extend(item)
+    if not any(data is candidate for candidate in positions):
+        raise ValueError("Official XML data is outside the transport envelope")
     family = "notice" if kind in NOTICE_TYPES else "protocol"
     if family == "notice":
         reg = field(data, "registrationNumber")
@@ -103,15 +118,19 @@ def parse_document(raw, filename):
     for attachments in (node for node in data.iter() if local_name(node) == "attachments"):
         for document in attachments:
             doc_kind = local_name(document)
+            document_guid = field(document, "guid") or (document.get("guid") or "").strip()
             if doc_kind == "prevDocument":
-                if field(document, "guid"):
-                    previous.append(field(document, "guid"))
+                if document_guid:
+                    previous.append(document_guid)
+                else:
+                    unresolved.append({"kind": doc_kind, "guid": "", "content_uid": "",
+                                       "reason": "previous_document_missing_guid"})
                 continue
             if doc_kind not in ("document", "documentFS"):
                 continue
             name, url = field(document, "fileName"), field(document, "url")
             if not url or not name:
-                unresolved.append({"kind": doc_kind, "guid": field(document, "guid"),
+                unresolved.append({"kind": doc_kind, "guid": document_guid,
                                    "content_uid": field(document, "contentUid"),
                                    "reason": "attachment_has_no_download_url_or_filename"})
                 continue
@@ -130,13 +149,13 @@ def parse_document(raw, filename):
             if url in seen:
                 continue
             seen.add(url)
-            docs.append({"name": name, "url": url, "guid": field(document, "guid"),
+            docs.append({"name": name, "url": url, "guid": document_guid,
                          "xml_type": kind, "published": field(data, "publicationDateTime")})
     version = field(data, "version")
     record = {
         "reg_number": reg, "xml_filename": filename,
         "xml_sha256": hashlib.sha256(raw).hexdigest(), "xml_type": kind,
-        "xml_family": family, "xml_guid": field(data, "guid"),
+        "xml_family": family, "xml_guid": field(data, "guid") or (data.get("guid") or "").strip(),
         "version": int(version) if re.fullmatch(r"[0-9]{1,9}", version) else None,
         "publication": field(data, "publicationDateTime"),
         "created": field(data, "createDateTime"),

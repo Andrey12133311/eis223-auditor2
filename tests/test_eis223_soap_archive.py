@@ -162,6 +162,35 @@ class OfficialSoapArchiveTests(unittest.TestCase):
                                "<url>https://example.org/link</url></document></extra>")
         self.assertEqual(len(bridge.parse_notices(archive((name,raw)))[0]["documents"]),1)
 
+    def test_guid_attributes_and_unidentified_previous_reference_are_not_lost(self):
+        name,raw=fixture(extra='<attachments><prevDocument guid="synthetic-guid"/>'
+                               '<prevDocument/></attachments>')
+        raw=raw.replace(b"<guid>synthetic-guid</guid>",b"").replace(
+            b"<document>",b'<document guid="synthetic-guid">').replace(
+            b"<purchaseNoticeKESMBOData>",b'<purchaseNoticeKESMBOData guid="notice-guid">')
+        record=bridge.parse_notices(archive((name,raw)))[0]
+        self.assertEqual(record["xml_guid"],"notice-guid")
+        self.assertEqual(record["documents"][0]["guid"],"synthetic-guid")
+        self.assertEqual(record["previous_document_guids"],["synthetic-guid"])
+        self.assertEqual(record["unresolved_attachment_count"],1)
+        self.assertEqual(record["unresolved_attachments"][0]["reason"],"previous_document_missing_guid")
+
+    def test_trusted_root_accepts_unqualified_data_but_not_foreign_or_hidden_payload(self):
+        name,raw=fixture()
+        plain=raw.replace(b"<purchaseNoticeKESMBOData>",b'<purchaseNoticeKESMBOData xmlns="">')
+        reply=self.upload(archive((name,plain)))
+        self.assertEqual(reply.status_code,200,reply.text)
+        self.assertEqual(reply.json()["metadata_import"],"stored")
+        self.assertIn("редакция 1",offline.field(offline.official_notice(REG),"name"))
+        with self.connect() as db:
+            self.assertIn("редакция 1",db.execute("SELECT title FROM purchases").fetchone()[0])
+        foreign=raw.replace(b"<purchaseNoticeKESMBOData>",
+                            b'<purchaseNoticeKESMBOData xmlns="https://example.org/foreign">')
+        hidden=raw.replace(b"<body><item>",b"<extension><item>").replace(
+            b"</item></body>",b"</item></extension>")
+        for invalid in (foreign,hidden):
+            self.assertEqual(self.upload(archive((name,invalid))).status_code,422)
+
     def test_mixed_procurements_duplicate_members_and_foreign_namespaces_rejected(self):
         first=fixture()
         second=fixture(reg="32616233662")
