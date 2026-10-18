@@ -28,6 +28,9 @@ MAX_EXPANDED = 80*1024*1024
 def root():
     return Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
 
+def vps_only():
+    return os.environ.get("EIS223_SOURCE_MODE") == "OFFICIAL_EIS_VPS_ONLY"
+
 def auth(request):
     expected=os.getenv("EIS223_UPLOAD_TOKEN","").strip()
     provided=request.headers.get("x-eis223-upload-token","")
@@ -179,14 +182,14 @@ def save_atomic(path,data):
 
 def install(ns):
     app=ns["app"]
-    # Browser-only bridge: permit requests exclusively from the two official EIS origins.
-    # Token authentication still protects XML/original uploads and manifests.
-    app.add_middleware(CORSMiddleware,
-        allow_origins=["https://zakupki.gov.ru","https://int.zakupki.gov.ru"],
-        allow_methods=["GET","POST","OPTIONS"],
-        allow_headers=["content-type","x-eis223-upload-token","x-eis223-collector-version"],
-        allow_credentials=False,
-        max_age=600)
+    # VPS uploads are server-to-server; browsers receive no cross-origin grant.
+    if not vps_only():
+        app.add_middleware(CORSMiddleware,
+            allow_origins=["https://zakupki.gov.ru","https://int.zakupki.gov.ru"],
+            allow_methods=["GET","POST","OPTIONS"],
+            allow_headers=["content-type","x-eis223-upload-token","x-eis223-collector-version"],
+            allow_credentials=False,
+            max_age=600)
     discovery=ns.get("discover_eis_documents")
     downloader=ns.get("download_doc")
     extractor=ns.get("extract_text")
@@ -386,9 +389,9 @@ def install(ns):
                 await asyncio.sleep(600)
         asyncio.create_task(periodic_unique_reconciliation())
 
-    if discovery is not None:
+    if discovery is not None or vps_only():
         async def enriched_discovery(client,reg,card=None):
-            from_source=await discovery(client,reg,card)
+            from_source=[] if vps_only() else await discovery(client,reg,card)
             present={x.get("url") for x in from_source if isinstance(x,dict)}
             for uid,item in allowed_documents(reg).items():
                 if item["url"] in present:continue
@@ -402,9 +405,15 @@ def install(ns):
         ns["discover_eis_documents"]=enriched_discovery
 
     original_batch_download=ns.get("download_all_documents")
-    if original_batch_download is not None:
+    if original_batch_download is not None or vps_only():
         async def deduplicated_batch(client,reg,docs):
-            await original_batch_download(client,reg,docs)
+            if vps_only():
+                cache_loader=ns.get("_cache_docs")
+                cache=await asyncio.to_thread(cache_loader,reg) if callable(cache_loader) else {}
+                for document in docs:
+                    await ns["download_doc"](client,reg,document,cache)
+            else:
+                await original_batch_download(client,reg,docs)
             if not allowed_documents(reg):return
             original_count=len(docs)
             unique=[]
@@ -446,14 +455,14 @@ def install(ns):
             print(f"V296 ORIGINAL_DEDUP reg={reg} before={original_count} after={len(unique)}",flush=True)
         ns["download_all_documents"]=deduplicated_batch
 
-    if downloader is not None and extractor is not None:
+    if (downloader is not None and extractor is not None) or vps_only():
         async def downloaded_from_local(client,reg,d,cache=None):
             uid=uid_from_url(d.get("url",""))
             if uid and uid in allowed_documents(reg):
                 item=saved_document(reg,uid)
                 if item:
                     path,receipt=item
-                    txt=await asyncio.to_thread(extractor,path)
+                    txt=await asyncio.to_thread(extractor,path) if callable(extractor) else ""
                     text=str(txt or "")
                     chars=len(text.strip())
                     d["local"]=str(path)
@@ -465,6 +474,28 @@ def install(ns):
                     d["meta"]["sha256"]=receipt["sha256"]
                     print(f"V295 LOCAL_EIS_ORIGINAL reg={reg} uid={uid} chars={chars} status={d['status']}",flush=True)
                     return
+            if vps_only():
+                # Previously saved originals remain available for local analysis,
+                # including files predating the authenticated receipt pipeline.
+                cache=cache or {}
+                urls=[d.get("url"),d.get("final_url")]
+                urls.extend((d.get("meta") or {}).get("alt_urls") or [])
+                candidates=[d.get("local")]+[cache.get(url) for url in urls if url]
+                for local in candidates:
+                    if not local:continue
+                    path=Path(local)
+                    if not path.is_file():continue
+                    txt=await asyncio.to_thread(extractor,path) if callable(extractor) else ""
+                    text=str(txt or "")
+                    chars=len(text.strip())
+                    d.update(local=str(path),text=text,
+                             final_url=d.get("final_url") or d.get("url"),
+                             status="checked" if chars>=3 else "downloaded_no_text",
+                             error=None if chars>=3 else "Файл получен, но текст не извлечён")
+                    return
+                d.update(local=None,text="",status="waiting_for_originals",
+                         error="Оригинал ожидается от загрузчика ЕИС на VPS")
+                return
             return await downloader(client,reg,d,cache)
         ns["download_doc"]=downloaded_from_local
 

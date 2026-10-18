@@ -6,6 +6,7 @@ bytes locally and never fabricates documents, searches or violation counts.
 from __future__ import annotations
 import asyncio
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -333,7 +334,8 @@ def _bridge(ns):
     db=_db(ns)
     try:
         row=db.execute("SELECT seen_at,last_action FROM v301_bridge_health WHERE singleton=1").fetchone()
-        active=bool(row and int(time.time())-row["seen_at"]<40)
+        vps_only=os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY"
+        active=bool(not vps_only and row and int(time.time())-row["seen_at"]<40)
         q=db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased')").fetchone()[0]
         # A VPS heartbeat is distinct from an official browser heartbeat.
         try:
@@ -343,10 +345,13 @@ def _bridge(ns):
             server={"active":False,"last_seen":None}
         return {"active":active or server["active"],
                 "browser_active":active,"server_active":server["active"],
+                "browser_collector_enabled":not vps_only,
+                "intake_mode":"vps_only" if vps_only else "server_and_browser",
                 "server_last_seen":server.get("last_seen"),
                 "server_status":server.get("status"),
                 "discovery_status":server.get("discovery_status"),
-                "last_seen":max(row["seen_at"] if row else 0,server.get("last_seen") or 0) or None,
+                "last_seen":max(row["seen_at"] if row and not vps_only else 0,
+                                server.get("last_seen") or 0) or None,
                 "queued":q,"poll_seconds":8}
     finally:db.close()
 
@@ -373,6 +378,8 @@ def install(ns):
         if kind=="reg":
             if not REG.fullmatch(value):raise HTTPException(422,"Номер закупки 223-ФЗ должен содержать 11 цифр и начинаться с 3")
         elif kind=="inn":
+            if os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY":
+                raise HTTPException(422,"В режиме VPS укажите номер закупки ЕИС.")
             if not INN.fullmatch(value):raise HTTPException(422,"ИНН должен содержать 10 или 12 цифр")
         else:raise HTTPException(422,"Выберите поиск по номеру или ИНН")
         prior=await asyncio.to_thread(_local_results,ns,kind,value)

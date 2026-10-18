@@ -481,7 +481,10 @@ def install(ns):
 
     @app.get("/eis223/worker-version")
     async def version():
-        return {"feature": FEATURE, "protocol_version": 1}
+        vps_only = os.environ.get("EIS223_SOURCE_MODE") == "OFFICIAL_EIS_VPS_ONLY"
+        return {"feature": FEATURE, "protocol_version": 1,
+                "intake_mode": "vps_only" if vps_only else "server_and_browser",
+                "browser_collector_enabled": not vps_only}
 
     @app.get("/api/eis-worker/jobs/next")
     async def next_jobs(request: Request, worker_id: str, limit: int = 2):

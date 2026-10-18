@@ -2,6 +2,7 @@
 
 This is an independent analytical service, not the official EIS website.
 """
+import os
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -99,6 +100,7 @@ table{display:block;overflow:auto}
 SCRIPT='''<script id="v302-modern-js">
 (function(){
  if(window.__v302Active)return;window.__v302Active=true;
+ const VPS_ONLY=__EIS223_VPS_ONLY__;
  const by=id=>document.getElementById(id);
  const page=['/','/manual-purchases','/manual-documents','/documents'].includes(location.pathname);
  const escape=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -134,14 +136,17 @@ SCRIPT='''<script id="v302-modern-js">
   try{
    const s=await req('/api/v301/bridge/status');const el=by('v302-connect');
    if(!el)return;
-   el.classList.toggle('online',!!s.active);
-   el.textContent=s.active?'● ЕИС подключён · в очереди: '+s.queued:
-     '○ Вкладка ЕИС не подключена · ожидают: '+s.queued;
+   const active=VPS_ONLY?!!s.server_active:!!s.active;
+   el.classList.toggle('online',active);
+   el.textContent=VPS_ONLY?
+     (active?'● Загрузчик VPS подключён · в очереди: ':'○ Загрузчик VPS не на связи · ожидают: ')+s.queued:
+     (active?'● ЕИС подключён · в очереди: ':'○ Вкладка ЕИС не подключена · ожидают: ')+s.queued;
   }catch(e){}
  }
  let seq=0;
  async function submit(kind,value){
   const i=++seq;value=digits(value);
+  if(VPS_ONLY&&kind==='inn')return notice('В режиме VPS укажите номер закупки ЕИС.','error');
   if(kind==='reg'&&!/^3[0-9]{10}$/.test(value))
     return notice('Введите номер закупки 223-ФЗ из 11 цифр.','error');
   if(kind==='inn'&&!/^(?:[0-9]{10}|[0-9]{12})$/.test(value))
@@ -155,13 +160,17 @@ SCRIPT='''<script id="v302-modern-js">
       body:JSON.stringify({kind,value})});
     if(kind==='reg')window.dispatchEvent(new Event('eis223:manual-input'));
     if(i!==seq)return;
+    const connected=VPS_ONLY?!!r.bridge?.server_active:!!r.bridge?.active;
     notice('<strong>Запрос '+escape(value)+' поставлен в приоритетную очередь.</strong> '+
-      (r.bridge?.active?'Мост ЕИС активен, загрузка начнётся в ближайшие секунды.':
-       'Чтобы получить новые документы, запустите браузерный мост во вкладке zakupki.gov.ru.')+
+      (VPS_ONLY?
+       (connected?'Загрузчик VPS подключён. Документы поступят автоматически в одном из ближайших циклов.':
+        'Загрузчик VPS сейчас не на связи. Задание сохранено и продолжится после восстановления соединения.'):
+       (connected?'Мост ЕИС активен, загрузка начнётся в ближайшие секунды.':
+        'Чтобы получить новые документы, запустите браузерный мост во вкладке zakupki.gov.ru.'))+
       (kind==='reg'?'<p><a href="/check-new/'+encodeURIComponent(value)+
        '">Открыть проверку →</a></p>':'')+
       '<p id="v302-task-status">Ожидание ЕИС…</p><div id="v302-task-items">'+rows(r.existing)+'</div>',
-      r.bridge?.active?'ok':'');
+      connected?'ok':'');
     bridge();
     for(let k=0;k<85;k++){
       if(seq!==i)return;
@@ -212,25 +221,30 @@ SCRIPT='''<script id="v302-modern-js">
       '<span class="v302-title"><strong>Контроль закупок по 223-ФЗ</strong>',
       '<small>Независимый аналитический сервис · ЕИС · документальная проверка нарушений</small></span>',
       '<span id="v302-connect" class="v302-connect">Проверка подключения ЕИС…</span></div>',
-      '<div class="v302-grid">',
+      '<div class="v302-grid"'+(VPS_ONLY?' style="grid-template-columns:1fr"':'')+'>',
       '<form id="v302-reg-form" class="v302-box"><label for="v302-reg">По номеру закупки ЕИС</label>',
       '<p>Загрузка извещения и всех доступных оригиналов, затем юридическая проверка.</p>',
       '<div class="v302-inputs"><input id="v302-reg" inputmode="numeric" maxlength="11" ',
       'placeholder="Например: 32616440427" required>',
       '<button type="submit" id="v302-reg-submit">Проверить</button></div></form>',
+      VPS_ONLY?'':[
       '<form id="v302-inn-form" class="v302-box"><label for="v302-inn">По ИНН заказчика</label>',
       '<p>Поиск всех закупок заказчика в ЕИС и приоритетное получение документов.</p>',
       '<div class="v302-inputs"><input id="v302-inn" inputmode="numeric" maxlength="12" ',
       'placeholder="ИНН из 10 или 12 цифр" required>',
-      '<button type="submit" id="v302-inn-submit">Найти закупки</button></div></form></div>',
+      '<button type="submit" id="v302-inn-submit">Найти закупки</button></div></form>'
+      ].join(''),
+      '</div>',
       '<div id="v302-search-result" role="status" aria-live="polite"></div>',
-      '<div class="v302-links"><span>Официальный источник: только ЕИС, без ЭТП и агрегаторов</span>',
+      '<div class="v302-links"><span>'+(VPS_ONLY?'Документы из ЕИС поступают автоматически через VPS':
+        'Официальный источник: только ЕИС, без ЭТП и агрегаторов')+'</span>',
       '<a href="https://zakupki.gov.ru/epz/main/public/home.html" target="_blank" rel="noopener noreferrer">Открыть ЕИС ↗</a>',
-      '<a href="/api/v299/eis223/collector.js" target="_blank" rel="noopener noreferrer">Открыть код подключения</a>',
-      '<a href="#" id="v302-copy-bridge">Скопировать код</a></div>'
+      VPS_ONLY?'':'<a href="/api/v299/eis223/collector.js" target="_blank" rel="noopener noreferrer">Открыть код подключения</a>',
+      VPS_ONLY?'':'<a href="#" id="v302-copy-bridge">Скопировать код</a>',
+      '</div>'
     ].join('');
     host.insertBefore(node,host.firstChild);
-    by('v302-copy-bridge').addEventListener('click',async e=>{
+    if(!VPS_ONLY)by('v302-copy-bridge').addEventListener('click',async e=>{
       e.preventDefault();
       try{
         const r=await fetch('/api/v299/eis223/collector.js',{cache:'no-store'});
@@ -243,13 +257,13 @@ SCRIPT='''<script id="v302-modern-js">
       }
     });
     by('v302-reg-form').addEventListener('submit',e=>{e.preventDefault();submit('reg',by('v302-reg').value)});
-    by('v302-inn-form').addEventListener('submit',e=>{e.preventDefault();submit('inn',by('v302-inn').value)});
-    const inn=by('inn');if(inn&&/^[0-9]{10}([0-9]{2})?$/.test(inn.value))by('v302-inn').value=inn.value;
+    if(!VPS_ONLY)by('v302-inn-form').addEventListener('submit',e=>{e.preventDefault();submit('inn',by('v302-inn').value)});
+    const inn=by('inn');if(!VPS_ONLY&&inn&&/^[0-9]{10}([0-9]{2})?$/.test(inn.value))by('v302-inn').value=inn.value;
     // A customer favorite is an explicit, user-initiated search. Remove the
     // one-use parameter so reloading cannot submit it another time.
     const params=new URLSearchParams(location.search);
     const favoriteInn=params.get('favorite_inn');
-    if(favoriteInn&&/^[0-9]{10}([0-9]{2})?$/.test(favoriteInn)){
+    if(!VPS_ONLY&&favoriteInn&&/^[0-9]{10}([0-9]{2})?$/.test(favoriteInn)){
       by('v302-inn').value=favoriteInn;
       params.delete('favorite_inn');
       const query=params.toString();
@@ -270,6 +284,7 @@ SCRIPT='''<script id="v302-modern-js">
     },true);
   }
   const b=by('v257-inn-search');
+  if(VPS_ONLY&&b){b.style.display='none';b.disabled=true;}
   if(b&&!b.dataset.v302Hook){
     b.dataset.v302Hook='yes';
     b.addEventListener('click',e=>{
@@ -306,10 +321,13 @@ def install(ns):
             if 'id="v302-modern-css"' not in html:
                 html=html.replace('</head>',STYLE+'</head>',1) if '</head>' in html else STYLE+html
             if 'id="v302-modern-js"' not in html:
-                html=html.replace('</body>',SCRIPT+'</body>',1) if '</body>' in html else html+SCRIPT
+                script=SCRIPT.replace('__EIS223_VPS_ONLY__',
+                    'true' if os.environ.get('EIS223_SOURCE_MODE')=='OFFICIAL_EIS_VPS_ONLY' else 'false')
+                html=html.replace('</body>',script+'</body>',1) if '</body>' in html else html+script
             headers={k:v for k,v in response.headers.items()
                      if k.lower() not in ('content-length','transfer-encoding','content-encoding')}
             headers['Cache-Control']='no-store'
             return HTMLResponse(html,status_code=200,headers=headers)
     app.add_middleware(ModernLayout)
-    print('V302 MODERN_EIS_LAYOUT_READY search_reg=True search_inn=True',flush=True)
+    print('V302 MODERN_EIS_LAYOUT_READY search_reg=True search_inn='+
+          str(os.environ.get('EIS223_SOURCE_MODE')!='OFFICIAL_EIS_VPS_ONLY'),flush=True)

@@ -780,7 +780,9 @@ async def offline_audit(ns,reg,collect_only=False):
 
 def install(ns):
     """Switch off all historic background collectors and source-triggering routes."""
-    os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_BROWSER_ONLY"
+    vps_only=os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY"
+    if not vps_only:
+        os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_BROWSER_ONLY"
     app=ns["app"]
 
     # Core Python module initializes its DB on import. Non-EIS start hooks launch
@@ -821,7 +823,8 @@ def install(ns):
         )
         if any(path.startswith(p) for p in forbidden):
             return JSONResponse({"source":"ЕИС","status":"disabled",
-                                 "detail":"Источник отключён. Работает только официальный ЕИС через браузер."},
+                                 "detail":"Источник отключён. Документы ЕИС загружает VPS." if vps_only
+                                          else "Источник отключён. Работает только официальный ЕИС через браузер."},
                                 status_code=410)
         if (method in ("POST","PUT","PATCH") and
               not path.startswith(("/api/v294/eis223/","/api/v295/eis223/")) and
@@ -845,9 +848,12 @@ def install(ns):
         except (ImportError,OSError,RuntimeError):
             pass
         active=bool(collector.get("active"))
-        return {"mode":"official_eis_server_and_browser" if active else "official_eis_browser_only",
-                "sources":["ЕИС getDocsIP (VPS)","ЕИС (браузерное подключение)"] if active
-                          else ["ЕИС (браузерное подключение)"],
+        return {"mode":"official_eis_vps_only" if vps_only else
+                        ("official_eis_server_and_browser" if active else "official_eis_browser_only"),
+                "sources":["ЕИС getDocsIP (VPS)"] if vps_only else
+                          (["ЕИС getDocsIP (VPS)","ЕИС (браузерное подключение)"] if active
+                           else ["ЕИС (браузерное подключение)"]),
+                "browser_collector_enabled":not vps_only,
                 "server_collector":collector,
                 "server_collector_configured":len(os.environ.get("EIS223_UPLOAD_TOKEN", ""))>=24,
                 "legacy_background_workers":0,

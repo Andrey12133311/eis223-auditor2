@@ -226,6 +226,7 @@ def _known(ns,regs):
     finally:db.close()
 
 def _scan_status():
+    vps_only=os.environ.get("EIS223_SOURCE_MODE")=="OFFICIAL_EIS_VPS_ONLY"
     path=root()/"eis223_public_browser_intake"/"_monitor_status.json"
     try:
         info=json.loads(path.read_text(encoding="utf-8"))
@@ -236,26 +237,28 @@ def _scan_status():
     try:version=int(info.get("collector_version") or 0)
     except (ValueError,TypeError):version=0
     active=False
-    if isinstance(at,str):
+    if not vps_only and isinstance(at,str):
         try:
             date=datetime.fromisoformat(at)
             active=(version>=313 and (datetime.now(timezone.utc)-date)<timedelta(minutes=12))
         except (ValueError,TypeError):pass
     return {
         "browser_collector_active":active,
+        "browser_collector_enabled":not vps_only,
+        "intake_mode":"vps_only" if vps_only else "browser",
         "collector_version":version,
-        "upgrade_required":version<342,
+        "upgrade_required":not vps_only and version<342,
         "required_version":342,
         "card_facts_supported":version>=341,
         "last_scan":at,
-        "last_cycle_status":info.get("status","not_started"),
-        "last_error":info.get("error",""),
+        "last_cycle_status":"disabled" if vps_only else info.get("status","not_started"),
+        "last_error":"" if vps_only else info.get("error",""),
         "last_new_purchases":info.get("new_purchases",0),
         "last_originals_uploaded":info.get("originals_uploaded",0),
         "poll_interval_seconds":300,
         "search_requests_per_cycle":1,
         "max_procurements_per_cycle":2,
-        "eis_source":"official public 223-FZ search, browser only",
+        "eis_source":"official EIS getDocsIP, VPS only" if vps_only else "official public 223-FZ search, browser only",
         "server_eis_requests":0,
     }
 

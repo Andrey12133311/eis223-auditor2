@@ -33,6 +33,7 @@ import v299_browser_intake
 import v300_violation_ui
 import v301_search_jobs
 import eis_server_worker
+import eis_vps_only
 import v302_eis_modern_ui
 import v303_dashboard_fixes
 import v304_official_memo_odt
@@ -178,7 +179,7 @@ def main():
     v358_archive_gc.reclaim(Path(os.environ.get('EIS223_DATA_DIR') or '/data'))
     v357_storage_guard.inspect_disk(os.environ.get('EIS223_DATA_DIR') or '/data')
     folder,count=restore()
-    os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_BROWSER_ONLY"
+    os.environ["EIS223_SOURCE_MODE"]="OFFICIAL_EIS_VPS_ONLY"
     path=Path(tempfile.gettempdir())/'eis223_v282_private'/'entry.py'
     patch_file(folder/'entry.py',path)
     for fn in (patch_v257,patch_v258,patch_v259,patch_v260,patch_v261,patch_v262,patch_v263,patch_v264,patch_v265,patch_v266):
@@ -190,7 +191,7 @@ def main():
     digest=patch_v276(path)
     digest=patch_v277(path)
     # Disabled: DaMIA/TenderGuru discovery feed patches and Roseltorg retry scheduler.
-    # Only browser-origin EIS ZIP and original document intake remains active.
+    # The VPS supplies official EIS ZIPs and originals; audit uses saved bytes.
     digest=patch_v291(path)
     sys.path.insert(0,str(path.parent))
     import importlib
@@ -255,6 +256,7 @@ def main():
         mount_accounts_to_eis(entry.app)
         from scripts.v373_thematic_email_notifications import install as install_thematic_mail
         install_thematic_mail(vars(entry))
+    eis_vps_only.install(vars(entry))
     _guard_disk_full_startup(entry.app)
     if '--verify-only' in sys.argv:return
     # Railway cannot reach EIS SOAP; do not launch repeated network probes.
