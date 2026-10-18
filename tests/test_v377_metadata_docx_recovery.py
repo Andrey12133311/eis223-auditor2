@@ -112,7 +112,8 @@ class DocxMetadataRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "word/styles.xml"):
             Document(path)
         with self.assertLogs(metadata.LOG, level="WARNING") as logs:
-            text = metadata.document_text(path, self.ns["extract_text"])
+            text = metadata._document_text_uncached(path, self.ns["extract_text"])
+        self.assertEqual(text, metadata.document_text(path, self.ns["extract_text"]))
         self.assertIn("word/styles.xml", logs.output[0])
         self.assertLess(text.index("Сведения о закупке"), text.index(CUSTOMER))
         self.assertLess(text.index(CUSTOMER), text.index("Последний абзац документа"))

@@ -14,6 +14,7 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request, Response
 from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_session_policy_v1 import no_store_headers
+from scripts.v342_identity import organization_display_name
 
 router = APIRouter(prefix="/me/manual-checks", tags=["personal-manual-checks"])
 REG = re.compile(r"^3[0-9]{10}$")
@@ -136,7 +137,7 @@ def _read_only_status(ns, entries):
                                           legal_review_documents>0),
                 "legal_review_documents":legal_review_documents,
                 "card_available":bool(purchase),
-                "customer":customer_name,
+                "customer":organization_display_name(customer_name),
                 "customer_inn":customer_inn,
                 "violation_types":sorted(labels)[:40],
             })

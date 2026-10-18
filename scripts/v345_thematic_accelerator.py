@@ -11,6 +11,7 @@ import sqlite3
 import time
 from datetime import datetime,timezone
 import v342_thematic_queue as original
+from v381_audit_scheduling import background_audit
 
 MAX_CONCURRENT=4
 MAX_PER_BATCH=18
@@ -27,7 +28,14 @@ def _prepare(ns):
     clock=time.time()
     c=_open(ns)
     try:
-        campaigns=c.execute("SELECT * FROM thematic_batches WHERE status='active'").fetchall()
+        campaigns=c.execute("SELECT * FROM thematic_batches WHERE status='active' ORDER BY created_at,id").fetchall()
+        # Continue after the last served campaign if historical/imported
+        # active campaigns exceed the normal three-campaign UI limit.
+        previous=ns.get("_v381_last_thematic_batch")
+        for index,camp in enumerate(campaigns):
+            if camp["id"]==previous:
+                campaigns=campaigns[index+1:]+campaigns[:index+1]
+                break
         if clock-original.WORKER_STATE.get("index_at",0)>INDEX_SECONDS:
             rows=c.execute("SELECT reg_number,customer FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
             for camp in campaigns:
@@ -37,9 +45,9 @@ def _prepare(ns):
                 c.executemany("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",queue)
             c.commit()
             original.WORKER_STATE["index_at"]=clock
-        selected=[]
+        by_campaign=[]
         for camp in campaigns:
-            if len(selected)>=MAX_PER_CYCLE: break
+            selected=[]
             # Fast indexed subqueries avoid scanning or re-reading original files
             # that have not changed since the last successful legal evaluation.
             rows=c.execute("""
@@ -50,6 +58,10 @@ def _prepare(ns):
                    AND d.status='checked') ready_count
              FROM thematic_items t WHERE t.batch_id=?
                AND t.status IN ('queued','waiting_originals','waiting_engine','retry','completed')
+               AND (t.status!='completed'
+                    OR t.last_doc_id<(SELECT COALESCE(MAX(id),0) FROM docs d WHERE d.reg_number=t.reg)
+                    OR t.last_ready_count<(SELECT COUNT(*) FROM docs d
+                       WHERE d.reg_number=t.reg AND COALESCE(d.local_path,'')!='' AND d.status='checked'))
              ORDER BY CASE WHEN EXISTS(
                  SELECT 1 FROM docs d WHERE d.reg_number=t.reg
                   AND COALESCE(d.local_path,'')!='' AND d.status='checked'
@@ -61,7 +73,7 @@ def _prepare(ns):
             """,(camp["id"],)).fetchall()
             count=0
             for row in rows:
-                if count>=MAX_PER_BATCH or len(selected)>=MAX_PER_CYCLE:break
+                if count>=MAX_PER_BATCH:break
                 doc_id=int(row["doc_id"] or 0)
                 ready=int(row["ready_count"] or 0)
                 new_evidence=doc_id>int(row["last_doc_id"] or 0) or ready>int(row["last_ready_count"] or 0)
@@ -77,6 +89,17 @@ def _prepare(ns):
                   "categories":json.loads(camp["categories"]),
                   "ready":ready,"doc_id":doc_id})
                 count+=1
+            by_campaign.append(selected)
+        # A third active campaign must not wait forever behind 18 + 18 jobs
+        # from the first two. Interleave bounded selections before dispatch.
+        selected=[]
+        for offset in range(MAX_PER_BATCH):
+            for queue in by_campaign:
+                if offset<len(queue):selected.append(queue[offset])
+                if len(selected)>=MAX_PER_CYCLE:
+                    ns["_v381_last_thematic_batch"]=selected[-1]["batch"]
+                    return selected
+        if selected:ns["_v381_last_thematic_batch"]=selected[-1]["batch"]
         return selected
     finally:c.close()
 
@@ -85,7 +108,8 @@ async def _one(ns,item,sem):
         if item["ready"]<1:
             return (item,"waiting_originals",[],"Ожидаются доступные оригиналы ЕИС")
         try:
-            state,findings=await original.independent_review(ns,item["reg"],item["categories"])
+            with background_audit():
+                state,findings=await original.independent_review(ns,item["reg"],item["categories"])
             description={
               "completed":"Проверено по сохранённым оригиналам ЕИС",
               "waiting_originals":"Ожидаются подтверждённые оригиналы ЕИС",
@@ -236,6 +260,7 @@ def _request_missing_originals(ns,results=()):
     return made
 
 async def faster_tick(ns):
+    started=time.monotonic()
     if original.storage_health()["blocked"]:
         original.WORKER_STATE["last_error"]="Недостаточно места на диске Railway для сохранения проверок"
         return
@@ -248,13 +273,32 @@ async def faster_tick(ns):
             print("V353 THEME_EIS_DISPATCH_ERROR "+type(exc).__name__,flush=True)
         return
     sem=asyncio.Semaphore(MAX_CONCURRENT)
-    results=await asyncio.gather(*(_one(ns,item,sem) for item in items))
-    await asyncio.to_thread(_persist,ns,results)
+    tasks=[asyncio.create_task(_one(ns,item,sem)) for item in items]
+    processed=completed=0
+    first_result_ms=None
+    try:
+        for finished in asyncio.as_completed(tasks):
+            result=await finished
+            # Durable progress is visible immediately, even while another
+            # procurement is still extracting a slow PDF or large archive.
+            await asyncio.to_thread(_persist,ns,[result])
+            processed+=1
+            completed+=int(result[1]=="completed")
+            if first_result_ms is None:first_result_ms=round((time.monotonic()-started)*1000,1)
+            original.WORKER_STATE["processed_total"]=original.WORKER_STATE.get("processed_total",0)+1
+    finally:
+        for task in tasks:
+            if not task.done():task.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
     try:
         await asyncio.to_thread(_request_missing_originals,ns)
     except Exception as exc:
         print("V352 THEME_EIS_DISPATCH_ERROR "+type(exc).__name__,flush=True)
-    original.WORKER_STATE["processed_total"]=original.WORKER_STATE.get("processed_total",0)+len(results)
+    elapsed_ms=round((time.monotonic()-started)*1000,1)
+    original.WORKER_STATE["last_batch_elapsed_ms"]=elapsed_ms
+    print(f"V381 THEMATIC_BATCH_COMPLETED items_processed={processed} audits_completed={completed} "
+          f"elapsed_ms={elapsed_ms} first_result_ms={first_result_ms}",flush=True)
+    return processed
 
 def install(ns):
     c=_open(ns)
@@ -277,7 +321,6 @@ def install(ns):
     finally:c.close()
     original.tick=faster_tick
     original.WORKER_STATE["interval_seconds"]=20
-    # The v342 worker resolves asyncio.sleep from its original module globals.
-    # Its existing loop still waits two minutes; replace the worker's sleep in
-    # v342 directly in a separate, bounded code change.
+    # v342 drains ready batches immediately and waits for evidence notifications
+    # while idle. The fallback poll still handles external DB writers.
     print("THEMATIC_FAST_WORKER_READY concurrency=4 per_cycle=36 index_seconds=90",flush=True)

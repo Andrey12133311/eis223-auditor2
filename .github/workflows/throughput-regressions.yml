@@ -1,0 +1,33 @@
+name: Throughput and memo regressions
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'tests/test_extraction_throughput.py'
+      - 'tests/test_v381*.py'
+      - 'tests/test_organization_display.py'
+      - 'tests/test_memo_requisites.py'
+      - 'tests/memo_fixture.py'
+      - '.github/workflows/throughput-regressions.yml'
+  push:
+    branches: [thematic-audit-20261015]
+permissions:
+  contents: read
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1'
+      - name: Verify bounded processing, evidence reuse and private memo fields
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -m unittest discover -s tests -p 'test_extraction_throughput.py'
+          python -m unittest discover -s tests -p 'test_v381*.py'
+          python -m unittest discover -s tests -p 'test_organization_display.py'
+          python -m unittest discover -s tests -p 'test_memo_requisites.py'
+          python -m unittest discover -s tests -p 'test_eis*.py'

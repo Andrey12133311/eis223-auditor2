@@ -314,7 +314,8 @@ def related(request:Request,reg:str):
                FROM purchases WHERE customer_inn=? AND reg_number<>?
                ORDER BY reg_number DESC LIMIT 40""",
             (p["customer_inn"],reg)).fetchall()
-        return {"purchases":[dict(r) for r in rows],"customer_inn":p["customer_inn"],
+        from scripts.v342_identity import organization_display_name
+        return {"purchases":[{**dict(r),"customer":organization_display_name(r["customer"])} for r in rows],"customer_inn":p["customer_inn"],
                 "source":"Только уже собранные данные ЕИС"}
     finally:con.close()
 

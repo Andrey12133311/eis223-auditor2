@@ -352,6 +352,15 @@ CREATE TABLE IF NOT EXISTS account_staff_discussions (
 );
 CREATE INDEX IF NOT EXISTS account_staff_discussions_case
     ON account_staff_discussions(user_id,reg_number,created_at DESC);
+CREATE TABLE IF NOT EXISTS account_memo_requisites (
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    executor TEXT NOT NULL,
+    phone TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,reg_number)
+);
 CREATE TABLE IF NOT EXISTS account_throttle (
     bucket_key TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL,

@@ -3,6 +3,7 @@
 Operates only on the already-rendered official FAS memo. No DB writes.
 """
 from __future__ import annotations
+import copy
 import io
 import re
 import zipfile
@@ -12,8 +13,13 @@ OO="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
 TX="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
 ST="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
 FO="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+DR="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+SVG="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
 STYLE_NAME="EIS223MemoBody321"
-for prefix,uri in (("office",OO),("text",TX),("style",ST),("fo",FO)):
+EXECUTOR_STYLE="EIS223MemoExecutor381"
+EXECUTOR_TEXT_STYLE="EIS223MemoExecutorText381"
+EXECUTOR_FRAME_STYLE="EIS223MemoExecutorFrame381"
+for prefix,uri in (("office",OO),("text",TX),("style",ST),("fo",FO),("draw",DR),("svg",SVG)):
     ET.register_namespace(prefix,uri)
 
 def _odf_string(element):
@@ -76,8 +82,97 @@ def _style(root):
         "{"+FO+"}font-size":"14pt",
         "{"+FO+"}font-weight":"normal",
         "{"+FO+"}font-style":"normal",
+        "{"+FO+"}color":"#000000",
         "{"+ST+"}font-size-asian":"14pt",
         "{"+ST+"}font-size-complex":"14pt"})
+
+
+def _executor_block(root,body):
+    """Anchor original executor/phone text at the bottom of the final page.
+
+    A paragraph anchor follows the final signature across pagination, unlike
+    fixed page numbers or blank spacer paragraphs. It appears once, never in
+    a repeating page footer. The source signature and wording stay intact.
+    """
+    current=list(body.iter("{"+TX+"}p"))
+    signer_idx=next((i for i,p in enumerate(current)
+        if p.get("{"+TX+"}style-name")=="P24" or "Заместитель начальника Управления" in _odf_string(p)),-1)
+    executor_idx=next((i for i,p in enumerate(current)
+        if p.get("{"+TX+"}style-name")=="P21" and i>signer_idx),-1)
+    if signer_idx<0 or executor_idx<=signer_idx:
+        return
+    direct=list(body)
+    block=current[executor_idx:executor_idx+2]
+    if not block or any(p not in direct for p in block):
+        return
+    # Use the last actual signature paragraph as anchor, never a layout blank.
+    anchor=next((p for p in reversed(current[signer_idx:executor_idx])
+                 if _clean(_odf_string(p)) and p in direct),None)
+    if anchor is None:
+        return
+    styles=root.find("{"+OO+"}automatic-styles")
+    # Keep the closing request and both signature lines together. Otherwise
+    # the last name alone can become the anchor of an almost-empty last page.
+    closing_idx=next((i for i in range(signer_idx-1,-1,-1)
+                      if _clean(_odf_string(current[i])) and current[i] in direct),signer_idx)
+    defined={s.get("{"+ST+"}name"):s for s in styles.findall("{"+ST+"}style")}
+    for index,paragraph in enumerate(current[closing_idx:current.index(anchor)]):
+        if paragraph not in direct:
+            continue
+        original=paragraph.get("{"+TX+"}style-name","Standard")
+        name="EIS223MemoClosing381_"+str(index)
+        if original in defined:
+            style=copy.deepcopy(defined[original])
+            style.set("{"+ST+"}name",name)
+            styles.append(style)
+        else:
+            style=ET.SubElement(styles,"{"+ST+"}style",{
+                "{"+ST+"}name":name,"{"+ST+"}family":"paragraph",
+                "{"+ST+"}parent-style-name":original})
+        properties=style.find("{"+ST+"}paragraph-properties")
+        if properties is None:
+            properties=ET.SubElement(style,"{"+ST+"}paragraph-properties")
+        properties.set("{"+FO+"}keep-with-next","always")
+        paragraph.set("{"+TX+"}style-name",name)
+    for p in current[signer_idx+1:]:
+        if p in list(body) and (p in block or not _clean(_odf_string(p))):
+            body.remove(p)
+    if not any(_clean(_odf_string(p)) for p in block):
+        return
+    for name,family in ((EXECUTOR_STYLE,"paragraph"),(EXECUTOR_TEXT_STYLE,"text")):
+        style=ET.SubElement(styles,"{"+ST+"}style",{
+            "{"+ST+"}name":name,"{"+ST+"}family":family})
+        if family=="paragraph":
+            ET.SubElement(style,"{"+ST+"}paragraph-properties",{
+                "{"+FO+"}text-align":"left","{"+FO+"}text-indent":"0cm",
+                "{"+FO+"}margin-left":"0cm","{"+FO+"}margin-right":"0cm",
+                "{"+FO+"}margin-top":"0cm","{"+FO+"}margin-bottom":"0cm",
+                "{"+FO+"}line-height":"100%","{"+FO+"}keep-with-next":"always"})
+        ET.SubElement(style,"{"+ST+"}text-properties",{
+            "{"+ST+"}font-name":"Times New Roman","{"+FO+"}font-family":"Times New Roman",
+            "{"+FO+"}font-size":"7pt","{"+ST+"}font-size-asian":"7pt",
+            "{"+ST+"}font-size-complex":"7pt","{"+FO+"}color":"#000000",
+            "{"+ST+"}use-window-font-color":"false",
+            "{"+FO+"}font-weight":"normal","{"+FO+"}font-style":"normal"})
+    frame_style=ET.SubElement(styles,"{"+ST+"}style",{
+        "{"+ST+"}name":EXECUTOR_FRAME_STYLE,"{"+ST+"}family":"graphic"})
+    ET.SubElement(frame_style,"{"+ST+"}graphic-properties",{
+        "{"+ST+"}wrap":"none","{"+ST+"}vertical-pos":"bottom",
+        "{"+ST+"}vertical-rel":"page-content","{"+ST+"}horizontal-pos":"left",
+        "{"+ST+"}horizontal-rel":"page-content","{"+ST+"}flow-with-text":"true",
+        "{"+FO+"}margin-top":"0.15cm","{"+FO+"}margin-bottom":"0cm",
+        "{"+FO+"}padding":"0cm","{"+FO+"}border":"none",
+        "{"+DR+"}fill":"none","{"+DR+"}stroke":"none"})
+    frame=ET.SubElement(anchor,"{"+DR+"}frame",{
+        "{"+DR+"}name":"EIS223MemoExecutor","{"+DR+"}style-name":EXECUTOR_FRAME_STYLE,
+        "{"+TX+"}anchor-type":"paragraph","{"+SVG+"}width":"16cm",
+        "{"+SVG+"}height":"0.5cm"})
+    box=ET.SubElement(frame,"{"+DR+"}text-box",{"{"+FO+"}min-height":"0.5cm"})
+    for paragraph in block:
+        paragraph.set("{"+TX+"}style-name",EXECUTOR_STYLE)
+        for child in paragraph.iter("{"+TX+"}span"):
+            child.set("{"+TX+"}style-name",EXECUTOR_TEXT_STYLE)
+        box.append(paragraph)
 
 def _title(f):
     return _clean(f.get("title") or "Нарушение условий закупки",260).rstrip(" .;:")+"."
@@ -122,18 +217,7 @@ def format_service_memo(data:bytes,findings:list[dict])->bytes:
     # only stray inline runs/tabs that produce incompatible font sizes.
     for par in paras[20:30]:
         _set(par,_odf_string(par))
-    # The sample has 19 empty layout paragraphs after the signatory; when
-    # text expands they spill the executor details onto an empty third page.
-    current=list(body.iter("{"+TX+"}p"))
-    signer_idx=next((i for i,p in enumerate(current)
-        if p.get("{"+TX+"}style-name")=="P24" or "Заместитель начальника Управления" in _odf_string(p)),-1)
-    executor_idx=next((i for i,p in enumerate(current)
-        if p.get("{"+TX+"}style-name")=="P21" and i>signer_idx),-1)
-    if signer_idx>=0 and executor_idx>signer_idx:
-        blanks=[p for p in current[signer_idx+1:executor_idx]
-                if not _clean(_odf_string(p)) and p in list(body)]
-        for p in blanks[:max(0,len(blanks)-7)]:
-            body.remove(p)
+    _executor_block(root,body)
     finished=ET.tostring(root,encoding="utf-8",xml_declaration=True)
     buf=io.BytesIO()
     with zipfile.ZipFile(buf,"w") as target:

@@ -587,7 +587,16 @@ MEMOS = page("Архив служебных записок", """
 <label>Создать и сохранить служебную записку по закупке
 <input type="text" name="reg" inputmode="numeric" pattern="3[0-9]{10}" maxlength="11"
  required autocomplete="off" placeholder="Введите номер ЕИС"></label>
-<button type="submit">Сформировать и сохранить</button>
+<fieldset id="memo-requisites" disabled style="flex:1 1 100%;border:1px solid #cedeeb;border-radius:8px;padding:12px">
+<legend>Реквизиты служебной записки</legend>
+<p>Укажите номер закупки. Изменения сохраняются только для этой закупки в вашей учётной записи.
+Текст и подпись образца сохраняются. Пустое поле удаляет соответствующую строку.</p>
+<label>Кому направляется служебная записка<input id="memo-recipient" name="recipient" maxlength="199" autocomplete="off"></label>
+<label>Исполнитель по служебной записке<input id="memo-executor" name="executor" maxlength="199" autocomplete="off"></label>
+<label>Телефон исполнителя<input id="memo-phone" name="phone" maxlength="199" autocomplete="off"></label>
+<button id="memo-save-requisites" type="button">Сохранить реквизиты</button>
+</fieldset>
+<button type="submit" id="memo-create">Сформировать и сохранить</button>
 </form>
 <p id="memo-status" role="status" aria-live="polite">Загружаем архив…</p>
 <div class="memo-filters" aria-label="Поиск в архиве">
@@ -603,7 +612,35 @@ MEMOS = page("Архив служебных записок", """
 <script>
 (()=>{
 const el=id=>document.getElementById(id);
-let cache=[],busy=false,decisions={};
+let cache=[],busy=false,decisions={},requisitesReg='',requisitesSequence=0;
+const regInput=el('memo-save').elements.reg;
+async function loadRequisites(){
+ const reg=regInput.value.trim(),sequence=++requisitesSequence;
+ requisitesReg='';el('memo-requisites').disabled=true;
+ el('memo-recipient').value='';el('memo-executor').value='';el('memo-phone').value='';
+ if(!/^3[0-9]{10}$/.test(reg))return;
+ try{
+  const r=await fetch('/me/memo-requisites/'+encodeURIComponent(reg),{credentials:'same-origin',cache:'no-store'});
+  if(!r.ok)throw Error('Не удалось загрузить реквизиты');
+  const data=await r.json();
+  if(sequence!==requisitesSequence||regInput.value.trim()!==reg)return;
+  for(const key of ['recipient','executor','phone'])el('memo-'+key).value=data.fields[key]||'';
+  requisitesReg=reg;el('memo-requisites').disabled=false;
+ }catch(e){if(sequence===requisitesSequence)el('memo-status').textContent=e.message}
+}
+regInput.addEventListener('input',loadRequisites);
+async function saveRequisites(reg){
+ if(reg!==requisitesReg)throw Error('Дождитесь загрузки реквизитов выбранной закупки');
+ const fields={recipient:el('memo-recipient').value,executor:el('memo-executor').value,phone:el('memo-phone').value};
+ const r=await fetch('/me/memo-requisites/'+encodeURIComponent(reg),{method:'PUT',credentials:'same-origin',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify(fields)});
+ if(!r.ok)throw Error('Не удалось сохранить реквизиты');
+}
+el('memo-save-requisites').onclick=async()=>{
+ const button=el('memo-save-requisites');button.disabled=true;
+ try{await saveRequisites(regInput.value.trim());el('memo-status').textContent='Реквизиты сохранены для этой закупки. Ранее созданные документы не изменены.'}
+ catch(e){el('memo-status').textContent=e.message}finally{button.disabled=false}
+};
 function render(){
  const search=el('memo-search').value.trim(),from=el('memo-from').value,to=el('memo-to').value;
  const data=cache.filter(x=>{
@@ -686,7 +723,7 @@ function render(){
    state.textContent='Старый архив: файл не был сохранён';
    state.className='memo-legacy';
    const button=document.createElement('button');button.type='button';button.textContent='Создать заново';
-   button.onclick=()=>{el('memo-save').querySelector('input').value=item.reg_number;
+   button.onclick=()=>{regInput.value=item.reg_number;loadRequisites();
      el('memo-save').scrollIntoView({behavior:'smooth',block:'center'})};
    actions.append(button);
   }
@@ -727,16 +764,17 @@ el('memo-save').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
  const reg=String(new FormData(form).get('reg')||'').trim();
  if(!/^3[0-9]{10}$/.test(reg))return;
- const button=form.querySelector('button');button.disabled=true;
+ const button=el('memo-create');button.disabled=true;
  el('memo-status').textContent='Формируется служебная записка по подтверждённым нарушениям…';
  try{
+  await saveRequisites(reg);
   const response=await fetch('/me/memo-archive/'+encodeURIComponent(reg),
     {method:'POST',credentials:'same-origin'});
   if(!response.ok){
    const data=await response.json().catch(()=>({}));
    throw Error(typeof data.detail==='string'?data.detail:'Не удалось сформировать ODT');
   }
-  form.reset();await refresh();
+  await refresh();
   el('memo-status').textContent='Служебная записка сохранена. Доступны ODT и PDF.';
  }catch(error){el('memo-status').textContent=error.message}
  finally{button.disabled=false}

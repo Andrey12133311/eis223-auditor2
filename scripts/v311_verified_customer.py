@@ -19,7 +19,7 @@ from urllib.parse import urlsplit,parse_qs
 
 from fastapi import HTTPException,Request
 from v295_eis_originals import auth
-from v342_identity import customer_label, valid_inn
+from v342_identity import customer_label, valid_inn, organization_display_name
 
 REG=re.compile(r"^3\d{10}$")
 INN=re.compile(r"^(?:\d{10}|\d{12})$")
@@ -56,24 +56,8 @@ def _name(value):
     if not 6<=len(value)<=400 or not re.search(r"[А-Яа-яЁёA-Za-z]",value):return ""
     if re.search(r"^(?:уточняем заказчика|заказчик уточняется|уточняется|не указан|нет данных|организация|заказчик|unknown)\b",value,re.I):return ""
     if re.fullmatch(r"[\d\W]+",value):return ""
-    # EIS sometimes provides entire legal names in uppercase; preserve legal
-    # entity abbreviations while rendering a normally cased company name.
-    alpha=[c for c in value if c.isalpha()]
-    if alpha and sum(c.isupper() for c in alpha)>=int(.85*len(alpha)):
-        abbreviations=("ООО","ПАО","АО","ОАО","ЗАО","ФГУП","ФГБУ",
-                       "ФБУЗ","ГБУ","МБУ","МУП","АНО","ФГБОУ",
-                       "ГАУЗ","ГАУ","КГАУ","ГБУЗ","ГУП")
-        # An abbreviated legal name is already correctly cased (e.g.
-        # ГАУЗ АО «АОКБ»); sentence casing would corrupt both abbreviations.
-        if len(value)<80 and re.match(r"^(?:"+"|".join(abbreviations)+r")\b",value):
-            return value
-        safe=value.lower()
-        safe=safe[0].upper()+safe[1:]
-        safe=re.sub(r"«([а-яё])",lambda m:"«"+m[1].upper(),safe)
-        safe=re.sub(r"(?<![\w-])(?:"+ "|".join(x.lower() for x in abbreviations)+r")(?![\w-])",
-                    lambda m:m[0].upper(),safe)
-        value=safe
-    return value
+    # Never guess the remaining capitalization of an authoritative legal name.
+    return organization_display_name(value)
 
 def _db(ns):
     db=ns["conn"]()

@@ -229,6 +229,14 @@ def _docx_body_without_auxiliary_parts(path):
 
 def document_text(path, extractor):
     if Path(path).suffix.lower() == ".docx":
+        from v347_text_cache import cached_extract
+        return cached_extract(path, lambda p: _document_text_uncached(p, extractor),
+                              namespace="eis223-docx-evidence-order-v381")
+    return str(extractor(path) or "")
+
+
+def _document_text_uncached(path, extractor):
+    if Path(path).suffix.lower() == ".docx":
         # Maintain section/table order, including nested information cards.
         from docx import Document
         from docx.oxml.ns import qn

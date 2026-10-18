@@ -18,6 +18,8 @@ RUN python -m py_compile scripts/account_notifications_v1.py scripts/v373_themat
 RUN python -m py_compile scripts/v375_staff_center.py scripts/v375_task_autoload.py scripts/v375_staff_center_selftest.py scripts/v370_staff_ui.py scripts/v370_manager_campaigns.py scripts/v368_manager_workflow.py scripts/account_schema_v1.py scripts/account_migrations_v1.py scripts/account_production_v1.py && PYTHONPATH=/app:/app/scripts python scripts/v375_staff_center_selftest.py
 COPY tests/test_eis223_soap_archive.py tests/test_eis_server_worker.py tests/test_eis_vps_worker.py tests/test_eis_vps_pipeline.py tests/test_eis_vps_installer.py tests/test_eis_vps_only.py tests/test_eis_vps_only_offline.py tests/test_eis_vps_only_ui.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_eis*.py'
+COPY tests/test_extraction_throughput.py tests/test_v381_audit_scheduling.py tests/test_memo_requisites.py tests/test_organization_display.py tests/test_v381_memo_layout.py tests/memo_fixture.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_extraction_throughput.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_audit_scheduling.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_requisites.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_organization_display.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_memo_layout.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

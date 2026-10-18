@@ -7,6 +7,7 @@ Credentials belong in a protected JSON file, never in arguments or logs.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 import contextlib
 import hashlib
 from html.parser import HTMLParser
@@ -20,6 +21,7 @@ import sqlite3
 import ssl
 import stat
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -29,7 +31,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 ENDPOINT = "https://int.zakupki.gov.ru/eis-integration/services/getDocsIP"
 SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 API_NS = "http://zakupki.gov.ru/fz44/get-docs-ip/ws"
@@ -332,10 +334,19 @@ class Transport:
                            eis=True, headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'})
         return archive_urls(raw)
 
-    def download(self, url, limit):
-        wait = 2.5 - (time.monotonic() - self.last_file_at)
-        if wait > 0:
-            time.sleep(wait)
+    def download(self, url, limit, *, cancel=None):
+        # Exactly one download thread uses this limiter. A speculative file
+        # waiting for its slot must not start after the active upload failed.
+        while True:
+            if cancel is not None and (cancel.is_set() or STOP):
+                raise WorkerError("download_cancelled")
+            wait = 2.5 - (time.monotonic() - self.last_file_at)
+            if wait <= 0:
+                break
+            if cancel is None:
+                time.sleep(wait)
+            else:
+                cancel.wait(wait)
         self.last_file_at = time.monotonic()
         return self.request(url, eis=True, limit=limit)
 
@@ -424,6 +435,84 @@ class State:
 
 def cache_key(reg, identity, url):
     return hashlib.sha256((reg + "\0" + identity + "\0" + url).encode()).hexdigest()
+
+
+class OriginalPipeline:
+    """One look-ahead download; SQLite and all uploads stay on the main thread.
+
+    The current original and at most one prefetched original are resident.
+    Neither download concurrency nor the 12-attempt cycle budget increases.
+    On failure, a file already in flight is cached for the ordinary retry.
+    """
+    def __init__(self, worker, reg, documents):
+        self.worker, self.reg = worker, reg
+        self.documents = iter(documents)
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="eis-original")
+        self.cancel = threading.Event()
+        self.pending = None
+
+    def prefetch(self):
+        if self.pending is not None or STOP or self.worker.files_this_cycle >= 12:
+            return
+        for item in self.documents:
+            if item.get("received") is True:
+                continue
+            self.worker.files_this_cycle += 1
+            uid = str(item.get("uid", ""))
+            future = Future()
+            transfer = {"uid": uid, "key": None, "future": future, "cached": True}
+            self.pending = transfer
+            try:
+                if not UID.fullmatch(uid):
+                    raise WorkerError("invalid_manifest_uid")
+                url = official_url(str(item.get("url", "")))
+                key = cache_key(self.reg, uid, url)
+                transfer["key"] = key
+                data = self.worker.state.cached(key)
+                if data is not None:
+                    future.set_result(data)
+                else:
+                    transfer["cached"] = False
+                    transfer["future"] = self.executor.submit(
+                        self.worker.http.download, url, MAX_FILE, cancel=self.cancel)
+            except WorkerError as exc:
+                future.set_exception(exc)
+            return
+
+    def take(self):
+        self.prefetch()
+        transfer, self.pending = self.pending, None
+        return transfer
+
+    def result(self, transfer):
+        data = transfer["future"].result()
+        if not transfer["cached"]:
+            self.worker.state.cache(transfer["key"], data)
+            transfer["cached"] = True
+        return transfer["key"], data
+
+    def close(self):
+        active_error = sys.exc_info()[1]
+        self.cancel.set()
+        try:
+            if self.pending and not self.pending["future"].cancel():
+                # Keep an already-downloaded original even when its predecessor
+                # failed to upload. Cancelled/rate-limited downloads have no bytes.
+                try:
+                    self.result(self.pending)
+                except WorkerError as exc:
+                    # A concurrent site failure must not hide an EIS 403/429
+                    # from the prefetched request or shorten its global pause.
+                    if global_backoff(exc.code):
+                        retry = max(exc.retry_after,
+                                    active_error.retry_after if isinstance(active_error, WorkerError) else 0)
+                        until = max(float(self.worker.state.get("backoff_until", "0")),
+                                    time.time() + retry)
+                        self.worker.state.set("backoff_until", until)
+                        if active_error is None or isinstance(active_error, WorkerError):
+                            raise WorkerError(exc.code, retry) from None
+        finally:
+            self.executor.shutdown(wait=True, cancel_futures=True)
 
 
 class Worker:
@@ -524,31 +613,38 @@ class Worker:
                     int(receipt.get("unsupported_attachment_count", 0)))
                 self.state.delivered(reg, "archive", hashlib.sha256(data).hexdigest(), data, key)
                 report["archives_uploaded"] += 1
+            if job.get("metadata_only") is True:
+                # The server independently verifies these archives and writes
+                # the card before completing a metadata-only lease. Originals
+                # remain the responsibility of full-document jobs.
+                report.update(status="partial", detail="Официальные XML переданы для обновления карточки.")
+                return report
             manifest = self.http.site("/api/v295/eis223/manifest/" + reg)
             documents = manifest.get("documents")
             if not isinstance(documents, list):
                 raise WorkerError("manifest_missing_documents")
-            for item in documents:
-                if STOP or self.files_this_cycle >= 12:
-                    break
-                if item.get("received") is True:
-                    continue
-                uid = str(item.get("uid", ""))
-                if not UID.fullmatch(uid):
-                    raise WorkerError("invalid_manifest_uid")
-                self.files_this_cycle += 1
-                try:
+            with contextlib.closing(OriginalPipeline(self, reg, documents)) as pipeline:
+                while not STOP:
                     self.heartbeat(job)
-                    key, data = self.get_file(reg, uid, str(item.get("url", "")), MAX_FILE)
-                    self.http.upload("/api/v295/eis223/original/" + reg + "/" + uid,
-                                     data, "application/octet-stream")
-                    self.state.delivered(reg, "original", uid, data, key)
-                    report["originals_uploaded"] += 1
-                except WorkerError as exc:
-                    report["originals_failed"] += 1
-                    report.update(error_code=exc.code, retry_after_seconds=exc.retry_after)
-                    if exc.retry_after >= 1200 or exc.code.startswith("site_"):
-                        raise
+                    transfer = pipeline.take()
+                    if transfer is None:
+                        break
+                    try:
+                        key, data = pipeline.result(transfer)
+                        # Overlap only the next download with this upload. EIS
+                        # requests remain serialized and spaced by 2.5 seconds.
+                        pipeline.prefetch()
+                        uid = transfer["uid"]
+                        self.http.upload("/api/v295/eis223/original/" + reg + "/" + uid,
+                                         data, "application/octet-stream")
+                        self.state.delivered(reg, "original", uid, data, key)
+                        report["originals_uploaded"] += 1
+                    except WorkerError as exc:
+                        report["originals_failed"] += 1
+                        report.update(error_code=exc.code, retry_after_seconds=exc.retry_after)
+                        if (exc.retry_after >= 1200 or exc.code.startswith("site_")
+                                or exc.code == "invalid_manifest_uid"):
+                            raise
             # Server receipts, not local successful calls, are authoritative.
             current = self.http.site("/api/v295/eis223/manifest/" + reg)
             docs = current.get("documents")

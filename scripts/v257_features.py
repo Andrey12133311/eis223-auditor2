@@ -12,6 +12,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from v319_manual_inputs import MANUAL_SOURCE_SQL,ensure_schema,migrate_legacy_inputs,record_input
+from v342_identity import organization_display_name
 
 MANUAL_PAGE = r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Самостоятельные проверки · 223-ФЗ</title><style>
 body{margin:0;font:15px system-ui;background:#f6f7f5;color:#24342a}header{background:#203b32;color:white;padding:22px max(20px,5vw)}main{max-width:1180px;margin:auto;padding:24px}nav{display:flex;gap:10px;flex-wrap:wrap}a{color:#1e6659}header a{color:#e9faf5}button,input{font:inherit;padding:10px;border:1px solid #aebbb1;border-radius:7px}button{cursor:pointer;background:#276f59;color:#fff}.card{padding:16px;background:white;border:1px solid #dce4dd;border-radius:10px;margin:12px 0}small{color:#657169}#notice{min-height:28px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #e5e9e5;text-align:left;padding:12px}td{vertical-align:top}@media(max-width:700px){table,thead,tbody,tr,td{display:block}thead{display:none}td{border:0;padding:5px}tr{padding:10px;border-bottom:1px solid #dde2dd}}
@@ -260,7 +261,7 @@ def install(ns:dict)->None:
              FROM ("""+MANUAL_SOURCE_SQL+""") r LEFT JOIN purchases p ON p.reg_number=r.reg
              LEFT JOIN requests_v233 j ON j.reg=r.reg AND j.lane='manual'
              """+job_join+" ORDER BY r.requested_at DESC,r.reg DESC LIMIT ? OFFSET ?",(limit,offset)).fetchall()
-        return {'total':total,'items':[{**dict(r),**manual_progress(r['reg_number'],r['documents_checked'],r['manual_status'])} for r in records]}
+        return {'total':total,'items':[{**dict(r),'customer':organization_display_name(r['customer']),**manual_progress(r['reg_number'],r['documents_checked'],r['manual_status'])} for r in records]}
     @app.post('/api/v257/manual/{reg}',include_in_schema=False)
     def register_manual(reg:str):
         if not re.fullmatch(r'3[0-9]{10}',reg):raise HTTPException(400,'Некорректный номер закупки')
