@@ -29,7 +29,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ENDPOINT = "https://int.zakupki.gov.ru/eis-integration/services/getDocsIP"
 SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 API_NS = "http://zakupki.gov.ru/fz44/get-docs-ip/ws"
@@ -205,6 +205,22 @@ def verify_zip(data):
         raise WorkerError("invalid_archive") from exc
 
 
+def validate_token(value, name):
+    """Normalize a pasted opaque token and fail without disclosing any value."""
+    if name not in ("eis_token", "site_token"):
+        raise WorkerError("invalid_token_field")
+    if value is None or isinstance(value, str) and not value.strip():
+        raise WorkerError(name + "_empty")
+    if not isinstance(value, str):
+        raise WorkerError(name + "_invalid_characters")
+    value = value.strip()
+    if any(not 0x21 <= ord(char) <= 0x7E for char in value):
+        raise WorkerError(name + "_invalid_characters")
+    if value.upper() in ("EIS223_UPLOAD_TOKEN", "EIS_TOKEN"):
+        raise WorkerError(name + "_variable_name")
+    return value
+
+
 def load_config(path):
     p = Path(path)
     st = p.stat()
@@ -217,10 +233,7 @@ def load_config(path):
     except (ValueError, UnicodeError) as exc:
         raise WorkerError("credentials_invalid_json") from exc
     for name in ("eis_token", "site_token"):
-        value = config.get(name)
-        if not isinstance(value, str) or not value.strip() or any(ord(c) < 32 for c in value):
-            raise WorkerError("credentials_missing_or_invalid")
-        config[name] = value.strip()
+        config[name] = validate_token(config.get(name), name)
     url = str(config.get("site_url", "")).rstrip("/")
     try:
         u = urllib.parse.urlsplit(url)
@@ -251,11 +264,15 @@ class Transport:
             official_url(url)
         elif not url.startswith(self.config["site_url"] + "/"):
             raise WorkerError("unexpected_site_url")
+        # Validate again even when callers inject a config without load_config().
+        # Unicode is valid in XML, but HTTP token headers must stay printable ASCII.
+        token_name = "eis_token" if eis and send_token else "site_token" if not eis else None
+        token = validate_token(self.config.get(token_name), token_name) if token_name else None
         hdr = {"User-Agent": "eis223-vps-worker/" + VERSION, **(headers or {})}
         if eis and send_token:
-            hdr["individualPerson_token"] = self.config["eis_token"]
+            hdr["individualPerson_token"] = token
         elif not eis:
-            hdr["x-eis223-upload-token"] = self.config["site_token"]
+            hdr["x-eis223-upload-token"] = token
         request = urllib.request.Request(url, data=data, method=method, headers=hdr)
         opener = self.eis_opener if eis else self.site_opener
         try:
