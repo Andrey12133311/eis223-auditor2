@@ -79,6 +79,10 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(diag.classify(200, b'<!DOCTYPE foo><foo/>')["state"], "UNEXPECTED_XML")
 
     def test_transport_classification_and_redirect_is_blocked(self):
+        certificate_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        certificate_error.reason = "CERTIFICATE_VERIFY_FAILED"
+        self.assertEqual(diag.transport_state(certificate_error), "TLS_ERROR")
+        self.assertEqual(diag.transport_state(urllib.error.URLError(certificate_error)), "TLS_ERROR")
         for error, expected in ((ssl.SSLError("handshake failure"), "TLS_ERROR"),
                                (TimeoutError(), "TIMEOUT"), (socket.gaierror(), "DNS_ERROR"),
                                (OSError("unreachable"), "NETWORK_ERROR")):

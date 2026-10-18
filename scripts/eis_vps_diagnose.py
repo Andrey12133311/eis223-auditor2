@@ -131,7 +131,11 @@ def send_probe(token, reg_number, timeout=30):
 
 
 def transport_state(error):
-    reason = getattr(error, "reason", error)
+    # URLError.reason is a nested exception; SSLError.reason is only a string.
+    # Preserve SSLError itself so certificate failures remain TLS errors.
+    reason = getattr(error, "reason", None)
+    if not isinstance(reason, BaseException):
+        reason = error
     if isinstance(reason, ssl.SSLError):
         return "TLS_ERROR"
     if isinstance(reason, (TimeoutError, socket.timeout)):
