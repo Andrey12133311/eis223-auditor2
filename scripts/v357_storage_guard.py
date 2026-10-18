@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 MIN_FREE = 64 * 1024 * 1024
 RETRY_AFTER_SECONDS = 60
 BRIDGE_PREFIXES = (
+    "/api/eis-worker/", "/api/v294/eis223/archive",
     "/api/v301/bridge/",
     "/api/v299/eis223/heartbeat",
     "/api/v299/eis223/public-manifest",

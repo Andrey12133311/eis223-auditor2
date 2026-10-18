@@ -65,73 +65,149 @@ def verified_xml_nmcd(notice):
     return next(iter(candidates.values())) if len(candidates)==1 else ""
 
 
-def official_notice(reg):
-    """Read XML only from a validated, persisted official EIS SOAP archive."""
+def official_xml_documents(reg):
+    """Read all supported XML identities from byte/hash-verified SOAP archives.
+
+    Protocols remain protocol records; they never replace the procurement's
+    current notice. Deduplicate identical XML across overlapping SOAP replies.
+    The original ZIP, every filename and every XML revision remain on disk.
+    """
+    from eis223_soap_xml import parse_document
+    if not REG.fullmatch(reg):return []
     folder=data_root()/"eis223_official_archive_inbox"/reg
-    if not folder.is_dir():return None
-    for receipt_path in sorted(folder.glob("*.json"),reverse=True)[:100]:
+    if not folder.is_dir():return []
+    records={}
+    for receipt_path in sorted(folder.glob("*.json")):
         try:
             receipt=json.loads(receipt_path.read_text(encoding="utf-8"))
             if receipt.get("reg_number")!=reg or receipt.get("source")!="official_eis_soap_archive":
                 continue
-            sha=receipt["archive_sha256"]
+            sha=receipt.get("archive_sha256","")
             if not re.fullmatch("[0-9a-f]{64}",sha):continue
             archive_path=folder/(sha+".zip")
-            if not archive_path.is_file() or archive_path.stat().st_size>15*1024*1024:
-                continue
-            with zipfile.ZipFile(archive_path) as z:
-                for notice in receipt.get("notices",[])[:50]:
-                    if notice.get("reg_number")!=reg:continue
-                    name=notice.get("xml_filename","")
-                    if name not in z.namelist():continue
-                    info=z.getinfo(name)
-                    if info.file_size>15*1024*1024:continue
-                    xml=z.read(name)
-                    if hashlib.sha256(xml).hexdigest()!=notice.get("xml_sha256"):continue
-                    if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():continue
-                    root=ET.fromstring(xml)
-                    if tag(root)!="purchaseNotice":continue
-                    data=next((x for x in root.iter() if tag(x)=="purchaseNoticeData"),None)
-                    if data is not None and field(data,"registrationNumber")==reg:
-                        return data
-        except (OSError,ValueError,KeyError,TypeError,zipfile.BadZipFile,ET.ParseError):
+            if not archive_path.is_file() or archive_path.stat().st_size>15*1024*1024:continue
+            raw=archive_path.read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=sha:continue
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                members=[i for i in archive.infolist() if not i.is_dir()]
+                if (len(members)>100 or len({i.filename for i in members})!=len(members)
+                        or sum(i.file_size for i in members)>50*1024*1024):continue
+                names={i.filename:i for i in members}
+                for entry in receipt.get("notices",[])[:100]:
+                    if entry.get("reg_number")!=reg:continue
+                    name=entry.get("xml_filename","")
+                    info=names.get(name)
+                    if info is None or info.file_size>15*1024*1024 or info.flag_bits&1:continue
+                    xml=archive.read(info)
+                    digest=hashlib.sha256(xml).hexdigest()
+                    if digest!=entry.get("xml_sha256") or digest in records:continue
+                    try:record,data=parse_document(xml,name)
+                    except ValueError:continue
+                    if record["reg_number"]==reg:
+                        records[digest]=(record,data)
+        except (OSError,ValueError,KeyError,TypeError,AttributeError,zipfile.BadZipFile,
+                RuntimeError,NotImplementedError):
             continue
-    return None
+    return list(records.values())
+
+
+def official_notice(reg):
+    """Use the newest explicit notice revision, never ZIP/hash listing order."""
+    from eis223_soap_xml import revision_key
+    notices=[item for item in official_xml_documents(reg) if item[0]["xml_family"]=="notice"]
+    return max(notices,key=lambda item:revision_key(item[0]))[1] if notices else None
 
 
 def official_notice_revisions(reg):
-    """Read every distinct verified notice XML revision, without remote calls."""
-    folder=data_root()/"eis223_official_archive_inbox"/reg
-    revisions={}
-    if not folder.is_dir():return []
-    for receipt_path in sorted(folder.glob("*.json"),reverse=True)[:250]:
-        try:
-            receipt=json.loads(receipt_path.read_text(encoding="utf-8"))
-            if receipt.get("reg_number")!=reg or receipt.get("source")!="official_eis_soap_archive":continue
-            sha=receipt.get("archive_sha256","")
-            if not re.fullmatch("[0-9a-f]{64}",sha):continue
-            archive=folder/(sha+".zip")
-            if not archive.is_file() or archive.stat().st_size>15*1024*1024:continue
-            with zipfile.ZipFile(archive) as z:
-                for entry in receipt.get("notices",[])[:50]:
-                    if entry.get("reg_number")!=reg:continue
-                    name=entry.get("xml_filename","")
-                    if name not in z.namelist() or z.getinfo(name).file_size>15*1024*1024:continue
-                    xml=z.read(name)
-                    digest=hashlib.sha256(xml).hexdigest()
-                    if digest!=entry.get("xml_sha256") or digest in revisions:continue
-                    if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():continue
-                    root=ET.fromstring(xml)
-                    if tag(root)!="purchaseNotice":continue
-                    data=next((x for x in root.iter() if tag(x)=="purchaseNoticeData"),None)
-                    if data is None or field(data,"registrationNumber")!=reg:continue
-                    revisions[digest]={"sha256":digest,
-                        "publication":field(data,"publicationDateTime"),
-                        "submission_end":field(data,"submissionCloseDateTime"),
-                        "submission_start":field(data,"applSubmisionStartDate")}
-        except (OSError,ValueError,TypeError,KeyError,zipfile.BadZipFile,ET.ParseError):
-            continue
-    return list(revisions.values())
+    """Read every distinct verified notice revision, without remote calls."""
+    from eis223_soap_xml import revision_key
+    notices=[item for item in official_xml_documents(reg) if item[0]["xml_family"]=="notice"]
+    return [{"sha256":record["xml_sha256"],"version":record["version"],
+             "xml_type":record["xml_type"],
+             "publication":field(data,"publicationDateTime"),
+             "submission_end":field(data,"submissionCloseDateTime"),
+             "submission_start":field(data,"applSubmisionStartDate")}
+            for record,data in sorted(notices,key=lambda item:revision_key(item[0]))]
+
+
+def import_soap_metadata(ns,reg):
+    """Persist the current XML card without invoking or clearing any audit.
+
+    New rows are shared procurement metadata. This function never creates
+    manual/account membership, updates result counters, or touches findings,
+    documents, queue ownership or the user's saved report fields.
+    """
+    import sqlite3
+    from datetime import datetime,timezone
+    from urllib.parse import urlsplit
+    from eis223_soap_xml import revision_key
+    from v342_identity import valid_inn,subject
+    from v311_verified_customer import _name
+    from v335_price_recovery import money
+    notices=[item for item in official_xml_documents(reg) if item[0]["xml_family"]=="notice"]
+    if not notices:return {"stored":False,"reason":"notice_not_received"}
+    record,notice=max(notices,key=lambda item:revision_key(item[0]))
+    buyer=direct(direct(notice,"customer"),"mainInfo")
+    values={"title":subject(field(notice,"name")),
+            "customer":_name(field(buyer,"fullName") or field(buyer,"shortName")),
+            "customer_inn":valid_inn(field(buyer,"inn")),
+            "method":field(notice,"purchaseCodeName"),
+            "published_at":field(notice,"publicationDateTime"),
+            "submission_start":field(notice,"applSubmisionStartDate")[:10],
+            "submission_end":field(notice,"submissionCloseDateTime")[:10]}
+    values={key:value for key,value in values.items() if value}
+    if values.get("submission_end"):values["deadline"]=values["submission_end"]
+    if values.get("customer") and callable(ns.get("org_form")):
+        values["org_form"]=ns["org_form"](values["customer"])
+    parsed=money(verified_xml_nmcd(notice))
+    if parsed:values.update(price=parsed[0],price_num=parsed[1])
+    source_url=field(notice,"urlEIS")
+    try:
+        source=urlsplit(source_url)
+        if (source.scheme=="https" and source.hostname=="zakupki.gov.ru"
+                and source.port in (None,443) and not source.username and not source.password):
+            values["url"]=source_url
+    except ValueError:pass
+    db=ns["conn"]();db.row_factory=sqlite3.Row
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        columns={row[1] for row in db.execute("PRAGMA table_info(purchases)")}
+        row=db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+        previous=dict(row) if row is not None else {}
+        try:card=json.loads(previous.get("card_fields_json") or "{}")
+        except (ValueError,TypeError):card={}
+        if not isinstance(card,dict):card={}
+        prior=card.get("soap_metadata")
+        if isinstance(prior,dict) and revision_key(prior)>=revision_key(record):
+            db.commit()
+            return {"stored":True,"changed":False,"reg_number":reg}
+        card["soap_metadata"]={key:record[key] for key in (
+            "xml_type","xml_sha256","xml_filename","xml_guid","version",
+            "publication","created","modified")}
+        card["soap_metadata"]["source"]="official_eis_getDocsIP"
+        summary=card.get("summary") if isinstance(card.get("summary"),dict) else {}
+        summary.update({key:value for key,value in values.items()
+                        if key in ("title","customer","method","price","price_num",
+                                   "submission_start","submission_end")})
+        card["summary"]=summary
+        values["card_fields_json"]=json.dumps(card,ensure_ascii=False)
+        if row is None:
+            values.update(reg_number=reg,source="official_eis_getDocsIP",
+                          last_seen=datetime.now(timezone.utc).isoformat(),
+                          card_source_status="metadata_only")
+            values={key:value for key,value in values.items() if key in columns}
+            db.execute("INSERT INTO purchases ("+",".join(values)+") VALUES ("+
+                       ",".join("?" for _ in values)+")",tuple(values.values()))
+        else:
+            values={key:value for key,value in values.items() if key in columns}
+            db.execute("UPDATE purchases SET "+",".join(key+"=?" for key in values)+
+                       " WHERE reg_number=?",(*values.values(),reg))
+        db.commit()
+        return {"stored":True,"changed":True,"reg_number":reg}
+    except Exception:
+        if db.in_transaction:db.rollback()
+        raise
+    finally:db.close()
 
 
 # Federal five-day working calendar based on Labour Code art. 112 and
@@ -727,6 +803,7 @@ def install(ns):
     ns["_v290_schedule_roseltorg"]=lambda *a,**kw:None
     ns["_v290_roseltorg_attach"]=lambda *a,**kw:None
     ns["_v298_offline_audit"]=lambda reg: offline_audit(ns,reg)
+    ns["_v379_import_soap_metadata"]=lambda reg: import_soap_metadata(ns,reg)
     if isinstance(ns.get("state"),dict):
         ns["state"].update(running=False,current_reg=None,last_error=None)
 
@@ -761,13 +838,24 @@ def install(ns):
         regs=0
         if inbox.is_dir():
             regs=sum(bool(p.is_dir() and REG.fullmatch(p.name)) for p in inbox.iterdir())
-        return {"mode":"official_eis_browser_only",
-                "sources":["ЕИС getDocsIP (браузерное подключение)"],
+        collector={"active":False,"last_seen":None,"status":"not_connected"}
+        try:
+            from eis_server_worker import health
+            collector=await asyncio.to_thread(health,ns)
+        except (ImportError,OSError,RuntimeError):
+            pass
+        active=bool(collector.get("active"))
+        return {"mode":"official_eis_server_and_browser" if active else "official_eis_browser_only",
+                "sources":["ЕИС getDocsIP (VPS)","ЕИС (браузерное подключение)"] if active
+                          else ["ЕИС (браузерное подключение)"],
+                "server_collector":collector,
+                "server_collector_configured":len(os.environ.get("EIS223_UPLOAD_TOKEN", ""))>=24,
                 "legacy_background_workers":0,
                 "legacy_failed_requests_scheduled":0,
                 "official_imported_procurements":regs,
                 "existing_data_preserved":True,
-                "direct_eis_server_requests":False}
+                "direct_eis_server_requests":False,
+                "vps_eis_requests":active}
 
     print("V298 EIS_ONLY_ACTIVE "+json.dumps({
         "remaining_hooks":[getattr(x,"__name__","?") for x in kept],

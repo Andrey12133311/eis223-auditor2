@@ -61,6 +61,11 @@ def _init(ns):
                 last_action TEXT NOT NULL DEFAULT ''
             );
         """)
+        # Fence server leases from late reports sent by a browser collector.
+        columns={r[1] for r in db.execute("PRAGMA table_info(v301_search_jobs)")}
+        for name in ("lease_owner","lease_token"):
+            if name not in columns:
+                db.execute("ALTER TABLE v301_search_jobs ADD COLUMN "+name+" TEXT NOT NULL DEFAULT ''")
         # Repair the backlog produced by the obsolete /223/purchase/... URL.
         # These jobs are NOT regarded as successful checks. They wait for the
         # upgraded browser bridge to retrieve real original-file bytes.
@@ -205,6 +210,8 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         row=db.execute("SELECT * FROM v301_search_jobs WHERE id=?",(job_id,)).fetchone()
         if not row:
             raise HTTPException(404,"Неизвестный запрос")
+        if row["lease_owner"]:
+            raise HTTPException(409,"Задание принадлежит серверному загрузчику")
         if row["status"] not in ("leased","queued","deferred"):
             return dict(row)
         # Existing v376 tabs report partial while the offline audit is still
@@ -218,6 +225,8 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         row=db.execute("SELECT * FROM v301_search_jobs WHERE id=?",(job_id,)).fetchone()
         if not row:
             raise HTTPException(404,"Неизвестный запрос")
+        if row["lease_owner"]:
+            raise HTTPException(409,"Задание принадлежит серверному загрузчику")
         if row["status"] not in ("leased","queued","deferred"):
             db.commit()
             return dict(row)
@@ -297,10 +306,10 @@ def _claim(ns,collector_version=320):
     try:
         db.execute("BEGIN IMMEDIATE")
         db.execute(
-            "UPDATE v301_search_jobs SET status='queued',not_before=? "
+            "UPDATE v301_search_jobs SET status='queued',not_before=?,lease_owner=CASE WHEN lease_owner<>'' THEN 'server-retry' ELSE '' END,lease_token='' "
             "WHERE status='leased' AND lease_until<? AND attempts<4",(now+30,now))
         db.execute(
-            "UPDATE v301_search_jobs SET status='error',detail='Истёк лимит повторных попыток' "
+            "UPDATE v301_search_jobs SET status='error',detail='Истёк лимит повторных попыток',lease_owner='',lease_token='' "
             "WHERE status='leased' AND lease_until<? AND attempts>=4",(now,))
         row=db.execute(
             "SELECT * FROM v301_search_jobs WHERE status='queued' AND not_before<=? "
@@ -309,7 +318,7 @@ def _claim(ns,collector_version=320):
         if row:
             db.execute(
                 "UPDATE v301_search_jobs SET status='leased',lease_until=?,"
-                "attempts=attempts+1,updated_at=? WHERE id=?",
+                "attempts=attempts+1,updated_at=?,lease_owner='',lease_token='' WHERE id=?",
                 (now+420,_utc(),row["id"]))
         db.execute("INSERT OR REPLACE INTO v301_bridge_health(singleton,seen_at,last_action) "
                    "VALUES(1,?,?)",(now,"claimed" if row else "idle"))
@@ -326,7 +335,18 @@ def _bridge(ns):
         row=db.execute("SELECT seen_at,last_action FROM v301_bridge_health WHERE singleton=1").fetchone()
         active=bool(row and int(time.time())-row["seen_at"]<40)
         q=db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased')").fetchone()[0]
-        return {"active":active,"last_seen":row["seen_at"] if row else None,
+        # A VPS heartbeat is distinct from an official browser heartbeat.
+        try:
+            from eis_server_worker import health
+            server=health(ns)
+        except (sqlite3.Error,ImportError):
+            server={"active":False,"last_seen":None}
+        return {"active":active or server["active"],
+                "browser_active":active,"server_active":server["active"],
+                "server_last_seen":server.get("last_seen"),
+                "server_status":server.get("status"),
+                "discovery_status":server.get("discovery_status"),
+                "last_seen":max(row["seen_at"] if row else 0,server.get("last_seen") or 0) or None,
                 "queued":q,"poll_seconds":8}
     finally:db.close()
 
@@ -410,7 +430,7 @@ def install(ns):
             from v257_features import manual_progress
             checked=int(existing[0].get("documents_checked") or 0) if existing else 0
             audit=await asyncio.to_thread(manual_progress,job["target"],checked,job["status"])
-        return {"job":{k:v for k,v in job.items() if k!="lease_until"},
+        return {"job":{k:v for k,v in job.items() if k not in ("lease_until","lease_owner","lease_token")},
                 "existing":existing[:100],"total_existing":len(existing),
                 "audit":audit,"bridge":await asyncio.to_thread(_bridge,ns)}
 
