@@ -207,7 +207,11 @@ def result_accordion(key,label,count,body):
             '</span></summary><div class="result-body">'+body+'</div></details>')
 
 
-def detail_block(item, kind, title, law, evidence, document, source, link):
+def detail_block(item, kind, title, law, evidence, document, source, link, review_reg=None):
+    review_control=""
+    if review_reg and kind=="legal":
+        from scripts.v382_finding_review_ui import finding_control
+        review_control=finding_control(review_reg,item)
     supporting=(item or {}).get("supporting_sources") or []
     extra=""
     if len(supporting)>1:
@@ -240,7 +244,7 @@ def detail_block(item, kind, title, law, evidence, document, source, link):
       +('<p class="meta"><b>Пояснение проверки:</b> '+esc(note)+'</p>' if note else '')
       +('<p class="meta"><b>Почему требует проверки:</b> '+esc('; '.join(gaps))+'. '
         'В этой карточке запись не включена в подтверждённые нарушения. Сохранённая запись не изменена.</p>' if gaps else '')
-      +extra
+      +extra+review_control
       +'</article>')
 
 def render_thematic_panel(reg,thematic):
@@ -284,7 +288,7 @@ def render_thematic_panel(reg,thematic):
     result.append('</section>')
     return ''.join(result)
 
-def render(reg,data,thematic=None):
+def render(reg,data,thematic=None,account_review=False):
     p,findings,checks,docs,ftotal,ctotal,dtotal=data
     from v333_dedup_ui import collapse
     from v352_dashboard_truth import collapse_legal_events
@@ -303,7 +307,7 @@ def render(reg,data,thematic=None):
             unique.append(item)
     violation=[detail_block(item,"legal",item.get("title"),item.get("law"),
           item.get("evidence"),item.get("document"),item.get("source_url"),
-          item.get("law_url")) for item in unique]
+          item.get("law_url"),review_reg=reg if account_review and not thematic else None) for item in unique]
     reviews=collapse(incomplete+[dict(x) for x in checks if x.get("status")=="check"],field="item")
     # Display counts must agree with the number of distinct cards. Historical
     # findings and checks remain untouched and available in the ledger.
@@ -366,6 +370,10 @@ def render(reg,data,thematic=None):
         '<p>Подтверждённых нарушений в сохранённых результатах пока нет. '
         'Это не означает, что нарушений не существует.</p>')))
     review_section='' if thematic else result_accordion('audit-review','Требует проверки',len(reviews),checked)
+    review_assets=""
+    if account_review and not thematic:
+        from scripts.v382_finding_review_ui import STYLE as review_style, SCRIPT as review_script
+        review_assets=review_style+review_script
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'
      '<meta name="viewport" content="width=device-width,initial-scale=1">'
      '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+'</head><body>'
@@ -374,7 +382,7 @@ def render(reg,data,thematic=None):
      +thematic_html
      +general_section+review_section
      +'<section class="panel"><h2>Документы ЕИС ('+str(dtotal)+')</h2>'+docs_html+'</section>'
-     +'</main></body></html>')
+     +'</main>'+review_assets+'</body></html>')
 
 class FastCardASGI:
     def __init__(self,app,ns):
@@ -387,7 +395,7 @@ class FastCardASGI:
         reg=match.group(1)
         try:
             data=await asyncio.wait_for(asyncio.to_thread(read,self.ns,reg),timeout=6)
-            result=HTMLResponse(render(reg,data),headers={"Cache-Control":"no-store","X-Audit-Card":"saved-evidence-v343"})
+            result=HTMLResponse(render(reg,data,account_review=bool(scope.get("eis223_account_id"))),headers={"Cache-Control":"no-store","X-Audit-Card":"saved-evidence-v343"})
         except (sqlite3.Error,TimeoutError,ValueError) as e:
             result=HTMLResponse(
              '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Карточка проверки</title>'

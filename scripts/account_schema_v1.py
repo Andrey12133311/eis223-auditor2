@@ -220,6 +220,19 @@ CREATE TABLE IF NOT EXISTS account_manager_finding_reviews (
 );
 CREATE INDEX IF NOT EXISTS account_manager_finding_reviewer
     ON account_manager_finding_reviews(reviewer_id,updated_at DESC);
+CREATE TABLE IF NOT EXISTS account_finding_submissions (
+    version INTEGER NOT NULL DEFAULT 1,
+    user_id UUID NOT NULL REFERENCES account_users(id),
+    reg_number TEXT NOT NULL,
+    finding_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'submitted'
+        CHECK(status IN ('submitted','approved','returned','rejected')),
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,reg_number,finding_key)
+);
+CREATE INDEX IF NOT EXISTS account_finding_submissions_queue
+    ON account_finding_submissions(status,submitted_at DESC);
 CREATE TABLE IF NOT EXISTS account_manager_memo_reviews (
     memo_id UUID PRIMARY KEY REFERENCES account_memos(id) ON DELETE CASCADE,
     owner_id UUID NOT NULL REFERENCES account_users(id),

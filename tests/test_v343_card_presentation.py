@@ -84,6 +84,38 @@ def data(findings=None, checks=None):
 
 
 class CardPresentationTests(unittest.TestCase):
+    def test_review_controls_only_on_authenticated_cards(self):
+        guest = card.render(REG, data())
+        self.assertNotIn('data-finding-review=', guest)
+        self.assertNotIn('/me/finding-submissions/', guest)
+        account = card.render(REG, data(), account_review=True)
+        dom = DOM(account).root
+        finding = dom.find("article", **{"class": "legal"})[0]
+        controls = [n for n in finding.find("div") if "data-finding-review" in n.attrs]
+        self.assertEqual(len(controls), 1)
+        self.assertEqual(controls[0].attrs["data-review-reg"], REG)
+        self.assertEqual(len(controls[0].attrs["data-finding-review"]), 64)
+        self.assertIn('Направить на согласование руководителю', account)
+        self.assertNotIn('Повторно направить', account)
+
+    def test_review_key_is_exact_canonical_evidence_identity(self):
+        import hashlib
+        import json
+        from scripts.v382_finding_review_ui import finding_control
+        values = [REG] + [str(FINDING.get(key) or "").strip()
+                          for key in ("title", "law", "evidence", "document", "source_url")]
+        expected = hashlib.sha256(json.dumps(values, ensure_ascii=False,
+                                  separators=(",", ":")).encode()).hexdigest()
+        self.assertIn('data-finding-review="' + expected + '"', finding_control(REG, FINDING))
+        self.assertNotIn(expected, finding_control(REG, {**FINDING, "evidence": FINDING["evidence"] + " Изменено"}))
+
+    def test_electronic_case_loads_shared_review_controls_before_render(self):
+        from scripts.v369_case_ui import render_case
+        markup = render_case(REG)
+        self.assertIn('window.EISFindingReview.control(REG,item.finding_key)', markup)
+        self.assertLess(markup.index('window.EISFindingReview={'), markup.index('const REG='))
+        self.assertIn('window.EISFindingReview.load(REG,true)', markup)
+
     def test_both_result_sections_are_native_collapsed_accordions(self):
         dom = DOM(card.render(REG, data())).root
         groups = dom.find("details")

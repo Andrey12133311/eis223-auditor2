@@ -419,13 +419,114 @@ async function testOlderCaseSearchesCannotRenderIntoNewCase() {
     assert.equal(ui.get(id).children.length, 0, id + ' must not show older case response');
 }
 
+const flatten = node => [node, ...node.children.flatMap(flatten)];
+const reviewKey = 'a'.repeat(64), reviewReg = '32616412317';
+const findingFixture = () => ({finding_key: reviewKey, title: 'Нарушение', law: '223-ФЗ ст. 4 ч. 12',
+  evidence: 'Проверенное доказательство', document: 'Протокол.pdf', warnings: [], review: null, submission: null});
+function reviewHarness(responder) {
+  const ui = harness(embedded('v382_finding_review_ui.py', 'SCRIPT ='), 'control,load,send', responder);
+  ui.box = ui.api.control(reviewReg, reviewKey);
+  ui.context.document.querySelectorAll = () => [ui.box];
+  ui.submit = () => flatten(ui.box).find(x => x.tagName === 'BUTTON' && x.textContent.includes('руководителю'));
+  ui.words = () => flatten(ui.box).map(x => x.textContent).join(' ');
+  return ui;
+}
+async function testFindingSubmissionLifecycleAndNoDuplicate() {
+  const held = deferred(); let row = findingFixture();
+  const ui = reviewHarness(async call => {
+    if (call.method === 'POST') {
+      await held.promise; row = {...row, submission: {status: 'submitted'}};
+      return {status: 'submitted', already_submitted: false};
+    }
+    return {findings: [row], manager_assigned: true};
+  });
+  await ui.api.load(reviewReg);
+  assert.equal(ui.submit().textContent, 'Направить на согласование руководителю');
+  assert.equal(ui.submit().disabled, false);
+  const sending = ui.api.send(reviewReg, reviewKey);
+  await ui.api.send(reviewReg, reviewKey);
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 1, 'double click makes one submission');
+  assert.ok(flatten(ui.box).some(x => x.tagName === 'BUTTON' && x.textContent === 'Отправляем…' && x.disabled));
+  held.resolve(); await sending;
+  assert.match(ui.words(), /Отправлено на согласование/);
+  assert.equal(ui.submit().disabled, true);
+  row = {...row, submission: {status: 'rejected'}, review: {decision: 'rejected', comment: '<script>Причина отказа</script>'}};
+  await ui.api.load(reviewReg);
+  assert.match(ui.words(), /Комментарий руководителя: <script>Причина отказа<\/script>/);
+  assert.equal(ui.submit().disabled, true);
+  await ui.api.send(reviewReg, reviewKey);
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 1, 'final denial cannot be resubmitted');
+  assert.ok(!ui.words().includes('повторно'));
+}
+async function testFindingMissingManagerStaleAndErrors() {
+  let reply = {findings: [findingFixture()], manager_assigned: false};
+  const ui = reviewHarness(async () => reply);
+  await ui.api.load(reviewReg);
+  assert.equal(ui.submit().disabled, true); assert.match(ui.words(), /Руководитель не назначен/);
+  await ui.api.send(reviewReg, reviewKey);
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 0);
+  reply = {findings: [], manager_assigned: true}; await ui.api.load(reviewReg);
+  assert.equal(ui.submit(), undefined); assert.match(ui.words(), /Версия доказательства изменилась/);
+  reply = {httpStatus: 503, body: {detail: 'Сервис недоступен'}}; await ui.api.load(reviewReg);
+  assert.match(ui.words(), /Сервис недоступен/);
+  assert.ok(flatten(ui.box).some(x => x.tagName === 'BUTTON' && !x.disabled), 'failed GET can be retried');
+}
+async function testFindingMutationOutranksInFlightRead() {
+  const held = deferred(); let reads = 0, submitted = false;
+  const ui = reviewHarness(async call => {
+    if (call.method === 'POST') {submitted = true; return {status: 'submitted', already_submitted: false};}
+    if (++reads === 2) return held.promise;
+    return {findings: [{...findingFixture(), submission: submitted ? {status: 'submitted'} : null}], manager_assigned: true};
+  });
+  await ui.api.load(reviewReg);
+  const stale = ui.api.load(reviewReg), sending = ui.api.send(reviewReg, reviewKey);
+  await flush(); assert.equal(reads, 2);
+  held.resolve({findings: [findingFixture()], manager_assigned: true});
+  await Promise.all([stale, sending]);
+  assert.equal(reads, 3, 'mutation queues fresh read after stale GET');
+  assert.equal(ui.submit().disabled, true); assert.match(ui.words(), /Отправлено на согласование/);
+}
+async function testManagerFindingQueueAndVersionedDecisions() {
+  let row = {...findingFixture(), submission: {status: 'submitted', version: 7}}, rejected = false;
+  const ui = harness(embedded('v368_manager_ui.py', 'SCRIPT='), 'loadFindings,loadFindingQueue', async call => {
+    if (call.url.includes('/decision') && call.method === 'POST') {
+      const body = JSON.parse(call.options.body);
+      assert.equal(body.submission_version, 7); assert.equal(body.decision, 'rejected');
+      assert.equal(body.comment, 'Недостаточное доказательство');
+      rejected = true; row = {...row, review: {decision: 'rejected', comment: body.comment}, submission: {status: 'rejected', version: 7}};
+      return {decision: 'rejected'};
+    }
+    if (call.url === '/manager/finding-submissions') return [{...row, reg_number: reviewReg, user_id: 'employee-1',
+      employee: 'Сотрудник', status: rejected ? 'rejected' : 'submitted'}];
+    if (call.url.startsWith('/manager/findings/')) return {findings: [row]};
+    if (call.url === '/manager/dashboard') return {tasks_by_day: []};
+    if (call.url.endsWith('/options')) return {categories: {}, legal_forms: {}};
+    if (call.url.endsWith('/quality')) return {issues: []};
+    return [];
+  });
+  await flush(); await flush();
+  assert.equal(ui.get('mgr-submission-items').children.length, 1);
+  ui.get('mgr-finding-worker').value = 'employee-1'; ui.get('mgr-finding-reg').value = reviewReg;
+  await ui.api.loadFindings();
+  let buttons = flatten(ui.get('mgr-finding-items')).filter(x => x.tagName === 'BUTTON');
+  assert.deepEqual(buttons.map(x => x.textContent), ['Согласовать', 'Отказать']);
+  ui.context.prompt = () => 'Нет'; await buttons[1].onclick();
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 0, 'short refusal reason must not POST');
+  ui.context.prompt = () => 'Недостаточное доказательство'; await buttons[1].onclick();
+  buttons = flatten(ui.get('mgr-finding-items')).filter(x => x.tagName === 'BUTTON');
+  assert.equal(buttons.length, 2); assert.ok(buttons.every(x => x.disabled), 'terminal decision is read-only');
+  assert.match(ui.get('mgr-submission-note').textContent, /Ожидают решения: 0/);
+}
+
 (async () => {
   for (const test of [testManualFiltersAndRefreshRace, testThematicFiltersAndDeniedPolling,
     testHistoricalAdoptionQueuesFreshRead, testStaffRequestsAndAsyncForms, testParallelCaseReadsIgnoreOlderResponses,
     testCaseSwitchDisablesOldDraftAndControls, testDirtyDraftSurvivesRefreshAndCaseSwitch,
     testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
-    testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue]) {
+    testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue,
+    testFindingSubmissionLifecycleAndNoDuplicate, testFindingMissingManagerStaleAndErrors,
+    testFindingMutationOutranksInFlightRead, testManagerFindingQueueAndVersionedDecisions]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 12 scenarios passed');
+  console.log('Account frontend request/race regressions: 16 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

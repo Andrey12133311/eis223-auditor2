@@ -275,6 +275,8 @@ def install(app):
     app.include_router(personal_features)
     app.include_router(manager_workflow)
     app.include_router(manager_evidence)
+    from scripts.v382_finding_submissions import router as finding_submissions
+    app.include_router(finding_submissions)
     app.include_router(manager_quality)
     app.include_router(account_cases)
     app.include_router(manager_case_notes)

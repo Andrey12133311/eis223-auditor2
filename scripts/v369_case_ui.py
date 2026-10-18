@@ -106,6 +106,7 @@ function drawEntry(item,index,type){
  if(item.warnings?.length)box.append(text("p","Требует уточнения: "+item.warnings.join("; "),"case-problem"));
  if(item.source_representations>1)box.append(text("small","Повторные записи источников объединены: "+item.source_representations));
  if(type==="findings"){
+  if(item.finding_key&&window.EISFindingReview)box.append(window.EISFindingReview.control(REG,item.finding_key));
   const b=text("button","Оставить замечание к нарушению");b.type="button";
   b.style.cssText="margin-top:12px;padding:9px 12px;background:#eaf4fb;border:1px solid #d4e5ef;border-radius:8px;color:#1c5b8b;font-weight:700;cursor:pointer";
   b.onclick=()=>{document.querySelector('[data-case-tab="notes"]').click();
@@ -134,6 +135,7 @@ function render(data){
  const src=sourceLink(p.url,"Открыть карточку ЕИС ↗");
  if(src)$("case-source").append(src);
  fillEntries("case-finding-entries",data.findings||[],"findings");
+ if(window.EISFindingReview)window.EISFindingReview.load(REG,true);
  fillEntries("case-comparison-entries",data.comparisons||[],"comparisons");
  fillEntries("case-review-entries",data.review_items||[],"review");
  const docs=$("case-doc-rows");docs.replaceChildren();
@@ -210,6 +212,7 @@ load();
 
 
 def render_case(reg):
+    from scripts.v382_finding_review_ui import STYLE as review_style, SCRIPT as review_script
     if not (isinstance(reg,str) and reg.isdigit() and len(reg)==11 and reg[0]=="3"):
         raise ValueError("Invalid EIS registry number")
     markup=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -281,5 +284,5 @@ def render_case(reg):
 <div class="case-muted" role="status" id="case-status" style="padding:15px 0"></div>
 <p class="case-muted"><a href="/account/memos">Служебные записки ODT/PDF →</a></p>
 </main>__SCRIPT__</body></html>"""
-    return (markup.replace("__REG__",reg).replace("__STYLE__",STYLE)
-                  .replace("__SCRIPT__",SCRIPT.replace("__REG__",json.dumps(reg))))
+    return (markup.replace("__REG__",reg).replace("__STYLE__",STYLE+review_style)
+                  .replace("__SCRIPT__",review_script+SCRIPT.replace("__REG__",json.dumps(reg))))

@@ -111,7 +111,8 @@ async function refreshOwnName(){
 }
 const labels={assigned:"Назначено",in_progress:"В работе",submitted:"На согласовании",returned:"Возвращено",completed:"Завершено",cancelled:"Отменено",approved:"Согласовано",rejected:"Отклонено"};
 let cache={tasks:[],team:[],memos:[],alerts:[],thematic:[],campaigns:[],options:null,quality:null,dashboard:null,users:[]};
-let currentTab="overview";
+let currentTab="overview",findingSequence=0;
+let findingQueueRequest=null,findingQueueQueued=false;
 const tag=(name,cls="",value="")=>{const x=document.createElement(name);if(cls)x.className=cls;if(value!==undefined)x.textContent=String(value);return x};
 const status=(s)=>{const text=labels[s]||s||"Неизвестно";const cls=["completed","approved"].includes(s)?"good":["returned","cancelled","rejected"].includes(s)?"bad":["submitted"].includes(s)?"warn":"";return tag("span","mgr-chip "+cls,text)};
 const fmt=d=>d?new Date(d).toLocaleDateString("ru-RU"):"—";
@@ -122,7 +123,7 @@ async function api(url,method="GET",body){
  const res=await fetch(url,opts);
  if(res.status===401){location.href="/account/login";throw Error("Войдите в учётную запись")}
  const payload=await res.json().catch(()=>({}));
- if(!res.ok)throw Error(typeof payload.detail==="string"?payload.detail:("Ошибка запроса "+res.status));
+ if(!res.ok){const error=Error(typeof payload.detail==="string"?payload.detail:("Ошибка запроса "+res.status));error.status=res.status;throw error}
  return payload;
 }
 function mountRows(id,items){const root=$(id);root.replaceChildren();for(const x of items)root.append(x)}
@@ -135,7 +136,7 @@ function show(name){
  document.querySelectorAll(".mgr-section").forEach(x=>x.classList.toggle("mgr-hidden",x.dataset.section!==name));
  const titles={overview:"Панель управления",tasks:"Поручения и сроки",findings:"Согласование нарушений",thematic:"Тематические проверки подразделения",quality:"Контроль качества",memos:"Служебные записки",team:"Сотрудники",reports:"Отчёт руководителя",history:"Журнал действий"};
  $("mgr-title").textContent=titles[name]||"Кабинет руководителя";
- if(name==="findings")fillFindingTarget();
+ if(name==="findings"){fillFindingTarget();loadFindingQueue()}
 }
 document.querySelectorAll(".mgr-tab").forEach(x=>x.onclick=()=>show(x.dataset.tab));
 function metrics(d){
@@ -485,6 +486,38 @@ function renderHistory(items){
  }
  mountRows("mgr-history-rows",rows);
 }
+function renderFindingQueue(items){
+ const root=$("mgr-submission-items");root.replaceChildren();
+ const pending=items.filter(x=>x.status==="submitted");
+ $("mgr-submission-note").textContent="Ожидают решения: "+pending.length+". Всего направленных нарушений: "+items.length+".";
+ if(!items.length){root.append(tag("p","mgr-muted","Сотрудники пока не направляли нарушения на согласование."));return}
+ for(const item of [...pending,...items.filter(x=>x.status!=="submitted")]){
+  const entry=tag("article","mgr-entry");
+  entry.append(tag("h3","",item.title),status(item.status),
+   tag("p","mgr-muted",(item.employee||"Сотрудник")+" · Закупка № "+item.reg_number+
+    " · Направлено: "+fmt(item.submitted_at)));
+  if(item.comment)entry.append(tag("p","mgr-quality","Комментарий руководителя: "+item.comment));
+  entry.append(action(item.status==="submitted"?"Рассмотреть нарушение":"Открыть решение","mgr-outline",async()=>{
+   show("findings");await openFindings(item.user_id,item.reg_number);
+   $("mgr-finding-"+item.finding_key)?.scrollIntoView({behavior:"smooth",block:"center"});
+  }));root.append(entry);
+ }
+}
+function loadFindingQueue(fresh=false){
+ if(findingQueueRequest){if(fresh)findingQueueQueued=true;return findingQueueRequest}
+ $("mgr-submission-refresh").disabled=true;
+ findingQueueRequest=(async()=>{
+  do{
+   findingQueueQueued=false;
+   try{
+    const items=await api("/manager/finding-submissions");
+    renderFindingQueue(Array.isArray(items)?items:[]);
+   }catch(e){$("mgr-submission-note").textContent="Не удалось загрузить очередь: "+e.message}
+  }while(findingQueueQueued);
+ })().finally(()=>{findingQueueRequest=null;$("mgr-submission-refresh").disabled=false});
+ return findingQueueRequest;
+}
+$("mgr-submission-refresh").onclick=()=>loadFindingQueue(true);
 function fillFindingTarget(){
  if($("mgr-finding-reg").value&&$("mgr-finding-worker").value)return;
  const first=cache.tasks.find(x=>["submitted","in_progress","returned"].includes(x.status));
@@ -497,17 +530,19 @@ async function openFindings(employee,reg){
 async function loadFindings(){
  const employee=$("mgr-finding-worker").value,reg=$("mgr-finding-reg").value.trim();
  if(!employee||!/^3[0-9]{10}$/.test(reg))return toast("Выберите сотрудника и номер закупки ЕИС");
- const data=await api("/manager/findings/"+encodeURIComponent(employee)+"/"+reg);
+ const sequence=++findingSequence;
+ const [data,personalNotes]=await Promise.all([
+  api("/manager/findings/"+encodeURIComponent(employee)+"/"+reg),
+  api("/manager/cases/"+encodeURIComponent(employee)+"/"+encodeURIComponent(reg)+"/notes").catch(()=>[])]);
+ if(sequence!==findingSequence)return;
  const root=$("mgr-finding-items");root.replaceChildren();
- let personalNotes=[];
- try{personalNotes=await api("/manager/cases/"+encodeURIComponent(employee)+
-  "/"+encodeURIComponent(reg)+"/notes")}catch(e){/* Notes may be unavailable while evidence loads */}
  $("mgr-finding-note").textContent="Найдено подтверждённых анализатором эпизодов: "+data.findings.length+". Решения руководителя сохраняются отдельно.";
- await renderProposals(employee,reg);
- await renderDiscussion(employee,reg);
+ await Promise.all([renderProposals(employee,reg,sequence),renderDiscussion(employee,reg,sequence)]);
+ if(sequence!==findingSequence)return;
  if(!data.findings.length){root.append(tag("p","mgr-muted","Для этой закупки подтверждённых нарушений пока нет."));return}
  for(const item of data.findings){
-  const card=tag("article","mgr-entry");
+  const card=tag("article","mgr-entry");card.id="mgr-finding-"+item.finding_key;
+  if(item.submission)card.append(status(item.submission.status));
   card.append(tag("span","mgr-chip","Карточка нарушения"),tag("h3","",item.title),
    tag("div","mgr-muted","Норма: "+(item.law||"требует уточнения")));
   const correlated=personalNotes.filter(n=>!n.finding_key||n.finding_key===item.finding_key);
@@ -529,33 +564,41 @@ async function loadFindings(){
     a.target="_blank";a.rel="noopener noreferrer";card.append(a);
    }
   }
-  if(item.warnings.length)card.append(tag("p","mgr-warning",item.warnings.join(" · ")));
+  if(item.warnings?.length)card.append(tag("p","mgr-warning",item.warnings.join(" · ")));
   const current=item.review;
   if(current){
    card.append(tag("div","mgr-quality","Решение руководителя: "+(labels[current.decision]||current.decision)+
      (current.comment?" · "+current.comment:"")));
   }
-  const buttons=tag("div","mgr-actions");
-  for(const [decision,label,css] of [["approved","Подтвердить","mgr-primary"],["returned","На доработку","mgr-outline"],["rejected","Отклонить","mgr-danger"]]){
-   buttons.append(action(label,css,async()=>{
-    if(decision==="approved"&&item.warnings.length)return toast("Для утверждения сначала устраните замечания к доказательствам");
-    let comment="";
-    if(decision!=="approved"){
-     comment=prompt("Обоснование решения (не менее 5 символов)")??"";
-     if(!comment)return;
-    }else if(!confirm("Подтвердить нарушение по указанному доказательству?"))return;
-    await api("/manager/findings/"+employee+"/"+reg+"/"+item.finding_key+"/decision",
-      "POST",{decision,comment});
-    toast("Решение сохранено, исходные материалы не изменены");await loadFindings();
-   }));
+  const buttons=tag("div","mgr-actions"),decisionButtons=[];let deciding=false;
+  const finalDecision=["approved","rejected","returned"].includes(item.submission?.status||item.review?.decision);
+  for(const [decision,label,css] of [["approved","Согласовать","mgr-primary"],["rejected","Отказать","mgr-danger"]]){
+   const button=action(label,css,async()=>{
+    if(deciding||finalDecision||sequence!==findingSequence)return;
+    if(decision==="approved"&&item.warnings?.length)return toast("Для утверждения сначала устраните замечания к доказательствам");
+    const comment=prompt(decision==="approved"?"Комментарий к согласованию (по желанию)":"Причина отказа (не менее 5 символов)");
+    if(comment===null)return;
+    if(decision!=="approved"&&comment.trim().length<5)return toast("Укажите обоснование решения: не менее 5 символов");
+    deciding=true;decisionButtons.forEach(b=>b.disabled=true);
+    try{
+     await api("/manager/findings/"+encodeURIComponent(employee)+"/"+reg+"/"+item.finding_key+"/decision",
+       "POST",{decision,comment,submission_version:item.submission?.version});
+     toast("Решение сохранено и доступно сотруднику");
+     await Promise.all([loadFindingQueue(true),sequence===findingSequence?loadFindings():Promise.resolve()]);
+    }catch(e){
+     if(e.status===409)await Promise.all([loadFindingQueue(true),sequence===findingSequence?loadFindings():Promise.resolve()]);
+     throw e;
+    }finally{deciding=false;decisionButtons.forEach(b=>b.disabled=false)}
+   });button.disabled=finalDecision;decisionButtons.push(button);buttons.append(button);
   }
   card.append(buttons);root.append(card);
  }
 }
-async function renderProposals(employee,reg){
+async function renderProposals(employee,reg,sequence=findingSequence){
  const node=$("mgr-manual-proposals");node.replaceChildren();
  try{
   const rows=await api('/manager/workbench/'+employee+'/'+reg+'/proposals');
+  if(sequence!==findingSequence)return;
   if(!rows.length){node.append(tag('p','mgr-muted','Ручных предложений сотрудника нет'));return}
   for(const item of rows){
    const card=tag("article","mgr-entry");
@@ -582,19 +625,21 @@ async function renderProposals(employee,reg){
    }
    node.append(card);
   }
- }catch(e){node.append(tag('p','mgr-muted','Ручные предложения временно недоступны'))}
+ }catch(e){if(sequence===findingSequence)node.append(tag('p','mgr-muted','Ручные предложения временно недоступны'))}
 }
-async function renderDiscussion(employee,reg){
+async function renderDiscussion(employee,reg,sequence=findingSequence){
  const node=$("mgr-case-discussion");node.replaceChildren();
  try{
   const entries=await api('/manager/workbench/'+employee+'/'+reg+'/discussion');
+  if(sequence!==findingSequence)return;
   for(const item of entries){
    const box=tag('div','mgr-entry');
    box.append(tag('b','',item.author),tag('div','mgr-muted',
      new Date(item.created_at).toLocaleString('ru-RU')),
     tag('p','',item.body));node.append(box);
   }
- }catch(e){node.append(tag('p','mgr-muted','Обсуждение пока недоступно'))}
+ }catch(e){if(sequence===findingSequence)node.append(tag('p','mgr-muted','Обсуждение пока недоступно'))}
+ if(sequence!==findingSequence)return;
  const form=$('mgr-case-message');
  form.onsubmit=async e=>{
   e.preventDefault();
@@ -638,7 +683,7 @@ async function reloadData(){
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
  populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
- await mailStatus;
+ await Promise.all([mailStatus,loadFindingQueue(true)]);
 }
 if(ROLE==="admin"){
  const mailTest=$("mgr-mail-test");
@@ -777,6 +822,11 @@ __STYLE__</head><body>
 <div id="mgr-quality-items"></div></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="findings">
+<div class="mgr-card"><h2>Нарушения на согласовании</h2>
+<p>Направленные сотрудниками нарушения. Откройте карточку, проверьте доказательства и согласуйте или откажите с указанием причины.</p>
+<button type="button" id="mgr-submission-refresh" class="mgr-outline">Обновить очередь</button>
+<p id="mgr-submission-note" class="mgr-muted" role="status" aria-live="polite">Загружаем очередь…</p>
+<div id="mgr-submission-items"></div></div>
 <div class="mgr-card"><h2>Рассмотрение нарушений</h2>
 <p>Выберите исполнителя и закупку. Отображаются только подтверждённые анализатором нарушения из реальных записей.
 Недостаток доказательств блокирует согласование, но не удаляет запись.</p>
