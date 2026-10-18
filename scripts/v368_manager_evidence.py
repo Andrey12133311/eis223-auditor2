@@ -168,7 +168,18 @@ def dashboard(request:Request,response:Response):
                     "SELECT user_id FROM account_manager_teams WHERE manager_id=%s")
         team_ids=[r[0] for r in db.execute(
             team_query,() if role=="admin" else (actor,)).fetchall()]
-        task_rows=_task_rows(db,actor,role)
+        # Summary counts cover all authorized tasks, not the 400-row list page.
+        # Preserve the task endpoint's current-team and creator restrictions.
+        task_where=("WHERE t.manager_id=%s AND mt.manager_id=%s"
+                    if role!="admin" else "")
+        task_summary=db.execute(
+            """SELECT t.status,COUNT(*),COUNT(*) FILTER (
+                   WHERE t.due_date < %s AND t.status NOT IN ('completed','cancelled'))
+               FROM account_manager_tasks t
+               JOIN account_users u ON u.id=t.user_id
+               LEFT JOIN account_manager_teams mt ON mt.user_id=t.user_id
+               """+task_where+" GROUP BY t.status",
+            (date.today(),actor,actor) if role!="admin" else (date.today(),)).fetchall()
         memo_where="" if role=="admin" else " AND t.manager_id=%s"
         memo_rows=db.execute(
             """SELECT r.status,COUNT(*) FROM account_manager_memo_reviews r
@@ -183,7 +194,7 @@ def dashboard(request:Request,response:Response):
         if team_ids:
             people_sql=",".join("%s" for _ in team_ids)
             manual_rows=db.execute(
-                """SELECT user_id,reg_number,job_id,created_at,last_started_at
+                """SELECT user_id,reg_number,job_id,created_at,last_started_at,COUNT(*) OVER ()
                    FROM account_manual_checks WHERE user_id IN ("""+people_sql+
                 ") ORDER BY last_started_at DESC LIMIT 350",tuple(team_ids)).fetchall()
         else:
@@ -194,8 +205,9 @@ def dashboard(request:Request,response:Response):
                """+("WHERE manager_id=%s " if role!="admin" else "")+
                """GROUP BY 1 ORDER BY 1 DESC LIMIT 14""",
             (actor,) if role!="admin" else ()).fetchall()
-    task_items=[_task_dict(row) for row in task_rows]
-    status_counts={state:sum(1 for t in task_items if t["status"]==state)
+    manual_truncated=bool(manual_rows and int(manual_rows[0][5])>len(manual_rows))
+    task_totals={row[0]:int(row[1]) for row in task_summary}
+    status_counts={state:task_totals.get(state,0)
                    for state in ("assigned","in_progress","submitted","returned",
                                  "completed","cancelled")}
     docs=None
@@ -226,9 +238,9 @@ def dashboard(request:Request,response:Response):
     review_counts=dict(approved)
     return {
         "staff":len(team_ids),
-        "tasks_total":len(task_items),
-        "tasks_overdue":sum(x["overdue"] for x in task_items),
-        "tasks_pending":sum(x["status"]=="submitted" for x in task_items),
+        "tasks_total":sum(task_totals.values()),
+        "tasks_overdue":sum(int(row[2]) for row in task_summary),
+        "tasks_pending":status_counts["submitted"],
         "tasks_status":status_counts,
         "memos_pending":memo_counts.get("submitted",0),
         "memos_approved":memo_counts.get("approved",0),
@@ -239,7 +251,10 @@ def dashboard(request:Request,response:Response):
         "real_confirmed_findings":violations,
         "verified_legal_reviews":checked_purchases,
         "tasks_by_day":[{"day":r[0].isoformat(),"count":r[1]} for r in activities],
-        "metric_note":"Числа из базы ЕИС. Отсутствующие сведения не заменяются оценками.",
+        "manual_checks_truncated":manual_truncated,
+        "metric_note":("Числа из базы ЕИС. Отсутствующие сведения не заменяются оценками."+
+                       (" Показатели документов и нарушений рассчитаны по последним 350 самостоятельным проверкам команды."
+                        if manual_truncated else "")),
     }
 
 

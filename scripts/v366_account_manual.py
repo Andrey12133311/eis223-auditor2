@@ -57,72 +57,69 @@ def _read_only_status(ns, entries):
         conn.execute("PRAGMA query_only=ON")
         regs=[r["reg_number"] for r in entries]
         counts=load_counts(conn,regs)
-        has_jobs=bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v301_search_jobs'"
-        ).fetchone())
-        has_purchases=bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchases'"
-        ).fetchone())
+        tables={r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
         purchase_columns=({x[1] for x in conn.execute("PRAGMA table_info(purchases)")}
-                          if has_purchases else set())
+                          if "purchases" in tables else set())
         available_name=[c for c in ("customer","customer_name") if c in purchase_columns]
         has_inn="customer_inn" in purchase_columns
-        has_findings=bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='findings'"
-        ).fetchone())
-        has_checks=bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checks'"
-        ).fetchone())
-        has_legal_queue=bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'"
-        ).fetchone())
-        finding_columns={col[1] for col in conn.execute("PRAGMA table_info(findings)")} if has_findings else set()
-        check_columns={col[1] for col in conn.execute("PRAGMA table_info(checks)")} if has_checks else set()
+        finding_columns={col[1] for col in conn.execute("PRAGMA table_info(findings)")} if "findings" in tables else set()
+        check_columns={col[1] for col in conn.execute("PRAGMA table_info(checks)")} if "checks" in tables else set()
+        purchases, jobs, audits, labels_by_reg = {}, {}, {}, {}
+        # Bound SQLite parameters and read shared facts once per batch, rather
+        # than opening up to six queries for each account procurement.
+        unique_regs=list(dict.fromkeys(regs))
+        for offset in range(0,len(unique_regs),350):
+            batch=unique_regs[offset:offset+350]
+            marks=",".join("?" for _ in batch)
+            if "purchases" in tables:
+                cols=["reg_number","documents_found","documents_checked"]+available_name[:1]
+                if has_inn:cols.append("customer_inn")
+                for row in conn.execute("SELECT "+",".join(cols)+
+                        " FROM purchases WHERE reg_number IN ("+marks+")",batch):
+                    purchases.setdefault(row["reg_number"],row)
+            if "v332_audit_queue" in tables:
+                for row in conn.execute(
+                    "SELECT reg,state,documents_read FROM ("
+                    "SELECT reg,state,documents_read,ROW_NUMBER() OVER ("
+                    "PARTITION BY reg ORDER BY updated_at DESC) AS latest "
+                    "FROM v332_audit_queue WHERE reg IN ("+marks+")) WHERE latest=1",batch):
+                    audits[row["reg"]]=row
+            for table,label,state,columns in (
+                    ("findings","title","kind",finding_columns),
+                    ("checks","item","status",check_columns)):
+                if not {label,state,"reg_number"}<=columns:continue
+                # Keep the previous per-source cap; deterministic ordering makes
+                # the displayed labels stable across repeated refreshes.
+                for row in conn.execute(
+                    "SELECT reg_number,label FROM (SELECT reg_number,label,"
+                    "ROW_NUMBER() OVER (PARTITION BY reg_number ORDER BY label) AS n "
+                    "FROM (SELECT DISTINCT reg_number,"+label+" AS label FROM "+table+
+                    " WHERE reg_number IN ("+marks+") AND "+state+
+                    " IN ('violation','нарушение'))) WHERE n<=40",batch):
+                    if row["label"]:
+                        labels_by_reg.setdefault(row["reg_number"],set()).add(str(row["label"]).strip()[:160])
+        job_ids=list(dict.fromkeys(e["job_id"] for e in entries if e["job_id"]))
+        if "v301_search_jobs" in tables:
+            for offset in range(0,len(job_ids),350):
+                batch=job_ids[offset:offset+350]
+                marks=",".join("?" for _ in batch)
+                for row in conn.execute(
+                    "SELECT id,target,status,detail FROM v301_search_jobs "
+                    "WHERE kind='reg' AND id IN ("+marks+")",batch):
+                    jobs[(row["id"],row["target"])]=row
         data=[]
         for entry in entries:
             reg=entry["reg_number"]
             job_id=entry["job_id"]
-            job=(conn.execute(
-                "SELECT status,detail,created_at FROM v301_search_jobs "
-                "WHERE id=? AND kind='reg' AND target=? LIMIT 1",
-                (job_id,reg)).fetchone() if has_jobs and job_id else None)
-            purchase=(conn.execute(
-                "SELECT documents_found,documents_checked FROM purchases "
-                "WHERE reg_number=? LIMIT 1",(reg,)).fetchone()
-                if has_purchases else None)
-            customer_name=""
-            customer_inn=""
-            if purchase:
-                cols=", ".join(([available_name[0]] if available_name else [])+
-                               (["customer_inn"] if has_inn else []))
-                if cols:
-                    customer_row=conn.execute(
-                        "SELECT "+cols+" FROM purchases WHERE reg_number=? LIMIT 1",
-                        (reg,)).fetchone()
-                    if available_name:
-                        customer_name=str(customer_row[available_name[0]] or "")[:250]
-                    if has_inn:
-                        customer_inn=str(customer_row["customer_inn"] or "")[:12]
-            labels=set()
-            if {"title","kind","reg_number"}<=finding_columns:
-                for value in conn.execute(
-                    "SELECT DISTINCT title FROM findings WHERE reg_number=? "
-                    "AND (kind='violation' OR kind='нарушение') LIMIT 40",(reg,)):
-                    if value[0]:labels.add(str(value[0]).strip()[:160])
-            if {"item","status","reg_number"}<=check_columns:
-                for value in conn.execute(
-                    "SELECT DISTINCT item FROM checks WHERE reg_number=? "
-                    "AND (status='violation' OR status='нарушение') LIMIT 40",(reg,)):
-                    if value[0]:labels.add(str(value[0]).strip()[:160])
-            legal_review_state="unknown"
-            legal_review_documents=0
-            if has_legal_queue:
-                audit=conn.execute(
-                    """SELECT state,documents_read FROM v332_audit_queue
-                       WHERE reg=? ORDER BY updated_at DESC LIMIT 1""",(reg,)).fetchone()
-                if audit:
-                    legal_review_state=str(audit["state"] or "unknown")
-                    legal_review_documents=int(audit["documents_read"] or 0)
+            job=jobs.get((job_id,reg))
+            purchase=purchases.get(reg)
+            customer_name=str(purchase[available_name[0]] or "")[:250] if purchase and available_name else ""
+            customer_inn=str(purchase["customer_inn"] or "")[:12] if purchase and has_inn else ""
+            labels=labels_by_reg.get(reg,set())
+            audit=audits.get(reg)
+            legal_review_state=str(audit["state"] or "unknown") if audit else "unknown"
+            legal_review_documents=int(audit["documents_read"] or 0) if audit else 0
             started_at=entry["last_started_at"]
             data.append({
                 "reg_number":reg,

@@ -1,6 +1,8 @@
 """Modern staff workbench integrated with real EIS queues and owner-only data."""
 from __future__ import annotations
 
+from scripts.account_visual_polish_v1 import account_page_style
+
 CSS=r"""
 <style>
 :root{font-family:Inter,"Segoe UI",Arial,sans-serif;--blue:#175b88;--ink:#28495f;--line:#dbe7ef;--soft:#f3f7fa}
@@ -111,10 +113,17 @@ async function api(url,method="GET",body){
  if(!r.ok)throw Error(typeof data.detail==="string"?data.detail:"Ошибка HTTP "+r.status);
  return data;
 }
+// Share only concurrent reads; actions always get a fresh dashboard afterward.
+let dashboardRequest=null;
+function dashboardData(force=false){
+ if(force&&dashboardRequest)return dashboardRequest.catch(()=>{}).then(()=>dashboardData());
+ if(!dashboardRequest)dashboardRequest=api('/me/center/dashboard').finally(()=>{dashboardRequest=null});
+ return dashboardRequest;
+}
 async function loadToday(){
  const status=el('today-status');status.textContent='Получение данных…';
  try{
-  const data=await api('/me/center/dashboard');
+  const data=await dashboardData();
   for(const [id,value] of [['today-tasks',data.task_active],['today-campaigns',data.campaign_active],
    ['today-manual',data.manual_checks],['today-alerts',data.unread_notifications]]){
    el(id).textContent=Number(value||0).toLocaleString('ru-RU');
@@ -143,19 +152,24 @@ async function loadToday(){
 function section(tab){
  document.querySelectorAll('[data-staff-section]').forEach(x=>x.hidden=x.dataset.staffSection!==tab);
  document.querySelectorAll('[data-staff-tab]').forEach(x=>x.setAttribute("aria-selected",String(x.dataset.staffTab===tab)));
- if(tab==='goals')campaigns();
- if(tab==='activity')loadHistory();
- if(tab==='overview')loadDashboard();
- if(tab==='library')loadLibrary();
- if(tab==='today')loadToday();
+ if(tab==='goals')return campaigns();
+ if(tab==='activity')return loadHistory();
+ if(tab==='overview')return loadDashboard();
+ if(tab==='library')return loadLibrary();
+ if(tab==='today')return loadToday();
+ if(tab==='templates')return Promise.all([templates(),options()]);
 }
 document.querySelectorAll('[data-staff-tab]').forEach(x=>x.onclick=()=>section(x.dataset.staffTab));
-el('staff-refresh').addEventListener('click',()=>{
+el('staff-refresh').addEventListener('click',async()=>{
+ const button=el('staff-refresh');button.disabled=true;
  const current=document.querySelector('[data-staff-tab][aria-selected="true"]');
  const tab=current?.dataset.staffTab||'overview';
- section(tab);
- if(tab==='overview')reloadOverview();
- msg('Обновление данных запущено');
+ try{
+  const updates=[section(tab),reloadOverview()];
+  if(tab==='overview')updates.push(loadProgress(),loadNotifications(),loadSavedSearches());
+  if(tab==='case')updates.push(loadCase());
+  await Promise.all(updates);
+ }finally{button.disabled=false}
 });
 function list(root,items,build){
  const node=el(root);node.replaceChildren();
@@ -179,9 +193,9 @@ function createAction(text,onClick,kind='outline'){
  button.onclick=async()=>{button.disabled=true;try{await onClick()}catch(error){msg(error.message)}finally{button.disabled=false}};
  return button;
 }
-async function loadDashboard(){
+async function loadDashboard(force=false){
  try{
-  const data=await api('/me/center/dashboard');
+  const data=await dashboardData(force);
   for(const [id,count] of Object.entries({
    'active-tasks':data.task_active,'active-campaigns':data.campaign_active,
    'unread':data.unread_notifications,'reviewed':data.finding_decisions?.confirmed||0
@@ -196,11 +210,11 @@ async function loadDashboard(){
    const actions=make('div');actions.className='staff-tools';
    const go=link('/check-new/'+x.reg_number,'Карточка ЕИС');actions.append(go);
    if(x.status==='assigned'||x.status==='returned')
-    actions.append(createAction('Принять',async()=>{await api('/me/assignments/'+x.id+'/take','POST');await loadDashboard()}));
+    actions.append(createAction('Принять',async()=>{await api('/me/assignments/'+x.id+'/take','POST');await loadDashboard(true)}));
    if(x.status==='in_progress')
     actions.append(createAction('Передать результат',async()=>{
      if(!confirm('Передать руководителю только завершённую проверку?'))return;
-     await api('/me/assignments/'+x.id+'/submit','POST');await loadDashboard();
+     await api('/me/assignments/'+x.id+'/submit','POST');await loadDashboard(true);
     }));
    row.append(body,actions);return row;
   });
@@ -250,7 +264,7 @@ async function loadNotifications(){
     make('small',new Date(x.created_at).toLocaleString('ru-RU')));
    row.append(body);
    if(!x.read)row.append(createAction('Прочитано',async()=>{
-    await api('/me/notifications/'+x.id+'/read','POST');await loadNotifications();await loadDashboard();
+    await api('/me/notifications/'+x.id+'/read','POST');await loadNotifications();await loadDashboard(true);
    }));
    return row;
   });
@@ -290,28 +304,56 @@ async function loadSavedSearches(){
   });
  }catch(error){msg('Сохранённые запросы: '+error.message)}
 }
-let autosaveHandle=null;
-async function loadDraft(reg){
+// Keep independent local edits for each case until its save has settled.
+// A later case load must never replace a draft that is still being saved.
+const draftEdits=new Map();
+async function loadDraft(reg,isCurrent=()=>reg===currentCaseReg){
+ const before=draftEdits.get(reg),version=before?.version;
+ const wasDirty=!!before&&(before.saving||before.version!==before.savedVersion);
  try{
   const data=await api('/me/center/draft/'+reg);
-  const field=el('staff-case-draft');
-  field.dataset.reg=reg;field.value=data.body||'';
-  el('staff-draft-saved').textContent=data.updated_at?
+  if(!isCurrent())return;
+  const field=el('staff-case-draft'),local=draftEdits.get(reg);
+  const keepLocal=!!local&&(wasDirty||local.version!==version||local.saving||local.version!==local.savedVersion);
+  field.dataset.reg=reg;field.value=keepLocal?local.body:(data.body||'');field.disabled=false;
+  if(keepLocal){
+   el('staff-draft-saved').textContent=local.error?'Ошибка автосохранения':
+    local.version===local.savedVersion?'Изменения автоматически сохранены':'Сохранение изменений…';
+  }else{
+   if(local)draftEdits.delete(reg);
+   el('staff-draft-saved').textContent=data.updated_at?
     'Последнее сохранение: '+new Date(data.updated_at).toLocaleString('ru-RU'):'Черновик пуст';
- }catch(error){msg('Черновик: '+error.message)}
+  }
+ }catch(error){if(isCurrent())msg('Черновик: '+error.message)}
+}
+async function saveDraft(reg,edit){
+ if(edit.saving)return;
+ const version=edit.version,text=edit.body;edit.saving=true;
+ try{
+  await api('/me/center/draft/'+reg,'PUT',{body:text});
+  edit.savedVersion=version;edit.error=false;
+  const field=el('staff-case-draft');
+  if(field.dataset.reg===reg&&field.value===text&&edit.version===version)
+   el('staff-draft-saved').textContent='Изменения автоматически сохранены';
+ }catch(error){
+  edit.error=true;
+  if(el('staff-case-draft').dataset.reg===reg){
+   msg('Не удалось сохранить черновик: '+error.message);
+   el('staff-draft-saved').textContent='Ошибка автосохранения';
+  }
+ }finally{
+  edit.saving=false;
+  if(edit.version!==version){clearTimeout(edit.timer);await saveDraft(reg,edit)}
+ }
 }
 el('staff-case-draft').addEventListener('input',()=>{
- clearTimeout(autosaveHandle);
- const field=el('staff-case-draft'),reg=field.dataset.reg,text=field.value;
- if(!regOK(reg))return;
+ const field=el('staff-case-draft'),reg=field.dataset.reg;
+ if(!regOK(reg)||field.disabled)return;
+ const edit=draftEdits.get(reg)||{version:0,savedVersion:0,saving:false,timer:null};
+ clearTimeout(edit.timer);edit.body=field.value;edit.version++;edit.error=false;
+ draftEdits.set(reg,edit);
  el('staff-draft-saved').textContent='Сохранение изменений…';
- autosaveHandle=setTimeout(async()=>{
-  try{await api('/me/center/draft/'+reg,'PUT',{body:text});
-   if(field.dataset.reg===reg&&field.value===text)
-    el('staff-draft-saved').textContent='Изменения автоматически сохранены';
-  }catch(error){msg('Не удалось сохранить черновик: '+error.message);
-   el('staff-draft-saved').textContent='Ошибка автосохранения'}
- },800);
+ edit.timer=setTimeout(()=>saveDraft(reg,edit),800);
 });
 el('staff-search-save').onclick=async()=>{
  const phrase=el('staff-global-query').value.trim();
@@ -387,7 +429,7 @@ async function campaigns(){
       if(value==='rejected'&&!confirm('Отклонить это нарушение только в личной оценке, сохранив исходные данные ЕИС?'))return;
       await api('/me/center/findings/'+item.finding_id+'/decision','POST',
        {reg_number:item.reg_number,decision:value,comment});
-      await campaigns();await loadDashboard();
+      await campaigns();await loadDashboard(true);
       msg('Решение сохранено; исходные результаты ЕИС не изменялись');
      }));
     }
@@ -418,7 +460,7 @@ async function templates(){
     try{
      const result=await api('/me/workbench/templates/'+item.id+'/start','POST');
      msg('Создана настоящая тематическая проверка ЕИС: '+result.batch_id);
-     section('goals');await campaigns();
+     await section('goals');
     }catch(e){msg(e.message)}finally{launch.disabled=false}
    };
    const del=make("button","Удалить");del.className="danger";
@@ -428,7 +470,9 @@ async function templates(){
   });
  }catch(e){msg(e.message)}
 }
+let optionsLoaded=false;
 async function options(){
+ if(optionsLoaded)return;
  const data=await api('/me/workbench/options').catch(()=>null);
  const opts=data||{
   categories:{dates:"Сроки и разъяснения",docs:"Документация",national:"Национальный режим",
@@ -444,6 +488,7 @@ async function options(){
    label.append(input,make("span",value));box.append(label);
   }
  }
+ optionsLoaded=true;
 }
 el("staff-bulk-form").onsubmit=async event=>{
  event.preventDefault();
@@ -468,17 +513,45 @@ el("staff-template-form").onsubmit=async event=>{
    await templates();msg("Шаблон сохранён")
  }catch(e){msg(e.message)}
 };
+let caseGeneration=0,currentCaseReg="";
+function caseFormEnabled(id,enabled){
+ el(id).querySelectorAll('input,select,textarea,button').forEach(field=>{field.disabled=!enabled});
+}
+function resetCaseView(changed){
+ for(const id of ['staff-checklist','staff-manual-findings','staff-related','staff-discussion',
+  'staff-version-left','staff-version-right','staff-version-diff','staff-search-results','staff-original-results'])
+  el(id).replaceChildren();
+ const draft=el('staff-case-draft');
+ if(changed||draft.dataset.reg!==currentCaseReg){
+  draft.disabled=true;draft.dataset.reg='';draft.value='';
+  el('staff-draft-saved').textContent='Загрузка черновика…';
+ }
+ el('staff-version-note').textContent='Загрузка редакций…';
+ for(const id of ['staff-priority','staff-save-pref','staff-version-left','staff-version-right','staff-version-compare'])
+  el(id).disabled=true;
+ el('staff-priority').checked=false;
+ for(const id of ['staff-manual-form','staff-message-form']){
+  if(changed)el(id).reset();
+  caseFormEnabled(id,false);
+ }
+}
 async function loadCase(){
  const reg=el("staff-reg").value.trim();
  if(!regOK(reg)){msg("Укажите номер ЕИС из 11 цифр");return}
+ const changed=currentCaseReg!==reg;
+ currentCaseReg=reg;const generation=++caseGeneration;
+ resetCaseView(changed);
+ const isCurrent=()=>generation===caseGeneration&&reg===currentCaseReg;
  el("staff-case").hidden=false;
  el("staff-case-link").href='/me/cases/'+reg;
  el("staff-case-download").href='/me/workbench/'+reg+'/export.zip';
- for(const cb of [loadChecklist,loadManual,loadRelated,loadDiscussion,loadPreferences,loadVersions,loadDraft])await cb(reg);
+ await Promise.all([loadChecklist,loadManual,loadRelated,loadDiscussion,loadPreferences,loadVersions,loadDraft]
+  .map(load=>load(reg,isCurrent)));
 }
-async function loadChecklist(reg){
+async function loadChecklist(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const questions=await api('/me/workbench/'+reg+'/checklist');
+  if(!isCurrent())return;
   list('staff-checklist',questions,q=>{
    const item=make("article");item.className="entry";
    item.append(make("h3",q.question));
@@ -499,9 +572,11 @@ async function loadChecklist(reg){
   })
  }catch(e){msg(e.message)}
 }
-async function loadManual(reg){
+async function loadManual(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const issues=await api('/me/workbench/'+reg+'/manual-findings');
+  if(!isCurrent())return;
+  caseFormEnabled('staff-manual-form',true);
   list('staff-manual-findings',issues,item=>{
    const box=make("article");box.className="entry";
    box.append(make("h3",item.title),make("p",item.law),
@@ -512,17 +587,22 @@ async function loadManual(reg){
  }catch(e){msg(e.message)}
 }
 el("staff-manual-form").onsubmit=async event=>{
- event.preventDefault();const reg=el('staff-reg').value.trim();
- const data=Object.fromEntries(new FormData(event.currentTarget).entries());
+ event.preventDefault();const form=event.currentTarget,reg=currentCaseReg,generation=caseGeneration;
+ const data=Object.fromEntries(new FormData(form).entries());
+ const button=form.querySelector('button');if(button.disabled)return;button.disabled=true;
  try{
   await api('/me/workbench/'+reg+'/manual-findings','POST',data);
-  event.currentTarget.reset();await loadManual(reg);
+  if(generation!==caseGeneration||reg!==currentCaseReg)return;
+  form.reset();await loadManual(reg);
+  if(generation!==caseGeneration)return;
   msg("Нарушение передано на проверку и пока не увеличивает число подтверждённых")
- }catch(e){msg(e.message)}
+ }catch(e){if(generation===caseGeneration)msg(e.message)}
+ finally{if(generation===caseGeneration&&reg===currentCaseReg)button.disabled=false}
 };
-async function loadRelated(reg){
+async function loadRelated(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const related=await api('/me/workbench/'+reg+'/related');
+  if(!isCurrent())return;
   list("staff-related",related.purchases||[],x=>{
    const box=make("div");box.className="entry";
    box.append(link('/check-new/'+x.reg_number,'№ '+x.reg_number),
@@ -532,10 +612,11 @@ async function loadRelated(reg){
  }catch(e){msg(e.message)}
 }
 el("staff-search-form").onsubmit=async event=>{
- event.preventDefault();const reg=el("staff-reg").value.trim(),
+ event.preventDefault();const reg=currentCaseReg,generation=caseGeneration,
    query=String(new FormData(event.currentTarget).get("q")||"").trim();
  try{
   const result=await api('/me/workbench/'+reg+'/search?q='+encodeURIComponent(query));
+  if(generation!==caseGeneration)return;
   list('staff-search-results',result.results||[],x=>{
    const box=make("div");box.className="entry";
    box.append(make("small",x.type),make("p",x.excerpt));return box;
@@ -543,9 +624,11 @@ el("staff-search-form").onsubmit=async event=>{
   msg(result.scope);
  }catch(e){msg(e.message)}
 };
-async function loadDiscussion(reg){
+async function loadDiscussion(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const messages=await api('/me/workbench/'+reg+'/discussion');
+  if(!isCurrent())return;
+  caseFormEnabled('staff-message-form',true);
   list('staff-discussion',messages,x=>{
    const box=make("div");box.className="entry";
    box.append(make("b",x.author),make("small",new Date(x.created_at).toLocaleString('ru-RU')),
@@ -554,27 +637,33 @@ async function loadDiscussion(reg){
  }catch(e){msg(e.message)}
 }
 el("staff-message-form").onsubmit=async event=>{
- event.preventDefault();const reg=el("staff-reg").value.trim();
- const body=String(new FormData(event.currentTarget).get("body")||"");
+ event.preventDefault();const form=event.currentTarget,reg=currentCaseReg,generation=caseGeneration;
+ const body=String(new FormData(form).get("body")||"");
+ const button=form.querySelector('button');if(button.disabled)return;button.disabled=true;
  try{
   await api('/me/workbench/'+reg+'/discussion','POST',{body});
-  event.currentTarget.reset();await loadDiscussion(reg);msg("Сообщение сохранено")
- }catch(e){msg(e.message)}
+  if(generation!==caseGeneration||reg!==currentCaseReg)return;
+  form.reset();await loadDiscussion(reg);
+  if(generation===caseGeneration)msg("Сообщение сохранено")
+ }catch(e){if(generation===caseGeneration)msg(e.message)}
+ finally{if(generation===caseGeneration&&reg===currentCaseReg)button.disabled=false}
 };
-async function loadPreferences(reg){
+async function loadPreferences(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const pref=await api('/me/workbench/preferences');
+  if(!isCurrent())return;
   el("staff-priority").checked=pref.priority_regs.includes(reg);
+  el("staff-priority").disabled=false;el("staff-save-pref").disabled=false;
   // Settings persisted in PostgreSQL; the calendar is deliberately not shown.
  }catch(e){msg(e.message)}
 }
 el("staff-save-pref").onclick=async()=>{
- const reg=el("staff-reg").value.trim();
+ const reg=currentCaseReg,priority=el("staff-priority").checked;
  if(!regOK(reg)){msg("Сначала выберите проверку");return}
  try{
   const old=await api('/me/workbench/preferences');
   const next=old.priority_regs.filter(x=>x!==reg);
-  if(el("staff-priority").checked)next.unshift(reg);
+  if(priority)next.unshift(reg);
   await api('/me/workbench/preferences','PUT',{
    priority_regs:next.slice(0,30),
    pinned_legal_categories:old.pinned_legal_categories,
@@ -584,16 +673,18 @@ el("staff-save-pref").onclick=async()=>{
 };
 el("staff-case-load").onclick=loadCase;
 el("staff-recheck").onclick=async()=>{
- const reg=el("staff-reg").value.trim();
+ const reg=currentCaseReg;
  if(!regOK(reg))return msg('Выберите номер своей закупки');
  try{const result=await api('/me/workbench/'+reg+'/recheck','POST');
   msg('Повторная загрузка оригиналов ЕИС: '+result.status+'. История сохранена')}
  catch(e){msg(e.message)}
 };
-async function loadVersions(reg){
+async function loadVersions(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const result=await api('/me/workbench/'+reg+'/versions');
+  if(!isCurrent())return;
   const left=el('staff-version-left'),right=el('staff-version-right');
+  left.disabled=false;right.disabled=false;el('staff-version-compare').disabled=false;
   left.replaceChildren();right.replaceChildren();
   for(const group of result.groups||[]){
    for(const version of group.versions){
@@ -608,9 +699,10 @@ async function loadVersions(reg){
  }catch(e){msg(e.message)}
 }
 el('staff-version-compare').onclick=async()=>{
- const reg=el('staff-reg').value.trim(),a=el('staff-version-left').value,b=el('staff-version-right').value;
+ const reg=currentCaseReg,generation=caseGeneration,a=el('staff-version-left').value,b=el('staff-version-right').value;
  if(!a||!b||a===b)return msg('Выберите две разные редакции');
  try{const result=await api('/me/workbench/'+reg+'/compare?left='+encodeURIComponent(a)+'&right='+encodeURIComponent(b));
+  if(generation!==caseGeneration)return;
   const root=el('staff-version-diff');root.replaceChildren();
   for(const row of result.diff||[]){const node=make('div',row);node.style.whiteSpace='pre-wrap';
    node.style.background=row.startsWith('+')?'#e5f5e9':row.startsWith('-')?'#fff0ef':'#fff';
@@ -619,10 +711,11 @@ el('staff-version-compare').onclick=async()=>{
  }catch(e){msg(e.message)}
 };
 el('staff-original-search').onsubmit=async event=>{
- event.preventDefault();const reg=el('staff-reg').value.trim();
+ event.preventDefault();const reg=currentCaseReg,generation=caseGeneration;
  const phrase=String(new FormData(event.currentTarget).get('q')||'').trim();
  try{
   const result=await api('/me/workbench/'+reg+'/search-originals?q='+encodeURIComponent(phrase));
+  if(generation!==caseGeneration)return;
   list('staff-original-results',result.results||[],x=>{
    const box=make('article');box.className='entry';
    box.append(make('h3',x.name),make('p',x.fragment));return box});
@@ -649,11 +742,9 @@ async function loadLibrary(){
   })
  }catch(e){msg(e.message)}
 }
-loadHistory();loadLibrary();
 showName();
 el('staff-global-search').addEventListener('submit',searchAll);
-options().catch(e=>msg(e.message));
-reloadOverview();loadDashboard();loadProgress();loadNotifications();loadSavedSearches();campaigns();templates();
+reloadOverview();loadDashboard();loadProgress();loadNotifications();loadSavedSearches();
 // Live server-side jobs continue independently of the browser; this only refreshes the view.
 setInterval(()=>{
  if(document.hidden)return;
@@ -855,4 +946,4 @@ placeholder="Срок оплаты договора"></label>
 </main>__JS__</body></html>"""
 
 def render_workbench():
-    return PAGE.replace("__CSS__",CSS).replace("__JS__",JS)
+    return PAGE.replace("__CSS__",CSS+account_page_style()).replace("__JS__",JS)

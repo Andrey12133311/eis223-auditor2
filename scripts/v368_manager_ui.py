@@ -2,6 +2,8 @@
 import json
 from html import escape
 
+from scripts.account_visual_polish_v1 import account_page_style
+
 STYLE=r"""
 <style>
 :root{--navy:#153f64;--navy2:#1c5684;--blue:#176397;--light:#f2f6fa;--edge:#dce5ed;
@@ -313,7 +315,6 @@ function renderAdmin(){
   tr.append(cell(controls));rows.push(tr);
  }
  mountRows("mgr-admin-rows",rows);
- renderMailStatus();
 }
 function renderCampaignOptions(){
  if(!cache.options)return;
@@ -615,22 +616,29 @@ $("mgr-task-create").onsubmit=async e=>{
  try{await api("/manager/tasks","POST",data);form.reset();toast("Поручение назначено");await reload();show("tasks")}
  catch(error){toast(error.message)}finally{button.disabled=false}
 };
-async function reload(){
+let reloadRequest=null,reloadQueued=false;
+function reload(){
+ if(reloadRequest){reloadQueued=true;return reloadRequest}
+ reloadRequest=(async()=>{
+  do{reloadQueued=false;await reloadData()}while(reloadQueued);
+ })().finally(()=>{reloadRequest=null});
+ return reloadRequest;
+}
+async function reloadData(){
  const paths=[["dashboard","/manager/dashboard"],["tasks","/manager/tasks"],["team","/manager/team"],
   ["memos","/manager/memos"],["alerts","/manager/alerts"],
   ["thematic","/manager/thematic"],["quality","/manager/quality"],["campaigns","/manager/campaigns"],["options","/manager/campaigns/options"]];
+ if(ROLE==="admin")paths.push(["users","/manager/admin/users"]);
+ const mailStatus=renderMailStatus();
  const all=await Promise.allSettled(paths.map(async([key,url])=>[key,await api(url)]));
  for(const a of all){
   if(a.status==="fulfilled")cache[a.value[0]]=a.value[1];
   else toast("Некоторые данные временно недоступны");
  }
- if(ROLE==="admin"){
-  try{cache.users=await api("/manager/admin/users")}catch(e){toast(e.message)}
- }
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
  populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
- $("mgr-refresh").disabled=false;
+ await mailStatus;
 }
 if(ROLE==="admin"){
  const mailTest=$("mgr-mail-test");
@@ -854,6 +862,6 @@ __STYLE__</head><body>
 </main></div>
 <div id="mgr-toast" class="mgr-toast mgr-hidden" role="status" aria-live="polite"></div>
 __SCRIPT__</body></html>"""
-    return (shell.replace("__STYLE__",STYLE)
+    return (shell.replace("__STYLE__",STYLE+account_page_style())
                  .replace("__SCRIPT__",SCRIPT.replace("__ROLE__",json.dumps(role)))
                  .replace("__LABEL__","Роль: "+("Администратор" if role=="admin" else "Руководитель")))

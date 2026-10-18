@@ -4,6 +4,7 @@ Pure HTML builders: no private user data embedded in shared-page markup.
 Private data is fetched from owner-scoped APIs only after authentication.
 """
 from html import escape
+from scripts.account_visual_polish_v1 import workspace_style
 
 
 _STYLE = """
@@ -207,7 +208,7 @@ def site_header(role="user"):
     admin = '<button type="button" id="eis223-admin-nav" hidden>Управление пользователями</button>' if role == "admin" else ""
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + '''
+    return (_STYLE + workspace_style() + '''
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
