@@ -368,6 +368,7 @@ async def stored_docs(ns,reg,rows):
         raw=row.get("local_path")
         if not raw:return None
         async with FILE_IO_LIMIT:
+            stage="path"
             try:
                 f=Path(raw).resolve(strict=True)
                 if (not f.is_file() or not f.is_relative_to(data_root) or
@@ -377,15 +378,22 @@ async def stored_docs(ns,reg,rows):
                 def load_hash():
                     with f.open("rb") as h:
                         return hashlib.file_digest(h,"sha256").hexdigest()
+                stage="hash"
                 sha=await asyncio.to_thread(load_hash)
                 try:meta=json.loads(row.get("metadata_json") or "{}")
                 except (ValueError,TypeError):meta={}
                 if not isinstance(meta,dict):meta={}
                 if meta.get("sha256") and meta["sha256"]!=sha:return None
+                # Older saved originals stored their EIS URL in docs.url.
+                # A receipt still has to authenticate this exact file/hash.
+                if not meta.get("source_url"):
+                    meta={**meta,"source_url":row.get("url") or ""}
+                stage="receipt"
                 trusted=await asyncio.to_thread(source_verified,reg,f,sha,meta)
                 meta={**meta,"sha256":sha}
                 if not trusted:
                     meta["source"]="existing_local_unverified"
+                stage="text"
                 body=await asyncio.wait_for(
                     asyncio.to_thread(document_text,f,extractor),timeout=55)
                 body=str(body or "")[:650000]
@@ -405,8 +413,9 @@ async def stored_docs(ns,reg,rows):
                 # producing thousands of repeated exception logs.
                 return None
             except Exception as exc:
+                reason=" ".join(str(exc).split())[:240]
                 print(f"V351 DOC_SKIP reg={reg} type={type(exc).__name__} "
-                      f"file_id={row.get('id')}",flush=True)
+                      f"file_id={row.get('id')} stage={stage} reason={reason!r}",flush=True)
                 return None
 
     output=[]

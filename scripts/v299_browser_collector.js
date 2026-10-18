@@ -6,7 +6,7 @@
 (async function () {
   "use strict";
   const SITE = "https://zakupki.gov.ru";
-  const COLLECTOR_VERSION = "376"; // Backend recovery without losing completion reports
+  const COLLECTOR_VERSION = "377"; // Separate saved originals from the legal audit
   const RAIL = "https://web-production-1c2ea.up.railway.app";
   const INTERVAL = 300000; // не чаще одного поиска за пять минут
   const BACKEND_RETRY_MS = 60000;
@@ -936,6 +936,19 @@
     if(!base)base="Документ ЕИС "+downloadUid(item).slice(0,10);
     return base+detected;
   }
+  function originalIntake(state,discovered=0) {
+    const count=value=>Number.isFinite(Number(value))?
+      Math.max(0,Math.floor(Number(value))):0;
+    const registered=count(state?.manifest_documents);
+    const received=count(state?.originals_received);
+    // A refreshed tab may show fewer files than the persisted official
+    // manifest. Retain every known expectation until its bytes are saved.
+    const expected=Math.max(count(discovered),registered,
+      count(state?.visible_attachments));
+    return {received,expected,complete:expected>0&&
+      registered>=expected&&received>=expected};
+  }
+
   async function handleRegistry(reg,searchDoc) {
     const {docs,source,landing,customer,title}=await discoverFromOfficialCard(reg,searchDoc);
     const manifestBase={
@@ -989,26 +1002,21 @@
       }
     }
     const state=(await getKnown([reg]))[reg]||{};
-    const complete=state.manifest_documents>=docs.length&&
-      state.originals_received>=docs.length&&
-      state.checked_documents>=docs.length;
+    // These are download jobs. The server performs the legal audit after
+    // upload; checked rows can also be fewer than attachments after dedup.
+    const intake=originalIntake(state,docs.length);
     log(reg,"вложений на странице:",docs.length,
       "оригиналов на сервере:",state.originals_received||0,
       "новых оригиналов:",uploadedNow,
       "неудачных попыток:",unresolved,
-      "полностью проверено:",complete);
-    if(uploadedNow===0&&!complete){
-      const originalsPresent=state.manifest_documents>=docs.length&&
-        state.originals_received>=docs.length;
-      if(originalsPresent){
-        log(reg,"все оригиналы уже находятся на Railway; ожидание юридической перепроверки.");
-        return {discovered:docs.length,uploaded:0,complete:false};
-      }
+      "загрузка завершена:",intake.complete);
+    if(uploadedNow===0&&!intake.complete){
       throw new Error("Оригиналы ЕИС получены не полностью: "+
-        (state.originals_received||0)+" из "+docs.length+
+        intake.received+" из "+intake.expected+
         ". Ошибок скачивания: "+unresolved+".");
     }
-    return {discovered:docs.length,uploaded:uploadedNow,complete};
+    return {discovered:docs.length,uploaded:uploadedNow,
+      intakeComplete:intake.complete,expected:intake.expected};
   }
   async function heartbeat(status,newPurchases,newOriginals,error="") {
     try {
@@ -1042,10 +1050,10 @@
         status="empty";
       } else {
         const known=await getKnown(numbers);
-        const fresh=numbers.filter(n=>!known[n]?.complete||known[n]?.needs_metadata);
+        const fresh=numbers.filter(n=>!originalIntake(known[n]).complete||known[n]?.needs_metadata);
         log("В выдаче",numbers.length,"номеров; ещё требуют загрузки",fresh.length);
         const picks=[];
-        const previouslyComplete=numbers.filter(n=>known[n]?.complete&&!fresh.includes(n));
+        const previouslyComplete=numbers.filter(n=>originalIntake(known[n]).complete&&!fresh.includes(n));
         // Every third cycle re-enumerate ONE previously "complete" notice.
         // Legacy incomplete manifests must not prevent discovery of newly
         // published originals, but fresh purchases retain priority.
@@ -1117,15 +1125,14 @@
         const before=uploaded;
         const outcome=await handleRegistry(job.target,null);
         const updated=(await getKnown([job.target]))[job.target]||{};
-        const fullyReceived=outcome.complete &&
-          updated.manifest_documents>=outcome.discovered;
+        const intake=originalIntake(updated,Math.max(outcome.discovered,outcome.expected));
+        const fullyReceived=outcome.intakeComplete && intake.complete;
         report={
           status:fullyReceived?"done":"partial",
           detail:fullyReceived?
-            "Все обнаруженные оригиналы ЕИС получены и проверены":
-            ("Получено "+(updated.originals_received||0)+" из "+
-               (updated.visible_attachments||outcome.discovered||0)+
-               " вложений ЕИС; остальные остаются в очереди"),
+            "Все учтённые оригиналы ЕИС сохранены; результат юридической проверки ожидается":
+            ("Получено "+intake.received+" из "+intake.expected+
+               " вложений ЕИС; загрузка не завершена"),
           accepted:uploaded-before,found:outcome.discovered?1:0
         };
         }

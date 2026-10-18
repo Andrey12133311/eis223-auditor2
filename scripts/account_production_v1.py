@@ -27,6 +27,11 @@ MACHINE_EXACT = frozenset({
     "/api/v299/eis223/heartbeat",
     "/api/v299/eis223/known",
     "/api/v310/eis223/card-metadata",
+    # Verified EIS card fields use the same upload key as manifests/originals.
+    # Keep exact paths: browser preflights carry no key or account cookie.
+    "/api/v311/eis223/customer",
+    "/api/v322/eis223/price",
+    "/api/v341/eis223/card-facts",
     "/api/v301/bridge/next",
 })
 MACHINE_PREFIXES = (

@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 import re
 import sqlite3
+import zipfile
 
 from v295_eis_originals import allowed_documents, saved_document, uid_from_url, root
 from v311_verified_customer import _name
@@ -187,13 +188,62 @@ def parse_text(text):
     return result
 
 
+def _docx_body_without_auxiliary_parts(path):
+    """Read the real body when a dangling Office relationship blocks python-docx.
+
+    Some published DOCX files reference absent styles, images or printer
+    settings. These parts are not needed to read the existing document body.
+    Never recover a missing/malformed body or follow external relationships.
+    """
+    from lxml import etree
+    from docx.oxml.ns import qn
+
+    limit = 16 * 1024 * 1024
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if len(entries) > 2000 or sum(i.file_size for i in entries) > 80 * 1024 * 1024:
+                raise ValueError("DOCX expanded size exceeds the extraction limit")
+            bodies = [i for i in entries if i.filename == "word/document.xml"]
+            if len(bodies) != 1 or bodies[0].file_size > limit:
+                raise ValueError("DOCX main document is missing, ambiguous or too large")
+            with archive.open(bodies[0]) as stream:
+                data = stream.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("DOCX main document exceeds the extraction limit")
+    except (zipfile.BadZipFile, KeyError) as exc:
+        raise ValueError("DOCX main document could not be read") from exc
+    parser = etree.XMLParser(resolve_entities=False, no_network=True,
+                             load_dtd=False, huge_tree=False, recover=False)
+    try:
+        document = etree.fromstring(data, parser=parser)
+    except etree.XMLSyntaxError as exc:
+        raise ValueError("DOCX main document contains invalid XML") from exc
+    if document.getroottree().docinfo.doctype or document.tag != qn("w:document"):
+        raise ValueError("DOCX main document has an unsupported XML structure")
+    body = document.find(qn("w:body"))
+    if body is None:
+        raise ValueError("DOCX main document has no body")
+    return body
+
+
 def document_text(path, extractor):
     if Path(path).suffix.lower() == ".docx":
         # Maintain section/table order, including nested information cards.
         from docx import Document
         from docx.oxml.ns import qn
+        from lxml import etree
         lines = []
-        content = Document(path).element.body
+        try:
+            content = Document(path).element.body
+        except KeyError as exc:
+            # python-docx loads every related part, even styles/images that
+            # have no bearing on the document's actual textual evidence.
+            content = _docx_body_without_auxiliary_parts(path)
+            LOG.warning("Recovered DOCX body with missing auxiliary part file=%s reason=%s",
+                        Path(path).name, compact(exc)[:240])
+        except (etree.XMLSyntaxError, zipfile.BadZipFile) as exc:
+            raise ValueError("DOCX package contains invalid XML or ZIP data") from exc
         value = lambda el: "\n".join(
             "".join(t.text or "" for t in p.iter(qn("w:t")))
             for p in el.iter(qn("w:p")))
@@ -337,6 +387,9 @@ def apply_metadata(ns, reg, metadata):
 
 
 def stored_metadata(ns, reg):
+    extractor = ns.get("extract_text")
+    if not callable(extractor):
+        raise RuntimeError("Document extractor unavailable")
     db = ns["conn"]()
     db.row_factory = sqlite3.Row
     try:
@@ -350,6 +403,7 @@ def stored_metadata(ns, reg):
     data_root=root().resolve()
     for row in rows[:100]:
         d = dict(row)
+        stage = "metadata"
         try:
             meta = json.loads(d.get("metadata_json") or "{}")
             if not isinstance(meta,dict):continue
@@ -376,15 +430,25 @@ def stored_metadata(ns, reg):
                 expected=meta.get("sha256")
             if not expected or not re.fullmatch(r"[0-9a-f]{64}",str(expected)):
                 continue
+            stage = "hash"
             with file.open("rb") as stream:
                 if hashlib.file_digest(stream,"sha256").hexdigest()!=expected:
                     continue
-            text=document_text(file,ns["extract_text"])
-            docs.append({"name":d["name"],"url":d["url"],"status":"checked",
+            stage = "text"
+            text=document_text(file,extractor)
+            if len(str(text or "").strip()) < 3:
+                continue
+            # Legacy rows can carry the URL only in docs.url. Preserve the
+            # verified receipt's hash and source for downstream provenance.
+            meta = {**meta, "sha256":expected,
+                    "source_url":meta.get("source_url") or d.get("url") or ""}
+            docs.append({"name":d.get("name") or file.name,
+                         "url":d.get("url") or meta["source_url"],"status":"checked",
                          "type":d.get("doc_type") or "",
                          "text":text,"meta":meta})
-        except (OSError,ValueError,TypeError,KeyError):
-            LOG.warning("Cannot read verified metadata reg=%s doc=%s",reg,d.get("id"))
+        except (OSError,ValueError,TypeError,KeyError) as exc:
+            LOG.warning("Cannot read verified metadata reg=%s doc=%s stage=%s type=%s reason=%s",
+                        reg,d.get("id"),stage,type(exc).__name__,compact(exc)[:240])
     db = ns["conn"]()
     try:
         row = db.execute("SELECT customer FROM purchases WHERE reg_number=?", (reg,)).fetchone()
