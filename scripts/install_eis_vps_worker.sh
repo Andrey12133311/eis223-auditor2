@@ -74,6 +74,28 @@ def run(*args):
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def read_secret(module, name, label, current=None):
+    """Validate before HTTP and retry only the malformed field, without echoing it."""
+    candidate = current
+    while True:
+        if candidate is None:
+            candidate = getpass.getpass(label + ' (ввод скрыт): ')
+        try:
+            return module.validate_token(candidate, name)
+        except module.WorkerError as error:
+            if error.code == name + '_variable_name':
+                hint = ('Скопируй её ЗНАЧЕНИЕ в Railway.' if name == 'site_token'
+                        else 'Вставь само значение токена ЕИС.')
+                print(label + ': введено название переменной. ' + hint)
+            elif error.code == name + '_empty':
+                print(label + ': пустой ввод. Вставь скопированное значение целиком.')
+            elif error.code == name + '_invalid_characters':
+                print(label + ': есть недопустимые символы — например, русские буквы, пробелы или невидимые знаки. Скопируй значение ключа заново.')
+            else:
+                raise
+            candidate = None
+
+
 def setup():
     parser = argparse.ArgumentParser(description='Установка фонового загрузчика ЕИС. Секреты вводятся скрыто.')
     source = parser.add_mutually_exclusive_group(required=True)
@@ -111,22 +133,24 @@ def setup():
         print('Использую сохранённые реквизиты подключения.')
     else:
         print('Ключ сайта находится в Railway → проект eis223-auditor → web → Variables → EIS223_UPLOAD_TOKEN.')
-        config = {'site_url': args.site_url.rstrip('/'),
-                  'eis_token': getpass.getpass('Токен ЕИС (ввод скрыт): ').strip(),
-                  'site_token': getpass.getpass('Ключ сайта EIS223_UPLOAD_TOKEN (ввод скрыт): ').strip()}
+        print('Скопируй значение переменной, которое открывается в Railway. Само название EIS223_UPLOAD_TOKEN вводить не нужно.')
+        config = {'site_url': args.site_url.rstrip('/')}
     config.update(ca_file=str(CA), interval_seconds=300, timeout_seconds=30)
     # No service/configuration mutation before both authenticated connections pass.
     with tempfile.TemporaryDirectory(prefix='eis223-install-') as temporary:
         temp = Path(temporary)
         (temp / 'worker.py').write_bytes(code)
         (temp / 'ca.crt').write_bytes(ca_data)
+        spec = importlib.util.spec_from_file_location('eis223_worker_preflight', temp / 'worker.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for name, label in (('eis_token', 'Токен ЕИС'),
+                            ('site_token', 'Ключ сайта EIS223_UPLOAD_TOKEN')):
+            config[name] = read_secret(module, name, label, config.get(name))
         check_config = {**config, 'ca_file': str(temp / 'ca.crt')}
         check_path = temp / 'credentials.json'
         check_path.write_text(json.dumps(check_config), encoding='utf-8')
         check_path.chmod(0o600)
-        spec = importlib.util.spec_from_file_location('eis223_worker_preflight', temp / 'worker.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         valid = module.load_config(check_path)
         http = module.Transport(valid)
         status = http.site('/api/eis-worker/status')

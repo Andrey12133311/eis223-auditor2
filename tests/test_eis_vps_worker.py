@@ -225,6 +225,52 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(w.WorkerError):
             w.discovery_numbers(b'<p>captcha</p>')
 
+    def test_token_validation_identifies_bad_field_without_exposing_value(self):
+        cases = [
+            (None, 'empty'), ('', 'empty'), ('  \r\n ', 'empty'),
+            ('секрет', 'invalid_characters'), ('valid\u200btoken', 'invalid_characters'),
+            ('valid\r\nInjected:yes', 'invalid_characters'),
+            ('valid token', 'invalid_characters'), ('valid\ttoken', 'invalid_characters'),
+            ('valid\x7ftoken', 'invalid_characters'), (12345, 'invalid_characters'),
+            ('EIS223_UPLOAD_TOKEN', 'variable_name'), ('EIS_TOKEN', 'variable_name'),
+            (' eis223_upload_token ', 'variable_name'),
+        ]
+        for name in ('eis_token', 'site_token'):
+            for value, suffix in cases:
+                with self.subTest(name=name, value_type=type(value).__name__, suffix=suffix):
+                    with self.assertRaises(w.WorkerError) as error:
+                        w.validate_token(value, name)
+                    self.assertEqual(str(error.exception), name + '_' + suffix)
+
+    def test_opaque_ascii_token_preserved_with_outer_paste_whitespace_trimmed(self):
+        value = "opaque+Value/2026:=!?@[]{}#$%&*()-_.~"
+        self.assertEqual(w.validate_token(value, 'eis_token'), value)
+        self.assertEqual(w.validate_token(' \r\n' + value + '\t\n ', 'site_token'), value)
+        self.assertEqual(w.validate_token('short-but-valid', 'site_token'), 'short-but-valid')
+
+    def test_request_rejects_invalid_injected_token_before_header_construction(self):
+        http = w.Transport.__new__(w.Transport)
+        http.config = {'site_url': 'https://example.test', 'eis_token': 'ЕИС-секрет',
+                       'site_token': 'site-secret\u200b', 'timeout_seconds': 30}
+        for url, eis, code in ((w.ENDPOINT, True, 'eis_token_invalid_characters'),
+                               ('https://example.test/api/eis-worker/status', False, 'site_token_invalid_characters')):
+            with self.subTest(eis=eis), patch('urllib.request.Request') as request:
+                with self.assertRaises(w.WorkerError) as error:
+                    http.request(url, eis=eis)
+                self.assertEqual(error.exception.code, code)
+                request.assert_not_called()
+
+    def test_config_rejects_literal_env_names_and_non_ascii_by_field(self):
+        path = Path(self.temp.name) / 'invalid-token-config.json'
+        good = {'eis_token': TOKEN, 'site_token': 'opaque-site-token', 'site_url': 'https://example.test'}
+        for name, bad, suffix in (('eis_token', 'секрет', 'invalid_characters'),
+                                  ('site_token', 'EIS223_UPLOAD_TOKEN', 'variable_name')):
+            path.write_text(json.dumps({**good, name: bad}))
+            path.chmod(0o600)
+            with self.assertRaises(w.WorkerError) as error:
+                w.load_config(path)
+            self.assertEqual(error.exception.code, name + '_' + suffix)
+
     def test_credentials_permissions_and_validation(self):
         p = Path(self.temp.name) / 'config.json'
         p.write_text(json.dumps({'eis_token': TOKEN, 'site_token': 'site-secret',

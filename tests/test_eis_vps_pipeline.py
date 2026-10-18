@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import eis_server_worker as server
+import eis_vps_only as intake_policy
 import eis_vps_worker as worker
 import v294_eis_bridge as archives
 import v295_eis_originals as originals
@@ -154,7 +155,8 @@ class VpsPipelineIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             env = {"EIS223_DATA_DIR": str(root / "data"),
-                   "EIS223_UPLOAD_TOKEN": SITE_TOKEN}
+                   "EIS223_UPLOAD_TOKEN": SITE_TOKEN,
+                   "EIS223_SOURCE_MODE": "OFFICIAL_EIS_VPS_ONLY"}
             with patch.dict(os.environ, env):
                 db_path = root / "site.sqlite3"
 
@@ -179,6 +181,7 @@ class VpsPipelineIntegrationTest(unittest.TestCase):
                 originals.install(ns)
                 jobs.install(ns)
                 server.install(ns)
+                intake_policy.install(ns)
                 data = synthetic_zip()
                 eis = SyntheticEisOpener(self, data)
                 config = {"site_url": SITE, "site_token": SITE_TOKEN, "eis_token": EIS_TOKEN,
