@@ -28,6 +28,7 @@ HEALTH_SECONDS = 120
 MAX_ATTEMPTS = 4
 MAX_REPORT_BYTES = 12288
 FEATURE = "eis-soap-vps-worker"
+SUPPORTED_CAPABILITIES = frozenset(("inn_search",))
 
 
 def init(ns):
@@ -53,6 +54,11 @@ def init(ns):
             accepted_at INTEGER NOT NULL DEFAULT 0, source_url TEXT NOT NULL DEFAULT ''
           );
         """)
+        columns = {item[1] for item in db.execute("PRAGMA table_info(eis_server_workers)")}
+        if "capabilities_json" not in columns:
+            db.execute("ALTER TABLE eis_server_workers ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'")
+        from eis_inn_search import init_schema
+        init_schema(db)
         db.commit()
     finally:
         db.close()
@@ -111,7 +117,18 @@ async def body(request):
     return result
 
 
-def _seen(db, identity, status="idle", detail="", discovery_status=None, discovery_error=None):
+def capabilities(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.split(",") if value else []
+    if (not isinstance(value, (list, tuple)) or len(value) > 8
+            or any(not isinstance(item, str) or not re.fullmatch(r"[a-z0-9_]{1,40}", item) for item in value)):
+        raise HTTPException(422, "Invalid worker capabilities")
+    return sorted(SUPPORTED_CAPABILITIES.intersection(value))
+
+
+def _seen(db, identity, status="idle", detail="", discovery_status=None, discovery_error=None, supported=None):
     db.execute("""INSERT INTO eis_server_workers(worker_id,seen_at,status,detail)
       VALUES(?,?,?,?) ON CONFLICT(worker_id) DO UPDATE SET
       seen_at=excluded.seen_at,status=excluded.status,detail=excluded.detail""",
@@ -119,31 +136,47 @@ def _seen(db, identity, status="idle", detail="", discovery_status=None, discove
     if discovery_status is not None:
         db.execute("UPDATE eis_server_workers SET discovery_status=?,discovery_error=? WHERE worker_id=?",
                    (safe_text(discovery_status, 40), safe_text(discovery_error, 100), identity))
+    if supported is not None:
+        db.execute("UPDATE eis_server_workers SET capabilities_json=? WHERE worker_id=?",
+                   (json.dumps(supported), identity))
 
 
 def health(ns):
     db = _db(ns)
     try:
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='eis_server_workers'").fetchone()
-        row = db.execute("SELECT * FROM eis_server_workers ORDER BY seen_at DESC LIMIT 1").fetchone() if exists else None
-        return {"active": bool(row and time.time() - row["seen_at"] <= HEALTH_SECONDS
-                               and row["status"] != "stopped"),
-                "last_seen": row["seen_at"] if row else None,
+        rows = db.execute("SELECT * FROM eis_server_workers ORDER BY seen_at DESC").fetchall() if exists else []
+        row = rows[0] if rows else None
+        now = time.time()
+        active = [item for item in rows if now-item["seen_at"] <= HEALTH_SECONDS and item["status"] != "stopped"]
+        available = set()
+        for item in active:
+            try:
+                declared = json.loads(item["capabilities_json"]) if "capabilities_json" in item.keys() else []
+                if isinstance(declared, list):
+                    available.update(value for value in declared if isinstance(value, str) and value in SUPPORTED_CAPABILITIES)
+            except (ValueError, TypeError):
+                pass
+        return {"active": bool(active), "last_seen": row["seen_at"] if row else None,
                 "status": row["status"] if row else "not_connected",
                 "discovery_status": row["discovery_status"] if row else "not_started",
-                "discovery_error": row["discovery_error"] if row else ""}
+                "discovery_error": row["discovery_error"] if row else "",
+                "capabilities": sorted(available), "inn_search_available": "inn_search" in available}
     finally:
         db.close()
 
 
 def _public_job(row):
-    return {"id": row["id"], "reg_number": row["target"], "kind": "reg",
-            "metadata_only": row["parent_id"] == "v341-card-facts",
-            "lease_token": row["lease_token"], "lease_until": row["lease_until"],
-            "attempts": row["attempts"]}
+    base = {"id": row["id"], "kind": row["kind"], "lease_token": row["lease_token"],
+            "lease_until": row["lease_until"], "attempts": row["attempts"]}
+    if row["kind"] == "inn":
+        return {**base, "target": row["target"], "inn": row["target"], "page": row["page"]}
+    return {**base, "reg_number": row["target"], "metadata_only": row["parent_id"] == "v341-card-facts"}
 
 
-def claim(ns, identity, limit=2):
+def claim(ns, identity, limit=2, supported=()):
+    from eis_inn_search import enqueue_pending_candidates, MAX_PAGES
+    supported = capabilities(supported)
     db = _db(ns)
     now = int(time.time())
     try:
@@ -155,21 +188,37 @@ def claim(ns, identity, limit=2):
           detail='Истёк лимит повторных попыток загрузки ЕИС',lease_until=0,
           lease_owner='',lease_token='',updated_at=?
           WHERE status='leased' AND lease_until<? AND attempts>=?""", (_utc(), now, MAX_ATTEMPTS))
-        # Re-deliver this worker's live claims after a lost HTTP response.
+        enqueue_pending_candidates(db)
+        capable = "inn_search" in supported
+        # Re-deliver live claims only to a worker that still supports their kind.
         rows = list(db.execute("""SELECT * FROM v301_search_jobs WHERE
           status='leased' AND lease_owner=? AND lease_until>=?
-          ORDER BY priority,created_at LIMIT ?""", (identity, now, limit)))
+          AND (kind='reg' OR (? AND kind='inn' AND page BETWEEN 1 AND ?))
+          ORDER BY priority,created_at LIMIT ?""", (identity, now, capable, MAX_PAGES, limit)))
+        inn_claimed = any(item["kind"] == "inn" for item in rows)
+        # One public INN search page at a time, including across multiple VPSs.
+        inn_busy = db.execute("SELECT 1 FROM v301_search_jobs WHERE kind='inn' AND status='leased' AND lease_until>=? LIMIT 1", (now,)).fetchone()
         if len(rows) < limit:
+            # Reserve one available slot for a due INN page. Otherwise page
+            # priority 12 would starve behind its own priority-8 candidates.
+            # The loop skips a second INN so the remaining slot serves a reg.
             ready = db.execute("""SELECT * FROM v301_search_jobs
-              WHERE kind='reg' AND status='queued' AND not_before<=?
-              ORDER BY priority,created_at LIMIT ?""", (now, limit-len(rows))).fetchall()
+              WHERE (kind='reg' OR (? AND kind='inn' AND page BETWEEN 1 AND ?))
+              AND status='queued' AND not_before<=?
+              ORDER BY CASE WHEN kind='inn' THEN 0 ELSE 1 END,priority,created_at LIMIT ?""",
+              (capable and not inn_busy, MAX_PAGES, now, MAX_QUEUE)).fetchall()
             for row in ready:
+                if len(rows) >= limit:
+                    break
+                if row["kind"] == "inn" and inn_claimed:
+                    continue
                 token = secrets.token_hex(24)
                 db.execute("""UPDATE v301_search_jobs SET status='leased',lease_until=?,
                   lease_owner=?,lease_token=?,attempts=attempts+1,updated_at=? WHERE id=?""",
                   (now+LEASE_SECONDS, identity, token, _utc(), row["id"]))
                 rows.append(db.execute("SELECT * FROM v301_search_jobs WHERE id=?", (row["id"],)).fetchone())
-        _seen(db, identity, "running" if rows else "idle")
+                inn_claimed = inn_claimed or row["kind"] == "inn"
+        _seen(db, identity, "running" if rows else "idle", supported=supported)
         db.commit()
         return [_public_job(row) for row in rows]
     except Exception:
@@ -192,6 +241,7 @@ def _assert_lease(row, identity, token, reg=None):
 
 def heartbeat(ns, data):
     identity = worker_id(data.get("worker_id"))
+    supported = capabilities(data.get("capabilities"))
     db = _db(ns)
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -204,7 +254,7 @@ def heartbeat(ns, data):
             db.execute("UPDATE v301_search_jobs SET lease_until=?,updated_at=? WHERE id=?",
                        (lease_until, _utc(), current))
         _seen(db, identity, data.get("status") or ("running" if current else "idle"),
-              data.get("detail"), data.get("discovery_status"), data.get("discovery_error"))
+              data.get("detail"), data.get("discovery_status"), data.get("discovery_error"), supported)
         db.commit()
         return {"received": True, "lease_until": lease_until}
     except Exception:
@@ -351,6 +401,8 @@ def report(ns, identifier, data):
             return {**json.loads(replay["result_json"]), "replayed": True}
         row = db.execute("SELECT * FROM v301_search_jobs WHERE id=?", (identifier,)).fetchone()
         _assert_lease(row, identity, token, reg)
+        if row["kind"] != "reg":
+            raise HTTPException(409, "Use the INN report endpoint for this job")
         proof = evidence(reg, hashes) if hashes or status in ("completed", "partial") else {
             "metadata_received": False, "expected": 0, "received": 0, "unresolved": 0, "complete": False}
         metadata_only = row["parent_id"] == "v341-card-facts"
@@ -475,6 +527,11 @@ def discovered(ns, data):
         db.close()
 
 
+def inn_progress(ns, job_id):
+    from eis_inn_search import progress
+    return progress(ns, job_id)
+
+
 def install(ns):
     init(ns)
     app = ns["app"]
@@ -484,15 +541,17 @@ def install(ns):
         vps_only = os.environ.get("EIS223_SOURCE_MODE") == "OFFICIAL_EIS_VPS_ONLY"
         return {"feature": FEATURE, "protocol_version": 1,
                 "intake_mode": "vps_only" if vps_only else "server_and_browser",
-                "browser_collector_enabled": not vps_only}
+                "browser_collector_enabled": not vps_only,
+                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES)}
 
     @app.get("/api/eis-worker/jobs/next")
-    async def next_jobs(request: Request, worker_id: str, limit: int = 2):
+    async def next_jobs(request: Request, worker_id: str, limit: int = 2, capabilities: str = ""):
         authenticate(request)
         identity = globals()["worker_id"](worker_id)
         if not 1 <= limit <= 2:
             raise HTTPException(422, "Claim one or two jobs")
-        return {"jobs": await asyncio.to_thread(claim, ns, identity, limit), "poll_seconds": 15}
+        supported = globals()["capabilities"](capabilities)
+        return {"jobs": await asyncio.to_thread(claim, ns, identity, limit, supported), "poll_seconds": 15}
 
     @app.post("/api/eis-worker/jobs")
     async def enqueue(request: Request):
@@ -519,6 +578,14 @@ def install(ns):
                     result["review_status"] = "pending_retry"
         return result
 
+    @app.post("/api/eis-worker/inn-jobs/{identifier}/report")
+    async def receive_inn_report(identifier: str, request: Request):
+        authenticate(request)
+        if not re.fullmatch(r"[0-9a-f]{24}", identifier):
+            raise HTTPException(422, "Invalid job identifier")
+        from eis_inn_search import report as inn_report
+        return await asyncio.to_thread(inn_report, ns, identifier, await body(request))
+
     @app.post("/api/eis-worker/heartbeat")
     async def receive_heartbeat(request: Request):
         authenticate(request)
@@ -537,6 +604,7 @@ def install(ns):
             counts = {row[0]: row[1] for row in db.execute("SELECT status,COUNT(*) FROM v301_search_jobs GROUP BY status")}
         finally:
             db.close()
-        return {"feature": FEATURE, "protocol_version": 1, "server": health(ns), "queue": counts}
+        return {"feature": FEATURE, "protocol_version": 1, "server": health(ns), "queue": counts,
+                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES)}
 
     print("EIS_SERVER_WORKER_READY token_auth=True browser_origin_required=False leased_queue=True", flush=True)

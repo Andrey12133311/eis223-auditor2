@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, Response
 
 from eis_server_worker import authenticate
-from v301_search_jobs import _db, _utc
+from v301_search_jobs import MAX_QUEUE, _db, _utc
 
 MESSAGE = "Документы ЕИС загружаются автоматически через VPS. Браузерный загрузчик отключён."
 SCRIPT_PATHS = frozenset(("/eis223/collector.js", "/api/v299/eis223/collector.js"))
@@ -26,17 +26,33 @@ def release_browser_leases(ns):
     """Give interrupted browser work back to the VPS without touching its leases."""
     db = _db(ns)
     try:
+        db.execute('BEGIN IMMEDIATE')
         changed = db.execute("""UPDATE v301_search_jobs SET status='queued',
           not_before=0,lease_until=0,lease_token='',lease_owner='server-retry',
           attempts=MAX(0,attempts-1),updated_at=?,
           detail='Загрузка передана на VPS'
-          WHERE kind='reg' AND status='leased' AND lease_owner=''""", (_utc(),)).rowcount
-        # The installed worker accepts registry numbers. Keep former INN search
-        # history with an explicit outcome instead of leaving unclaimable work.
-        db.execute("""UPDATE v301_search_jobs SET status='error',lease_until=0,
-          lease_owner='',lease_token='',updated_at=?,
-          detail='В режиме VPS укажите номер закупки ЕИС.'
-          WHERE kind='inn' AND status IN ('queued','leased','deferred')""", (_utc(),))
+          WHERE kind IN ('reg','inn') AND status='leased' AND lease_owner=''""", (_utc(),)).rowcount
+        # Recover only searches disabled by the previous VPS cutover. Leave
+        # unrelated errors and live VPS leases intact; do not duplicate work.
+        previous = db.execute("""SELECT id,target,page FROM v301_search_jobs
+          WHERE kind='inn' AND status='error'
+          AND detail='В режиме VPS укажите номер закупки ЕИС.'
+          ORDER BY created_at""").fetchall()
+        active = db.execute("""SELECT COUNT(*) FROM v301_search_jobs
+          WHERE status IN ('queued','leased','deferred')""").fetchone()[0]
+        for row in previous:
+            duplicate = db.execute("""SELECT 1 FROM v301_search_jobs WHERE kind='inn'
+              AND target=? AND page=? AND status IN ('queued','leased','deferred') LIMIT 1""",
+              (row['target'], row['page'])).fetchone()
+            if duplicate:
+                db.execute("UPDATE v301_search_jobs SET detail=?,updated_at=? WHERE id=?",
+                           ('Повторный поиск по ИНН уже ожидает выполнения.', _utc(), row['id']))
+            elif active < MAX_QUEUE:
+                db.execute("""UPDATE v301_search_jobs SET status='queued',attempts=0,
+                  not_before=0,lease_until=0,lease_owner='',lease_token='',updated_at=?,
+                  detail='Поиск по ИНН ожидает загрузчик VPS' WHERE id=?""", (_utc(), row['id']))
+                changed += 1
+                active += 1
         db.commit()
         return changed
     finally:

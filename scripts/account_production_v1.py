@@ -111,7 +111,7 @@ def add_account_navigation(html, role="user"):
 
 def machine_path(path):
     return (path in MACHINE_EXACT or any(path.startswith(p) for p in MACHINE_PREFIXES)
-            or re.fullmatch(r"/api/eis-worker/jobs/[0-9a-f]{24}/report",path) is not None)
+            or re.fullmatch(r"/api/eis-worker/(?:jobs|inn-jobs)/[0-9a-f]{24}/report",path) is not None)
 
 
 def verified_machine(headers):
