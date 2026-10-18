@@ -152,6 +152,8 @@ def finding_decision(user_id:str,reg_number:str,finding_key:str,
         # Serialize with employee submissions without requiring a personal check.
         db.execute("SELECT id FROM account_users WHERE id=%s FOR UPDATE",
                    (worker,)).fetchone()
+        # Assignment can change while waiting for the account lock.
+        _member(db,actor,role,worker)
         submission=db.execute(
             "SELECT status,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s AND finding_key=%s",
             (worker,reg_number,finding_key)).fetchone()

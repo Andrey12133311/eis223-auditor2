@@ -1,6 +1,7 @@
 """Dedicated EIS-inspired director workspace: role-gated, real-data UI."""
 import json
 from html import escape
+from scripts.account_admin_team_ui import TEAM_SCRIPT
 
 from scripts.account_visual_polish_v1 import account_page_style
 
@@ -300,19 +301,9 @@ function renderAdmin(){
      toast("Роль назначена. Почтовое уведомление будет отправлено, если отправитель настроен.");
      await reload();
    }));
-   if(person.role==="user"){
-    const select=document.createElement("select");
-    select.setAttribute("aria-label","Назначить руководителя");
-    select.style.maxWidth="170px";
-    const empty=document.createElement("option");empty.value="";empty.textContent="Без руководителя";select.append(empty);
-    for(const leader of managers){const option=document.createElement("option");option.value=leader.id;option.textContent=leader.email;select.append(option)}
-    select.value=person.manager_id||"";
-    controls.append(select,action("Сохранить","mgr-primary",async()=>{
-       await api("/manager/admin/team/"+person.id,"PUT",{manager_id:select.value||null});
-       toast("Подразделение обновлено");await reload();
-    }));
-   }
   }
+  const assignmentStatus=tag("p");assignmentStatus.setAttribute("role","status");
+  controls.append(window.eis223TeamControl(person,cache.users,assignmentStatus,reload),assignmentStatus);
   tr.append(cell(controls));rows.push(tr);
  }
  mountRows("mgr-admin-rows",rows);
@@ -661,6 +652,28 @@ $("mgr-task-create").onsubmit=async e=>{
  try{await api("/manager/tasks","POST",data);form.reset();toast("Поручение назначено");await reload();show("tasks")}
  catch(error){toast(error.message)}finally{button.disabled=false}
 };
+let selfAttachBusy=false;
+function renderSelfAttach(){
+ const root=$("mgr-self-attach");root.classList.toggle("mgr-hidden",ROLE!=="manager");
+ if(ROLE!=="manager")return;
+ const select=$("mgr-available-employee"),previous=select.value;select.replaceChildren();
+ const empty=tag("option","",(cache.available||[]).length?"Выберите сотрудника":"Нет сотрудников без руководителя");empty.value="";select.append(empty);
+ for(const person of cache.available||[]){const option=tag("option","",(person.full_name?person.full_name+' · ':'')+person.email);option.value=person.id;select.append(option)}
+ select.value=(cache.available||[]).some(x=>x.id===previous)?previous:"";
+ $("mgr-attach-self").disabled=selfAttachBusy||!select.value;
+}
+$("mgr-available-employee").onchange=()=>{$("mgr-attach-self").disabled=selfAttachBusy||!$("mgr-available-employee").value};
+$("mgr-attach-self").onclick=async()=>{
+ const select=$("mgr-available-employee"),button=$("mgr-attach-self"),status=$("mgr-attach-status"),id=select.value;
+ if(selfAttachBusy||button.disabled||!id)return;
+ if(!confirm("Прикрепить выбранного сотрудника к себе? Вам станут доступны его проверки и ранее отправленные нарушения."))return;
+ selfAttachBusy=true;button.disabled=true;select.disabled=true;status.textContent="Прикрепление сотрудника…";
+ try{
+  await api("/manager/team/"+encodeURIComponent(id)+"/attach","POST");
+  await reload();status.textContent="Сотрудник прикреплён к вам";
+ }catch(error){status.textContent=error.message}
+ finally{selfAttachBusy=false;select.disabled=false;button.disabled=!select.value}
+};
 let reloadRequest=null,reloadQueued=false;
 function reload(){
  if(reloadRequest){reloadQueued=true;return reloadRequest}
@@ -673,6 +686,7 @@ async function reloadData(){
  const paths=[["dashboard","/manager/dashboard"],["tasks","/manager/tasks"],["team","/manager/team"],
   ["memos","/manager/memos"],["alerts","/manager/alerts"],
   ["thematic","/manager/thematic"],["quality","/manager/quality"],["campaigns","/manager/campaigns"],["options","/manager/campaigns/options"]];
+ if(ROLE==="manager")paths.push(["available","/manager/team/available"]);
  if(ROLE==="admin")paths.push(["users","/manager/admin/users"]);
  const mailStatus=renderMailStatus();
  const all=await Promise.allSettled(paths.map(async([key,url])=>[key,await api(url)]));
@@ -682,7 +696,7 @@ async function reloadData(){
  }
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
- populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
+ renderSelfAttach();populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
  await Promise.all([mailStatus,loadFindingQueue(true)]);
 }
 if(ROLE==="admin"){
@@ -856,6 +870,13 @@ __STYLE__</head><body>
 <p id="mgr-memo-empty" class="mgr-muted mgr-hidden">Записок на согласовании нет.</p></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="team">
+<div class="mgr-card mgr-hidden" id="mgr-self-attach">
+<h2>Прикрепить сотрудника к себе</h2>
+<p>Выберите одобренного сотрудника без руководителя. Если сотрудник уже прикреплён к другому руководителю, переназначить его может администратор.</p>
+<p>После прикрепления вам станут доступны проверки и ранее отправленные нарушения сотрудника. История решений сохраняется.</p>
+<label>Сотрудник <select id="mgr-available-employee" style="max-width:100%"></select></label>
+<button type="button" class="mgr-primary" id="mgr-attach-self" disabled>Прикрепить к себе</button>
+<p role="status" id="mgr-attach-status"></p></div>
 <div class="mgr-card"><h2>Сотрудники подразделения</h2>
 <p>Руководитель видит только назначенных ему сотрудников. Администратор назначает руководителей
 и состав подразделений без ручного ввода идентификаторов.</p>
@@ -913,5 +934,5 @@ __STYLE__</head><body>
 <div id="mgr-toast" class="mgr-toast mgr-hidden" role="status" aria-live="polite"></div>
 __SCRIPT__</body></html>"""
     return (shell.replace("__STYLE__",STYLE+account_page_style())
-                 .replace("__SCRIPT__",SCRIPT.replace("__ROLE__",json.dumps(role)))
+                 .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role)))
                  .replace("__LABEL__","Роль: "+("Администратор" if role=="admin" else "Руководитель")))

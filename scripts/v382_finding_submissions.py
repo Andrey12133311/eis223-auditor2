@@ -29,7 +29,7 @@ def employee_findings(reg: str, request: Request, response: Response):
     response.headers.update(no_store_headers())
     with connect() as db:
         _shared_reg(reg)
-        manager = db.execute('SELECT manager_id FROM account_manager_teams WHERE user_id=%s', (user,)).fetchone()
+        manager = db.execute("SELECT t.manager_id FROM account_manager_teams t JOIN account_users m ON m.id=t.manager_id WHERE t.user_id=%s AND m.role='manager' AND m.status='approved'", (user,)).fetchone()
         submitted = db.execute('SELECT finding_key,status,submitted_at,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s', (user, reg)).fetchall()
         reviewed = db.execute('SELECT finding_key,decision,comment FROM account_manager_finding_reviews WHERE user_id=%s AND reg_number=%s', (user, reg)).fetchall()
     submissions = {r[0]: {'status': r[1], 'submitted_at': r[2].isoformat(), 'version': r[3]} for r in submitted}
@@ -50,7 +50,7 @@ def submit_finding(reg: str, finding_key: str, request: Request):
         # Shared procurements need no personal check. Lock the submitting
         # account, also used by manager decisions, before a row exists.
         db.execute('SELECT id FROM account_users WHERE id=%s FOR UPDATE', (user,)).fetchone()
-        manager = db.execute('SELECT manager_id FROM account_manager_teams WHERE user_id=%s', (user,)).fetchone()
+        manager = db.execute("SELECT t.manager_id FROM account_manager_teams t JOIN account_users m ON m.id=t.manager_id WHERE t.user_id=%s AND m.role='manager' AND m.status='approved'", (user,)).fetchone()
         if not manager:
             raise HTTPException(409, 'Ваш руководитель не назначен. Обратитесь к администратору.')
         item = next((x for x in _items(request, reg) if x['finding_key'] == finding_key), None)
