@@ -4,6 +4,7 @@ Pure HTML builders: no private user data embedded in shared-page markup.
 Private data is fetched from owner-scoped APIs only after authentication.
 """
 from html import escape
+from scripts.account_admin_team_ui import TEAM_SCRIPT
 from scripts.account_visual_polish_v1 import workspace_style
 
 
@@ -208,7 +209,7 @@ def site_header(role="user"):
     admin = '<button type="button" id="eis223-admin-nav" hidden>Управление пользователями</button>' if role == "admin" else ""
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + workspace_style() + '''
+    return (_STYLE + workspace_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
@@ -243,8 +244,8 @@ def site_header(role="user"):
 ''' + ('''
 <section class="eis223-feature" id="eis223-admin-controls" aria-label="Управление пользователями">
 <h3>Администрирование пользователей</h3>
-<p>Подтверждайте заявки и назначайте роли зарегистрированным сотрудникам.</p>
-<button type="button" id="eis223-admin-open" aria-expanded="false" aria-controls="eis223-admin-panel">Управление пользователями и ролями</button>
+<p>Подтверждайте заявки, назначайте роли и прикрепляйте сотрудников к руководителям.</p>
+<button type="button" id="eis223-admin-open" aria-expanded="false" aria-controls="eis223-admin-panel">Пользователи, роли и руководители</button>
 <div id="eis223-admin-panel" hidden>
 <p role="status" id="eis223-admin-status"></p>
 <div id="eis223-admin-users"></div>
@@ -367,7 +368,7 @@ if(adminButton){
       panel.hidden=true;adminButton.click();
      }catch(e){status.textContent='Не удалось сохранить: '+e.message;save.disabled=false}
     });
-    line.append(name,role,save);box.append(line);
+    line.append(name,role,save);line.append(window.eis223TeamControl(u,users,status));box.append(line);
    }
    status.textContent='Пользователей: '+users.length;
   }catch(e){status.textContent='Ошибка загрузки: '+e.message}

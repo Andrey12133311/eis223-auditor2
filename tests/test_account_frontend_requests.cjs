@@ -31,6 +31,7 @@ class Element {
     this.formValues = {}; this.resetCount = 0;
   }
   get options() { return this.children; }
+  get selectedOptions() { return this.children.filter(x => x.value === this.value); }
   get childElementCount() { return this.children.length; }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
@@ -518,6 +519,62 @@ async function testManagerFindingQueueAndVersionedDecisions() {
   assert.match(ui.get('mgr-submission-note').textContent, /Ожидают решения: 0/);
 }
 
+async function testAdminTeamSaveCancelRetryAndInactive() {
+  let reply=deferred(),reloads=0;
+  const ui=harness('(function(){'+embedded('account_admin_team_ui.py','TEAM_SCRIPT =')+'})();','',()=>reply.promise);
+  const person={id:'e',email:'employee@example.test',role:'user',status:'approved',manager_id:'m1'};
+  const leaders=[{id:'m1',email:'one@example.test',role:'manager',status:'approved'},
+    {id:'m2',email:'two@example.test',role:'manager',status:'approved'},
+    {id:'m3',email:'inactive@example.test',role:'manager',status:'blocked'}];
+  const status=new Element();
+  const root=ui.context.eis223TeamControl(person,leaders,status,async()=>{reloads++});
+  const nodes=flatten(root),select=nodes.find(x=>x.tagName==='SELECT'),save=nodes.find(x=>x.tagName==='BUTTON');
+  assert.equal(select.value,'m1');assert.ok(save.disabled);
+  assert.equal(select.children.length,3,'only active managers plus unassigned');
+  select.value='m2';select.onchange();assert.ok(!save.disabled);
+  ui.context.confirm=()=>false;await save.onclick();assert.equal(ui.calls.length,0);
+  ui.context.confirm=()=>true;
+  const task=save.onclick();await flush();assert.ok(save.disabled&&select.disabled);
+  await save.onclick();assert.equal(ui.calls.length,1,'duplicate save blocked');
+  reply.resolve({employee:'e',manager:'m2'});await task;
+  assert.equal(person.manager_id,'m2');assert.equal(reloads,1);assert.ok(save.disabled);
+  select.value='';select.onchange();reply=deferred();const failure=save.onclick();
+  reply.resolve({httpStatus:409,body:{detail:'Account changed'}});await failure;
+  assert.match(status.textContent,/Account changed/);assert.ok(!save.disabled&&!select.disabled);
+  assert.equal(person.manager_id,'m2');assert.equal(reloads,1);
+  reply=deferred();const retry=save.onclick();reply.resolve({employee:'e',manager:null});await retry;
+  assert.equal(person.manager_id,null);assert.equal(reloads,2);
+  const blocked=ui.context.eis223TeamControl({...person,status:'blocked',manager_id:'m3'},leaders,status);
+  const inactiveSelect=flatten(blocked).find(x=>x.tagName==='SELECT');
+  assert.equal(inactiveSelect.value,'m3');assert.ok(inactiveSelect.children.filter(x=>x.value).every(x=>x.disabled));
+  assert.equal(ui.context.eis223TeamControl({...person,role:'manager'},leaders,status).children.length,0);
+}
+async function testManagerSelfAttachAndRefresh() {
+  let attached=false,write=deferred();
+  const source=embedded('v368_manager_ui.py','SCRIPT=').replace('__ROLE__','"manager"');
+  const ui=harness(source,'reload',async call=>{
+    if(call.url==='/manager/team/e/attach'){await write.promise;attached=true;return {manager:'m',employee:'e'}}
+    if(call.url==='/manager/team/available')return attached?[]:[{id:'e',email:'staff@example.test',full_name:'Staff'}];
+    if(call.url==='/manager/team')return attached?[{id:'e',email:'staff@example.test',role:'user',status:'approved'}]:[];
+    if(call.url==='/manager/dashboard')return {tasks_by_day:[]};
+    if(call.url.endsWith('/options'))return {categories:{},legal_forms:{}};
+    if(call.url.endsWith('/quality'))return {issues:[]};
+    return [];
+  });
+  await flush();await flush();
+  const select=ui.get('mgr-available-employee'),button=ui.get('mgr-attach-self');
+  assert.equal(select.children.length,2);assert.ok(button.disabled);
+  select.value='e';select.onchange();ui.context.confirm=()=>false;await button.onclick();
+  assert.equal(ui.count('/manager/team/e/attach'),0);
+  ui.context.confirm=()=>true;const task=button.onclick();await flush();
+  await ui.api.reload();assert.ok(button.disabled,'refresh cannot unlock pending attachment');
+  await button.onclick();assert.equal(ui.count('/manager/team/e/attach'),1);
+  write.resolve();await task;
+  assert.equal(select.children.length,1);assert.ok(button.disabled);
+  assert.equal(ui.get('mgr-team-rows').children.length,1);
+  assert.match(ui.get('mgr-attach-status').textContent,/Сотрудник прикреплён/);
+}
+
 (async () => {
   for (const test of [testManualFiltersAndRefreshRace, testThematicFiltersAndDeniedPolling,
     testHistoricalAdoptionQueuesFreshRead, testStaffRequestsAndAsyncForms, testParallelCaseReadsIgnoreOlderResponses,
@@ -525,8 +582,9 @@ async function testManagerFindingQueueAndVersionedDecisions() {
     testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
     testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue,
     testFindingSubmissionLifecycleAndNoDuplicate, testFindingMissingManagerStaleAndErrors,
-    testFindingMutationOutranksInFlightRead, testManagerFindingQueueAndVersionedDecisions]) {
+    testFindingMutationOutranksInFlightRead, testManagerFindingQueueAndVersionedDecisions,
+    testAdminTeamSaveCancelRetryAndInactive, testManagerSelfAttachAndRefresh]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 16 scenarios passed');
+  console.log('Account frontend request/race regressions: 18 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

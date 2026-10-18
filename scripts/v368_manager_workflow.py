@@ -129,14 +129,16 @@ def admin_users(request:Request,response:Response):
     with connect() as db:
         rows=db.execute(
             """SELECT u.id,u.email,u.role,u.status,t.manager_id,
-                      u.last_name,u.first_name,u.patronymic
+                      u.last_name,u.first_name,u.patronymic,m.email,m.last_name,m.first_name,m.patronymic,m.status
                FROM account_users u
                LEFT JOIN account_manager_teams t ON t.user_id=u.id
-               ORDER BY lower(u.email) ASC LIMIT 250""").fetchall()
+               LEFT JOIN account_users m ON m.id=t.manager_id
+               ORDER BY lower(u.email) ASC""").fetchall()
     return [{"id":str(r[0]),"email":r[1],"role":r[2],
              "status":r[3],"manager_id":str(r[4]) if r[4] else None,
              "full_name":" ".join(x for x in (r[5],r[6],r[7]) if x),
-             "is_self":r[0]==actor} for r in rows]
+             "manager_email":r[8],"manager_name":" ".join(v for v in r[9:12] if v),
+             "manager_status":r[12],"is_self":r[0]==actor} for r in rows]
 
 @router.post("/admin/users/{user_id}/role")
 def admin_change_role(user_id:str,data:RoleUpdate,request:Request):
@@ -185,20 +187,27 @@ def admin_assign_team(user_id:str,data:Assignment,request:Request):
     require_origin(request)
     admin=administrator(request);target=_uuid(user_id)
     with connect() as db:
-        employee=db.execute(
-            "SELECT role,status FROM account_users WHERE id=%s",(target,)
-        ).fetchone()
-        if not employee or employee!=("user","approved"):
-            raise HTTPException(409,"В подразделение можно включить только одобренного сотрудника")
+        if data.manager_id == target:
+            raise HTTPException(422,"Нельзя назначить сотрудника своим руководителем")
+        # Lock both accounts in stable order. Role/status changes and finding
+        # decisions lock these same rows; assignment cannot race their checks.
+        locked={}
+        for identifier in sorted({target, data.manager_id} - {None}, key=str):
+            locked[identifier]=db.execute(
+                "SELECT role,status FROM account_users WHERE id=%s FOR UPDATE",(identifier,)
+            ).fetchone()
+        employee=locked[target]
+        if not employee or employee[0]!="user":
+            raise HTTPException(409,"В подразделение можно включить только сотрудника")
         if data.manager_id is None:
+            # Administrators can also detach a blocked employee.
             db.execute("DELETE FROM account_manager_teams WHERE user_id=%s",(target,))
             _audit(db,admin,target,"team",target,"unassign")
             return {"employee":str(target),"manager":None}
-        manager=db.execute(
-            "SELECT 1 FROM account_users WHERE id=%s AND role='manager' AND status='approved'",
-            (data.manager_id,)).fetchone()
-        if not manager:
-            raise HTTPException(404,"Назначенный руководитель не найден")
+        if employee[1]!="approved":
+            raise HTTPException(409,"В подразделение можно включить только одобренного сотрудника")
+        if locked[data.manager_id] != ("manager","approved"):
+            raise HTTPException(404,"Назначенный руководитель не найден или не активен")
         db.execute(
             """INSERT INTO account_manager_teams
                  (user_id,manager_id,assigned_by) VALUES(%s,%s,%s)
@@ -208,6 +217,53 @@ def admin_assign_team(user_id:str,data:Assignment,request:Request):
             (target,data.manager_id,admin))
         _audit(db,admin,target,"team",target,"assign",str(data.manager_id))
     return {"employee":str(target),"manager":str(data.manager_id)}
+
+def _self_manager(request):
+    actor,role=supervisor(request)
+    if role!="manager":
+        raise HTTPException(403,"Самостоятельное прикрепление доступно только руководителю")
+    return _uuid(actor)
+
+
+@router.get("/team/available")
+def available_employees(request:Request,response:Response):
+    _self_manager(request)
+    response.headers.update(no_store_headers())
+    with connect() as db:
+        rows=db.execute("""SELECT u.id,u.email,u.last_name,u.first_name,u.patronymic
+            FROM account_users u LEFT JOIN account_manager_teams t ON t.user_id=u.id
+            WHERE u.role='user' AND u.status='approved' AND t.user_id IS NULL
+            ORDER BY lower(u.email)""").fetchall()
+    return [{"id":str(r[0]),"email":r[1],
+             "full_name":" ".join(v for v in r[2:5] if v)} for r in rows]
+
+
+@router.post("/team/{user_id}/attach")
+def attach_to_self(user_id:str,request:Request):
+    require_origin(request)
+    actor=_self_manager(request);target=_uuid(user_id)
+    if target==actor:
+        raise HTTPException(422,"Нельзя прикрепить себя как сотрудника")
+    with connect() as db:
+        locked={}
+        for identifier in sorted({target,actor},key=str):
+            locked[identifier]=db.execute(
+                "SELECT role,status FROM account_users WHERE id=%s FOR UPDATE",(identifier,)
+            ).fetchone()
+        if locked[actor]!=("manager","approved"):
+            raise HTTPException(403,"Требуется действующая учётная запись руководителя")
+        if locked[target]!=("user","approved"):
+            raise HTTPException(409,"Можно прикрепить только одобренного сотрудника")
+        current=db.execute("SELECT manager_id FROM account_manager_teams WHERE user_id=%s",(target,)).fetchone()
+        if current:
+            if str(current[0])==str(actor):
+                return {"employee":str(target),"manager":str(actor),"changed":False}
+            raise HTTPException(409,"Сотрудник уже прикреплён к другому руководителю. Для переназначения обратитесь к администратору.")
+        db.execute("""INSERT INTO account_manager_teams(user_id,manager_id,assigned_by)
+                      VALUES(%s,%s,%s)""",(target,actor,actor))
+        _audit(db,actor,target,"team",target,"assign",str(actor))
+    return {"employee":str(target),"manager":str(actor),"changed":True}
+
 
 @router.get("/team")
 def team(request:Request,response:Response):

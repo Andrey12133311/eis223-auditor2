@@ -13,10 +13,16 @@ class RoleInput(BaseModel):
 def users(request: Request):
     current_account(request, admin=True)
     with connect() as db:
-        rows=db.execute("""SELECT id,email,role,status,last_name,first_name,patronymic
-            FROM account_users ORDER BY created_at DESC LIMIT 500""").fetchall()
+        rows=db.execute("""SELECT u.id,u.email,u.role,u.status,u.last_name,u.first_name,u.patronymic,
+                   t.manager_id,m.email,m.last_name,m.first_name,m.patronymic,m.status
+            FROM account_users u
+            LEFT JOIN account_manager_teams t ON t.user_id=u.id
+            LEFT JOIN account_users m ON m.id=t.manager_id
+            ORDER BY u.created_at DESC""").fetchall()
     return [{"id":str(r[0]),"email":r[1],"role":r[2],"status":r[3],
-             "full_name":" ".join(v for v in r[4:7] if v)} for r in rows]
+             "full_name":" ".join(v for v in r[4:7] if v),
+             "manager_id":str(r[7]) if r[7] else None,"manager_email":r[8],
+             "manager_name":" ".join(v for v in r[9:12] if v),"manager_status":r[12]} for r in rows]
 
 @router.put("/users/{user_id}")
 def change_role(user_id: UUID, data: RoleInput, request: Request):

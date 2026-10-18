@@ -1,5 +1,6 @@
 """Standalone HTML for staged user accounts (not mounted in production)."""
 from html import escape
+from scripts.account_admin_team_ui import TEAM_SCRIPT
 
 from scripts.account_visual_polish_v1 import account_page_style
 
@@ -448,7 +449,7 @@ refresh();
 })();
 </script>""")
 
-ADMIN = page("Управление пользователями", """
+ADMIN = page("Управление пользователями", TEAM_SCRIPT + """
 <h2>Роли существующих пользователей</h2><p id="role-message" role="status"></p><div id="role-users"></div>
 <script>
 async function loadRoles(){
@@ -458,7 +459,7 @@ async function loadRoles(){
  if(!r.ok)throw Error('HTTP '+r.status);
  const users=await r.json();box.replaceChildren();
  for(const u of users){
-  const line=document.createElement('p'),name=document.createElement('span');
+  const line=document.createElement('div'),name=document.createElement('span');
   name.textContent=(u.full_name||u.email)+' ('+u.email+', '+u.status+') ';
   const select=document.createElement('select');
   for(const [role,label] of [['user','Сотрудник'],['manager','Руководитель'],['admin','Администратор']]){
@@ -476,7 +477,7 @@ async function loadRoles(){
     msg.textContent='Роль сохранена. Пользователю потребуется войти заново.';await loadRoles();
    }catch(e){msg.textContent='Не удалось изменить роль: '+e.message;save.disabled=false}
   };
-  line.append(name,select,save);box.append(line);
+  line.append(name,select,save);line.append(window.eis223TeamControl(u,users,msg));box.append(line);
  }
  }catch(e){msg.textContent='Ошибка загрузки пользователей: '+e.message}
 }
