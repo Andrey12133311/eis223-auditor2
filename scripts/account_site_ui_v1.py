@@ -268,7 +268,6 @@ def site_header(role="user"):
 <div><h3>Самостоятельные проверки</h3><p class="eis223-tile-sub">Закупки, которые вы запустили на проверку</p></div></div>
 <ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/home">Все самостоятельные проверки →</a>
-<a class="eis223-all-checks" href="/account/workbench">Рабочее место сотрудника · 30 инструментов →</a>
 <form id="eis223-add-procurement">
 <input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
 name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">

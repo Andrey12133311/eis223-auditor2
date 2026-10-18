@@ -34,6 +34,14 @@ def test_markup():
     assert "summary.manual_checks" in shell
     assert "Promise.allSettled" in shell
     assert 'href="/account/home"' in shell
+    # Keep the workbench in the employee navigation, not duplicated below
+    # the self-initiated procurement list in the personal cabinet.
+    assert '<a href="/account/workbench">Рабочее место сотрудника</a>' in shell
+    assert 'href="/account/workbench">Все нарушения и тематические проверки →</a>' in shell
+    manual_actions = shell.split('id="eis223-my-procurements"', 1)[1].split(
+        '<form id="eis223-add-procurement">', 1)[0]
+    assert 'href="/account/home"' in manual_actions
+    assert '/account/workbench' not in manual_actions
     assert 'eis223-toggle-cabinet' in shell
     assert "Проверки, документы и результаты" not in shell  # no invented metrics
     assert "Мои самостоятельные проверки" in HOME

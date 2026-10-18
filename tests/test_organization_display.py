@@ -53,7 +53,7 @@ class OrganizationDisplayTests(unittest.TestCase):
                     self.assertEqual(formatter(source),expected)
 
     def test_fast_card_is_read_only_and_escapes_html(self):
-        source='Государственное автономное учреждение "центр ИТ <тест>"'
+        source='Государственное автономное учреждение "центр ИТ <тест> ' + 'длинное официальное название '*25 + '"'
         data=({"customer":source,"title":"Синтетическая закупка"},[],[],[],0,0,0)
         before=copy.deepcopy(data)
         markup=render("32615969056",data)
@@ -61,7 +61,7 @@ class OrganizationDisplayTests(unittest.TestCase):
         self.assertEqual(data,before)
 
     def test_dashboard_formats_existing_record_without_db_rewrite(self):
-        source='Государственное автономное учреждение "центр ИТ"'
+        source='Государственное автономное учреждение "центр ИТ ' + 'длинное официальное название '*25 + '"'
         db=sqlite3.connect(":memory:")
         db.row_factory=sqlite3.Row
         db.executescript("""
@@ -78,6 +78,40 @@ class OrganizationDisplayTests(unittest.TestCase):
         self.assertEqual(rows[0]["customer"],organization_display_name(source))
         self.assertEqual(db.execute("SELECT customer FROM purchases").fetchone()[0],source)
         db.close()
+
+    def test_long_full_names_survive_dashboard_and_card_rendering(self):
+        prefix = 'Государственное бюджетное учреждение '
+        body = ('Региональный центр исследований ' * 16) + 'ИТ & <Развитие> РАН'
+        names = [prefix + opening + body + closing
+                 for opening, closing in (('«', '»'), ('"', '"'), ('„', '“'), ('“', '”'))]
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        self.addCleanup(db.close)
+        db.executescript('''
+          CREATE TABLE purchases(reg_number TEXT, customer TEXT, risks INT,
+            documents_found INT, documents_checked INT, violations INT,last_seen TEXT);
+          CREATE TABLE findings(reg_number TEXT,title TEXT,law TEXT,evidence TEXT,
+            document TEXT,source_url TEXT,code TEXT,kind TEXT);
+          CREATE TABLE checks(reg_number TEXT,item TEXT,law TEXT,evidence TEXT,
+            document TEXT,source_url TEXT,status TEXT);
+        ''')
+        for index, name in enumerate(names):
+            self.assertGreater(len(name), 400)
+            db.execute("INSERT INTO purchases VALUES(?,?,0,1,1,0,'2026-10-18')",
+                       (str(32615969050 + index), name))
+        _, rows = dashboard_counts(db, ' FROM purchases p', [], 0, 20)
+        expected_names = {str(32615969050 + index): name for index, name in enumerate(names)}
+        self.assertEqual(len(rows), len(names))
+        for row in rows:
+            source = expected_names[row['reg_number']]
+            with self.subTest(source=source):
+                expected = organization_display_name(source)
+                self.assertEqual(row['customer'], expected)
+                markup = render(row['reg_number'], (row, [], [], [], 0, 0, 0))
+                self.assertIn(html.escape(expected, quote=True), markup)
+                self.assertNotIn('<Развитие>', markup)
+                self.assertEqual(db.execute('SELECT customer FROM purchases WHERE reg_number=?',
+                                            (row['reg_number'],)).fetchone()[0], source)
 
 
 if __name__=="__main__":

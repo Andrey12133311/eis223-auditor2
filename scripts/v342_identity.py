@@ -32,6 +32,36 @@ def organization_display_name(value):
     return "".join(chars)
 
 
+def unfinished_customer_quote(value):
+    closing = []
+    pairs = {"«": "»", '"': '"', "„": "“", "“": "”"}
+    for char in str(value or ""):
+        if closing and char == closing[-1]:
+            closing.pop()
+        elif char in pairs:
+            closing.append(pairs[char])
+    return bool(closing)
+
+
+def incomplete_customer_name(value):
+    """Recognize a legal-form-only label or an explicitly unfinished quote."""
+    name = compact(value).strip(' ,;:')
+    if not name:
+        return False
+    if re.fullmatch(r"(?:(?:федеральное|государственное|муниципальное|краевое|областное|"
+                    r"бюджетное|автономное|казенное|казённое)\s+)+учреждение", name, re.I):
+        return True
+    return unfinished_customer_quote(name)
+
+
+def customer_name_extension(old, new):
+    """Only extend an incomplete source prefix; never substitute another buyer."""
+    old, new = compact(old), compact(new)
+    if not incomplete_customer_name(old) or incomplete_customer_name(new):
+        return False
+    return len(new) > len(old) and new.casefold().startswith(old.casefold())
+
+
 def customer_label(value):
     name = compact(value).strip(" |:;,")
     name = re.sub(

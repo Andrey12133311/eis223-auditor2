@@ -71,6 +71,23 @@ class VisualPolishTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             render_manager('user')
 
+    def test_manual_checks_do_not_duplicate_employee_workbench_link(self):
+        for role in ('user', 'manager', 'admin'):
+            with self.subTest(role=role):
+                markup = site_header(role).decode()
+                parser = Tags()
+                parser.feed(markup)
+                workbench_links = [attrs for tag, attrs in parser.items
+                                   if tag == 'a' and attrs.get('href') == '/account/workbench']
+                self.assertEqual(len(workbench_links), 2)
+                self.assertIn('<a href="/account/workbench">Рабочее место сотрудника</a>', markup)
+                self.assertIn('href="/account/workbench">Все нарушения и тематические проверки →</a>', markup)
+                manual_actions = markup.split('id="eis223-my-procurements"', 1)[1].split(
+                    '<form id="eis223-add-procurement">', 1)[0]
+                self.assertIn('href="/account/home"', manual_actions)
+                self.assertNotIn('/account/workbench', manual_actions)
+                self.assertIn('id="eis223-add-procurement"', markup)
+
     def test_narrow_layout_keyboard_motion_and_input_safety(self):
         for fragment in (workspace_style(), account_page_style()):
             self.assertIn(':focus-visible', fragment)
