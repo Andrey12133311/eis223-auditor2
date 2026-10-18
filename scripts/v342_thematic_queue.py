@@ -517,7 +517,7 @@ def install(ns):
    p=c.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
    customer=escape(organization_display_name(p["customer"])) if p and "customer" in p.keys() else ""
   finally:c.close()
-  from scripts.v384_thematic_findings import thematic_items
+  from v384_thematic_findings import thematic_items
   findings=thematic_items(ns,batch,reg)
   printable=request.query_params.get("print")=="1"
   if not printable:
@@ -538,9 +538,11 @@ def install(ns):
   from v343_fast_cards import legal_links
   unique_print=findings
   rows="".join("<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'><h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORIES.get(f["category"],f["category"])))+"</p><p><b>Правовое основание:</b> "+escape(str(f["law"] or "Не указано"))+"</p>"+legal_links(f,f.get("law"),f.get("law_url"))+"<p style='white-space:pre-wrap'><b>Установленные обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>" for f in unique_print)
-  from scripts.v367_private_features import _memo_defaults, _memo_requisites
   owner=request.scope.get("eis223_account_id")
-  requisites={**_memo_defaults(),**(_memo_requisites(owner,reg) if owner else {})}
+  requisites={}
+  if owner:
+   from scripts.v367_private_features import _memo_defaults, _memo_requisites
+   requisites={**_memo_defaults(),**_memo_requisites(owner,reg)}
   recipient=str(requisites.get("recipient") or "").strip()
   executor=re.sub(r"^Исполнитель\s*:?\s*","",str(requisites.get("executor") or ""),flags=re.I).strip()
   phone=re.sub(r"^Тел(?:ефон)?[.:\s]*","",str(requisites.get("phone") or ""),flags=re.I).strip()
