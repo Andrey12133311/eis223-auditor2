@@ -11,7 +11,7 @@ import unittest
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import eis_vps_worker as w
 
@@ -61,7 +61,11 @@ class FakeTransport:
                         'candidate_count': len(data.get('reg_numbers', []))}
             return {'received': True, 'status': 'done' if self.received else 'queued', 'download_complete': self.received}
         if path.startswith('/api/eis-worker/jobs/next'):
-            jobs, self.jobs = self.jobs, []
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            limit = int(query.get('limit', ['2'])[0])
+            capable = 'inn_search' in query.get('capabilities', [''])[0]
+            jobs = [job for job in self.jobs if job.get('kind') != 'inn' or capable][:limit]
+            self.jobs = [job for job in self.jobs if job not in jobs]
             return {'jobs': jobs}
         if '/recheck/' in path:
             return {'status': 'queued'}
@@ -153,6 +157,146 @@ class WorkerTests(unittest.TestCase):
     def tearDown(self):
         self.state.db.close()
         self.temp.cleanup()
+
+    def test_retry_after_seconds_dates_and_invalid_values(self):
+        now = 1800000000
+        for value, expected in [('7200', 7200), ('5', 1200), ('garbage', 1200),
+                                ('-500', 1200), (None, 1200)]:
+            with self.subTest(value=value), patch.object(w.time, 'time', return_value=now):
+                self.assertEqual(w.retry_after_delay(value, 1200), expected)
+        from email.utils import formatdate
+        with patch.object(w.time, 'time', return_value=now):
+            self.assertEqual(w.retry_after_delay(formatdate(now + 5400, usegmt=True), 1200), 5400)
+            self.assertEqual(w.retry_after_delay(formatdate(now - 10, usegmt=True), 1200), 1200)
+        transport = w.Transport.__new__(w.Transport)
+        transport.config = {'site_url': 'https://example.test', 'eis_token': TOKEN,
+                            'site_token': 'site-secret', 'timeout_seconds': 10}
+        transport.eis_opener = Mock()
+        transport.eis_opener.open.side_effect = urllib.error.HTTPError(URL, 429, 'limited',
+                                                                       {'Retry-After': '7200'}, None)
+        with self.assertRaises(w.WorkerError) as error:
+            transport.request(URL, eis=True)
+        self.assertEqual(error.exception.retry_after, 7200)
+        self.assertEqual(error.exception.code, 'eis_http_429')
+
+    def test_long_remote_backoff_survives_restart_and_wire_limit(self):
+        self.http = MultiOriginalTransport()
+        self.http.second_error = w.WorkerError('eis_http_429', 172800)
+        self.worker.http = self.http
+        self.http.jobs = [self.job]
+        with patch.object(w.time, 'time', return_value=1800000000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        reports = [c[2] for c in self.http.calls if c[0] == 'site' and c[1].endswith('/report')]
+        self.assertEqual(reports[0]['retry_after_seconds'], 86400)
+        self.assertEqual(float(self.state.get('backoff_until')), 1800172800)
+        restarted = w.State(self.temp.name)
+        try:
+            other = w.Worker({'interval_seconds': 30}, restarted, self.http)
+            self.http.calls.clear()
+            with patch.object(w.time, 'time', return_value=1800086500):
+                other.cycle()
+            self.assertFalse(any(c[0] in ('soap', 'download', 'request') for c in self.http.calls))
+        finally:
+            restarted.db.close()
+
+    def test_heartbeat_rate_limit_is_persisted_before_inn_report_retry(self):
+        self.http.jobs = [self.inn_job()]
+        original_site = self.http.site
+        attempts = []
+
+        def site(path, data=None, method=None):
+            if path.endswith('/heartbeat') and data.get('current_job_id'):
+                attempts.append(path)
+                raise w.WorkerError('site_http_429', 7200)
+            return original_site(path, data, method)
+
+        with patch.object(self.http, 'site', side_effect=site), \
+                patch.object(w.time, 'time', return_value=1800000000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(float(self.state.get('site_backoff_until')), 1800007200)
+        self.assertTrue(self.state.pending_reports())
+        self.assertFalse(any(c[0] == 'site' and c[1].endswith('/report') for c in self.http.calls))
+
+    def test_site_retry_after_defers_reports_and_heartbeats_across_restart(self):
+        self.http.jobs = [self.job]
+        original_upload = self.http.upload
+
+        def limited_upload(path, data, content_type):
+            if '/original/' in path:
+                raise w.WorkerError('site_http_429', 7200)
+            return original_upload(path, data, content_type)
+
+        with patch.object(self.http, 'upload', side_effect=limited_upload), \
+                patch.object(w.time, 'time', return_value=1800000000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        self.assertTrue(self.state.pending_reports())
+        self.assertFalse(any(c[0] == 'site' and c[1].endswith('/report') for c in self.http.calls))
+        restarted = w.State(self.temp.name)
+        try:
+            other = w.Worker({'interval_seconds': 30}, restarted, self.http)
+            self.http.calls.clear()
+            with patch.object(w.time, 'time', return_value=1800000030):
+                other.cycle()
+                other.heartbeat(force=True)
+            self.assertEqual(self.http.calls, [])
+            with patch.object(w.time, 'time', return_value=1800007201), contextlib.redirect_stdout(io.StringIO()):
+                other.cycle()
+            self.assertTrue(any(c[0] == 'site' and c[1].endswith('/report') for c in self.http.calls))
+        finally:
+            restarted.db.close()
+
+    def test_second_job_is_claimed_only_after_first_report_ack(self):
+        second = {**self.job, 'id': 'job-2', 'reg_number': '32616233662'}
+        self.http.jobs = [self.job, second]
+        clock = [1800000000]
+        original_process = self.worker.process
+
+        def slow_process(job):
+            result = original_process(job)
+            clock[0] += 1000  # Longer than a normal lease; only current job is held.
+            return result
+
+        claim_times = []
+        original_site = self.http.site
+
+        def site(path, data=None, method=None):
+            if '/jobs/next?' in path:
+                claim_times.append(clock[0])
+                self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)['limit'], ['1'])
+            return original_site(path, data, method)
+
+        with patch.object(self.worker, 'process', side_effect=slow_process), \
+                patch.object(self.http, 'site', side_effect=site), \
+                patch.object(w.time, 'time', side_effect=lambda: clock[0]), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        self.assertEqual(claim_times, [1800000000, 1800001000])
+        calls = self.http.calls
+        claims = [i for i, call in enumerate(calls) if call[0] == 'site' and '/jobs/next?' in call[1]]
+        first_ack = next(i for i, call in enumerate(calls) if call[0] == 'site' and call[1].endswith('/job-1/report'))
+        self.assertLess(first_ack, claims[1])
+        self.assertIn(('soap', second['reg_number']), calls)
+
+    def test_full_original_budget_leaves_next_job_unleased(self):
+        self.http = MultiOriginalTransport(50)
+        self.worker.http = self.http
+        self.http.jobs = [self.job, {**self.job, 'id': 'job-2'}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        claims = [call for call in self.http.calls if call[0] == 'site' and '/jobs/next?' in call[1]]
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(len(self.http.jobs), 1)
+
+    def test_queue_interval_uses_fast_default_and_preserves_explicit_slow_rate(self):
+        p = Path(self.temp.name) / 'rate-config.json'
+        config = {'eis_token': TOKEN, 'site_token': 'site-secret', 'site_url': 'https://example.test'}
+        for interval, expected in [(None, 30), (1, 30), (30, 30), (300, 300), (900, 900)]:
+            value = dict(config)
+            if interval is not None:
+                value['interval_seconds'] = interval
+            p.write_text(json.dumps(value))
+            p.chmod(0o600)
+            self.assertEqual(w.load_config(p)['interval_seconds'], expected)
 
     def test_soap_fields_are_unqualified_and_token_escaped(self):
         xml = w.soap_request(REG, TOKEN + '&<')
@@ -280,15 +424,16 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(float(self.state.get('backoff_until')), 1800001200)
         self.assertNotIn(('download', self.http.documents[2]['url']), self.http.calls)
 
-    def test_pipeline_preserves_twelve_attempt_budget(self):
-        self.http = MultiOriginalTransport(15)
+    def test_pipeline_bounds_forty_eight_attempts_with_one_download(self):
+        self.http = MultiOriginalTransport(51)
         self.worker.http = self.http
         report = self.worker.process(self.job)
         self.assertEqual(report['status'], 'partial', report)
-        self.assertEqual(report['originals_uploaded'], 12)
-        self.assertEqual(self.worker.files_this_cycle, 12)
-        self.assertEqual(len([c for c in self.http.calls if c[0] == 'download']), 13)
-        self.assertNotIn(('download', self.http.documents[12]['url']), self.http.calls)
+        self.assertEqual(report['originals_uploaded'], 48)
+        self.assertEqual(self.worker.files_this_cycle, 48)
+        self.assertEqual(len([c for c in self.http.calls if c[0] == 'download']), 49)
+        self.assertEqual(self.http.max_active_downloads, 1)
+        self.assertNotIn(('download', self.http.documents[48]['url']), self.http.calls)
 
     def test_limiter_preserves_spacing_and_cancels_before_network(self):
         transport = w.Transport.__new__(w.Transport)
@@ -373,7 +518,7 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(any(c[0] in ('soap', 'request') for c in self.http.calls))
 
     def test_file_budget_does_not_claim_completed(self):
-        self.worker.files_this_cycle = 12
+        self.worker.files_this_cycle = 48
         report = self.worker.process(self.job)
         self.assertEqual(report['status'], 'partial')
         self.assertEqual(report['originals_uploaded'], 0)
@@ -573,7 +718,7 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(w.WorkerError):
             w.load_config(p)
         p.chmod(0o640)
-        self.assertEqual(w.load_config(p)['interval_seconds'], 300)
+        self.assertEqual(w.load_config(p)['interval_seconds'], 30)
         p.write_text(json.dumps({'eis_token': TOKEN, 'site_token': '', 'site_url': 'https://example.test'}))
         with self.assertRaises(w.WorkerError) as error:
             w.load_config(p)

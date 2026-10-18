@@ -79,6 +79,16 @@ class InnSearchTests(unittest.TestCase):
         self.assertEqual(sum(job["kind"] == "reg" for job in jobs), 1)
         self.assertIn(pagination["id"], [job["id"] for job in jobs])
 
+    def test_long_search_retry_keeps_remote_delay(self):
+        self.inn_job()
+        job = self.claim()[0]
+        now = int(time.time())
+        with patch.object(worker.time, 'time', return_value=now):
+            result = self.report(job, status="error", reg_numbers=[], source_url="",
+                                 error_code="eis_http_429", retry_after_seconds=86400)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(self.row(job["id"])["not_before"], now + 86400)
+
     def test_search_cooldown_never_exhausts_real_attempt_budget(self):
         self.inn_job()
         job = self.claim()[0]

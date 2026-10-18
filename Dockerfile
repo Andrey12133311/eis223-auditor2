@@ -28,6 +28,8 @@ COPY tests/test_manual_navigation_fix.py tests/test_personal_inn_search.py tests
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manual_navigation_fix.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_personal_inn_search.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manual_inn_ui.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_dashboard_filter_reset.py'
 COPY tests/test_memo_download_access.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_download_access.py'
+COPY tests/test_account_connection_pool.py tests/test_account_request_responsiveness.py tests/test_page_response_performance.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_account_connection_pool.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_account_request_responsiveness.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_page_response_performance.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

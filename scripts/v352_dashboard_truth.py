@@ -4,10 +4,13 @@ Only actual, active 'violation' rows participate. No old historical rows are
 reclassified, original findings/documents are never deleted. The same shared
 grouping drives the dashboard counter and the general card.
 """
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 import difflib
 from datetime import datetime
+import hashlib
+import json
 import re
+import threading
 from v333_dedup_ui import issue_key, _proof, _different_fact
 from v365_consultant_refs import legal_identity
 from v342_identity import organization_display_name
@@ -128,13 +131,48 @@ def collapse_legal_events(rows):
         result.append(best)
     return result
 
+_COUNT_CACHE = OrderedDict()
+_COUNT_CACHE_LOCK = threading.Lock()
+_COUNT_CACHE_LIMIT = 8192
+_COUNT_FIELDS = ("title", "law", "evidence", "document", "source_url", "code")
+
+
+def _saved_event_count(reg, rows):
+    """Reuse only an unchanged, complete evidence snapshot's exact count.
+
+    Hash every field used by collapse_legal_events, in the same row order.
+    Edits, deletions, status changes and replacements invalidate immediately;
+    neither a TTL nor a row-count/MAX(id) shortcut can miss an evidence edit.
+    The bounded shared cache retains digests and integers, never user data or
+    original evidence. Its value is a pure function of the saved rows.
+    """
+    if not rows:
+        return 0
+    payload = json.dumps([tuple(row.get(field) for field in _COUNT_FIELDS)
+                          for row in rows], ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+    key = (reg, hashlib.sha256(payload).digest())
+    with _COUNT_CACHE_LOCK:
+        if key in _COUNT_CACHE:
+            _COUNT_CACHE.move_to_end(key)
+            return _COUNT_CACHE[key]
+    count = len(collapse_legal_events(rows))
+    with _COUNT_CACHE_LOCK:
+        _COUNT_CACHE[key] = count
+        _COUNT_CACHE.move_to_end(key)
+        while len(_COUNT_CACHE) > _COUNT_CACHE_LIMIT:
+            _COUNT_CACHE.popitem(last=False)
+    return count
+
+
 def load_counts(conn,regs):
-    """Batched legal rows; no request-per-procurement N+1 scans."""
+    """Exact full-filter counts without repeatedly reconciling old evidence."""
     regs=list(dict.fromkeys(str(x) for x in regs))
-    grouped=defaultdict(list)
+    counts={}
     for offset in range(0,len(regs),350):
         batch=regs[offset:offset+350]
         if not batch:continue
+        grouped=defaultdict(list)
         marks=",".join("?" for _ in batch)
         for row in conn.execute(
             "SELECT reg_number,title,law,evidence,document,source_url,code "
@@ -146,7 +184,9 @@ def load_counts(conn,regs):
             "FROM checks WHERE status='violation' AND reg_number IN ("+marks+")",
             batch):
             d=dict(row);grouped[d.pop("reg_number")].append(d)
-    return {reg:len(collapse_legal_events(grouped.get(reg,()))) for reg in regs}
+        counts.update((reg,_saved_event_count(reg,grouped.get(reg,())))
+                      for reg in batch)
+    return counts
 
 def dashboard_counts(conn,sql,args,page_offset,page_limit):
     regs=[r[0] for r in conn.execute("SELECT p.reg_number"+sql,args).fetchall()]

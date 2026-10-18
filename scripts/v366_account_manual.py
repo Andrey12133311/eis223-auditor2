@@ -284,7 +284,7 @@ async def start_manual_check(reg_number:str, request:Request):
     # For a missing PG mapping, the EIS job is still real, never a fake result.
     # A retry reuses the unfinished job and completes the owner association.
     try:
-        link_run(owner,reg_number,job["id"])
+        await asyncio.to_thread(link_run,owner,reg_number,job["id"])
     except Exception as exc:
         raise HTTPException(503,
             "Задание ЕИС принято, но сохранение в личном кабинете не удалось. "

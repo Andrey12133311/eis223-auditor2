@@ -158,7 +158,7 @@ def report(ns, identifier, data):
             detail = "Поиск ЕИС по ИНН не выполнен" + (": "+error_code if error_code else "")
         if more and page >= MAX_PAGES:
             detail += "; достигнут предел 10 страниц, выдача обработана не полностью"
-        delay = max(300, min(3600, retry or 900)) if state == "queued" else 0
+        delay = max(300, min(86400, retry or 900)) if state == "queued" else 0
         db.execute("""UPDATE v301_search_jobs SET status=?,detail=?,found=?,accepted=0,attempts=?,
           not_before=?,lease_until=0,lease_owner='server-retry',lease_token='',updated_at=? WHERE id=?""",
           (state, detail, len(numbers), attempts, int(time.time())+delay if delay else 0, _utc(), identifier))
