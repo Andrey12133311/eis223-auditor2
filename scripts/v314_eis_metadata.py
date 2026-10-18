@@ -17,7 +17,7 @@ import zipfile
 
 from v295_eis_originals import allowed_documents, saved_document, uid_from_url, root
 from v311_verified_customer import _name
-from v342_identity import valid_inn, subject
+from v342_identity import valid_inn, subject, incomplete_customer_name, customer_name_extension, unfinished_customer_quote
 
 LOG = logging.getLogger(__name__)
 REG = re.compile(r"3[0-9]{10}$")
@@ -93,15 +93,41 @@ def buyer_inns(text, name):
     return result
 
 
+def _continue_buyer_name(value, following):
+    """Join only explicit quoted continuations, stopping at other fields/roles."""
+    result = compact(value)
+    for raw in following[:12]:
+        line = compact(raw)
+        if (not line or '|' in line or STOP_NAME.search(line) or
+                re.match(r"^(?:Поставщик|Исполнитель|Организатор|Участник|Предмет|"
+                         r"Наименование|Сведения|Информация|Заказчик)\b", line, re.I)):
+            break
+        if not incomplete_customer_name(result):
+            break
+        # A bare form may only acquire an explicitly quoted name. Once its
+        # quote is open, subsequent lines belong to that same quoted name.
+        open_quote = unfinished_customer_quote(result)
+        if not open_quote and not line.startswith(('«', '"', '„', '“')):
+            break
+        result += ' ' + line
+        if len(result) > 2000:
+            return compact(value)
+    return result
+
+
 def table_pairs(text):
     """Unwrap antiword's fixed-width table rows; preserve DOCX cell labels."""
     groups = []
     current = None
-    for raw in text.splitlines():
+    source_lines = text.splitlines()
+    for line_index, raw in enumerate(source_lines):
         line = raw.strip()
         if "|" not in line:
             if current and not current[1] and line and not re.fullmatch(r"\d+[.)]?", line):
                 current[1] = line
+                if BUYER_LABEL.fullmatch(current[0]):
+                    current[1] = _continue_buyer_name(line, source_lines[line_index+1:])
+                    current[2] += "\n" + current[1]
             continue
         cells = [compact(x) for x in line.strip("|").split("|")]
         if len(cells) == 1 and re.match(r"^(?:сведения|информация)\s+о\s+", cells[0], re.I):
@@ -126,6 +152,12 @@ def table_pairs(text):
         else:
             current = [label, value, raw]
             groups.append(current)
+        if current and (BUYER_LABEL.fullmatch(current[0]) or
+                        re.fullmatch(r"наименование[:\s]*", current[0], re.I)):
+            completed = _continue_buyer_name(current[1], source_lines[line_index+1:])
+            if completed != current[1]:
+                current[2] += "\n" + completed[len(compact(current[1])):].strip()
+            current[1] = completed
     return groups
 
 
@@ -160,9 +192,11 @@ def parse_text(text):
         result["customer_inn"] = next(iter(labelled_inns))
     if not result.get("customer"):
         # Explicit buyer prose, never an arbitrary first legal entity in a file.
-        m = re.search(r"(?im)^\s*Заказчик\s*:\s*([^\n]{6,500})", text)
-        if m and company(m[1]):
-            result.update(customer=company(m[1]), customer_evidence=compact(m[0])[:1000])
+        m = re.search(r"(?im)^\s*Заказчик\s*:\s*([^\n]{6,2000})", text)
+        if m:
+            raw_name = _continue_buyer_name(m[1], text[m.end():].lstrip("\r\n").splitlines())
+            if company(raw_name):
+                result.update(customer=company(raw_name), customer_evidence=compact("Заказчик: "+raw_name)[:2500])
     if not result.get("customer"):
         flat = compact(text)
         m = re.search(
@@ -299,6 +333,15 @@ def from_documents(reg, documents, known_customer=""):
         return {}
     # Notices/documentation provide the identity; contracts can add its INN.
     chosen = next((v for v in candidates if v.get("customer")), candidates[0]).copy() if candidates else {}
+    # Prefer a unique source-backed completion of an incomplete name.
+    # Conflicting full names or INNs remain unresolved instead of guessing.
+    extensions = [v for v in candidates if customer_name_extension(
+        chosen.get("customer"), v.get("customer")) and not (
+            chosen.get("customer_inn") and v.get("customer_inn") and
+            chosen["customer_inn"] != v["customer_inn"])]
+    extension_inns = {v["customer_inn"] for v in extensions if v.get("customer_inn")}
+    if len({compact(v["customer"]).casefold() for v in extensions}) == 1 and len(extension_inns) <= 1:
+        chosen = {**chosen, **extensions[0]}
     if not chosen.get("title"):
         title = next((v for v in candidates if v.get("title")), {})
         if title:
@@ -311,6 +354,7 @@ def from_documents(reg, documents, known_customer=""):
         chosen["customer_inn"] = inns.pop()
     elif len(inns) > 1:
         chosen.pop("customer_inn", None)
+        chosen["customer_identity_conflict"] = True
     if price_evidence.get("price_num") is not None:
         chosen.update(price=price_evidence["price"],price_num=price_evidence["price_num"],
                       price_source_url=price_evidence["source_url"],
@@ -340,7 +384,22 @@ def apply_metadata(ns, reg, metadata):
         changes = {}
         name = company(metadata.get("customer")) or _name(metadata.get("customer"))
         current_name = _name(p.get("customer"))
-        if name and (not current_name or current_name != compact(p.get("customer"))):
+        extension = (customer_name_extension(current_name, name) and
+                     not metadata.get("customer_identity_conflict"))
+        prior = db.execute("SELECT name,inn FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
+        if extension:
+            incoming_inn = valid_inn(metadata.get("customer_inn"))
+            existing_inns = {valid_inn(p.get("customer_inn"))}
+            if prior:
+                existing_inns.add(valid_inn(prior["inn"]))
+                if not (customer_name_extension(prior["name"], name) or
+                        compact(prior["name"]).casefold() == compact(name).casefold()):
+                    extension = False
+            existing_inns.discard("")
+            if len(existing_inns) > 1 or (incoming_inn and existing_inns and incoming_inn not in existing_inns):
+                extension = False
+        if name and (not current_name or extension or (
+                current_name != compact(p.get("customer")) and name == current_name)):
             changes["customer"] = name
             if callable(ns.get("org_form")):
                 changes["org_form"] = ns["org_form"](name)
@@ -359,6 +418,10 @@ def apply_metadata(ns, reg, metadata):
                              ELSE v311_verified_buyers.inn END
                 WHERE v311_verified_buyers.name=excluded.name""",
                 (reg,name,inn,metadata.get("source_url", ""),"official_eis_document",stamp))
+        if extension and "customer" in changes and prior:
+            db.execute("""UPDATE v311_verified_buyers SET name=?,evidence_page=?,
+                evidence_source='official_eis_document',captured_at=? WHERE reg=?""",
+                (name, metadata.get("source_url", ""), stamp, reg))
         title = subject(metadata.get("title"))
         if title and not subject(p.get("title")):
             changes["title"] = title
@@ -474,7 +537,7 @@ def reconcile(ns):
         # stall Railway readiness and starve the actual legal-audit queue.
         pending = [row for row in db.execute("SELECT reg_number,customer,customer_inn,title,price_num "
             "FROM purchases ORDER BY last_seen DESC")
-            if not _name(row[1]) or _name(row[1]) != compact(row[1]) or
+            if not _name(row[1]) or incomplete_customer_name(row[1]) or _name(row[1]) != compact(row[1]) or
             not valid_inn(row[2]) or not subject(row[3]) or row[4] is None]
         total=len(pending)
         offset=int(ns.get("_v314_metadata_offset") or 0)%max(1,total)

@@ -29,5 +29,6 @@ jobs:
           python -m unittest discover -s tests -p 'test_extraction_throughput.py'
           python -m unittest discover -s tests -p 'test_v381*.py'
           python -m unittest discover -s tests -p 'test_organization_display.py'
+          python -m unittest discover -s tests -p 'test_customer_name_completion.py'
           python -m unittest discover -s tests -p 'test_memo_requisites.py'
           python -m unittest discover -s tests -p 'test_eis*.py'

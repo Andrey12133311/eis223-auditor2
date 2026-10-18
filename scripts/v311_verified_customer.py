@@ -53,7 +53,7 @@ CONFIRMED={
 
 def _name(value):
     value=customer_label(value)
-    if not 6<=len(value)<=400 or not re.search(r"[А-Яа-яЁёA-Za-z]",value):return ""
+    if not 6<=len(value)<=2000 or not re.search(r"[А-Яа-яЁёA-Za-z]",value):return ""
     if re.search(r"^(?:уточняем заказчика|заказчик уточняется|уточняется|не указан|нет данных|организация|заказчик|unknown)\b",value,re.I):return ""
     if re.fullmatch(r"[\d\W]+",value):return ""
     # Never guess the remaining capitalization of an authoritative legal name.
