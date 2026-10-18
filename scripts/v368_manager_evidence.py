@@ -92,7 +92,11 @@ def _authorized_reg(db,actor,role,worker,reg):
         """SELECT 1 FROM account_manual_checks
            WHERE user_id=%s AND reg_number=%s""",(worker,reg)).fetchone()
     if not exists:
-        raise HTTPException(404,"Сотрудник не запускал эту самостоятельную проверку")
+        exists=db.execute(
+            "SELECT 1 FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s",
+            (worker,reg)).fetchone()
+    if not exists:
+        raise HTTPException(404,"Сотрудник не направлял нарушения этой закупки")
     return worker
 
 
@@ -106,6 +110,9 @@ def finding_list(user_id:str,reg_number:str,request:Request,response:Response):
             """SELECT finding_key,decision,comment,reviewer_id,updated_at
                FROM account_manager_finding_reviews
                WHERE user_id=%s AND reg_number=%s""",(worker,reg_number)).fetchall()
+        owns_check=bool(db.execute(
+            "SELECT 1 FROM account_manual_checks WHERE user_id=%s AND reg_number=%s",
+            (worker,reg_number)).fetchone())
         submissions=db.execute(
             "SELECT finding_key,status,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s",
             (worker,reg_number)).fetchall()
@@ -115,6 +122,8 @@ def finding_list(user_id:str,reg_number:str,request:Request,response:Response):
     try:items=_legal_items(_db_state(request),reg_number)
     except sqlite3.Error as exc:
         raise HTTPException(503,"Не удалось открыть доказательства ЕИС") from exc
+    if not owns_check:
+        items=[item for item in items if item["finding_key"] in submission_by_key]
     for item in items:
         item["review"]=approved.get(item["finding_key"])
         item["submission"]=submission_by_key.get(item["finding_key"])
@@ -140,12 +149,16 @@ def finding_decision(user_id:str,reg_number:str,finding_key:str,
         raise HTTPException(422,"Укажите причину возврата или отклонения")
     with connect() as db:
         worker=_authorized_reg(db,actor,role,user_id,reg_number)
-        # Serialize with employee submissions, including first-time inserts.
-        db.execute("SELECT 1 FROM account_manual_checks WHERE user_id=%s AND reg_number=%s FOR UPDATE",
-                   (worker,reg_number)).fetchone()
+        # Serialize with employee submissions without requiring a personal check.
+        db.execute("SELECT id FROM account_users WHERE id=%s FOR UPDATE",
+                   (worker,)).fetchone()
         submission=db.execute(
             "SELECT status,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s AND finding_key=%s",
             (worker,reg_number,finding_key)).fetchone()
+        if not submission and not db.execute(
+                "SELECT 1 FROM account_manual_checks WHERE user_id=%s AND reg_number=%s",
+                (worker,reg_number)).fetchone():
+            raise HTTPException(404,"Сотрудник не направлял это нарушение")
         if submission:
             if data.decision == "returned":
                 raise HTTPException(422,"Для направленного нарушения доступны согласование или отказ с причиной")

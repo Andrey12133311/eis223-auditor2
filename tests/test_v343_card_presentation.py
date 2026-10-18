@@ -84,6 +84,33 @@ def data(findings=None, checks=None):
 
 
 class CardPresentationTests(unittest.TestCase):
+    def test_finding_shows_one_applied_law_without_duplicate_basis_row(self):
+        original = data()
+        before = copy.deepcopy(original)
+        finding = DOM(card.render(REG, original, account_review=True)).root.find(
+            "article", **{"class": "legal"})[0]
+        content = finding.content()
+        self.assertNotIn("Правовое основание:", content)
+        self.assertEqual(content.count("Применённая норма:"), 1)
+        self.assertIn("223", content)
+        self.assertTrue(any(x.attrs["href"].startswith("https://www.consultant.ru/document/")
+                            for x in finding.find("a")))
+        self.assertTrue(finding.find("a", href=SOURCE))
+        self.assertEqual(original, before, "presentation must not modify saved legal data")
+
+    def test_unresolved_law_remains_visible_without_duplicate_finding_label(self):
+        item = {**FINDING, "law": "Иная применимая норма <уточнить>", "code": "OTHER", "law_url": ""}
+        finding = DOM(card.render(REG, data([item]))).root.find("article", **{"class": "legal"})[0]
+        self.assertNotIn("Правовое основание:", finding.content())
+        self.assertEqual(finding.content().count("Применённая норма:"), 1)
+        self.assertIn(item["law"], finding.content())
+        self.assertTrue(finding.find("a", href=SOURCE))
+
+    def test_review_only_card_keeps_its_existing_basis_presentation(self):
+        item = {**FINDING, "item": FINDING["title"], "status": "check"}
+        review = DOM(card.render(REG, data([], [item]))).root.find("article", **{"class": "review"})[0]
+        self.assertIn("Правовое основание:", review.content())
+
     def test_review_controls_only_on_authenticated_cards(self):
         guest = card.render(REG, data())
         self.assertNotIn('data-finding-review=', guest)

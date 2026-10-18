@@ -233,9 +233,18 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
     gaps=(item or {}).get("presentation_gaps") or []
     missing_link=(not origin and not any(source_link(x.get("url"),"ЕИС")
                     for x in supporting if isinstance(x,dict)))
+    # Findings already display their verified citation under «Применённая норма».
+    # Keep the stored law visible when no verified citation can be resolved,
+    # without a second, duplicate «Правовое основание» row.
+    basis_html=('<p><b>Правовое основание:</b> '+esc(law)+'</p>' if law else '')
+    if kind=="legal":
+        refs=verified_legal_references({**(item or {}),"law":law or (item or {}).get("law"),
+                                       "law_url":link or (item or {}).get("law_url")})
+        basis_html=('<p class="finding-law"><b>Применённая норма:</b> '+esc(law)+'</p>'
+                    if law and not refs else '')
     return ('<article class="'+kind+'">'+heading+'<h3>'+esc(title or "Нарушение")+'</h3>'
       +('<p class="evidence"><b>Факты и обстоятельства:</b> '+linked_evidence(evidence)+'</p>' if evidence else '')
-      +('<p><b>Правовое основание:</b> '+esc(law)+'</p>' if law else '')
+      +basis_html
       +legal_links(item,law,link)
       +source_html
       +('<p class="meta">Проверяемая ссылка на оригинал ЕИС в сохранённой записи отсутствует. '

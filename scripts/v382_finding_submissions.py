@@ -9,14 +9,11 @@ import sqlite3
 router = APIRouter(tags=['finding-submissions'])
 
 
-def _owned(db, user, reg, lock=False):
+def _shared_reg(reg):
+    # /check-new/{reg} is already an authenticated shared read route.
+    # A personal manual-check row is not provenance for shared EIS evidence.
     if not REG.fullmatch(reg):
         raise HTTPException(422, 'Некорректный номер закупки ЕИС')
-    row = db.execute(
-        'SELECT 1 FROM account_manual_checks WHERE user_id=%s AND reg_number=%s'
-        + (' FOR UPDATE' if lock else ''), (user, reg)).fetchone()
-    if not row:
-        raise HTTPException(404, 'Проверка не найдена в личном кабинете')
 
 
 def _items(request, reg):
@@ -31,7 +28,7 @@ def employee_findings(reg: str, request: Request, response: Response):
     user = current_account(request)[0]
     response.headers.update(no_store_headers())
     with connect() as db:
-        _owned(db, user, reg)
+        _shared_reg(reg)
         manager = db.execute('SELECT manager_id FROM account_manager_teams WHERE user_id=%s', (user,)).fetchone()
         submitted = db.execute('SELECT finding_key,status,submitted_at,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s', (user, reg)).fetchall()
         reviewed = db.execute('SELECT finding_key,decision,comment FROM account_manager_finding_reviews WHERE user_id=%s AND reg_number=%s', (user, reg)).fetchall()
@@ -49,9 +46,10 @@ def submit_finding(reg: str, finding_key: str, request: Request):
     require_origin(request)
     user = current_account(request)[0]
     with connect() as db:
-        # The same owned check is locked by decisions. Serializes initial and
-        # repeated requests even before the submission row exists.
-        _owned(db, user, reg, lock=True)
+        _shared_reg(reg)
+        # Shared procurements need no personal check. Lock the submitting
+        # account, also used by manager decisions, before a row exists.
+        db.execute('SELECT id FROM account_users WHERE id=%s FOR UPDATE', (user,)).fetchone()
         manager = db.execute('SELECT manager_id FROM account_manager_teams WHERE user_id=%s', (user,)).fetchone()
         if not manager:
             raise HTTPException(409, 'Ваш руководитель не назначен. Обратитесь к администратору.')
@@ -83,7 +81,6 @@ def manager_submissions(request: Request, response: Response):
                             FROM account_finding_submissions s
                             JOIN account_users u ON u.id=s.user_id
                             JOIN account_manager_teams t ON t.user_id=s.user_id
-                            JOIN account_manual_checks c ON c.user_id=s.user_id AND c.reg_number=s.reg_number
                             LEFT JOIN account_manager_finding_reviews r ON
                               r.user_id=s.user_id AND r.reg_number=s.reg_number AND r.finding_key=s.finding_key
                             WHERE u.status='approved' AND u.role='user' ''' + predicate + '''
