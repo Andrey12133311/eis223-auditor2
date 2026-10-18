@@ -9,6 +9,7 @@ import re
 import sqlite3
 from urllib.parse import urlsplit
 from fastapi.responses import HTMLResponse
+from v342_identity import organization_display_name
 
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
 STYLE="""<style id="eis-modern-audit-card">
@@ -310,7 +311,7 @@ def render(reg,data,thematic=None):
     basic=''
     if p:
         keys=[
-          ('Предмет закупки',val(p,'title')),('Заказчик',val(p,'customer')),
+          ('Предмет закупки',val(p,'title')),('Заказчик',organization_display_name(val(p,'customer'))),
           ('ИНН заказчика',val(p,'customer_inn')),('Способ закупки',val(p,'method')),
           ('Стоимость закупки',val(p,'price')),('Дата размещения',val(p,'published_at')),
           ('Начало подачи заявок',val(p,'submission_start')),

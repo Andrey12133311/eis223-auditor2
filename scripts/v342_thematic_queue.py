@@ -7,6 +7,8 @@ from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import v360_thematic_ownership as ownership
+from v381_audit_scheduling import audit_signals
+from v342_identity import organization_display_name
 
 WORKER_TASK=None
 WORKER_STATE={"last_cycle_at":None,"last_cycle_finished_at":None,"last_error":None}
@@ -309,7 +311,7 @@ def thematic_history_records(ns, permitted_ids=None):
      "AND title IS NOT NULL AND title<>'' LIMIT 35",(batch,))]
    item["customers"]=[]
    if customer_col:
-    item["customers"]=[r[0] for r in c.execute(
+    item["customers"]=[organization_display_name(r[0]) for r in c.execute(
       "SELECT DISTINCT p."+customer_col+" FROM thematic_items i "
       "JOIN purchases p ON p.reg_number=i.reg WHERE i.batch_id=? "
       "AND p."+customer_col+" IS NOT NULL AND p."+customer_col+"<>'' LIMIT 35",
@@ -433,6 +435,9 @@ def install(ns):
     except HTTPException:pass
    raise
   finally:c.close()
+  # New campaigns should not inherit another campaign's 90-second index wait.
+  WORKER_STATE["index_at"]=0
+  audit_signals(ns).notify("thematic")
   return {"id":identifier,"status":"active"}
  @app.post("/api/thematic/{batch}/stop")
  async def stop(batch:str,request:Request):
@@ -505,7 +510,7 @@ def install(ns):
    item=c.execute("SELECT status,detail FROM thematic_items WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
    if not item:raise HTTPException(404,"Закупка не найдена в тематической проверке")
    p=c.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
-   customer=escape(str(p["customer"] or "")) if p and "customer" in p.keys() else ""
+   customer=escape(organization_display_name(p["customer"])) if p and "customer" in p.keys() else ""
   finally:c.close()
   printable=request.query_params.get("print")=="1"
   if not printable:
@@ -546,16 +551,21 @@ def install(ns):
    return HTMLResponse(html,headers={k:v for k,v in response.headers.items() if k.lower() not in ("content-length","content-encoding")})
  app.add_middleware(ThemeNav)
  async def worker():
+  signals=audit_signals(ns)
   while True:
+   version=signals.version("thematic")
+   processed=0
    WORKER_STATE["last_cycle_at"]=now()
    WORKER_STATE["last_error"]=None
    # This scan runs many SQLite operations: keep it off the HTTP event loop.
-   try:await tick(ns)
+   try:processed=await tick(ns)
    except Exception as e:
     WORKER_STATE["last_error"]=type(e).__name__+": "+str(e)[:120]
     print("THEMATIC_TICK_ERROR",type(e).__name__,str(e)[:120],flush=True)
    finally:WORKER_STATE["last_cycle_finished_at"]=now()
-   await asyncio.sleep(20)
+   # Drain work already on disk without an unconditional 20-second gap.
+   # Capture the version before the scan so arrivals during a cycle are kept.
+   await signals.wait("thematic",version,.05 if processed else 20)
  @app.on_event("startup")
  async def startup_thematic():
   global WORKER_TASK

@@ -260,6 +260,17 @@ def stored_purchase(ns,reg):
     finally:db.close()
 
 
+def _read_original(reg,uid):
+    """Read/hash saved bytes outside the event loop under the shared cap."""
+    stored=saved_document(reg,uid)
+    if stored is None:return None
+    path,receipt=stored
+    with path.open("rb") as original:
+        digest=hashlib.file_digest(original,"sha256").hexdigest()
+    if digest!=receipt["sha256"]:return None
+    return path,receipt,digest
+
+
 async def offline_audit(ns,reg,collect_only=False):
     """Use only local official XML and saved original bytes, no remote I/O.
 
@@ -267,8 +278,9 @@ async def offline_audit(ns,reg,collect_only=False):
     return verified source documents without saving, removing, or replacing
     any existing database rows, findings, or original bytes.
     """
+    from v381_audit_scheduling import run_file_io
     if not REG.fullmatch(reg):raise ValueError("Invalid official registry number")
-    allowed=allowed_documents(reg)
+    allowed=await run_file_io(allowed_documents,reg)
     if not allowed:raise ValueError("Verified EIS XML has no documents")
     notice=await asyncio.to_thread(official_notice,reg)
     public={}
@@ -344,12 +356,9 @@ async def offline_audit(ns,reg,collect_only=False):
     docs=[]
     dedup_by_sha={}
     for uid,item in allowed.items():
-        stored=saved_document(reg,uid)
+        stored=await run_file_io(_read_original,reg,uid)
         if stored is None:continue
-        path,receipt=stored
-        with path.open("rb") as f:
-            sha=hashlib.file_digest(f,"sha256").hexdigest()
-        if sha!=receipt["sha256"]:continue
+        path,receipt,sha=stored
         if sha in dedup_by_sha:
             existing=docs[dedup_by_sha[sha]]
             existing.setdefault("meta",{}).setdefault("identical_sources",[]).append(
@@ -360,9 +369,8 @@ async def offline_audit(ns,reg,collect_only=False):
         if ext in ARCHIVE_EXT:
             # Keep the binary original as source evidence but NEVER count
             # the archive itself as a checked legal document.
-            members,warnings=await asyncio.wait_for(
-                asyncio.to_thread(extract_members,path,reg,uid,data_root(),extractor),
-                timeout=160)
+            members,warnings=await run_file_io(
+                extract_members,path,reg,uid,data_root(),extractor,timeout=160)
             docs.append({
                 "name":item["name"],"url":item["url"],"type":"archive",
                 "published":"","meta":{"source":"official_eis_archive",
@@ -397,7 +405,7 @@ async def offline_audit(ns,reg,collect_only=False):
             print(f"V310 ARCHIVE_EXTRACTED reg={reg} uid={uid} members_checked={len(members)} "
                   f"warnings={len(warnings)}",flush=True)
             continue
-        text=await asyncio.wait_for(asyncio.to_thread(extractor,path),timeout=45)
+        text=await run_file_io(extractor,path,timeout=45)
         text=str(text or "")
         valid=len(text.strip())>=3
         docs.append({
@@ -765,6 +773,8 @@ async def offline_audit(ns,reg,collect_only=False):
        "api_fields":list(detail.items()),
     }
     await asyncio.to_thread(save,p,docs,findings,checks,payload)
+    from v381_audit_scheduling import notify_evidence
+    notify_evidence(ns)
     if metadata:
         # Older save implementations omit customer_inn; retain the verified
         # value and source after saving without replacing docs or findings.

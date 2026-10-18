@@ -19,6 +19,7 @@ from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from v295_eis_originals import root as storage, save_atomic, auth
+from v342_identity import organization_display_name
 
 OO="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
 TX="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
@@ -141,14 +142,7 @@ def _read_purchase(ns,reg):
 
 def _plain_company(text):
     text=re.sub(r"\s+"," ",str(text or "")).strip().strip(".")
-    if not text:return ""
-    letters=[c for c in text if c.isalpha()]
-    if letters and sum(c.isupper() for c in letters)/len(letters)>.78:
-        words=re.split(r"(\s+)",text.lower())
-        text="".join(w.upper() if w.upper() in ORG_ABBR else
-                     w[:1].upper()+w[1:] if w.strip() else w for w in words)
-        text=re.sub(r'\b(Российской|Российская)\b',lambda m:m.group(0),text)
-    return text
+    return organization_display_name(text)
 
 async def _rusprofile_company(inn):
     """Best effort direct Rusprofile lookup, not an unofficial API or fabricated match."""
@@ -346,7 +340,7 @@ def _render_odt(template,p,findings,organization,fields):
     _set_paragraph(paras[29],
        "С учетом вышеизложенного, прошу рассмотреть вопрос о наличии/отсутствии "
        "признаков состава административного правонарушения в действиях "+
-       organization.rstrip(".")+".")
+       organization_display_name(organization).rstrip(".")+".")
     if len(paras)>31 and not _text(paras[30]).strip() and not _text(paras[31]).strip():
         body.remove(paras[31])
     # Final typography is applied after filling metadata by v321 formatter.
@@ -370,7 +364,7 @@ def _render_odt(template,p,findings,organization,fields):
     for idx,key in ((13,"recipient"),(18,"greeting"),(32,"signer_role"),(33,"signer"),
                     (55,"executor"),(56,"phone")):
         v=str(fields.get(key) or "").strip()
-        if v and idx<len(paras) and len(v)<200:
+        if (v or (key in ("recipient","executor","phone") and key in fields)) and idx<len(paras) and len(v)<200:
             _set_paragraph(paras[idx],v)
     # Remove the barcode belonging to the original registered memo, preserve crest.
     style=ET.fromstring(items["styles.xml"])
@@ -477,9 +471,17 @@ def install(ns):
 
     app.state.eis223_build_memo=build_memo
 
+    def saved_fields(request,reg):
+        # The outer account gate supplies this identity; never trust request IDs.
+        owner=request.scope.get("eis223_account_id")
+        if owner is None:return {}
+        from scripts.v367_private_features import _memo_requisites
+        return _memo_requisites(owner,reg)
+
     @app.get("/api/v304/memo/{reg}.odt")
-    async def memo_file(reg:str):
-        return await build_memo(reg)
+    async def memo_file(reg:str,request:Request):
+        fields=await asyncio.to_thread(saved_fields,request,reg)
+        return await build_memo(reg,fields)
 
     # Existing memo download button POSTs to the v218 route. Intercept here
     # rather than ship the obsolete memo text and layout.
@@ -494,7 +496,10 @@ def install(ns):
             except (ValueError,TypeError):
                 body={}
             try:
-                return await build_memo(m[1],body.get("fields") if isinstance(body,dict) else {})
+                fields=await asyncio.to_thread(saved_fields,request,m[1])
+                supplied=body.get("fields") if isinstance(body,dict) else {}
+                if isinstance(supplied,dict):fields.update(supplied)
+                return await build_memo(m[1],fields)
             except HTTPException as exc:
                 # Middleware executes outside FastAPI's exception handler.
                 # Return an actionable 4xx, not an unhandled 500/stack trace.

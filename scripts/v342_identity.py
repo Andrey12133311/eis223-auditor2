@@ -7,6 +7,31 @@ def compact(value):
     return " ".join(str(value or "").replace("\x00", " ").split())
 
 
+def organization_display_name(value):
+    """Capitalize only the initial inside a quoted organization name.
+
+    Preserve the source spelling, abbreviations and mixed case everywhere
+    else. Track paired quotes so a closing straight quote cannot capitalize
+    the next word (for example, '"Центр" филиал'). No storage is modified.
+    """
+    chars = list(str(value or ""))
+    closing = []
+    pairs = {"«": "»", '"': '"', "„": "“", "“": "”"}
+    for index, char in enumerate(chars):
+        if closing and char == closing[-1]:
+            closing.pop()
+            continue
+        if char not in pairs:
+            continue
+        closing.append(pairs[char])
+        initial = index + 1
+        while initial < len(chars) and chars[initial].isspace():
+            initial += 1
+        if initial < len(chars) and chars[initial].isalpha():
+            chars[initial] = chars[initial].upper()
+    return "".join(chars)
+
+
 def customer_label(value):
     name = compact(value).strip(" |:;,")
     name = re.sub(

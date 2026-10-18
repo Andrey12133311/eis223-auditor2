@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -65,7 +66,7 @@ class FakeTransport:
         self.calls.append(('soap', reg))
         return [ARCHIVE_URL]
 
-    def download(self, url, limit):
+    def download(self, url, limit, *, cancel=None):
         self.calls.append(('download', url))
         return zipped() if url == ARCHIVE_URL else b'%PDF-fixture'
 
@@ -82,6 +83,57 @@ class FakeTransport:
         if self.fail_discovery:
             raise w.WorkerError('eis_http_403', 1200)
         return b'<a href="/epz/order/notice/notice223/common-info.html?regNumber=32616233661">Link</a>'
+
+
+class MultiOriginalTransport(FakeTransport):
+    def __init__(self, count=4):
+        super().__init__()
+        self.documents = [{'uid': f'{i:032X}', 'url': URL[:-32] + f'{i:032X}'}
+                          for i in range(1, count + 1)]
+        self.receipts = set()
+        self.active_downloads = 0
+        self.max_active_downloads = 0
+        self.download_started = threading.Event()
+        self.upload_started = threading.Event()
+        self.wait_for_overlap = False
+        self.second_error = None
+
+    def site(self, path, data=None, method=None):
+        if '/manifest/' in path:
+            self.calls.append(('site', path, data))
+            return {'documents': [{**item, 'received': item['uid'] in self.receipts}
+                                  for item in self.documents]}
+        return super().site(path, data, method)
+
+    def download(self, url, limit, *, cancel=None):
+        if url == ARCHIVE_URL:
+            return super().download(url, limit, cancel=cancel)
+        self.calls.append(('download', url))
+        self.active_downloads += 1
+        self.max_active_downloads = max(self.max_active_downloads, self.active_downloads)
+        try:
+            if len(self.documents) > 1 and url == self.documents[1]['url']:
+                self.download_started.set()
+                if self.wait_for_overlap and not self.upload_started.wait(2):
+                    raise AssertionError('The second download did not overlap the first upload')
+                if self.second_error:
+                    raise self.second_error
+            return b'%PDF-synthetic-original'
+        finally:
+            self.active_downloads -= 1
+
+    def upload(self, path, data, content_type):
+        if '/original/' not in path:
+            return super().upload(path, data, content_type)
+        self.calls.append(('upload', path))
+        if self.wait_for_overlap and path.endswith('/' + self.documents[0]['uid']):
+            self.upload_started.set()
+            if not self.download_started.wait(2):
+                raise AssertionError('The first upload did not overlap the second download')
+        if self.fail_original:
+            raise w.WorkerError('site_connection_error')
+        self.receipts.add(path.rsplit('/', 1)[-1])
+        return {'accepted': True}
 
 
 class WorkerTests(unittest.TestCase):
@@ -156,6 +208,107 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(report['status'], 'completed')
         self.assertEqual(report['originals_uploaded'], 0)
         self.assertEqual([c[1] for c in self.http.calls if c[0] == 'download'], [ARCHIVE_URL])
+
+    def test_metadata_only_delivers_archives_without_consuming_original_budget(self):
+        report = self.worker.process({**self.job, 'metadata_only': True})
+        self.assertEqual(report['archives_uploaded'], 1)
+        self.assertEqual(report['originals_uploaded'], 0)
+        self.assertEqual(self.worker.files_this_cycle, 0)
+        self.assertNotEqual(report['status'], 'completed')
+        self.assertEqual([c[1] for c in self.http.calls if c[0] == 'download'], [ARCHIVE_URL])
+        self.assertFalse(any('/manifest/' in c[1] or '/recheck/' in c[1]
+                             for c in self.http.calls if c[0] == 'site'))
+
+    def test_pipeline_overlaps_upload_but_never_parallelizes_eis_downloads(self):
+        self.http = MultiOriginalTransport()
+        self.http.wait_for_overlap = True
+        self.worker.http = self.http
+        report = self.worker.process(self.job)
+        self.assertEqual(report['status'], 'completed', report)
+        self.assertEqual(report['originals_uploaded'], 4)
+        self.assertEqual(self.http.max_active_downloads, 1)
+        self.assertTrue(self.http.download_started.is_set())
+        self.assertTrue(self.http.upload_started.is_set())
+        self.assertFalse(list(Path(self.temp.name).glob('*.part')))
+
+    def test_pipeline_caches_prefetched_bytes_after_failed_upload(self):
+        self.http = MultiOriginalTransport()
+        self.http.wait_for_overlap = True
+        self.http.fail_original = True
+        self.worker.http = self.http
+        report = self.worker.process(self.job)
+        self.assertEqual(report['error_code'], 'site_connection_error')
+        self.assertEqual(report['originals_failed'], 1)
+        self.assertEqual(len(list(Path(self.temp.name).glob('*.part'))), 2)
+        first_downloads = [c for c in self.http.calls if c[0] == 'download']
+        self.assertEqual(len(first_downloads), 3)  # archive plus two originals
+        self.http.fail_original = False
+        self.http.calls.clear()
+        report = self.worker.process(self.job)
+        self.assertEqual(report['status'], 'completed', report)
+        for item in self.http.documents[:2]:
+            self.assertNotIn(('download', item['url']), self.http.calls)
+
+    def test_pipeline_stops_after_prefetched_rate_limit(self):
+        self.http = MultiOriginalTransport()
+        self.http.second_error = w.WorkerError('eis_http_429', 1200)
+        self.worker.http = self.http
+        report = self.worker.process(self.job)
+        self.assertEqual(report['error_code'], 'eis_http_429')
+        self.assertEqual(report['retry_after_seconds'], 1200)
+        self.assertEqual(report['originals_uploaded'], 1)
+        self.assertEqual(report['originals_failed'], 1)
+        self.assertEqual(self.worker.files_this_cycle, 2)
+        self.assertNotIn(('download', self.http.documents[2]['url']), self.http.calls)
+
+    def test_upload_failure_does_not_hide_prefetch_global_backoff(self):
+        self.http = MultiOriginalTransport()
+        self.http.wait_for_overlap = True
+        self.http.fail_original = True
+        self.http.second_error = w.WorkerError('eis_http_429', 1200)
+        self.worker.http = self.http
+        with patch.object(w.time, 'time', return_value=1800000000):
+            report = self.worker.process(self.job)
+        self.assertEqual(report['error_code'], 'eis_http_429')
+        self.assertEqual(report['retry_after_seconds'], 1200)
+        self.assertEqual(float(self.state.get('backoff_until')), 1800001200)
+        self.assertNotIn(('download', self.http.documents[2]['url']), self.http.calls)
+
+    def test_pipeline_preserves_twelve_attempt_budget(self):
+        self.http = MultiOriginalTransport(15)
+        self.worker.http = self.http
+        report = self.worker.process(self.job)
+        self.assertEqual(report['status'], 'partial', report)
+        self.assertEqual(report['originals_uploaded'], 12)
+        self.assertEqual(self.worker.files_this_cycle, 12)
+        self.assertEqual(len([c for c in self.http.calls if c[0] == 'download']), 13)
+        self.assertNotIn(('download', self.http.documents[12]['url']), self.http.calls)
+
+    def test_limiter_preserves_spacing_and_cancels_before_network(self):
+        transport = w.Transport.__new__(w.Transport)
+        transport.last_file_at = 97.5
+        starts = []
+        now = [100.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        def request(*args, **kwargs):
+            starts.append(now[0])
+            return b'fixture'
+
+        transport.request = request
+        with patch.object(w.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(w.time, 'sleep', side_effect=sleep):
+            transport.download(URL, w.MAX_FILE)
+            transport.download(URL, w.MAX_FILE)
+            self.assertEqual(starts, [100.0, 102.5])
+            cancel = threading.Event()
+            with patch.object(cancel, 'wait', side_effect=lambda seconds: cancel.set()):
+                with self.assertRaises(w.WorkerError) as error:
+                    transport.download(URL, w.MAX_FILE, cancel=cancel)
+            self.assertEqual(error.exception.code, 'download_cancelled')
+            self.assertEqual(starts, [100.0, 102.5])
 
     def test_failed_upload_keeps_cache_and_retries_without_redownloading_original(self):
         self.http.fail_original = True

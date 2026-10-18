@@ -197,6 +197,7 @@ def install(ns):
 
     review_jobs={}
     review_states={}
+    review_priorities={}
 
     def review_state_path(reg):
         return root()/"eis223_official_review_jobs"/(reg+".json")
@@ -306,8 +307,9 @@ def install(ns):
         except Exception as exc:
             print("V297 RECONCILE_ERROR "+type(exc).__name__,flush=True)
 
-    async def review_worker(reg):
-        total,received=review_counts(reg)
+    async def review_worker(reg,foreground=False):
+        from v381_audit_scheduling import notify_evidence,review_slot
+        total,received=await asyncio.to_thread(review_counts,reg)
         lock=ns.get("lock")
         process=ns.get("process_purchase")
         offline=ns.get("_v298_offline_audit")
@@ -315,24 +317,27 @@ def install(ns):
             update_review(reg,"failed",originals_received=received,reason="Audit pipeline unavailable")
             return
         try:
-            # One running official EIS analysis at a time. Never query the
-            # unreachable server or other feeds when offline mode is active.
-            async with lock:
-                update_review(reg,"running",originals_received=received)
-                if callable(offline):
-                    result=await asyncio.wait_for(offline(reg),timeout=240)
-                else:
-                    import httpx
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(20,connect=6),
-                                                follow_redirects=True) as client:
-                        result=await asyncio.wait_for(process(client,reg,None),timeout=240)
-                verified=await asyncio.to_thread(reconcile_document_rows,reg)
-                checked=(int(verified["checked"]) if verified is not None
-                         else int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0)
-                update_review(reg,"completed" if received>=total and checked>=received else "partial",
-                              originals_received=received,checked_documents=checked,
-                              findings=result.get("findings") if isinstance(result,dict) else None,
-                              deduplicated=bool(verified is not None))
+            # Preserve single-writer review while letting manual requests
+            # pass queued automatic work. Running work is never interrupted.
+            foreground=foreground or review_priorities.get(reg,False)
+            async with review_slot(background=not foreground):
+                async with lock:
+                    update_review(reg,"running",originals_received=received)
+                    if callable(offline):
+                        result=await asyncio.wait_for(offline(reg),timeout=240)
+                    else:
+                        import httpx
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(20,connect=6),
+                                                    follow_redirects=True) as client:
+                            result=await asyncio.wait_for(process(client,reg,None),timeout=240)
+                    verified=await asyncio.to_thread(reconcile_document_rows,reg)
+                    checked=(int(verified["checked"]) if verified is not None
+                             else int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0)
+                    update_review(reg,"completed" if received>=total and checked>=received else "partial",
+                                  originals_received=received,checked_documents=checked,
+                                  findings=result.get("findings") if isinstance(result,dict) else None,
+                                  deduplicated=bool(verified is not None))
+            notify_evidence(ns)
         except asyncio.CancelledError:
             update_review(reg,"queued",originals_received=received,reason="Interrupted; will resume")
             raise
@@ -344,8 +349,13 @@ def install(ns):
         if not expected or received==0:
             return {"reg_number":reg,"status":"waiting_for_originals",
                     "originals_received":received,"originals_expected":expected}
+        from v381_audit_scheduling import is_manual_review,promote_review
+        foreground=is_manual_review(ns,reg)
         task=review_jobs.get(reg)
         if task and not task.done():
+            if foreground:
+                review_priorities[reg]=True
+                promote_review(task)
             return {**review_state(reg),"originals_expected":expected}
         previous=review_state(reg)
         if (not force and previous.get("status")=="completed"
@@ -353,7 +363,8 @@ def install(ns):
             return {**previous,"originals_expected":expected}
         data=update_review(reg,"queued",originals_received=received,
                            originals_expected=expected)
-        review_jobs[reg]=asyncio.create_task(review_worker(reg))
+        review_priorities[reg]=foreground
+        review_jobs[reg]=asyncio.create_task(review_worker(reg,foreground))
         return data
 
     # Shared offline recheck entry point for immediate manual searches.
@@ -462,7 +473,8 @@ def install(ns):
                 item=saved_document(reg,uid)
                 if item:
                     path,receipt=item
-                    txt=await asyncio.to_thread(extractor,path) if callable(extractor) else ""
+                    from v381_audit_scheduling import run_file_io
+                    txt=await run_file_io(extractor,path) if callable(extractor) else ""
                     text=str(txt or "")
                     chars=len(text.strip())
                     d["local"]=str(path)
@@ -485,7 +497,8 @@ def install(ns):
                     if not local:continue
                     path=Path(local)
                     if not path.is_file():continue
-                    txt=await asyncio.to_thread(extractor,path) if callable(extractor) else ""
+                    from v381_audit_scheduling import run_file_io
+                    txt=await run_file_io(extractor,path) if callable(extractor) else ""
                     text=str(txt or "")
                     chars=len(text.strip())
                     d.update(local=str(path),text=text,

@@ -40,13 +40,15 @@ def run():
         ns={"extract_text":extract}
         with patch("v295_eis_originals.root",return_value=root):
             cached.install(ns)
-        one=ns["extract_text"](pdf)
-        two=ns["extract_text"](pdf)
-        assert one==two and count[0]==1
-        pdf.write_bytes(b"replaced bytes of EIS original")
-        ns["extract_text"](pdf)
-        assert count[0]==2,"Content change must invalidate OCR cache"
-        assert cached.cache_stats()["hits"]>=1
+        # Each selftest run gets its own cache even when bytes match an earlier run.
+        with patch("v347_text_cache.tempfile.gettempdir",return_value=tmp):
+            one=ns["extract_text"](pdf)
+            two=ns["extract_text"](pdf)
+            assert one==two and count[0]==1
+            pdf.write_bytes(b"replaced bytes of EIS original")
+            ns["extract_text"](pdf)
+            assert count[0]==2,"Content change must invalidate OCR cache"
+            assert cached.cache_stats()["hits"]>=1
 
         path=root/"audit.sqlite"
         def connection():

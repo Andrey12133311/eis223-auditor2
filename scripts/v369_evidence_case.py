@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 from scripts.v368_manager_workflow import supervisor, _member
+from scripts.v342_identity import organization_display_name
 
 router = APIRouter(prefix="/me/cases", tags=["my-procurement-case"])
 manager_router = APIRouter(prefix="/manager/cases", tags=["manager-procurement-case"])
@@ -198,7 +199,7 @@ def _case_snapshot(ns,reg):
             "reg_number":reg,
             "purchase":{
                 "title":str(p.get("title") or "")[:400],
-                "customer":str(p.get("customer") or "")[:300],
+                "customer":organization_display_name(p.get("customer"))[:300],
                 "customer_inn":str(p.get("customer_inn") or "")[:20],
                 "method":str(p.get("method") or "")[:200],
                 "price":str(p.get("price") or p.get("price_num") or "")[:120],

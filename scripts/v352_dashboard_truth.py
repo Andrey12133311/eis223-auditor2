@@ -10,6 +10,7 @@ from datetime import datetime
 import re
 from v333_dedup_ui import issue_key, _proof, _different_fact
 from v365_consultant_refs import legal_identity
+from v342_identity import organization_display_name
 
 def _normalized_law(row):
     # Equivalent ways to cite the same article/part and Government decree are
@@ -162,4 +163,5 @@ def dashboard_counts(conn,sql,args,page_offset,page_limit):
         list(args)+[page_limit,page_offset]).fetchall()]
     for row in records:
         row["violations"]=counts.get(row["reg_number"],0)
+        row["customer"]=organization_display_name(row.get("customer"))
     return summaries,records

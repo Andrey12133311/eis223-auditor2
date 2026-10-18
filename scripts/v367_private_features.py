@@ -20,6 +20,7 @@ import zipfile
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 
@@ -284,6 +285,71 @@ def memo_archive(request:Request, response:Response):
              "has_pdf":bool(row[4])} for row in rows]
 
 
+class MemoRequisites(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recipient: str = Field(max_length=199)
+    executor: str = Field(max_length=199)
+    phone: str | None = Field(default=None,max_length=199)
+
+    @field_validator("recipient", "executor", "phone")
+    @classmethod
+    def printable(cls, value):
+        if value is None:return None
+        if any(ord(c)<32 and c not in "\n\t\r" for c in value):
+            raise ValueError("Недопустимые управляющие символы")
+        return " ".join(value.split())
+
+
+def _memo_requisites(owner, reg_number):
+    with connect() as db:
+        row=db.execute(
+            "SELECT recipient,executor,phone FROM account_memo_requisites "
+            "WHERE user_id=%s AND reg_number=%s",(owner,reg_number)).fetchone()
+    return ({"recipient":row[0],"executor":row[1],**({"phone":row[2]} if row[2] is not None else {})} if row else {})
+
+
+def _memo_defaults():
+    # Read only the two editable lines; never change the shared official template.
+    from v304_official_memo_odt import template_path, OO, TX, _text
+    from xml.etree import ElementTree as ET
+    path=template_path()
+    if not path.is_file():return {}
+    try:
+        with zipfile.ZipFile(path) as z:
+            root=ET.fromstring(z.read("content.xml"))
+        body=root.find(".//{"+OO+"}text")
+        paragraphs=list(body.iter("{"+TX+"}p")) if body is not None else []
+        return {key:_text(paragraphs[idx]).strip() for key,idx in
+                (("recipient",13),("executor",55),("phone",56)) if idx<len(paragraphs)}
+    except (OSError,KeyError,zipfile.BadZipFile,ET.ParseError):
+        return {}
+
+
+@router.get("/memo-requisites/{reg_number}")
+def get_memo_requisites(reg_number:str,request:Request,response:Response):
+    owner=current_account(request)[0]
+    if not REG.fullmatch(reg_number):raise HTTPException(422,"Неверный номер закупки ЕИС")
+    response.headers.update(no_store_headers())
+    fields=_memo_requisites(owner,reg_number)
+    return {"fields":{**_memo_defaults(),**fields},"saved":bool(fields)}
+
+
+@router.put("/memo-requisites/{reg_number}")
+def save_memo_requisites(reg_number:str,data:MemoRequisites,request:Request):
+    require_origin(request)
+    owner=current_account(request)[0]
+    if not REG.fullmatch(reg_number):raise HTTPException(422,"Неверный номер закупки ЕИС")
+    with connect() as db:
+        db.execute(
+            """INSERT INTO account_memo_requisites(user_id,reg_number,recipient,executor,phone)
+               VALUES(%s,%s,%s,%s,%s) ON CONFLICT(user_id,reg_number) DO UPDATE SET
+               recipient=EXCLUDED.recipient,executor=EXCLUDED.executor,
+               phone=COALESCE(EXCLUDED.phone,account_memo_requisites.phone),
+               updated_at=CURRENT_TIMESTAMP""",
+            (owner,reg_number,data.recipient,data.executor,data.phone))
+    return {"saved":True,"fields":data.model_dump(exclude_none=True)}
+
+
 @router.post("/memo-archive/{reg_number}", status_code=201)
 async def create_archived_memo(reg_number:str,request:Request):
     require_origin(request)
@@ -300,7 +366,7 @@ async def create_archived_memo(reg_number:str,request:Request):
         raise HTTPException(409,"Личный архив содержит 100 записок; обратитесь к администратору")
     # The existing official renderer rejects unverified purchases / missing
     # original template; never create a placeholder document or fake finding.
-    rendered=await builder(reg_number)
+    rendered=await builder(reg_number,fields=_memo_requisites(owner,reg_number))
     binary=_verify_odt(rendered.body)
     memo_id=uuid4()
     with connect() as db:

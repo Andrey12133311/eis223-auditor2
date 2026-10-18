@@ -15,12 +15,15 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from v295_eis_originals import allowed_documents, saved_document, root, uid_from_url
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
+from v381_audit_scheduling import (audit_signals, background_audit,
+                                   ordered_map, run_file_io)
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
 RULE_REVISION="2026-10-18-v380-v372-protocol-identity-evidence"
@@ -31,9 +34,8 @@ FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
           ".ods",".xml",".txt",".csv"}
 MAX_BYTES=25*1024*1024
 MAX_DOC_ROWS=900
-# Bounded across both general and thematic workers; never launch OCR for
-# hundreds of files at once or starve the HTTP service.
-FILE_IO_LIMIT=asyncio.Semaphore(6)
+# Shared physical file limit lives in v381_audit_scheduling: six operations,
+# with one slot reserved for foreground/manual checks.
 FILE_BATCH_SIZE=12
 GENERAL_WORKERS=4
 PRIORITY=["32616233661","32616324151","32616287360"]
@@ -354,81 +356,77 @@ def source_verified(reg,path,digest,meta):
     return info["sha256"]==meta.get("archive_sha256") and digest==meta.get("sha256")
 
 async def stored_docs(ns,reg,rows):
-    """Hash, authenticate and extract in bounded parallel batches.
+    """Authenticate every file and extract with bounded, rolling workers.
 
-    All local paths and receipt checks are evaluated individually. Result
-    order is stable, and missing originals remain unreadable, never "OK".
-    Shared semaphore caps concurrency across main and thematic audits.
+    Results keep source order. Manual checks retain reserved physical capacity;
+    timed-out threads keep their permits until they actually stop.
     """
     extractor=ns.get("extract_text")
     if not callable(extractor):raise RuntimeError("Document extractor unavailable")
     data_root=root().resolve()
 
-    async def one(row):
+    def read_one(row):
         raw=row.get("local_path")
         if not raw:return None
-        async with FILE_IO_LIMIT:
-            stage="path"
-            try:
-                f=Path(raw).resolve(strict=True)
-                if (not f.is_file() or not f.is_relative_to(data_root) or
-                    f.suffix.lower() not in FILE_EXT or
-                    not 0<f.stat().st_size<=MAX_BYTES):
-                    return None
-                def load_hash():
-                    with f.open("rb") as h:
-                        return hashlib.file_digest(h,"sha256").hexdigest()
-                stage="hash"
-                sha=await asyncio.to_thread(load_hash)
-                try:meta=json.loads(row.get("metadata_json") or "{}")
-                except (ValueError,TypeError):meta={}
-                if not isinstance(meta,dict):meta={}
-                if meta.get("sha256") and meta["sha256"]!=sha:return None
-                # Older saved originals stored their EIS URL in docs.url.
-                # A receipt still has to authenticate this exact file/hash.
-                if not meta.get("source_url"):
-                    meta={**meta,"source_url":row.get("url") or ""}
-                stage="receipt"
-                trusted=await asyncio.to_thread(source_verified,reg,f,sha,meta)
-                meta={**meta,"sha256":sha}
-                if not trusted:
-                    meta["source"]="existing_local_unverified"
-                stage="text"
-                body=await asyncio.wait_for(
-                    asyncio.to_thread(document_text,f,extractor),timeout=55)
-                body=str(body or "")[:650000]
-                readable=len(body.strip())>=3
-                return {
-                    "name":row.get("name") or f.name,
-                    "url":row.get("url") or "",
-                    "type":row.get("doc_type") or "other",
-                    "published":row.get("published_at") or "",
-                    "meta":meta,"text":body,"local":str(f),"annotated":None,
-                    "status":"checked" if readable else "downloaded_no_text",
-                    "error":None if readable else "Текст не удалось извлечь",
-                    "final_url":row.get("final_url") or row.get("url") or ""
-                }
-            except (FileNotFoundError,NotADirectoryError):
-                # Old stale file paths cannot be audited: skip instead of
-                # producing thousands of repeated exception logs.
+        stage="path"
+        try:
+            f=Path(raw).resolve(strict=True)
+            if (not f.is_file() or not f.is_relative_to(data_root) or
+                f.suffix.lower() not in FILE_EXT or
+                not 0<f.stat().st_size<=MAX_BYTES):
                 return None
-            except Exception as exc:
-                reason=" ".join(str(exc).split())[:240]
-                print(f"V351 DOC_SKIP reg={reg} type={type(exc).__name__} "
-                      f"file_id={row.get('id')} stage={stage} reason={reason!r}",flush=True)
-                return None
+            def load_hash():
+                with f.open("rb") as h:
+                    return hashlib.file_digest(h,"sha256").hexdigest()
+            stage="hash"
+            sha=load_hash()
+            try:meta=json.loads(row.get("metadata_json") or "{}")
+            except (ValueError,TypeError):meta={}
+            if not isinstance(meta,dict):meta={}
+            if meta.get("sha256") and meta["sha256"]!=sha:return None
+            # Older saved originals stored their EIS URL in docs.url.
+            # A receipt still has to authenticate this exact file/hash.
+            if not meta.get("source_url"):
+                meta={**meta,"source_url":row.get("url") or ""}
+            stage="receipt"
+            trusted=source_verified(reg,f,sha,meta)
+            meta={**meta,"sha256":sha}
+            if not trusted:
+                meta["source"]="existing_local_unverified"
+            stage="text"
+            body=document_text(f,extractor)
+            body=str(body or "")[:650000]
+            readable=len(body.strip())>=3
+            return {
+                "name":row.get("name") or f.name,
+                "url":row.get("url") or "",
+                "type":row.get("doc_type") or "other",
+                "published":row.get("published_at") or "",
+                "meta":meta,"text":body,"local":str(f),"annotated":None,
+                "status":"checked" if readable else "downloaded_no_text",
+                "error":None if readable else "Текст не удалось извлечь",
+                "final_url":row.get("final_url") or row.get("url") or ""
+            }
+        except (FileNotFoundError,NotADirectoryError):
+            # Old stale file paths cannot be audited: skip instead of
+            # producing thousands of repeated exception logs.
+            return None
+        except Exception as exc:
+            reason=" ".join(str(exc).split())[:240]
+            print(f"V351 DOC_SKIP reg={reg} type={type(exc).__name__} "
+                  f"file_id={row.get('id')} stage={stage} reason={reason!r}",flush=True)
+            return None
 
-    output=[]
-    unreadable=0
-    for start in range(0,len(rows),FILE_BATCH_SIZE):
-        window=rows[start:start+FILE_BATCH_SIZE]
-        results=await asyncio.gather(*(one(row) for row in window))
-        for doc in results:
-            if doc is None:
-                unreadable+=1
-            else:
-                output.append(doc)
-                if doc["status"]!="checked":unreadable+=1
+    async def one(row):
+        try:
+            return await run_file_io(read_one,row,timeout=55)
+        except asyncio.TimeoutError:
+            print(f"V381 DOC_TIMEOUT reg={reg} file_id={row.get('id')}",flush=True)
+            return None
+
+    results=await ordered_map(one,rows,limit=FILE_BATCH_SIZE)
+    output=[doc for doc in results if doc is not None]
+    unreadable=sum(doc is None or doc["status"]!="checked" for doc in results)
     return output,unreadable
 
 def merge_docs(official,other):
@@ -673,20 +671,29 @@ def install(ns):
                 return
             async def worker(worker_id):
                 index=0
+                signals=audit_signals(ns)
                 while True:
+                    version=signals.version("general")
                     reg=await asyncio.to_thread(claim_next,ns)
-                    if reg is None:break
+                    if reg is None:
+                        await signals.wait("general",version,30)
+                        continue
                     try:
+                        started=time.monotonic()
                         # EIS originals are already stored; no HTTP/EIS request.
-                        # SQLite serializes writes. Maximum two concurrent runs.
-                        state,detail=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
+                        # Keep the four existing audit workers; foreground
+                        # file extraction always has reserved capacity.
+                        with background_audit():
+                            state,detail=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
                         await asyncio.to_thread(mark,ns,reg,state,detail)
+                        elapsed_ms=round((time.monotonic()-started)*1000,1)
                         index+=1
                         if state=="completed":
                             print(f"V332 AUDITED reg={reg} worker={worker_id} docs={detail['documents_read']}/"
                                   f"{detail['documents_found']} verified={detail['verified_original_documents']} "
                                   f"originals={detail['original_received']}/{detail['original_expected']} "
-                                  f"new_findings={detail['new_findings']} new_checks={detail['new_checks']}",
+                                  f"new_findings={detail['new_findings']} new_checks={detail['new_checks']} "
+                                  f"elapsed_ms={elapsed_ms}",
                                   flush=True)
                         elif index<=4 or index%20==0:
                             print(f"V332 NO_DOCUMENT_TEXT reg={reg}",flush=True)
@@ -704,17 +711,33 @@ def install(ns):
                         state=await asyncio.to_thread(progress,ns)
                         print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
                     await asyncio.sleep(.05)
-            while True:
-                await asyncio.gather(*(worker(i+1) for i in range(GENERAL_WORKERS)))
-                state=await asyncio.to_thread(progress,ns)
-                print("V332 CAMPAIGN_FINISHED "+json.dumps(state,ensure_ascii=False),flush=True)
-                await asyncio.sleep(30)
-                new=await asyncio.to_thread(add_new_verified,ns)
-                refreshed=await asyncio.to_thread(refresh_changed,ns)
-                if refreshed or new:
-                    print("V351 QUEUE_WAKEUP new="+str(new)+
-                          " new_evidence="+str(refreshed),flush=True)
-        asyncio.create_task(work())
+            async def refresh_queue():
+                signals=audit_signals(ns)
+                while True:
+                    version=signals.version("evidence")
+                    started=time.monotonic()
+                    try:
+                        new=await asyncio.to_thread(add_new_verified,ns)
+                        refreshed=await asyncio.to_thread(refresh_changed,ns)
+                        if refreshed or new:
+                            signals.notify("general")
+                            print("V381 QUEUE_WAKEUP new="+str(new)+
+                                  " new_evidence="+str(refreshed)+
+                                  " elapsed_ms="+str(round((time.monotonic()-started)*1000,1)),flush=True)
+                    except Exception as exc:
+                        # A transient busy DB must not cancel all four audits.
+                        print("V381 QUEUE_REFRESH_FAILED type="+type(exc).__name__,flush=True)
+                    # Independent of slow audits: newly ready evidence can
+                    # enter a freed worker immediately, with polling fallback.
+                    await signals.wait("evidence",version,30)
+            tasks=[asyncio.create_task(worker(i+1)) for i in range(GENERAL_WORKERS)]
+            tasks.append(asyncio.create_task(refresh_queue()))
+            try:
+                await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+        ns["_v332_campaign_worker"]=asyncio.create_task(work(),name="general-audit-campaign")
     print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
           "evidence_only=True",flush=True)

@@ -22,6 +22,7 @@ from xml.etree import ElementTree as ET
 from fastapi import HTTPException,Request
 from fastapi.responses import Response,HTMLResponse
 from v295_eis_originals import auth,root,save_atomic
+from v342_identity import organization_display_name
 
 logger=logging.getLogger(__name__)
 MIME="application/vnd.oasis.opendocument.text"
@@ -105,22 +106,7 @@ def _sentence(text,maxlen=1500):
     return text[:maxlen]
 
 def _human_org(value):
-    # Keep legal-form acronyms but never put a FULL organisation name in caps.
-    value=_sentence(value,450)
-    if not value:return ""
-    if sum(ch.isupper() for ch in value if ch.isalpha()) >= .85*max(1,sum(ch.isalpha() for ch in value)):
-        acronyms=r"(?:ООО|АО|ПАО|ЗАО|ОАО|ФГУП|ФГБУ|ФГБОУ|ГБУ|МБУ|АНО|НКО|ГУП|МУП)"
-        saved=[]
-        def save(m):
-            saved.append(m.group(0))
-            return "@LEGAL"+str(len(saved)-1)+"@"
-        value=re.sub(r"\b"+acronyms+r"\b",save,value)
-        value=value.lower()
-        value=value[0].upper()+value[1:]
-        value=re.sub(r"@legal([0-9]+)@",lambda m:saved[int(m.group(1))],value,flags=re.I)
-        value=re.sub(r"([.!?]\s+)([а-яё])",lambda m:m.group(1)+m.group(2).upper(),value)
-        value=re.sub(r"«([а-яё])",lambda m:"«"+m.group(1).upper(),value)
-    return value
+    return organization_display_name(_sentence(value,450))
 
 def _fetch_company_rusprofile(inn,provided_name):
     # Rusprofile has no publicly guaranteed API. Only trust a scrape that
