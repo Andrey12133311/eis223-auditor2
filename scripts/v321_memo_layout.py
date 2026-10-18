@@ -5,7 +5,9 @@ Operates only on the already-rendered official FAS memo. No DB writes.
 from __future__ import annotations
 import copy
 import io
+import math
 import re
+import unicodedata
 import zipfile
 from xml.etree import ElementTree as ET
 
@@ -19,6 +21,7 @@ STYLE_NAME="EIS223MemoBody321"
 EXECUTOR_STYLE="EIS223MemoExecutor381"
 EXECUTOR_TEXT_STYLE="EIS223MemoExecutorText381"
 EXECUTOR_FRAME_STYLE="EIS223MemoExecutorFrame381"
+XML_ID="{http://www.w3.org/XML/1998/namespace}id"
 for prefix,uri in (("office",OO),("text",TX),("style",ST),("fo",FO),("draw",DR),("svg",SVG)):
     ET.register_namespace(prefix,uri)
 
@@ -96,14 +99,20 @@ def _executor_block(root,body):
     """
     current=list(body.iter("{"+TX+"}p"))
     signer_idx=next((i for i,p in enumerate(current)
-        if p.get("{"+TX+"}style-name")=="P24" or "Заместитель начальника Управления" in _odf_string(p)),-1)
+        if p.get(XML_ID)=="eis223-memo-signer-role"),-1)
+    if signer_idx<0:
+        signer_idx=next((i for i,p in enumerate(current)
+            if p.get("{"+TX+"}style-name")=="P24" or "Заместитель начальника Управления" in _odf_string(p)),-1)
     executor_idx=next((i for i,p in enumerate(current)
-        if p.get("{"+TX+"}style-name")=="P21" and i>signer_idx),-1)
+        if p.get(XML_ID)=="eis223-memo-executor"),-1)
+    if executor_idx<0:
+        executor_idx=next((i for i,p in enumerate(current)
+            if p.get("{"+TX+"}style-name")=="P21" and i>signer_idx),-1)
     if signer_idx<0 or executor_idx<=signer_idx:
         return
     direct=list(body)
     block=current[executor_idx:executor_idx+2]
-    if not block or any(p not in direct for p in block):
+    if not block:
         return
     # Use the last actual signature paragraph as anchor, never a layout blank.
     anchor=next((p for p in reversed(current[signer_idx:executor_idx])
@@ -133,12 +142,59 @@ def _executor_block(root,body):
         if properties is None:
             properties=ET.SubElement(style,"{"+ST+"}paragraph-properties")
         properties.set("{"+FO+"}keep-with-next","always")
+        properties.set("{"+FO+"}break-before","auto")
+        properties.set("{"+FO+"}break-after","auto")
         paragraph.set("{"+TX+"}style-name",name)
+    # Reserve the two small executor lines within the final content page.
+    # The frame itself must not flow to a new page merely to clear its anchor.
+    # Account fields allow 199 characters. A long name/phone wraps inside
+    # the 16 cm frame, so a fixed two-line reserve can overlap the signature.
+    # Bound line length conservatively at 56 em-width character units for
+    # 7 pt text; wide Unicode glyphs count twice and combining marks do not.
+    reserved_lines=0
+    for paragraph in block:
+        text=_odf_string(paragraph)
+        if not text.strip():continue
+        units=sum(0 if unicodedata.combining(c) else
+                  2 if unicodedata.east_asian_width(c) in ("W","F") else 1
+                  for c in text)
+        reserved_lines+=max(1,math.ceil(units/56))+len(list(paragraph.iter("{"+TX+"}line-break")))
+    reserve=(max(0.7,(reserved_lines*8.2+3)/28.34646) if reserved_lines else 0)
+    anchor_original=anchor.get("{"+TX+"}style-name","Standard")
+    anchor_style=ET.SubElement(styles,"{"+ST+"}style",{
+        "{"+ST+"}name":"EIS223MemoSignatureEnd",
+        "{"+ST+"}family":"paragraph","{"+ST+"}parent-style-name":anchor_original})
+    ET.SubElement(anchor_style,"{"+ST+"}paragraph-properties",{
+        "{"+FO+"}margin-bottom":"0cm","{"+FO+"}keep-with-next":"always" if reserve else "auto",
+        "{"+FO+"}break-before":"auto","{"+FO+"}break-after":"auto"})
+    anchor.set("{"+TX+"}style-name","EIS223MemoSignatureEnd")
+    parents={child:parent for parent in body.iter() for child in parent}
+    for paragraph in block:
+        parents[paragraph].remove(paragraph)
+    # A source template may keep the executor in a separate anchored frame.
+    # Drop its now-empty wrapper so it cannot preserve an empty final page.
+    for frame in list(body.iter("{"+DR+"}frame")):
+        if (not _clean(_odf_string(frame)) and
+                frame.find(".//{"+DR+"}image") is None):
+            parent=parents.get(frame)
+            if parent is not None and frame in list(parent):parent.remove(frame)
     for p in current[signer_idx+1:]:
         if p in list(body) and (p in block or not _clean(_odf_string(p))):
             body.remove(p)
     if not any(_clean(_odf_string(p)) for p in block):
         return
+    # Bottom margins of the last paragraph can be discarded at a page edge.
+    # Reserve a real line box kept with the signature instead, so any necessary
+    # break moves the closing/signature together, never the executor alone.
+    reserve_style=ET.SubElement(styles,"{"+ST+"}style",{
+        "{"+ST+"}name":"EIS223MemoExecutorReserve","{"+ST+"}family":"paragraph"})
+    ET.SubElement(reserve_style,"{"+ST+"}paragraph-properties",{
+        "{"+FO+"}line-height":f"{reserve:.2f}cm","{"+FO+"}margin-top":"0cm",
+        "{"+FO+"}margin-bottom":"0cm","{"+FO+"}keep-with-next":"auto",
+        "{"+FO+"}break-before":"auto","{"+FO+"}break-after":"auto"})
+    ET.SubElement(reserve_style,"{"+ST+"}text-properties",{"{"+FO+"}font-size":"1pt"})
+    body.insert(list(body).index(anchor)+1,ET.Element("{"+TX+"}p",{
+        "{"+TX+"}style-name":"EIS223MemoExecutorReserve"}))
     for name,family in ((EXECUTOR_STYLE,"paragraph"),(EXECUTOR_TEXT_STYLE,"text")):
         style=ET.SubElement(styles,"{"+ST+"}style",{
             "{"+ST+"}name":name,"{"+ST+"}family":family})
@@ -157,15 +213,16 @@ def _executor_block(root,body):
     frame_style=ET.SubElement(styles,"{"+ST+"}style",{
         "{"+ST+"}name":EXECUTOR_FRAME_STYLE,"{"+ST+"}family":"graphic"})
     ET.SubElement(frame_style,"{"+ST+"}graphic-properties",{
-        "{"+ST+"}wrap":"none","{"+ST+"}vertical-pos":"bottom",
+        "{"+ST+"}wrap":"run-through","{"+ST+"}run-through":"foreground",
+        "{"+ST+"}vertical-pos":"bottom",
         "{"+ST+"}vertical-rel":"page-content","{"+ST+"}horizontal-pos":"left",
-        "{"+ST+"}horizontal-rel":"page-content","{"+ST+"}flow-with-text":"true",
+        "{"+ST+"}horizontal-rel":"page-content","{"+ST+"}flow-with-text":"false",
         "{"+FO+"}margin-top":"0.15cm","{"+FO+"}margin-bottom":"0cm",
         "{"+FO+"}padding":"0cm","{"+FO+"}border":"none",
         "{"+DR+"}fill":"none","{"+DR+"}stroke":"none"})
     frame=ET.SubElement(anchor,"{"+DR+"}frame",{
         "{"+DR+"}name":"EIS223MemoExecutor","{"+DR+"}style-name":EXECUTOR_FRAME_STYLE,
-        "{"+TX+"}anchor-type":"paragraph","{"+SVG+"}width":"16cm",
+        "{"+TX+"}anchor-type":"paragraph","{"+DR+"}z-index":"1","{"+SVG+"}width":"16cm",
         "{"+SVG+"}height":"0.5cm"})
     box=ET.SubElement(frame,"{"+DR+"}text-box",{"{"+FO+"}min-height":"0.5cm"})
     for paragraph in block:
@@ -202,17 +259,15 @@ def format_service_memo(data:bytes,findings:list[dict])->bytes:
     _style(root)
     main=findings[0]
     _set(paras[26],"В документе «"+_document(main)+"» установлено следующее: "+_title(main))
-    _set(paras[27],"Подтверждающие обстоятельства: "+_evidence(main))
-    # Every verified violation goes into its own paragraphs, including #3/#4.
+    # The raw source excerpt is already retained with the verified finding.
+    # Do not repeat that technical file/fragment dump in the service memo.
+    body.remove(paras[27])
+    # Every verified violation remains in its own paragraph, including #3/#4.
     place=list(body).index(paras[28])
     for f in findings[1:]:
         desc=ET.Element("{"+TX+"}p")
         _set(desc,"Дополнительно в документе «"+_document(f)+"» установлено: "+_title(f))
         body.insert(place,desc);place+=1
-        if _evidence(f):
-            detail=ET.Element("{"+TX+"}p")
-            _set(detail,"Подтверждающие обстоятельства: "+_evidence(f))
-            body.insert(place,detail);place+=1
     # The remaining boilerplate keeps the template's words and order; remove
     # only stray inline runs/tabs that produce incompatible font sizes.
     for par in paras[20:30]:

@@ -487,6 +487,24 @@ async function testFindingMutationOutranksInFlightRead() {
   assert.equal(reads, 3, 'mutation queues fresh read after stale GET');
   assert.equal(ui.submit().disabled, true); assert.match(ui.words(), /Отправлено на согласование/);
 }
+async function testThematicFindingContextAndNoDuplicate() {
+  const batch='a'.repeat(24),other='b'.repeat(24),held=deferred();let submitted=false;
+  const ui=harness(embedded('v382_finding_review_ui.py','SCRIPT ='),'control,load,send',async call=>{
+    assert.ok(call.url.endsWith('?batch='+batch)||call.url.endsWith('?batch='+other));
+    if(call.method==='POST'){assert.ok(call.url.endsWith('/submit?batch='+batch));await held.promise;submitted=true;return {status:'submitted'}}
+    return {findings:[{...findingFixture(),submission:submitted&&call.url.endsWith(batch)?{status:'submitted'}:null}],manager_assigned:true};
+  });
+  const first=ui.api.control(reviewReg,reviewKey,batch),second=ui.api.control(reviewReg,reviewKey,other);
+  ui.context.document.querySelectorAll=()=>[first,second];
+  await Promise.all([ui.api.load(reviewReg,false,batch),ui.api.load(reviewReg,false,other)]);
+  const sending=ui.api.send(reviewReg,reviewKey,batch);
+  await ui.api.send(reviewReg,reviewKey,batch);
+  assert.equal(ui.calls.filter(x=>x.method==='POST').length,1);
+  held.resolve();await sending;
+  const button=box=>flatten(box).find(x=>x.tagName==='BUTTON'&&x.textContent.includes('руководителю'));
+  assert.equal(button(first).disabled,true);
+  assert.equal(button(second).disabled,false,'another batch context must not inherit stale local state');
+}
 async function testManagerFindingQueueAndVersionedDecisions() {
   let row = {...findingFixture(), submission: {status: 'submitted', version: 7}}, rejected = false;
   const ui = harness(embedded('v368_manager_ui.py', 'SCRIPT='), 'loadFindings,loadFindingQueue', async call => {
@@ -582,9 +600,9 @@ async function testManagerSelfAttachAndRefresh() {
     testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
     testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue,
     testFindingSubmissionLifecycleAndNoDuplicate, testFindingMissingManagerStaleAndErrors,
-    testFindingMutationOutranksInFlightRead, testManagerFindingQueueAndVersionedDecisions,
+    testFindingMutationOutranksInFlightRead, testThematicFindingContextAndNoDuplicate, testManagerFindingQueueAndVersionedDecisions,
     testAdminTeamSaveCancelRetryAndInactive, testManagerSelfAttachAndRefresh]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 18 scenarios passed');
+  console.log('Account frontend request/race regressions: 19 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
