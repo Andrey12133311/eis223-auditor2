@@ -18,6 +18,7 @@ from scripts.account_api_v1 import connect,current_account,require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 from scripts.v368_manager_workflow import supervisor,_member,_uuid,_audit,_task_dict,_task_rows
 from scripts.v367_private_features import _pdf_from_odt
+from scripts.v384_thematic_findings import review_items
 
 router=APIRouter(prefix="/manager",tags=["manager-legal-control"])
 
@@ -116,12 +117,14 @@ def finding_list(user_id:str,reg_number:str,request:Request,response:Response):
         submissions=db.execute(
             "SELECT finding_key,status,version FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s",
             (worker,reg_number)).fetchall()
+        try:
+            items=review_items(db,_db_state(request),worker,reg_number,
+                              _legal_items(_db_state(request),reg_number))
+        except sqlite3.Error as exc:
+            raise HTTPException(503,"Не удалось открыть доказательства ЕИС") from exc
     submission_by_key={r[0]:{"status":r[1],"version":r[2]} for r in submissions}
     approved={r[0]:{"decision":r[1],"comment":r[2],
                     "reviewer_id":str(r[3]),"updated_at":r[4].isoformat()} for r in saved}
-    try:items=_legal_items(_db_state(request),reg_number)
-    except sqlite3.Error as exc:
-        raise HTTPException(503,"Не удалось открыть доказательства ЕИС") from exc
     if not owns_check:
         items=[item for item in items if item["finding_key"] in submission_by_key]
     for item in items:
@@ -172,7 +175,8 @@ def finding_decision(user_id:str,reg_number:str,finding_key:str,
                 raise HTTPException(409,"Окончательное решение по нарушению уже сохранено")
         # The key must still match a verified live finding; stale approvals
         # cannot be silently carried to modified evidence.
-        try:items=_legal_items(_db_state(request),reg_number)
+        try:items=review_items(db,_db_state(request),worker,reg_number,
+                              _legal_items(_db_state(request),reg_number))
         except sqlite3.Error as exc:
             raise HTTPException(503,"Проверка текущих доказательств недоступна") from exc
         row=next((item for item in items if item["finding_key"]==finding_key),None)

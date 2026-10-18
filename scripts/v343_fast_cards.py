@@ -207,11 +207,11 @@ def result_accordion(key,label,count,body):
             '</span></summary><div class="result-body">'+body+'</div></details>')
 
 
-def detail_block(item, kind, title, law, evidence, document, source, link, review_reg=None):
+def detail_block(item, kind, title, law, evidence, document, source, link, review_reg=None, review_batch=""):
     review_control=""
     if review_reg and kind=="legal":
         from scripts.v382_finding_review_ui import finding_control
-        review_control=finding_control(review_reg,item)
+        review_control=finding_control(review_reg,item,review_batch)
     supporting=(item or {}).get("supporting_sources") or []
     extra=""
     if len(supporting)>1:
@@ -256,12 +256,13 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
       +extra+review_control
       +'</article>')
 
-def render_thematic_panel(reg,thematic):
+def render_thematic_panel(reg,thematic,account_review=False):
     """Reuse the same panels and finding cards used by the main audit view."""
     if not thematic:return ""
     batch=thematic["batch"]
     from v352_dashboard_truth import collapse_legal_events
-    rows=collapse_legal_events(thematic.get("findings",[]))
+    rows=(list(thematic.get("findings",[])) if thematic.get("findings_canonical")
+          else collapse_legal_events(thematic.get("findings",[])))
     labels=thematic.get("category_labels") or {}
     selected=thematic.get("categories") or []
     state=thematic.get("state") or "queued"
@@ -277,6 +278,9 @@ def render_thematic_panel(reg,thematic):
       '</div></div>']
     if thematic.get("detail"):
         result.append('<p class="meta">'+esc(thematic["detail"])+'</p>')
+    if account_review:
+        from scripts.account_memo_requisites_ui_v1 import render_memo_requisites_editor
+        result.append(render_memo_requisites_editor(reg))
     if rows:
         result.append('<p><a class="action" href="/thematic/card/'+esc(batch)+'/'+
           esc(reg)+'?print=1" target="_blank" rel="noopener noreferrer">'+
@@ -290,9 +294,11 @@ def render_thematic_panel(reg,thematic):
         category=labels.get(item.get("category"),item.get("category") or "Без категории")
         block=detail_block(item,"legal",item.get("title"),item.get("law"),
             item.get("evidence"),item.get("document"),
-            item.get("source_url"),item.get("law_url"))
+            item.get("source_url"),item.get("law_url"),
+            review_reg=reg if account_review else None,review_batch=batch)
         result.append(block.replace('<article class="legal">',
-              '<article class="legal"><p class="meta">Категория: '+
+              '<article class="legal"><p class="meta"><b>Номер закупки ЕИС: '+esc(reg)+
+              '</b></p><p class="meta">Категория: '+
               esc(category)+'</p>',1))
     result.append('</section>')
     return ''.join(result)
@@ -344,7 +350,7 @@ def render(reg,data,thematic=None,account_review=False):
     if thematic:
         nav=('<nav><a href="/thematic#'+esc(thematic["batch"])+
              '">← К тематической очереди</a></nav>')
-    thematic_html=render_thematic_panel(reg,thematic)
+    thematic_html=render_thematic_panel(reg,thematic,account_review=account_review)
     export_label=('Скачать ODT сохранённых результатов · требуется сверка' if incomplete
                   else 'Сформировать служебную записку ODT')
     actions='<p class="card-actions"><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">'+export_label+'</a></p>' if candidates else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
@@ -380,7 +386,7 @@ def render(reg,data,thematic=None,account_review=False):
         'Это не означает, что нарушений не существует.</p>')))
     review_section='' if thematic else result_accordion('audit-review','Требует проверки',len(reviews),checked)
     review_assets=""
-    if account_review and not thematic:
+    if account_review:
         from scripts.v382_finding_review_ui import STYLE as review_style, SCRIPT as review_script
         review_assets=review_style+review_script
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'

@@ -18,6 +18,8 @@ def initialize_schema(db):
         raise RuntimeError("Unsafe SQL fragment in account migration")
     for statement in statements:
         db.execute(statement)
+    db.execute("ALTER TABLE account_finding_submissions ADD COLUMN IF NOT EXISTS "
+               "source_batch TEXT NOT NULL DEFAULT ''")
     # Safe additive migration for existing accounts. Never guess names from email.
     for column in ("last_name", "first_name", "patronymic"):
         db.execute(

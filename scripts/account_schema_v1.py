@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS account_finding_submissions (
     reg_number TEXT NOT NULL,
     finding_key TEXT NOT NULL,
     title TEXT NOT NULL,
+    source_batch TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'submitted'
         CHECK(status IN ('submitted','approved','returned','rejected')),
     submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

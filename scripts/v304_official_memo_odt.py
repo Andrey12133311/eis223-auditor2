@@ -290,6 +290,12 @@ def _render_odt(template,p,findings,organization,fields):
     if body is None:raise HTTPException(503,"Шаблон ODT не содержит текста")
     paras=list(body.iter("{"+TX+"}p"))
     if len(paras)<35:raise HTTPException(503,"Неверная структура служебной записки")
+    # Identify semantic fields before removing spacers or adding findings.
+    # Word-exported templates can rename P21/P24, so final-page layout must
+    # not depend on their incidental paragraph-style names.
+    for idx,key in ((32,"signer-role"),(33,"signer"),(55,"executor"),(56,"phone")):
+        if idx<len(paras):
+            paras[idx].set("{http://www.w3.org/XML/1998/namespace}id","eis223-memo-"+key)
     reg=str(p.get("reg_number"))
     title=re.sub(r"\s+"," ",str(p.get("title") or "предмет закупки не установлен")).strip()
     title=title[:580]
