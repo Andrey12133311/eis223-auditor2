@@ -53,6 +53,7 @@ SHARED_READ_PATHS = frozenset((
     "/", "/api/status", "/api/org-forms", "/api/procurements",
     "/api/purchases", "/api/dashboard",
     "/api/v257/dashboard", "/api/v257/violation-types",
+    "/api/v304/memo-template/status",
     "/api/v332/legal-audit/progress",
     "/api/v334/violation-ledger/summary",
     "/api/v334/violation-ledger/overlaps",
@@ -62,6 +63,9 @@ SHARED_READ_PATTERNS = tuple(map(re.compile, (
     r"/api/purchases/3[0-9]{10}",
     r"/api/v257/purchase-extra/3[0-9]{10}",
     r"/api/v267/findings/3[0-9]{10}",
+    # Render saved shared findings with the current account's requisites.
+    # Template uploads and personal archive writes remain separately protected.
+    r"/api/v304/memo/3[0-9]{10}\.odt",
     r"/check-new/3[0-9]{10}/?",
     r"/api/v334/violation-ledger/purchase/3[0-9]{10}",
     r"/reports/3[0-9]{10}\.html",
