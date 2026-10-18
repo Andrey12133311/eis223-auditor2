@@ -11,8 +11,9 @@ import secrets
 import sqlite3
 import time
 from datetime import datetime,timezone
+from pathlib import Path
 from fastapi import HTTPException,Request
-from v295_eis_originals import auth,allowed_documents,saved_document,root
+from v295_eis_originals import auth,allowed_documents,saved_document,root,uid_from_url,EXT
 from v319_manual_inputs import migrate_legacy_inputs,record_input
 
 REG=re.compile(r"^3[0-9]{10}$")
@@ -165,10 +166,54 @@ def _enqueue(ns,kind,target,page=1,priority=10,parent_id="",user_input=False):
         raise
     finally:db.close()
 
+def _stored_download_complete(reg):
+    """Confirm originals locally, independently of browser report counters."""
+    if not REG.fullmatch(reg):return False
+    path=root()/"eis223_public_browser_intake"/reg/"manifest.json"
+    try:
+        snapshot=path.read_text(encoding="utf-8")
+        manifest=json.loads(snapshot)
+        if (not isinstance(manifest,dict) or manifest.get("reg_number")!=reg
+                or manifest.get("source")!="public_eis_223_browser"):
+            return False
+        declared=int(manifest.get("declared_attachment_count") or 0)
+        documents=manifest.get("documents")
+        if not isinstance(documents,list):return False
+        refs=allowed_documents(reg)
+        browser_refs=set()
+        for item in documents[:100]:
+            if not isinstance(item,dict):continue
+            uid=uid_from_url(item.get("url",""))
+            name=Path(item.get("name") or "").name
+            ext=Path(name).suffix.lower()
+            if (uid and name and len(name)<=255 and ext in EXT
+                    and uid in refs and refs[uid]["ext"]==ext):
+                browser_refs.add(uid)
+        # Historical SOAP references also enter allowed_documents. They
+        # cannot stand in for as-yet unregistered browser-page attachments.
+        if not 0<declared<=len(browser_refs):return False
+        if not all(saved_document(reg,uid) for uid in refs):return False
+        # Do not finish against a manifest that changed during receipt checks.
+        return path.read_text(encoding="utf-8")==snapshot
+    except (OSError,ValueError,TypeError,AttributeError):
+        return False
+
 def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False):
     if status not in ("done","partial","error","deferred"):status="error"
     db=_db(ns)
     try:
+        row=db.execute("SELECT * FROM v301_search_jobs WHERE id=?",(job_id,)).fetchone()
+        if not row:
+            raise HTTPException(404,"Неизвестный запрос")
+        if row["status"] not in ("leased","queued","deferred"):
+            return dict(row)
+        # Existing v376 tabs report partial while the offline audit is still
+        # running even after all files arrived. Check trusted server receipts
+        # outside the SQLite write lock so they need no browser restart.
+        target=row["target"]
+        downloaded=(status=="partial" and row["kind"]=="reg"
+                    and row["parent_id"]!="v341-card-facts"
+                    and _stored_download_complete(target))
         db.execute("BEGIN IMMEDIATE")
         row=db.execute("SELECT * FROM v301_search_jobs WHERE id=?",(job_id,)).fetchone()
         if not row:
@@ -176,6 +221,10 @@ def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False)
         if row["status"] not in ("leased","queued","deferred"):
             db.commit()
             return dict(row)
+        if (downloaded and row["kind"]=="reg" and row["target"]==target
+                and row["parent_id"]!="v341-card-facts"):
+            status="done"
+            detail="Все обнаруженные оригиналы ЕИС получены и переданы на проверку на сервере"
         valid=[]
         for reg in (regs if isinstance(regs,list) else [])[:40]:
             if isinstance(reg,str) and REG.fullmatch(reg) and reg not in valid:valid.append(reg)
