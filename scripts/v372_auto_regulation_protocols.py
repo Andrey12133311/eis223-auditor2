@@ -61,7 +61,6 @@ METHODS = {
     "предложения":re.compile(r"запрос\s+предложени\w*",re.I),
     "оферты":re.compile(r"запрос\s+оферт\w*",re.I),
 }
-MAX_DOCS=75
 MAX_TEXT=150000
 
 def _text(doc):
@@ -231,7 +230,10 @@ def review_protocols(p,documents):
 
 def evaluate(p,docs):
     """Pure deterministic assessment, no I/O or changes to purchase originals."""
-    originals=[d for d in (docs or [])[:MAX_DOCS] if isinstance(d,dict)
+    # Intake already bounds document counts and sizes. An unrelated original
+    # must not consume a slot and hide a later protocol from this rule family.
+    # Per-document text and regex/result limits still bound assessment work.
+    originals=[d for d in (docs or []) if isinstance(d,dict)
                and d.get("status")=="checked" and receipt_verified(d)
                and str(d.get("text") or "").strip()]
     reg_find,reg_checks=review_regulation(p,originals)
