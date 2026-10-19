@@ -350,6 +350,38 @@ class QueuePeriods(unittest.TestCase):
             self.assertEqual(tuple(row), ("", ""))
             self.assertEqual(c.execute("SELECT COUNT(*) FROM thematic_findings").fetchone()[0], 1)
 
+    def test_saved_reads_recover_after_exclusive_sqlite_lock(self):
+        self.campaign()
+        lock = self.connect()
+        self.addCleanup(lock.close)
+        lock.execute("BEGIN EXCLUSIVE")
+        # Release the real competing transaction between bounded attempts.
+        with patch("time.sleep", side_effect=lambda _: lock.rollback()) as sleep:
+            result = thematic.saved_read(thematic.thematic_history_records, self.ns, [self.batch])
+        self.assertEqual(result["batches"][0]["id"], self.batch)
+        sleep.assert_called_once()
+        thematic.WORKER_STATE.update(last_cycle_at="", last_cycle_finished_at="", last_error="")
+        result = thematic.saved_read(thematic.overview, self.ns, self.batch)
+        self.assertEqual(result["id"], self.batch)
+        with thematic.read_db(self.ns) as c:
+            self.assertEqual(c.execute("PRAGMA busy_timeout").fetchone()[0], 1000)
+            with self.assertRaises(sqlite3.OperationalError):
+                c.execute("DELETE FROM thematic_batches")
+
+    def test_saved_reads_report_busy_instead_of_empty_results(self):
+        from unittest.mock import Mock
+        from fastapi import HTTPException
+        operation = Mock(side_effect=sqlite3.OperationalError("database is locked"))
+        with patch("time.sleep"), self.assertRaises(HTTPException) as error:
+            thematic.saved_read(operation)
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(error.exception.headers, {"Retry-After": "2"})
+        self.assertEqual(operation.call_count, 3)
+        operation = Mock(side_effect=sqlite3.OperationalError("no such table: missing"))
+        with self.assertRaisesRegex(sqlite3.OperationalError, "no such table"):
+            thematic.saved_read(operation)
+        self.assertEqual(operation.call_count, 1)
+
     def test_http_validation_happens_before_activation_and_saved_period_is_readable(self):
         thematic.install(self.ns)
 

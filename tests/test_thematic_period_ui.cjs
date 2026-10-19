@@ -44,7 +44,7 @@ function harness(source, responder, exposed = '') {
     return nodes.get(id);
   };
   const context = {
-    console, URL, URLSearchParams,
+    console, URL, URLSearchParams, AbortController,
     location: {hash: '', pathname: '/thematic', search: '', assign() {}},
     document: {
       hidden: false, getElementById: get, querySelector: selector => get(selector.replace(/^#/, '')),
@@ -185,7 +185,40 @@ async function testManagerCampaignRange() {
   assert.equal(ui.api.thematicPeriod({date_to: '2026-10-19'}), 'По 19.10.2026 включительно');
 }
 
+async function testSavedOpeningRecoveryAndNavigation() {
+  const a='a'.repeat(24), b='b'.repeat(24);
+  let fail=true, resolveOld;
+  const ui=harness(embedded('v342_thematic_queue.py','PAGE="""'),async call=>{
+    if(call.url.endsWith('/history'))return {batches:[a,b].map(id=>({id,created_at:'2026-10-19',purchases:819,violations:1,status:'active'}))};
+    if(fail)return {httpStatus:503,body:{detail:'База занята. Повторите открытие.'}};
+    if(call.url.endsWith(a))return await new Promise(resolve=>{resolveOld=resolve});
+    return {id:b,status:'active',items:[],counts:{completed:42}};
+  });
+  // Browser location normalizes assignments to a leading #; exercise real clicks.
+  let hash='';Object.defineProperty(ui.context.location,'hash',{get:()=>hash,set:value=>{hash=value&&!value.startsWith('#')?'#'+value:value}});
+  await flush();
+  const first=ui.get('history').children[0].children[0];
+  first.onclick({preventDefault(){}});
+  assert.match(ui.get('out').textContent,/Загрузка/, 'click immediately changes result pane');
+  await flush();
+  assert.match(textOf(ui.get('thematic-load-status')),/База занята/);
+  assert.match(textOf(ui.get('thematic-load-status')),/Повторить открытие/);
+  fail=false;
+  ui.get('thematic-load-status').children.at(-1).onclick();
+  const count=ui.calls.filter(c=>c.url.endsWith(a)).length;
+  first.onclick({preventDefault(){}});
+  assert.equal(ui.calls.filter(c=>c.url.endsWith(a)).length,count,'same queue single flight');
+  ui.get('history').children[1].children[0].onclick({preventDefault(){}});
+  await flush();
+  assert.match(textOf(ui.get('out')),/42/);
+  resolveOld({id:a,status:'active',counts:{completed:999},items:[]});await flush();
+  assert.doesNotMatch(textOf(ui.get('out')),/999/,'late response cannot replace new selection');
+  assert.match(textOf(ui.get('out')),/42/);
+  assert.equal(ui.context.refresh,undefined,'page helpers cannot collide with injected scripts');
+}
+
 (async () => {
+  await testSavedOpeningRecoveryAndNavigation();
   await testCreateRangeAndValidation();
   await testSavedCabinetPeriods();
   await testManagerCampaignRange();

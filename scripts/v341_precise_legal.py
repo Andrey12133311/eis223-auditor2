@@ -6,6 +6,7 @@ review items. Calendar dates deliberately ignore the time of day.
 """
 from __future__ import annotations
 from legal_applicability import competitive_rule_scope
+from audit_db_retry import run_db_sync
 
 import re
 from datetime import timedelta
@@ -237,7 +238,7 @@ def install(ns):
     @wraps(analyze)
     def enriched_analyze(p, docs):
         enrich(ns, p, docs)
-        persist_facts(ns, p)
+        run_db_sync(persist_facts,ns,p,stage="legal_persist_facts")
         existing = list(analyze(p, docs))
         extra, _ = shared_evaluate(p, docs)
         # Deduplicate the same dated legal event even if the EIS original

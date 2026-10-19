@@ -208,16 +208,21 @@ def claim_next(ns):
         # SQLite LIKE does not case-fold Cyrillic or normalize quoted names.
         c.create_function("eis_business_company",1,business_company,deterministic=True)
         c.execute("BEGIN IMMEDIATE")
+        # Snapshot cooldowns after acquiring the writer: a prior claim may
+        # have waited while another worker requeued a transient busy result.
+        deferred=[reg for reg,until in ns.get("_v332_busy_until",{}).copy().items()
+                  if until>time.monotonic()]
+        cooldown=(" AND q.reg NOT IN ("+",".join("?" for _ in deferred)+")") if deferred else ""
         row=c.execute("""SELECT q.reg FROM v332_audit_queue q
             JOIN purchases p ON p.reg_number=q.reg
-            WHERE q.campaign=? AND q.state='pending'
+            WHERE q.campaign=? AND q.state='pending'"""+cooldown+"""
             AND EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg
                 AND COALESCE(d.local_path,'')<>'' AND d.status='checked')
             AND eis_business_company(p.customer)=1
             ORDER BY CASE q.reg WHEN '32616233661' THEN 0
              WHEN '32616324151' THEN 1
              WHEN '32616287360' THEN 2 ELSE 3 END,
-            q.reg LIMIT 1""",(CAMPAIGN,)).fetchone()
+            q.reg LIMIT 1""",(CAMPAIGN,*deferred)).fetchone()
         if not row:
             c.commit()
             return None
@@ -538,7 +543,7 @@ def persist(ns,reg,findings,checks):
     finally:c.close()
 
 async def inspect_one(ns,reg):
-    old,rows=await asyncio.to_thread(existing,ns,reg)
+    old,rows=await run_db(existing,ns,reg,stage="general_existing")
     purchase=as_procurement(old)
     card={"status":"partial","pages":{}}
     detail={"registrationNumber":reg,"purchaseName":purchase["title"],
@@ -580,7 +585,7 @@ async def inspect_one(ns,reg):
     from v342_identity import subject,valid_inn
     metadata=await asyncio.to_thread(from_documents,reg,docs,_name(purchase.get("customer")))
     if metadata:
-        await asyncio.to_thread(apply_metadata,ns,reg,metadata)
+        await run_db(apply_metadata,ns,reg,metadata,stage="general_metadata")
         if not subject(purchase.get("title")) and metadata.get("title"):
             purchase["title"]=metadata["title"]
         if not _name(purchase.get("customer")) and metadata.get("customer"):
@@ -728,9 +733,14 @@ def install(ns):
                         raise
                     except Exception as exc:
                         index+=1
-                        await mark_result(reg,"failed",{"error":str(exc)[:300]})
-                        print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
-                              f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
+                        if is_busy(exc):
+                            ns.setdefault("_v332_busy_until",{})[reg]=time.monotonic()+60
+                            await mark_result(reg,"pending",{"error":"Временная блокировка БД; проверка будет повторена"})
+                            print(f"V332 AUDIT_DEFERRED reg={reg} worker={worker_id} database_busy=True retry_after_seconds=60",flush=True)
+                        else:
+                            await mark_result(reg,"failed",{"error":str(exc)[:300]})
+                            print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
+                                  f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
                     if index%20==0:
                         try:
                             state=await run_db(progress,ns,stage="general_progress")
