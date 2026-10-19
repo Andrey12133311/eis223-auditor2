@@ -5,6 +5,7 @@ rules. Generic law quotations, missing fields and unresolved exceptions remain
 review items. Calendar dates deliberately ignore the time of day.
 """
 from __future__ import annotations
+from legal_applicability import competitive_rule_scope
 
 import re
 from datetime import timedelta
@@ -90,7 +91,7 @@ def review(doc, code, title, evidence, law, match):
 
 def evaluate(p, docs):
     findings, checks = [], []
-    competitive = bool(COMPETITIVE.search(str(p.get("method") or "")))
+    competitive = competitive_rule_scope(p) is True
     sme_proof = (p.get("fact_evidence") or {}).get("sme_only") or {}
     if not sme_proof:
         sme_proof = document_facts(docs).get("sme_only") or {}
