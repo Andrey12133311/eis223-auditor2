@@ -128,24 +128,10 @@ def _verified(doc):
             and bool(meta.get("source_url")) and len(str(doc.get("text") or "").strip())>30)
 
 def _sme_scope(p,docs):
-    # The procurement method is an explicit category returned by official
-    # EIS XML or the verified browser manifest (not a generic document mention).
-    method=_plain(p.get("method"),500)
-    if _SME.search(method):
-        return ("method",method)
-    for d in docs:
-        if not _verified(d):
-            continue
-        body=_plain(d.get("text"),100_000)
-        for m in _SME.finditer(body):
-            phrase=body[max(0,m.start()-180):m.end()+110]
-            # Reject a bare quotation of the law or example eligibility.
-            # The wording must expressly identify THIS competition.
-            if re.search(r"(?:данн\w*|настоящ\w*|проводим\w*|эт\w*)\s+"
-                         r"(?:закупк\w*|конкурс\w*|аукцион\w*|процедур\w*)",phrase,re.I) or (
-                re.search(r"\b(?:конкурс\w*|закупк\w*|участник\w*)\b",phrase,re.I)
-                and not re.search(r"(?:согласно\s+стать[еёи]|част[ьи]\s+19|федеральн\w*\s+закон)",phrase,re.I)):
-                return ("verified_document",phrase[:260])
+    from v383_msp_scope import resolve
+    scope=resolve(p,docs)
+    if scope["value"] is True:
+        return ("verified_scope",str(scope["evidence"])[:650])
     return (None,"")
 
 def _candidate_chunks(doc):

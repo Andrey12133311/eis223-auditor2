@@ -185,11 +185,6 @@ def document_facts(docs):
             if re.fullmatch(r"(?:наименование\s+способа\s+закупки|способ(?:\s+осуществления|\s+проведения|\s+размещения)?\s+закупки|способ\s+и\s+форма\s+проведения\s+закупки|форма\s+торгов)", label, re.I):
                 if METHOD.search(value) and len(value) <= 220:
                     key, parsed = "method", compact(value)
-            if re.fullmatch(r"(?:участники\s+закупки|категория\s+участников|участие\s+МСП)", label, re.I):
-                if re.search(r"(?:только|исключительно)\s+(?:субъекты|для\s+субъектов)\s+малого\s+и\s+среднего\s+предпринимательства", value, re.I):
-                    key, parsed = "sme_only", True
-                elif re.search(r"(?:не\s+ограничено|не\s+ограничивается)\s+(?:субъектами\s+)?(?:МСП|малого\s+и\s+среднего)", value, re.I):
-                    key, parsed = "sme_only", False
             if key and parsed is not None:
                 candidates.setdefault(key, {})[str(parsed)] = {
                     "value": parsed, "document": doc.get("name"),
@@ -208,7 +203,12 @@ def document_facts(docs):
                         "value": parsed.isoformat(), "document": doc.get("name"),
                         "source_url": (doc.get("meta") or {}).get("source_url"),
                         "evidence": compact(m[0])[:650], "source": "official_eis_document"}
-    return {key: next(iter(values.values())) for key, values in candidates.items() if len(values) == 1}
+    result = {key: next(iter(values.values())) for key, values in candidates.items() if len(values) == 1}
+    from v383_msp_scope import resolve
+    scope = resolve({}, docs)
+    if isinstance(scope["value"],bool):
+        result["sme_only"] = scope["evidence"][0]
+    return result
 
 
 def enrich(ns, purchase, docs, card=None, detail=None):
@@ -218,7 +218,8 @@ def enrich(ns, purchase, docs, card=None, detail=None):
     for key, value in direct.get("fields", {}).items():
         proof[key] = {"value": value, "document": "Карточка ЕИС",
                       "source_url": direct["source_page"], "source": "official_eis_card",
-                      "evidence": str(direct.get("field_evidence", {}).get(key) or value)[:650]}
+                      "evidence": str(direct.get("field_evidence", {}).get(key) or value)[:650],
+                      "captured_at": direct.get("captured_at")}
     # A saved EIS card is useful even if it captured a price before v341.
     if not direct.get("prices"):
         db = ns["conn"](); db.row_factory = sqlite3.Row
@@ -232,10 +233,23 @@ def enrich(ns, purchase, docs, card=None, detail=None):
             pass
         finally:
             db.close()
-    purchase.setdefault("fact_evidence", {}).update(proof)
+    # Never replace a saved authoritative card flag with document inference.
+    # Resolve the current document separately so disagreement remains visible.
+    existing = (purchase.get("fact_evidence") or {}).get("sme_only") or {}
+    if existing.get("source") == "official_eis_card" and (proof.get("sme_only") or {}).get("source") != "official_eis_card":
+        proof.pop("sme_only", None)
+    purchase["fact_evidence"] = {**(purchase.get("fact_evidence") or {}), **proof}
     for key, item in proof.items():
         if not purchase.get(key) or item["source"] == "official_eis_card":
             purchase[key] = item["value"]
+    from v383_msp_scope import resolve, saved_card
+    # Preserve current structured source plus contradictory document evidence.
+    if card is not None:
+        purchase["card_fields_json"] = {**saved_card(purchase), **card}
+    scope = resolve(purchase, docs)
+    purchase["sme_scope"] = scope["state"]
+    purchase["sme_only"] = scope["value"]
+    purchase["fact_evidence"]["sme_scope"] = scope
     if purchase.get("submission_end"):
         purchase["deadline"] = purchase["submission_end"]
     selected = chosen_price(direct.get("prices") or [])

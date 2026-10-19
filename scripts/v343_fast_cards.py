@@ -337,6 +337,8 @@ def render(reg,data,thematic=None,account_review=False):
           ('Окончание подачи заявок',val(p,'submission_end'))]
         if not val(p,'price') and val(p,'price_num') is not None:
             keys[4]=('Стоимость закупки',val(p,'price_num'))
+        from v383_msp_scope import display as msp_display
+        keys.append(('Закупка только для МСП',msp_display(p)))
         basic='<div class="grid">'+''.join('<div><b>'+esc(k)+':</b> '+text(v)+'</div>' for k,v in keys)+'</div>'
         basic+='<p class="meta">Документы: проверено '+str(int(val(p,'documents_checked') or 0))+' из '+str(int(val(p,'documents_found') or dtotal))+'</p>'
         eis=source_link(p.get('url'),'Открыть карточку ЕИС')
