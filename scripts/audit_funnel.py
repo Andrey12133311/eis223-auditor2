@@ -17,6 +17,7 @@ from contextvars import ContextVar
 from functools import wraps
 import json
 import uuid
+import audit_rule_counts
 
 CURRENT = ContextVar("audit_funnel", default=None)
 COUNTS = frozenset(("documents", "unreadable", "readable_input_documents", "verified_documents", "analysis_documents",
@@ -179,6 +180,17 @@ def committed():
 
 
 @safe
+def committed_general_rules(findings, checks):
+    """Use only the exact inserted SQL tuples, after the durable commit."""
+    event = CURRENT.get()
+    if event is None or not event["committed"] or not event["persist_applied"]:return
+    codes = (row[1] for row in findings)
+    check_codes = (row[8] for row in checks if row[3] == "violation")
+    event["persisted_rules"] = audit_rule_counts.merge(
+        audit_rule_counts.count(codes), audit_rule_counts.count(check_codes))
+
+
+@safe
 def bind(item):
     event = CURRENT.get()
     if event is not None:item["_audit_funnel"] = event
@@ -190,6 +202,7 @@ def pending(events, item, findings, state):
     # Clone only the closed, fixed-size scalar summary; never retain findings.
     event = {**previous, "counts": dict(previous["counts"]), "reasons": dict(previous["reasons"])} if isinstance(previous, dict) else new("thematic", item.get("reg"))
     if event is None:return
+    event.pop("persisted_rules", None)  # A retry never inherits an earlier delta.
     _add(event, "counts", "persist_input", len(_rows(findings)))
     event["state"] = state if state in STATES else "unknown"
     event["persist_applied"] = False
@@ -208,7 +221,9 @@ def emit(event, stage, state="unknown"):
         "analysis_observed": event.get("analysis_observed") is True, "committed": event.get("committed") is True,
         "persist_applied": event.get("persist_applied") is True,
         "counts": {k: min(MAX_COUNT, event["counts"].get(k, 0)) for k in sorted(COUNTS) if type(event["counts"].get(k, 0)) is int and event["counts"].get(k, 0) >= 0},
-        "reasons": {k: min(MAX_COUNT, v) for k, v in event["reasons"].items() if k in REASONS and type(v) is int and v >= 0}}
+        "reasons": {k: min(MAX_COUNT, v) for k, v in event["reasons"].items() if k in REASONS and type(v) is int and v >= 0},
+        "persisted_rules": audit_rule_counts.clean(event.get("persisted_rules"))
+            if event.get("committed") is True and event.get("persist_applied") is True else {}}
     reg = valid_registration(event.get("reg"))
     if reg is not None:payload["reg"] = reg
     print("AUDIT_FUNNEL " + json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
@@ -220,7 +235,18 @@ def applied(event):
 
 
 @safe
-def emit_committed(events):
+def _committed_thematic_rules(thematic_plans):
+    # Thematic plans contain only rows actually inserted for applied items.
+    # This function runs after commit/close, never inside the SQLite writer.
+    for _, state, findings, _, _, _, event in thematic_plans:
+        if (event is not None and event.get("persist_applied") is True
+                and state in ("completed", "retry")):
+            event["persisted_rules"] = audit_rule_counts.count(f.get("code") for f in findings)
+
+
+@safe
+def emit_committed(events, thematic_plans=()):
+    _committed_thematic_rules(thematic_plans)
     for event in events:
         event["committed"] = True
         state = event.get("state", "unknown")
@@ -260,6 +286,8 @@ def _exit(scope, stage, state):
                 for key, value in event[group].items():_add(parent, group, key, value)
             parent["committed"] = True
             parent["persist_applied"] = event["persist_applied"]
+            parent["persisted_rules"] = audit_rule_counts.merge(
+                parent.get("persisted_rules"), event.get("persisted_rules"))
     else:
         emit(event, stage, state)
 

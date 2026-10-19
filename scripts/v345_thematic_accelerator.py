@@ -11,6 +11,7 @@ import json
 import sqlite3
 import time
 import uuid
+import full_recheck_runtime
 from datetime import datetime,timezone
 import v342_thematic_queue as original
 from v381_audit_scheduling import background_audit, run_file_io
@@ -210,6 +211,8 @@ def _prepare(ns):
                 last=row["reg"]
                 inspected+=1
                 if not _campaign_guard(c,camp,row["reg"]):continue
+                if not c.execute("SELECT 1 FROM thematic_items t WHERE t.batch_id=? AND t.reg=?"+
+                    full_recheck_runtime.available_sql(c,"t.reg"),(camp["id"],row["reg"])).fetchone():continue
                 ready=int(row["ready_count"] or 0)
                 state=row["status"]
                 try:
@@ -265,6 +268,8 @@ def _prepare(ns):
             if per_batch.get(item["batch"],0)>=MAX_PER_BATCH:continue
             campaign=c.execute("SELECT * FROM thematic_batches WHERE id=?",(item["batch"],)).fetchone()
             if not _campaign_guard(c,campaign,item["reg"],item):continue
+            if not c.execute("SELECT 1 FROM thematic_items t WHERE t.batch_id=? AND t.reg=?"+
+                full_recheck_runtime.available_sql(c,"t.reg"),(item["batch"],item["reg"])).fetchone():continue
             row=item.pop("before")
             token=uuid.uuid4().hex
             result=c.execute("""UPDATE thematic_items SET status='queued',reservation_token=?,
@@ -607,7 +612,7 @@ def _persist(ns,results):
         c.rollback()
         raise
     finally:c.close()
-    audit_funnel.emit_committed(diagnostic_events)
+    audit_funnel.emit_committed(diagnostic_events,planned)
     # Exact before/after snapshots keep diagnostic counting outside the writer.
     # Neither grouping nor a broken log sink can invalidate committed evidence.
     for batch,reg,before,after,version in saved_events:

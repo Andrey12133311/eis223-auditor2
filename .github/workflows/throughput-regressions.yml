@@ -6,6 +6,7 @@ on:
       - 'tests/test_extraction_throughput.py'
       - 'tests/test_general_original_collection_retry.py'
       - 'tests/test_automatic*.py'
+      - 'tests/test_full_recheck*.py'
       - 'tests/test_intake_automatic_rechecks.py'
       - 'tests/test_semantic_audit_sources.py'
       - 'tests/test_legal_audit_revision.py'
@@ -14,6 +15,7 @@ on:
       - 'tests/test_receipt_original_parity.py'
       - 'tests/test_archive_member_occurrences.py'
       - 'tests/test_audit_funnel.py'
+      - 'tests/test_audit_rule_counts.py'
       - 'tests/test_legal_event_recall.py'
       - 'tests/test_procurement_fact_trace.py'
       - 'tests/test_legal_date_label_archive_recall.py'
@@ -66,6 +68,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_receipt_original_parity.py'
           python -m unittest discover -s tests -p 'test_archive_member_occurrences.py'
           python -m unittest discover -s tests -p 'test_audit_funnel.py'
+          python -m unittest discover -s tests -p 'test_audit_rule_counts.py'
           python -m unittest discover -s tests -p 'test_legal_event_recall.py'
           python -m unittest discover -s tests -p 'test_procurement_fact_trace.py'
           python -m unittest discover -s tests -p 'test_legal_date_label_archive_recall.py'
@@ -89,4 +92,5 @@ jobs:
           python -m unittest discover -s tests -p 'test_thematic_index_lock_scope.py'
           python -m unittest discover -s tests -p 'test_v343_card_presentation.py'
           python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_automatic_recheck_fairness test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract
           node tests/test_account_frontend_requests.cjs
