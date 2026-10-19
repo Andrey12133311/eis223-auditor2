@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+from audit_db_retry import run_db,is_busy
 import asyncio
 import hashlib
 import json
@@ -625,7 +626,7 @@ async def inspect_one(ns,reg):
             "location":f.get("location") or "",
             "note":"Документ не подтверждён квитанцией ЕИС; в число установленных нарушений не включено"
         })
-    new_f,new_c=await asyncio.to_thread(persist,ns,reg,accepted,checks)
+    new_f,new_c=await run_db(persist,ns,reg,accepted,checks,stage="general_persist")
     return ("completed",{
         "documents_found":len(docs)+unreadable,
         "documents_read":counted,"documents_unreadable":unreadable,
@@ -669,12 +670,31 @@ def install(ns):
                 print("V332 INIT_FAILED type="+type(exc).__name__+
                       " reason="+str(exc)[:200],flush=True)
                 return
+            async def mark_result(reg,state,details):
+                # Retain the already-computed result while the database is busy.
+                # Each bounded retry closes its connection before yielding;
+                # other workers keep running and cancellation still propagates.
+                while True:
+                    try:
+                        return await run_db(mark,ns,reg,state,details,stage="general_mark")
+                    except Exception as exc:
+                        if not is_busy(exc):raise
+                        await asyncio.sleep(2)
+
             async def worker(worker_id):
                 index=0
                 signals=audit_signals(ns)
                 while True:
                     version=signals.version("general")
-                    reg=await asyncio.to_thread(claim_next,ns)
+                    try:
+                        reg=await run_db(claim_next,ns,stage="general_claim")
+                    except Exception as exc:
+                        if not is_busy(exc):raise
+                        # A busy claim has changed no queue row. Keep this
+                        # worker and its siblings alive rather than cancelling
+                        # the whole campaign through gather().
+                        await asyncio.sleep(2)
+                        continue
                     if reg is None:
                         await signals.wait("general",version,30)
                         continue
@@ -685,7 +705,7 @@ def install(ns):
                         # file extraction always has reserved capacity.
                         with background_audit():
                             state,detail=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
-                        await asyncio.to_thread(mark,ns,reg,state,detail)
+                        await mark_result(reg,state,detail)
                         elapsed_ms=round((time.monotonic()-started)*1000,1)
                         index+=1
                         if state=="completed":
@@ -703,13 +723,16 @@ def install(ns):
                         raise
                     except Exception as exc:
                         index+=1
-                        await asyncio.to_thread(mark,ns,reg,"failed",
-                                                {"error":str(exc)[:300]})
+                        await mark_result(reg,"failed",{"error":str(exc)[:300]})
                         print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
                               f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
                     if index%20==0:
-                        state=await asyncio.to_thread(progress,ns)
-                        print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
+                        try:
+                            state=await run_db(progress,ns,stage="general_progress")
+                            print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
+                        except Exception as exc:
+                            if not is_busy(exc):raise
+                            print("V332 PROGRESS_DELAY database_busy=True",flush=True)
                     await asyncio.sleep(.05)
             async def refresh_queue():
                 signals=audit_signals(ns)
