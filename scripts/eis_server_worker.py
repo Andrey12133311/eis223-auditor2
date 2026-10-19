@@ -815,12 +815,27 @@ def install(ns):
         authenticate(request)
         if not re.fullmatch(r"[0-9a-f]{24}", identifier):
             raise HTTPException(422, "Invalid job identifier")
-        result = await asyncio.to_thread(report, ns, identifier, await body(request))
+        try:
+            result = await asyncio.to_thread(report, ns, identifier, await body(request))
+        except sqlite3.OperationalError as exc:
+            from audit_db_retry import is_busy
+            if not is_busy(exc):
+                raise
+            # report() has already rolled back/closed. Do not acknowledge an
+            # uncommitted report or flood middleware logs with its traceback.
+            # The existing VPS client keeps the report durable on HTTP 503 and
+            # applies its usual 300-second site backoff before the same replay.
+            _log_telemetry("report_busy", retry_after_seconds=300)
+            raise HTTPException(503, "Worker report database is busy; retry the same report",
+                                headers={"Retry-After": "300"}) from None
         if not result.get("replayed") and result["originals_received"] > 0:
+            enqueue_async = ns.get("_v295_enqueue_review_async")
             enqueue_review = ns.get("_v295_enqueue_review")
-            if callable(enqueue_review):
+            if callable(enqueue_async) or callable(enqueue_review):
                 try:
-                    result["review_status"] = enqueue_review(result["reg_number"]).get("status")
+                    admission = (await enqueue_async(result["reg_number"]) if callable(enqueue_async)
+                                 else enqueue_review(result["reg_number"]))
+                    result["review_status"] = admission.get("status")
                 except Exception:
                     result["review_status"] = "pending_retry"
         return result

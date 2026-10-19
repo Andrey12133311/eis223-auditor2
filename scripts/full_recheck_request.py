@@ -143,10 +143,14 @@ def inventory(c, request_id):
         + " FROM full_recheck_members WHERE request_id=?", (request_id,)).fetchone()
     unknown = {key: c.execute("SELECT COUNT(*) FROM full_recheck_members WHERE request_id=? AND " + key + " IS NULL", (request_id,)).fetchone()[0]
         for key in sorted(NULLABLE_METRICS)}
-    totals = c.execute("SELECT COALESCE(SUM(total_new_findings),0),COALESCE(SUM(total_new_checks),0) "
+    # Extend the existing request-scoped scan; attempts are durable claims,
+    # not successful reads, and retries do not increase unique membership.
+    totals = c.execute("SELECT COALESCE(SUM(total_new_findings),0),COALESCE(SUM(total_new_checks),0),"
+        "COUNT(CASE WHEN attempt_count>0 THEN 1 END),COALESCE(SUM(attempt_count),0) "
         "FROM full_recheck_members WHERE request_id=?", (request_id,)).fetchone()
     request.update(states=counts, reasons=reasons, metrics=dict(zip(METRICS, sums)), metrics_unknown=unknown,
         metrics_basis="latest_recorded_attempt_per_member", committed_new_findings=totals[0], committed_new_checks=totals[1],
+        unique_attempted=totals[2], total_attempts=totals[3],
         expected_matches_actual=request["expected_count"] == request["actual_count"])
     return request
 
