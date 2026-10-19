@@ -29,7 +29,7 @@ from v381_audit_scheduling import (audit_signals, background_audit,
                                    ordered_map, run_file_io)
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
-RULE_REVISION="2026-10-19-v380-v372-readable-evidence-recovery"
+RULE_REVISION="2026-10-19-v380-v372-original-collection-retry"
 DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
@@ -728,6 +728,7 @@ async def inspect_one(ns,reg):
                  for d in other if (d.get("meta") or {}).get("source") in
                  ("official_eis_original","official_eis_archive_member")}
     official=[]
+    source_incomplete=False
     if received_uids-represented:
         try:
             # Pull from REAL, locally saved and receipt-validated originals;
@@ -742,9 +743,17 @@ async def inspect_one(ns,reg):
             card=result.get("card") or card
             detail=result.get("detail") or detail
         except Exception as exc:
+            # The readable stored subset can still yield proven findings,
+            # but a failed collection has not examined every received original.
+            source_incomplete=True
             print(f"V332 OFFICIAL_SOURCE_ERROR reg={reg} "
                   f"type={type(exc).__name__}",flush=True)
     docs=merge_docs(official,other)
+    # Collection may return an unreadable original instead of raising. Inspect
+    # the deduplicated result so a readable copy can satisfy the same evidence;
+    # an expanded archive container is not itself an unreadable legal document.
+    source_incomplete=source_incomplete or any(
+        d.get("status") in ("downloaded_no_text","archive_unreadable") for d in docs)
     # Repair persisted identity before legal comparison. This also covers
     # purchases whose originals were imported before the metadata parser.
     from v314_eis_metadata import from_documents,apply_metadata
@@ -767,6 +776,7 @@ async def inspect_one(ns,reg):
             "documents_found":len(docs)+unreadable,"documents_read":0,
             "documents_unreadable":unreadable,"verified_original_documents":0,
             "original_expected":expected,"original_received":received,
+            "source_incomplete":source_incomplete,
             "error":"Нет пригодного текста в доступных документах; нарушения не оценивались"})
     analyzer=ns.get("analyze")
     checker=ns.get("build_checks")
@@ -815,6 +825,7 @@ async def inspect_one(ns,reg):
         "verified_original_documents":verified_count,
         "original_expected":expected,"original_received":received,
         "new_findings":new_f,"new_checks":new_c,
+        "source_incomplete":source_incomplete,
         "result_token":token,
         "error":None
     })
@@ -996,12 +1007,18 @@ def install(ns):
                                     return await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
                             slot["phase"]="inspect"
                             state,detail=await review()
-                            result={**detail,"last_source_version":snapshot,
-                                    "result_token":detail.get("result_token") or uuid.uuid4().hex}
+                            # This diagnostic describes collection coverage;
+                            # durable state/backoff carries it without a new DB
+                            # column or an invented unreadable-document count.
+                            source_incomplete=bool(detail.get("source_incomplete"))
+                            result={key:value for key,value in detail.items() if key!="source_incomplete"}
+                            result.update(last_source_version=snapshot,
+                                          result_token=detail.get("result_token") or uuid.uuid4().hex)
                             incomplete=(state=="no_readable_documents" or
-                                        int(detail.get("documents_unreadable") or 0)>0)
+                                        int(detail.get("documents_unreadable") or 0)>0 or source_incomplete)
                             if incomplete:
-                                reason=("Не все доступные оригиналы удалось прочитать; назначен повтор" if
+                                reason=("Не завершено чтение полученных оригиналов ЕИС; назначен повтор" if source_incomplete else
+                                    "Не все доступные оригиналы удалось прочитать; назначен повтор" if
                                         state=="completed" else
                                         "Текст доступных оригиналов пока не прочитан; назначен повтор")
                                 delay=await db_stage(ns,"save_partial",defer_retry,ns,reg,result,reason,worker=slot)
