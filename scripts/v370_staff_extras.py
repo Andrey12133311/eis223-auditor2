@@ -50,7 +50,7 @@ def launch_template(request:Request,template_id:UUID):
             """INSERT INTO account_thematic_batches(user_id,batch_id)
                VALUES(%s,%s)""",(uid,batch))
     try:
-        _insert_real_batch(ns,batch,item[1],item[2])
+        _insert_real_batch(ns,batch,item[1],item[2],owner_id=uid)
     except Exception:
         # A template without a real engine batch must not appear as completed.
         with connect() as db:

@@ -504,10 +504,10 @@ def install(ns):
    # PostgreSQL ownership and SQLite lock waits must not stop HTTP serving.
    c=db(ns);linked=False
    try:
-    # Concurrent HTTP starts must share the same three-campaign limit.
+    # Read this owner's active queues after taking the shared creation lock.
+    # Other users and historical unassigned queues do not consume their slots.
     c.execute("BEGIN IMMEDIATE")
-    if c.execute("SELECT COUNT(*) FROM thematic_batches WHERE status=?",("active",)).fetchone()[0]>=3:
-     raise HTTPException(429,"Одновременно допускается не более трёх тематических очередей")
+    ownership.require_start_capacity(c,ownership.account_id(request))
     # Assign the real campaign to its authenticated creator before activation.
     ownership.link_started(request,identifier)
     linked=True

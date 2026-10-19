@@ -30,6 +30,45 @@ def protect_write(request):
         require_origin(request)
 
 
+def require_start_capacity(sqlite_con, owner_id=None):
+    """Limit active checks for one owner inside the caller's SQLite write lock.
+
+    Call after BEGIN IMMEDIATE and before inserting a real engine batch.
+    Fetch ownership after taking that lock so simultaneous starts, including
+    manager assignments and templates, cannot use an outdated owner list.
+    The caller owns the SQLite transaction; this helper never commits it.
+    """
+    if owner_id is None and enabled():
+        raise HTTPException(401, "Требуется авторизация")
+    active_ids = [row[0] for row in sqlite_con.execute(
+        "SELECT id FROM thematic_batches WHERE status='active'"
+    ).fetchall()]
+    if owner_id is None:
+        # Keep the original limit for installations without personal accounts.
+        count = len(active_ids)
+    elif not active_ids:
+        count = 0
+    else:
+        try:
+            from scripts.account_api_v1 import connect
+            with connect() as db:
+                count = db.execute(
+                    "SELECT COUNT(*) FROM account_thematic_batches "
+                    "WHERE user_id=%s AND batch_id=ANY(%s)",
+                    (owner_id, active_ids)
+                ).fetchone()[0]
+        except Exception as exc:
+            raise HTTPException(
+                503, "Не удалось проверить количество активных тематических проверок"
+            ) from exc
+    if count >= 3:
+        message = ("В этой учётной записи уже работают три тематические проверки. "
+                   "Остановите одну из них перед запуском следующей."
+                   if owner_id is not None else
+                   "Одновременно допускается не более трёх тематических очередей")
+        raise HTTPException(429, message)
+
+
 def linked_ids(request):
     owner = account_id(request)
     if owner is None:
