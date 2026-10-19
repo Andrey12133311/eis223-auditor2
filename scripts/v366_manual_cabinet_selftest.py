@@ -145,7 +145,8 @@ def test_ownership_delete_isolated():
     assert "DELETE FROM v301_search_jobs" not in sql
     assert "account_procurements" not in sql
     assert 'getattr(request.app.state,"eis223_manual_ns",None)' in inspect.getsource(manual.start_manual_check)
-    assert "_enqueue,ns" in inspect.getsource(manual.start_manual_check)
+    assert "_start_linked_recheck,ns" in inspect.getsource(manual.start_manual_check)
+    assert '_enqueue(ns,"reg",reg_number' in inspect.getsource(manual._start_linked_recheck)
 
 
 if __name__=="__main__":

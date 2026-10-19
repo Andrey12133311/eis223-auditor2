@@ -25,14 +25,10 @@ router=APIRouter(prefix="/me/workbench",tags=["employee-extras"])
 def recheck(request:Request,reg:str):
     require_origin(request)
     uid=case_owner(request,reg)
-    from v301_search_jobs import _enqueue
-    from scripts.v366_account_manual import link_run
-    # Reuse pending work. This never alters previous EIS evidence or assigns
-    # a confirmed finding on the basis of a queue event.
-    job,created=_enqueue(eis(request),"reg",reg,1,2,"",True)
-    link_run(uid,reg,job["id"])
+    from scripts.v366_account_manual import _start_linked_recheck
+    job,created,legal=_start_linked_recheck(eis(request),uid,reg,2)
     return {"job_id":job["id"],"status":job["status"],
-            "new_job":created,"originals_retained":True}
+            "new_job":created,"originals_retained":True,"legal_recheck":legal}
 
 @router.post("/templates/{template_id}/start",status_code=201)
 def launch_template(request:Request,template_id:UUID):
