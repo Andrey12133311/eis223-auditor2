@@ -201,20 +201,19 @@ def progress(ns):
 
 def claim_next(ns):
     """Atomically reserve an audit row; prefer already downloaded originals."""
+    from v342_thematic_queue import business_company
     c=connect(ns)
     try:
+        # Use exactly the same company scope as dashboard queue admission.
+        # SQLite LIKE does not case-fold Cyrillic or normalize quoted names.
+        c.create_function("eis_business_company",1,business_company,deterministic=True)
         c.execute("BEGIN IMMEDIATE")
         row=c.execute("""SELECT q.reg FROM v332_audit_queue q
             JOIN purchases p ON p.reg_number=q.reg
             WHERE q.campaign=? AND q.state='pending'
             AND EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg
                 AND COALESCE(d.local_path,'')<>'' AND d.status='checked')
-            AND (p.customer LIKE 'ООО %' OR p.customer LIKE 'АО %'
-                 OR p.customer LIKE 'ПАО %' OR p.customer LIKE 'ОАО %'
-                 OR p.customer LIKE 'ЗАО %'
-                 OR p.customer LIKE 'Общество с ограниченной ответственностью%'
-                 OR p.customer LIKE 'Акционерное общество%'
-                 OR p.customer LIKE 'Публичное акционерное общество%')
+            AND eis_business_company(p.customer)=1
             ORDER BY CASE q.reg WHEN '32616233661' THEN 0
              WHEN '32616324151' THEN 1
              WHEN '32616287360' THEN 2 ELSE 3 END,
@@ -434,13 +433,19 @@ def merge_docs(official,other):
     # Only one logical document for duplicate binary SHA; official receipts
     # take priority over unverified local copies.
     out=[]
-    hashes=set()
+    hashes={}
     for d in [*official,*other]:
         m=d.get("meta") or {}
         digest=m.get("sha256")
         if not digest or not HEX.fullmatch(str(digest)):continue
-        if digest in hashes:continue
-        hashes.add(digest)
+        if digest in hashes:
+            index=hashes[digest]
+            # stored_docs also contains receipt-authenticated originals. An
+            # older unverified row with identical bytes cannot hide that proof.
+            # Replace in place so the order of distinct hashes stays stable.
+            if is_official(d) and not is_official(out[index]):out[index]=d
+            continue
+        hashes[digest]=len(out)
         out.append(d)
     return out
 
