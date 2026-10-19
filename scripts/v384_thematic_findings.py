@@ -61,7 +61,11 @@ Historical evidence stays in this result. Callers count only confirmed items
 and display the others as revised/review evidence, never as new violations.
 """
     from v352_dashboard_truth import collapse_legal_events
-    from scripts.v385_msp_reassessment import apply_reassessments
+    try:
+        from scripts.v385_msp_reassessment import apply_reassessments
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":raise
+        from v385_msp_reassessment import apply_reassessments
     if not BATCH.fullmatch(batch) or (reg is not None and not REG.fullmatch(reg)):
         raise HTTPException(422, "Некорректный номер проверки или закупки")
     row = db.execute("SELECT categories FROM thematic_batches WHERE id=?", (batch,)).fetchone()
