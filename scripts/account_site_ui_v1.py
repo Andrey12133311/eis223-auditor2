@@ -204,7 +204,9 @@ _STYLE = """
 
 
 def site_header(role="user"):
-    admin = '<button type="button" id="eis223-admin-nav" hidden>Управление пользователями</button>' if role == "admin" else ""
+    admin = ('<a href="/account/admin">Заявки на регистрацию</a>'
+             '<button type="button" id="eis223-admin-nav" hidden>Управление пользователями</button>'
+             if role == "admin" else "")
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
     return (_STYLE + workspace_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
