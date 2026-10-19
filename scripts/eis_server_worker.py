@@ -29,6 +29,9 @@ MAX_ATTEMPTS = 4
 MAX_REPORT_BYTES = 12288
 FEATURE = "eis-soap-vps-worker"
 SUPPORTED_CAPABILITIES = frozenset(("inn_search",))
+DISCOVERY_INTERVAL_SECONDS = 30
+MAX_DISCOVERY_PENDING = 5000
+RESERVED_MANUAL_SLOTS = 8
 
 
 def init(ns):
@@ -53,10 +56,33 @@ def init(ns):
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
             accepted_at INTEGER NOT NULL DEFAULT 0, source_url TEXT NOT NULL DEFAULT ''
           );
+          CREATE TABLE IF NOT EXISTS eis_server_discovery_candidates(
+            reg_number TEXT PRIMARY KEY, discovered_at INTEGER NOT NULL,
+            source_url TEXT NOT NULL, reg_job_id TEXT NOT NULL DEFAULT ''
+          );
+          CREATE INDEX IF NOT EXISTS eis_server_discovery_pending
+            ON eis_server_discovery_candidates(reg_job_id,discovered_at);
+          CREATE INDEX IF NOT EXISTS eis_server_reports_recent ON eis_server_reports(created_at DESC);
         """)
+        job_columns = {item[1] for item in db.execute("PRAGMA table_info(v301_search_jobs)")}
+        if {"kind", "target", "updated_at"}.issubset(job_columns):
+            db.execute("CREATE INDEX IF NOT EXISTS eis_server_registry_recent ON v301_search_jobs(kind,target,updated_at DESC)")
+        if {"kind", "status", "parent_id", "priority"}.issubset(job_columns):
+            # Existing public discoveries share FIFO priority with new ones;
+            # manual work and deliberately customised priorities stay intact.
+            db.execute("""UPDATE v301_search_jobs SET priority=8 WHERE kind='reg'
+              AND parent_id='server-discovery' AND priority=10 AND status IN ('queued','leased','deferred')""")
         columns = {item[1] for item in db.execute("PRAGMA table_info(eis_server_workers)")}
         if "capabilities_json" not in columns:
             db.execute("ALTER TABLE eis_server_workers ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'")
+        if "telemetry_json" not in columns:
+            db.execute("ALTER TABLE eis_server_workers ADD COLUMN telemetry_json TEXT NOT NULL DEFAULT '{}'")
+        columns = {item[1] for item in db.execute("PRAGMA table_info(eis_server_discovery)")}
+        for name, definition in (("request_hash", "TEXT NOT NULL DEFAULT ''"),
+                                 ("receipt_json", "TEXT NOT NULL DEFAULT '{}'"),
+                                 ("drain_turn", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in columns:
+                db.execute("ALTER TABLE eis_server_discovery ADD COLUMN "+name+" "+definition)
         from eis_inn_search import init_schema
         init_schema(db)
         db.commit()
@@ -98,6 +124,115 @@ def safe_text(value, limit=300):
         value = value.replace(secret, "[redacted]")
     value = re.sub(r"https?://\S+", "[source URL omitted]", value)
     return re.sub(r"[\x00-\x1f\x7f]", " ", value)[:limit]
+
+
+_TELEMETRY_ERROR_CODES = frozenset((
+    "eis_connection_error", "site_connection_error", "eis_search_cooldown",
+    "eis_search_markup_limit", "search_response_size_limit", "eis_search_browser_challenge",
+    "eis_search_no_verified_links", "eis_discovery_page_mismatch", "eis_inn_search_url_mismatch",
+    "eis_inn_filter_mismatch", "eis_inn_search_unrecognized_empty", "search_unrecognized",
+    "eis_soap_fault", "eis_incomplete_response", "unexpected_soap_response", "unsafe_soap_xml",
+    "invalid_soap_xml", "too_many_eis_archives", "archive_exceeds_15_mib", "archive_expansion_limit",
+    "unsafe_archive_member", "archive_crc_error", "invalid_archive", "response_size_limit",
+    "response_deadline", "site_invalid_json", "site_upload_not_accepted", "site_report_not_accepted",
+    "site_discovery_not_accepted", "site_discovery_backpressure", "unsupported_attachment_links",
+    "manifest_missing_documents", "invalid_manifest_uid", "download_cancelled", "untrusted_eis_url",
+    "site_redirect_refused", "unexpected_site_url", "invalid_discovery_page", "invalid_inn_job",
+    "invalid_registry_number", "invalid_job", "invalid_jobs_response", "no_original_references",
+    "unsupported_or_unresolved_attachment", "archive_not_received",
+))
+
+
+def _telemetry_error(value):
+    """Only fixed protocol codes reach logs; never free-form details or URLs."""
+    if not isinstance(value, str) or not value:
+        return ""
+    if value in _TELEMETRY_ERROR_CODES or re.fullmatch(r"(?:eis|site)_http_[1-5][0-9]{2}|eis_service_[0-9]{1,3}", value):
+        return value
+    return "unrecognized_error"
+
+
+def _log_telemetry(event, **fields):
+    print("EIS_WORKER_TELEMETRY "+json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
+
+
+def _heartbeat_telemetry(data):
+    result = {}
+    version = data.get("version")
+    if isinstance(version, str) and re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", version):
+        result["version"] = version
+    for key, upper in (("queue_interval_seconds", 86400), ("search_interval_seconds", 3600),
+                       ("queue_backoff_seconds", 86400), ("search_backoff_seconds", 86400),
+                       ("discovery_page", 10)):
+        value = data.get(key)
+        if type(value) is int and value >= 0 and (value <= upper or key.endswith("backoff_seconds")):
+            result[key] = min(value, upper)
+    if type(data.get("discovery_pending")) is bool:
+        result["discovery_pending"] = data["discovery_pending"]
+    result["status"] = data.get("status") if data.get("status") in ("idle", "running", "working", "stopped", "error") else "unknown"
+    result["discovery_status"] = data.get("discovery_status") if data.get("discovery_status") in (
+        "ok", "pending", "pending_delivery", "blocked", "error", "not_started", "disabled") else "unknown"
+    result["discovery_error"] = _telemetry_error(data.get("discovery_error"))
+    return result
+
+
+def _telemetry_state(data):
+    return {key: bool(value) if key.endswith("backoff_seconds") else value for key, value in data.items()}
+
+
+def _report_telemetry(result, kind="reg"):
+    output = {"kind": kind}
+    for key in ("status", "requested_status"):
+        value = result.get(key)
+        if value in ("queued", "leased", "done", "partial", "error", "completed", "no_data"):
+            output[key] = value
+    error = result.get("error_code")
+    if not error:
+        # v1.3 server receipts stored the fixed error code at the end of detail.
+        match = re.search(r": ([a-z][a-z0-9_]{0,79})$", str(result.get("detail", "")))
+        error = match.group(1) if match else ""
+    output["error_code"] = _telemetry_error(error)
+    for key in ("download_complete", "metadata_received", "metadata_stored", "page_complete", "search_complete"):
+        if type(result.get(key)) is bool:
+            output[key] = result[key]
+    for key in ("originals_expected", "originals_received", "unresolved_attachment_count", "candidate_count", "pending_candidates"):
+        if type(result.get(key)) is int and 0 <= result[key] <= 1000000:
+            output[key] = result[key]
+    return output
+
+
+def telemetry_snapshot(ns):
+    """Bounded startup diagnosis, including receipts written by older workers."""
+    db = _db(ns)
+    try:
+        now = int(time.time())
+        workers = []
+        for row in db.execute("SELECT * FROM eis_server_workers ORDER BY seen_at DESC LIMIT 3"):
+            try:
+                stored = json.loads(row["telemetry_json"])
+            except (ValueError, TypeError):
+                stored = {}
+            stored = stored if isinstance(stored, dict) else {}
+            workers.append({**_heartbeat_telemetry({**stored, "status": row["status"],
+                "discovery_status": row["discovery_status"], "discovery_error": row["discovery_error"]}),
+                "age_seconds": max(0, now-row["seen_at"])})
+        reports = []
+        for row in db.execute("""SELECT result_json,created_at,'reg' AS kind FROM eis_server_reports
+          UNION ALL SELECT result_json,created_at,'inn' AS kind FROM eis_server_inn_reports
+          ORDER BY created_at DESC LIMIT 20"""):
+            try:
+                result = json.loads(row["result_json"])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(result, dict):
+                reports.append({**_report_telemetry(result, row["kind"]), "age_seconds": max(0, now-row["created_at"])})
+        queue = {row[0]: row[1] for row in db.execute("SELECT status,COUNT(*) FROM v301_search_jobs GROUP BY status")
+                 if row[0] in ("queued", "leased", "deferred", "done", "partial", "error")}
+        return {"workers": workers, "recent_reports": reports, "queue": queue,
+                "discovery_pending": db.execute("SELECT COUNT(*) FROM eis_server_discovery_candidates WHERE reg_job_id=''").fetchone()[0],
+                "inn_pending": db.execute("SELECT COUNT(*) FROM eis_inn_candidates WHERE reg_job_id=''").fetchone()[0]}
+    finally:
+        db.close()
 
 
 async def body(request):
@@ -174,8 +309,70 @@ def _public_job(row):
     return {**base, "reg_number": row["target"], "metadata_only": row["parent_id"] == "v341-card-facts"}
 
 
+def _recent_registry_job(db, reg, now):
+    return db.execute("""SELECT id FROM v301_search_jobs WHERE kind='reg' AND target=?
+      AND (status IN ('queued','leased','deferred') OR updated_at>=?)
+      ORDER BY CASE WHEN status IN ('queued','leased','deferred') THEN 0 ELSE 1 END,updated_at DESC LIMIT 1""",
+      (reg, time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now-86400)))).fetchone()
+
+
+def enqueue_discovery_candidates(db, limit=100, max_new=None):
+    """Drain durable public-search candidates under the caller's write lock."""
+    now = int(time.time())
+    active = db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0]
+    budget = max(0, MAX_QUEUE-RESERVED_MANUAL_SLOTS-active)
+    if max_new is not None:
+        budget = min(budget, max_new)
+    created = []
+    for candidate in db.execute("""SELECT * FROM eis_server_discovery_candidates WHERE reg_job_id=''
+      ORDER BY discovered_at,reg_number LIMIT ?""", (limit,)).fetchall():
+        reg = candidate["reg_number"]
+        existing = _recent_registry_job(db, reg, now)
+        if existing:
+            identifier = existing[0]
+        elif budget:
+            identifier = secrets.token_hex(12)
+            db.execute("""INSERT INTO v301_search_jobs(id,kind,target,status,priority,parent_id,created_at,updated_at)
+              VALUES(?,'reg',?,'queued',8,'server-discovery',?,?)""", (identifier, reg, _utc(), _utc()))
+            created.append(reg)
+            budget -= 1
+        else:
+            continue
+        db.execute("UPDATE eis_server_discovery_candidates SET reg_job_id=? WHERE reg_number=?", (identifier, reg))
+    # Pending rows are never pruned, even when a download queue stays full.
+    db.execute("DELETE FROM eis_server_discovery_candidates WHERE reg_job_id<>'' AND discovered_at<?", (now-86400,))
+    return created
+
+
+def drain_candidates(db, limit=100):
+    """Share automatic admission fairly; eight queue places stay reserved."""
+    from eis_inn_search import enqueue_pending_candidates
+    db.execute("INSERT OR IGNORE INTO eis_server_discovery(singleton) VALUES(1)")
+    turn = db.execute("SELECT drain_turn FROM eis_server_discovery WHERE singleton=1").fetchone()[0]
+    active = db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0]
+    budget = min(limit, max(0, MAX_QUEUE-RESERVED_MANUAL_SLOTS-active))
+    general = []
+    # Give each source half of the free places and alternate the odd place.
+    # A source with no pending work yields its share in the second pass.
+    general_share = (budget+1)//2 if turn % 2 == 0 else budget//2
+    general.extend(enqueue_discovery_candidates(db, limit, general_share))
+    inn_created = enqueue_pending_candidates(db, limit, budget-general_share)
+    remaining = budget-len(general)-inn_created
+    if remaining:
+        if turn % 2 == 0:
+            extra = enqueue_discovery_candidates(db, limit, remaining)
+            general.extend(extra)
+            enqueue_pending_candidates(db, limit, remaining-len(extra))
+        else:
+            extra = enqueue_pending_candidates(db, limit, remaining)
+            general.extend(enqueue_discovery_candidates(db, limit, remaining-extra))
+    if budget:
+        db.execute("UPDATE eis_server_discovery SET drain_turn=? WHERE singleton=1", ((turn+1) % 2,))
+    return general
+
+
 def claim(ns, identity, limit=2, supported=()):
-    from eis_inn_search import enqueue_pending_candidates, MAX_PAGES
+    from eis_inn_search import MAX_PAGES
     supported = capabilities(supported)
     db = _db(ns)
     now = int(time.time())
@@ -188,7 +385,7 @@ def claim(ns, identity, limit=2, supported=()):
           detail='Истёк лимит повторных попыток загрузки ЕИС',lease_until=0,
           lease_owner='',lease_token='',updated_at=?
           WHERE status='leased' AND lease_until<? AND attempts>=?""", (_utc(), now, MAX_ATTEMPTS))
-        enqueue_pending_candidates(db)
+        drain_candidates(db)
         capable = "inn_search" in supported
         # Re-deliver live claims only to a worker that still supports their kind.
         rows = list(db.execute("""SELECT * FROM v301_search_jobs WHERE
@@ -245,6 +442,12 @@ def heartbeat(ns, data):
     db = _db(ns)
     try:
         db.execute("BEGIN IMMEDIATE")
+        prior = db.execute("SELECT telemetry_json FROM eis_server_workers WHERE worker_id=?", (identity,)).fetchone()
+        try:
+            previous = json.loads(prior[0]) if prior else {}
+        except (ValueError, TypeError):
+            previous = {}
+        telemetry = _heartbeat_telemetry(data)
         lease_until = None
         current = data.get("current_job_id")
         if current:
@@ -255,7 +458,10 @@ def heartbeat(ns, data):
                        (lease_until, _utc(), current))
         _seen(db, identity, data.get("status") or ("running" if current else "idle"),
               data.get("detail"), data.get("discovery_status"), data.get("discovery_error"), supported)
+        db.execute("UPDATE eis_server_workers SET telemetry_json=? WHERE worker_id=?", (json.dumps(telemetry), identity))
         db.commit()
+        if _telemetry_state(telemetry) != _telemetry_state(previous if isinstance(previous, dict) else {}):
+            _log_telemetry("heartbeat", **telemetry)
         return {"received": True, "lease_until": lease_until}
     except Exception:
         db.rollback()
@@ -455,6 +661,7 @@ def report(ns, identifier, data):
         else:
             detail = "Получение данных ЕИС не подтверждено" + (": "+error_code if error_code else "")
         result = {"received": True, "id": identifier, "reg_number": reg, "status": state,
+                  "requested_status": status, "error_code": _telemetry_error(error_code),
                   "download_complete": complete, "audit_complete": False,
                   "metadata_received": proof["metadata_received"], "metadata_stored": metadata_stored,
                   "originals_expected": proof["expected"], "originals_received": proof["received"],
@@ -467,6 +674,7 @@ def report(ns, identifier, data):
                    (identifier, token, identity, reg, json.dumps(result, ensure_ascii=False), int(time.time())))
         _seen(db, identity, "idle", error_code)
         db.commit()
+        _log_telemetry("report", **_report_telemetry(result))
         return result
     except Exception:
         db.rollback()
@@ -478,8 +686,8 @@ def report(ns, identifier, data):
 def discovered(ns, data):
     identity = worker_id(data.get("worker_id"))
     numbers = data.get("reg_numbers")
-    if not isinstance(numbers, list) or len(numbers) > 40:
-        raise HTTPException(422, "Expected at most 40 official registry numbers")
+    if not isinstance(numbers, list) or len(numbers) > 100:
+        raise HTTPException(422, "Expected at most 100 official registry numbers")
     numbers = list(dict.fromkeys(registry(number) for number in numbers))
     source = data.get("source_url")
     try:
@@ -487,6 +695,7 @@ def discovered(ns, data):
         valid = (isinstance(source, str) and len(source) <= 2000 and parsed.scheme == "https"
                  and parsed.hostname == "zakupki.gov.ru" and parsed.port in (None, 443)
                  and not parsed.username and not parsed.password and not parsed.fragment
+                 and not any(ord(c) < 33 for c in source)
                  and parsed.path == "/epz/order/extendedsearch/results.html"
                  and parse_qs(parsed.query).get("fz223") == ["on"])
     except (ValueError, TypeError, AttributeError):
@@ -494,32 +703,53 @@ def discovered(ns, data):
     if not valid:
         raise HTTPException(422, "Expected the actual official 223-FZ search URL")
     db = _db(ns)
-    created = []
     skipped = []
     now = int(time.time())
+    request_hash = hashlib.sha256(json.dumps([identity, source, numbers], separators=(",", ":")).encode()).hexdigest()
     try:
         db.execute("BEGIN IMMEDIATE")
-        previous = db.execute("SELECT accepted_at FROM eis_server_discovery WHERE singleton=1").fetchone()
-        if previous and now-previous[0] < 300:
-            raise HTTPException(429, "Discovery is limited to one cycle per five minutes",
-                                headers={"Retry-After": str(300-(now-previous[0]))})
-        budget = max(0, MAX_QUEUE-8-db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0])
+        previous = db.execute("SELECT * FROM eis_server_discovery WHERE singleton=1").fetchone()
+        if previous and now-previous["accepted_at"] < DISCOVERY_INTERVAL_SECONDS:
+            if previous["request_hash"] == request_hash:
+                db.commit()
+                return {**json.loads(previous["receipt_json"]), "replayed": True}
+            raise HTTPException(429, "Discovery is limited to one accepted page per 30 seconds",
+                                headers={"Retry-After": str(DISCOVERY_INTERVAL_SECONDS-(now-previous["accepted_at"])),
+                                         "X-EIS223-Retry-Scope": "discovery"})
+        fresh = []
         for reg in numbers:
-            old = db.execute("""SELECT id,status FROM v301_search_jobs WHERE kind='reg' AND target=?
-              AND (status IN ('queued','leased','deferred') OR updated_at>=?) LIMIT 1""",
-              (reg, time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now-86400)))).fetchone()
-            if old or budget <= 0:
+            old = _recent_registry_job(db, reg, now)
+            if old:
                 skipped.append(reg)
+                db.execute("UPDATE eis_server_discovery_candidates SET reg_job_id=? WHERE reg_number=? AND reg_job_id=''", (old[0], reg))
                 continue
-            identifier = secrets.token_hex(12)
-            db.execute("""INSERT INTO v301_search_jobs(id,kind,target,status,priority,parent_id,created_at,updated_at)
-              VALUES(?,'reg',?,'queued',10,'server-discovery',?,?)""", (identifier, reg, _utc(), _utc()))
-            created.append(reg)
-            budget -= 1
-        db.execute("INSERT OR REPLACE INTO eis_server_discovery VALUES(1,?,?)", (now, source))
+            pending = db.execute("SELECT 1 FROM eis_server_discovery_candidates WHERE reg_number=? AND reg_job_id=''", (reg,)).fetchone()
+            if not pending:
+                fresh.append(reg)
+        pending_count = db.execute("SELECT COUNT(*) FROM eis_server_discovery_candidates WHERE reg_job_id=''").fetchone()[0]
+        if pending_count+len(fresh) > MAX_DISCOVERY_PENDING:
+            # Reject the entire page. A worker must retry it without advancing
+            # its cursor; neither a full queue nor a lost response loses rows.
+            raise HTTPException(503, "Discovery backlog is full; retry the same page",
+                                headers={"Retry-After": "60", "X-EIS223-Retry-Scope": "discovery"})
+        for reg in fresh:
+            db.execute("""INSERT INTO eis_server_discovery_candidates(reg_number,discovered_at,source_url)
+              VALUES(?,?,?) ON CONFLICT(reg_number) DO UPDATE SET discovered_at=excluded.discovered_at,
+              source_url=excluded.source_url,reg_job_id=''""", (reg, now, source))
+        drained = set(drain_candidates(db))
+        pending = {row[0] for row in db.execute("SELECT reg_number FROM eis_server_discovery_candidates WHERE reg_job_id=''")}
+        result = {"accepted": True, "created": [reg for reg in numbers if reg in drained],
+                  "skipped": skipped, "pending": [reg for reg in numbers if reg in pending],
+                  "pending_candidates": len(pending), "manual_records_created": 0}
+        db.execute("""INSERT INTO eis_server_discovery(singleton,accepted_at,source_url,request_hash,receipt_json)
+          VALUES(1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET accepted_at=excluded.accepted_at,
+          source_url=excluded.source_url,request_hash=excluded.request_hash,receipt_json=excluded.receipt_json""",
+          (now, source, request_hash, json.dumps(result)))
         _seen(db, identity, "idle", discovery_status="ok", discovery_error="")
         db.commit()
-        return {"accepted": True, "created": created, "skipped": skipped, "manual_records_created": 0}
+        _log_telemetry("discovery", received=len(numbers), created=len(result["created"]),
+                       skipped=len(skipped), pending=len(result["pending"]), backlog=len(pending))
+        return result
     except Exception:
         db.rollback()
         raise
@@ -534,6 +764,10 @@ def inn_progress(ns, job_id):
 
 def install(ns):
     init(ns)
+    try:
+        _log_telemetry("startup", **telemetry_snapshot(ns))
+    except Exception as exc:
+        _log_telemetry("startup_unavailable", error_type=type(exc).__name__)
     app = ns["app"]
 
     @app.get("/eis223/worker-version")

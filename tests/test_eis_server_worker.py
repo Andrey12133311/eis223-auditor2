@@ -334,11 +334,208 @@ class ServerWorkerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["created"], ["32610000001"])
         self.assertEqual(response.json()["manual_records_created"], 0)
-        self.assertEqual(self.client.post("/api/eis-worker/discovered", headers=self.headers, json=body).status_code, 429)
+        replay = self.client.post("/api/eis-worker/discovered", headers=self.headers, json=body)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.json()["replayed"])
+        limited = self.client.post("/api/eis-worker/discovered", headers=self.headers,
+                                   json={**body, "reg_numbers": ["32610000002"]})
+        self.assertEqual(limited.status_code, 429)
+        self.assertLessEqual(int(limited.headers["Retry-After"]), 30)
+        self.assertEqual(limited.headers["X-EIS223-Retry-Scope"], "discovery")
         bad = {**body, "source_url": "https://example.com/epz/order/extendedsearch/results.html?fz223=on"}
         self.assertEqual(self.client.post("/api/eis-worker/discovered", headers=self.headers, json=bad).status_code, 422)
         with self.ns["conn"]() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM v319_manual_inputs").fetchone()[0], 0)
+
+    def discover(self, numbers, page=1):
+        return self.client.post("/api/eis-worker/discovered", headers=self.headers, json={
+            "worker_id": self.identity, "reg_numbers": numbers,
+            "source_url": "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?fz223=on&pageNumber="+str(page)})
+
+    def allow_discovery(self):
+        with self.ns["conn"]() as db:
+            db.execute("UPDATE eis_server_discovery SET accepted_at=0")
+
+    def test_discovery_accepts_100_and_empty_pages_after_30_seconds(self):
+        numbers = [str(32610000000+i) for i in range(100)]
+        now = int(time.time())
+        with patch.object(worker.time, "time", return_value=now):
+            response = self.discover(numbers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["created"]), 100)
+        with patch.object(worker.time, "time", return_value=now+30):
+            empty = self.discover([], page=2)
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json()["created"], [])
+        self.assertEqual(self.discover(numbers+[REG]).status_code, 422)
+
+    def test_discovery_full_queue_is_durable_across_restart_and_parallel_drain(self):
+        numbers = ["32610000001", "32610000002", "32610000003"]
+        self.enqueue("32610000009")
+        with patch.object(worker, "MAX_QUEUE", 9), patch("eis_inn_search.MAX_QUEUE", 9):
+            result = self.discover(numbers).json()
+            self.assertEqual(result["pending"], numbers)
+            self.assertEqual(result["created"], [])
+            worker.init(self.ns)  # Reinitialising cannot discard accepted pages.
+            self.allow_discovery()
+            repeat = self.discover(numbers, page=2).json()
+            self.assertEqual(repeat["pending_candidates"], 3)
+            with self.ns["conn"]() as db:
+                db.execute("UPDATE v301_search_jobs SET status='done'")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                claims = list(pool.map(lambda identity: worker.claim(self.ns, identity, 1), [self.identity, self.other]))
+            self.assertEqual(sum(len(jobs) for jobs in claims), 1)
+            with self.ns["conn"]() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_discovery_candidates WHERE reg_job_id=''").fetchone()[0], 2)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM v319_manual_inputs").fetchone()[0], 0)
+        # The eight reserved places remain available for explicit user work.
+        with patch.object(queue, "MAX_QUEUE", 9):
+            for suffix in range(8):
+                queue._enqueue(self.ns, "reg", str(32620000000+suffix), 1, 0, "", True)
+            with self.assertRaises(worker.HTTPException) as caught:
+                queue._enqueue(self.ns, "reg", "32620000009", 1, 0, "", True)
+            self.assertEqual(caught.exception.status_code, 429)
+
+    def test_discovery_saturation_rejects_whole_page_and_recovers_after_claim(self):
+        first, second = ["32610000001", "32610000002"], ["32610000003", "32610000004"]
+        with patch.object(worker, "MAX_QUEUE", 8), patch("eis_inn_search.MAX_QUEUE", 8), patch.object(worker, "MAX_DISCOVERY_PENDING", 2):
+            self.assertEqual(self.discover(first).status_code, 200)
+            self.allow_discovery()
+            result = self.discover(second, page=2)
+            self.assertEqual(result.status_code, 503)
+            self.assertEqual(result.headers["Retry-After"], "60")
+            self.assertEqual(result.headers["X-EIS223-Retry-Scope"], "discovery")
+            with self.ns["conn"]() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_discovery_candidates").fetchone()[0], 2)
+                self.assertEqual(db.execute("SELECT accepted_at FROM eis_server_discovery").fetchone()[0], 0)
+        worker.claim(self.ns, self.identity, 1)
+        accepted = self.discover(second, page=2)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["created"], second)
+
+    def test_discovery_daily_dedup_reuses_manual_and_inn_work_and_refreshes_later(self):
+        manual = queue._enqueue(self.ns, "reg", REG, 1, 0, "", True)[0]
+        self.assertEqual(self.discover([REG]).json()["skipped"], [REG])
+        self.allow_discovery()
+        with self.ns["conn"]() as db:
+            db.execute("UPDATE v301_search_jobs SET status='done' WHERE id=?", (manual["id"],))
+        self.assertEqual(self.discover([REG], page=2).json()["skipped"], [REG])
+        self.allow_discovery()
+        with self.ns["conn"]() as db:
+            db.execute("UPDATE v301_search_jobs SET updated_at='2000-01-01T00:00:00' WHERE id=?", (manual["id"],))
+        self.assertEqual(self.discover([REG], page=3).json()["created"], [REG])
+        with self.ns["conn"]() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE target=?", (REG,)).fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM v319_manual_inputs").fetchone()[0], 1)
+
+    def test_general_and_inn_backlogs_alternate_single_free_slot(self):
+        with self.ns["conn"]() as db:
+            db.execute("INSERT INTO eis_server_discovery_candidates VALUES(?,?,?,'')", (REG, int(time.time()), "official"))
+            db.execute("INSERT INTO eis_inn_candidates VALUES(?,?,?,?,?,?,?,'')",
+                       ("a"*24, "7701234567", "32610000001", "a"*24, 1, "official", queue._utc()))
+        with patch.object(worker, "MAX_QUEUE", 9), patch("eis_inn_search.MAX_QUEUE", 9):
+            first = worker.claim(self.ns, self.identity, 1)[0]
+            self.assertEqual(first["reg_number"], REG)
+            self.assertEqual(self.row(first["id"])["priority"], 8)
+            with self.ns["conn"]() as db:
+                db.execute("UPDATE v301_search_jobs SET status='done'")
+                db.execute("INSERT INTO eis_server_discovery_candidates VALUES(?,?,?,'')", ("32610000002", int(time.time()), "official"))
+            second = worker.claim(self.ns, self.identity, 1)[0]
+            self.assertEqual(second["reg_number"], "32610000001")
+            self.assertEqual(self.row(second["id"])["priority"], 8)
+
+    def test_pending_recent_jobs_do_not_starve_new_candidates(self):
+        old = self.enqueue()["job"]["id"]
+        with self.ns["conn"]() as db:
+            db.execute("UPDATE v301_search_jobs SET status='done' WHERE id=?", (old,))
+            db.execute("INSERT INTO eis_server_discovery_candidates VALUES(?,?,?,'')", (REG, 1, "official"))
+            db.execute("INSERT INTO eis_server_discovery_candidates VALUES(?,?,?,'')", ("32610000001", 2, "official"))
+        db = queue._db(self.ns)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            self.assertEqual(worker.enqueue_discovery_candidates(db, limit=1), [])
+            self.assertEqual(worker.enqueue_discovery_candidates(db, limit=1), ["32610000001"])
+            db.commit()
+        finally:
+            db.close()
+
+    def test_legacy_general_work_keeps_fifo_ahead_of_new_automatic_candidates(self):
+        old = queue._enqueue(self.ns, "reg", REG, 1, 10, "server-discovery", False)[0]
+        other = queue._enqueue(self.ns, "reg", "32610000009", 1, 10, "worker-bootstrap", False)[0]
+        with self.ns["conn"]() as db:
+            db.execute("UPDATE v301_search_jobs SET created_at='2000-01-01T00:00:00' WHERE id=?", (old["id"],))
+            db.execute("INSERT INTO eis_server_discovery_candidates VALUES(?,?,?,'')", ("32610000001", int(time.time()), "official"))
+        worker.init(self.ns)
+        self.assertEqual(self.row(old["id"])["priority"], 8)
+        self.assertEqual(self.row(other["id"])["priority"], 10)
+        self.assertEqual(worker.claim(self.ns, self.identity, 1)[0]["id"], old["id"])
+
+    def test_heartbeat_telemetry_is_safe_quiet_and_old_worker_compatible(self):
+        data = {"worker_id": self.identity, "version": "1.3.0", "status": "idle",
+                "discovery_status": "blocked", "discovery_error": "eis_http_403"}
+        with patch.object(worker, "_log_telemetry") as logged:
+            for _ in range(2):
+                self.assertEqual(self.client.post("/api/eis-worker/heartbeat", headers=self.headers, json=data).status_code, 200)
+            self.assertEqual(logged.call_count, 1)
+            data.update(version="1.4.0", search_backoff_seconds=100, queue_backoff_seconds=0,
+                        search_interval_seconds=60, discovery_page=2, discovery_pending=True,
+                        discovery_status="pending_delivery")
+            self.assertEqual(self.client.post("/api/eis-worker/heartbeat", headers=self.headers, json=data).status_code, 200)
+            data["search_backoff_seconds"] = 70
+            self.client.post("/api/eis-worker/heartbeat", headers=self.headers, json=data)
+            self.assertEqual(logged.call_count, 2)  # Countdown alone is not a state change.
+            self.assertEqual(worker.telemetry_snapshot(self.ns)["workers"][0]["discovery_status"], "pending_delivery")
+            data["search_backoff_seconds"] = 999999
+            self.client.post("/api/eis-worker/heartbeat", headers=self.headers, json=data)
+            self.assertEqual(worker.telemetry_snapshot(self.ns)["workers"][0]["search_backoff_seconds"], 86400)
+            self.assertEqual(logged.call_count, 2)
+            data.update(discovery_error=KEY, version=KEY, detail=KEY, discovery_status=KEY)
+            self.client.post("/api/eis-worker/heartbeat", headers=self.headers, json=data)
+            self.assertNotIn(KEY, str(logged.call_args_list))
+        snapshot = worker.telemetry_snapshot(self.ns)
+        self.assertNotIn(KEY, json.dumps(snapshot))
+        self.assertEqual(snapshot["workers"][0]["discovery_error"], "unrecognized_error")
+
+    def test_schema_upgrade_retains_legacy_worker_and_discovery_state(self):
+        with self.ns["conn"]() as db:
+            db.executescript("""DROP TABLE eis_server_workers; DROP TABLE eis_server_discovery;
+              CREATE TABLE eis_server_workers(worker_id TEXT PRIMARY KEY,seen_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT '',detail TEXT NOT NULL DEFAULT '',
+                discovery_status TEXT NOT NULL DEFAULT '',discovery_error TEXT NOT NULL DEFAULT '');
+              CREATE TABLE eis_server_discovery(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                accepted_at INTEGER NOT NULL DEFAULT 0,source_url TEXT NOT NULL DEFAULT '');""")
+            db.execute("INSERT INTO eis_server_workers VALUES(?,?,?,?,?,?)",
+                       (self.identity, int(time.time()), "idle", "", "blocked", "eis_http_429"))
+            db.execute("INSERT INTO eis_server_discovery VALUES(1,123,'official')")
+        worker.init(self.ns)
+        worker.init(self.ns)
+        self.assertEqual(worker.health(self.ns)["discovery_error"], "eis_http_429")
+        self.assertEqual(worker.telemetry_snapshot(self.ns)["workers"][0]["discovery_error"], "eis_http_429")
+        with self.ns["conn"]() as db:
+            self.assertEqual(db.execute("SELECT accepted_at,source_url,request_hash,drain_turn FROM eis_server_discovery").fetchone(),
+                             (123, "official", "", 0))
+
+    def test_report_telemetry_distinguishes_ack_from_received_bytes_and_reads_old_receipts(self):
+        self.enqueue()
+        job = self.claim()
+        with patch.object(worker, "_log_telemetry") as logged:
+            result = self.report(job, status="no_data", error_code="site_http_422")
+        self.assertEqual(result.status_code, 200)
+        self.assertFalse(result.json()["download_complete"])
+        self.assertEqual(result.json()["requested_status"], "no_data")
+        self.assertEqual(logged.call_args.kwargs["originals_received"], 0)
+        with self.ns["conn"]() as db:
+            legacy = {"status": "queued", "detail": "Получение данных ЕИС не подтверждено: site_http_422",
+                      "download_complete": False, "metadata_received": False, "originals_received": 0}
+            db.execute("UPDATE eis_server_reports SET result_json=?", (json.dumps(legacy),))
+            for suffix in range(25):
+                db.execute("INSERT INTO eis_server_reports VALUES(?,?,?,?,?,?)",
+                           (str(suffix), "token", self.identity, REG, json.dumps(legacy), int(time.time())+suffix))
+        snapshot = worker.telemetry_snapshot(self.ns)
+        self.assertEqual(len(snapshot["recent_reports"]), 20)
+        self.assertTrue(all(item["error_code"] == "site_http_422" for item in snapshot["recent_reports"]))
+        self.assertTrue(all(item["download_complete"] is False for item in snapshot["recent_reports"]))
 
 
 if __name__ == "__main__":

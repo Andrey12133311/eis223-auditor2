@@ -29,6 +29,7 @@ def init_schema(db):
         result_json TEXT NOT NULL, created_at INTEGER NOT NULL,
         PRIMARY KEY(job_id,lease_token)
       );
+      CREATE INDEX IF NOT EXISTS eis_server_inn_reports_recent ON eis_server_inn_reports(created_at DESC);
     """)
 
 
@@ -42,7 +43,7 @@ def root_job(db, row):
     return row["id"]
 
 
-def enqueue_pending_candidates(db, limit=40):
+def enqueue_pending_candidates(db, limit=40, max_new=None):
     """Attach candidates to shared downloads inside the caller's write lock.
 
     A full queue never drops search results. Unscheduled candidates remain in
@@ -50,6 +51,8 @@ def enqueue_pending_candidates(db, limit=40):
     """
     active = db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0]
     budget = max(0, MAX_QUEUE-8-active)
+    if max_new is not None:
+        budget = min(budget, max_new)
     created = 0
     for candidate in db.execute("SELECT * FROM eis_inn_candidates WHERE reg_job_id='' ORDER BY discovered_at,root_job_id,reg_number LIMIT ?",
                                 (limit,)).fetchall():
@@ -88,7 +91,8 @@ def official_search_source(source, inn, page):
 
 
 def report(ns, identifier, data):
-    from eis_server_worker import worker_id, _assert_lease, _seen, safe_text, MAX_ATTEMPTS
+    from eis_server_worker import (worker_id, _assert_lease, _seen, safe_text, MAX_ATTEMPTS,
+                                   drain_candidates, _log_telemetry, _report_telemetry, _telemetry_error)
 
     identity = worker_id(data.get("worker_id"))
     inn, page = data.get("inn"), data.get("page")
@@ -158,7 +162,11 @@ def report(ns, identifier, data):
             detail = "Поиск ЕИС по ИНН не выполнен" + (": "+error_code if error_code else "")
         if more and page >= MAX_PAGES:
             detail += "; достигнут предел 10 страниц, выдача обработана не полностью"
-        delay = max(300, min(86400, retry or 900)) if state == "queued" else 0
+        delay = 0
+        if state == "queued":
+            # A shared search slot is scheduling, not a remote EIS failure.
+            # Honour the remaining slot exactly; real failures keep backoff.
+            delay = max(1, retry or 60) if error_code == "eis_search_cooldown" else max(60, retry or 900)
         db.execute("""UPDATE v301_search_jobs SET status=?,detail=?,found=?,accepted=0,attempts=?,
           not_before=?,lease_until=0,lease_owner='server-retry',lease_token='',updated_at=? WHERE id=?""",
           (state, detail, len(numbers), attempts, int(time.time())+delay if delay else 0, _utc(), identifier))
@@ -177,8 +185,8 @@ def report(ns, identifier, data):
                         db.execute("""INSERT INTO v301_search_jobs
                           (id,kind,target,page,status,priority,created_at,updated_at,not_before,parent_id)
                           VALUES(?,'inn',?,?,'queued',12,?,?,?,?)""",
-                          (next_id, inn, page+1, _utc(), _utc(), int(time.time())+300, root))
-            enqueue_pending_candidates(db)
+                          (next_id, inn, page+1, _utc(), _utc(), int(time.time())+60, root))
+            drain_candidates(db)
             queued = db.execute("SELECT COUNT(*) FROM eis_inn_candidates WHERE source_job_id=? AND reg_job_id<>''", (identifier,)).fetchone()[0]
         pending = db.execute("SELECT COUNT(*) FROM eis_inn_candidates WHERE root_job_id=? AND reg_job_id=''", (root,)).fetchone()[0]
         result = {"received": True, "id": identifier, "kind": "inn", "inn": inn, "page": page,
@@ -186,11 +194,13 @@ def report(ns, identifier, data):
                   "candidate_count": len(numbers), "candidates_queued": queued,
                   "pending_candidates": pending, "next_page_job_id": next_id,
                   "pagination_limited": bool(more and page >= MAX_PAGES),
-                  "detail": detail, "buyer_inn_verified_by_search": False}
+                  "detail": detail, "buyer_inn_verified_by_search": False,
+                  "requested_status": status, "error_code": _telemetry_error(error_code)}
         db.execute("INSERT INTO eis_server_inn_reports VALUES(?,?,?,?,?,?,?,?)",
                    (identifier, token, identity, inn, page, root, json.dumps(result, ensure_ascii=False), int(time.time())))
         _seen(db, identity, "idle", error_code)
         db.commit()
+        _log_telemetry("report", **_report_telemetry(result, "inn"))
         return result
     except Exception:
         db.rollback()

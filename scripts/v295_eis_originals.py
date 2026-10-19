@@ -25,6 +25,32 @@ EXT = frozenset((".docx",".doc",".xlsx",".xls",".pdf",".rtf",".odt",".ods",".zip
 MAX_BYTES = 25*1024*1024
 MAX_EXPANDED = 80*1024*1024
 
+def _rejection_code(error):
+    """Expose only fixed format diagnostics in operational logs."""
+    return {
+        "Invalid original file size":"original_file_size",
+        "ЕИС вернула HTML вместо оригинального файла":"original_is_html",
+        "ЕИС вернула XML вместо запрошенного документа":"original_is_xml",
+        "Не является архивом RAR":"original_not_rar",
+        "Не является архивом 7z":"original_not_7z",
+        "Не является GZIP":"original_not_gzip",
+        "Не является BZIP2":"original_not_bzip2",
+        "Не является XZ":"original_not_xz",
+        "Не является TAR":"original_not_tar",
+        "Не является CAB":"original_not_cab",
+        "Not a binary Office original":"original_not_binary_office",
+        "Not a PDF original":"original_not_pdf",
+        "Not an RTF original":"original_not_rtf",
+        "Not an XML original":"original_not_xml",
+        "Not a ZIP-based Office/archive original":"original_not_zip",
+        "Unsafe compressed original":"original_zip_expansion_limit",
+        "Not a DOCX document":"original_not_docx",
+        "Not an XLSX document":"original_not_xlsx",
+        "Not an OpenDocument":"original_not_opendocument",
+        "Damaged ZIP":"original_zip_crc",
+        "Damaged ZIP original":"original_zip_damaged",
+    }.get(str(error),"unclassified_validation_error")
+
 def root():
     return Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
 
@@ -529,7 +555,9 @@ def install(ns):
         data=b"".join(raw)
         entry=allowed[uid]
         try:assert_format(data,entry["ext"])
-        except ValueError as exc:raise HTTPException(422,str(exc)) from exc
+        except ValueError as exc:
+            print(f"V295 ORIGINAL_REJECTED reg={reg} code={_rejection_code(exc)} bytes={size}",flush=True)
+            raise HTTPException(422,str(exc)) from exc
         sha=hashlib.sha256(data).hexdigest()
         folder=root()/"eis223_official_originals"/reg/uid
         file=folder/(sha+entry["ext"])

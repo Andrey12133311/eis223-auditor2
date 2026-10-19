@@ -17,6 +17,33 @@ FUNCTION = next(node for node in ast.parse(SOURCE).body
 NAMESPACE = {'getpass': getpass}
 exec(compile(ast.Module(body=[FUNCTION], type_ignores=[]), str(SCRIPT), 'exec'), NAMESPACE)
 read_secret = NAMESPACE['read_secret']
+INTERVAL_FUNCTION = next(node for node in ast.parse(SOURCE).body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'configure_intervals')
+exec(compile(ast.Module(body=[INTERVAL_FUNCTION], type_ignores=[]), str(SCRIPT), 'exec'), NAMESPACE)
+configure_intervals = NAMESPACE['configure_intervals']
+
+
+class InstallerIntervalTests(unittest.TestCase):
+    def test_upgrade_preserves_keys_and_enables_faster_search(self):
+        config = {'site_token': 'fixture-site', 'eis_token': 'fixture-eis', 'interval_seconds': 300}
+        configure_intervals(config)
+        self.assertEqual((config['interval_seconds'], config['search_interval_seconds']), (30, 60))
+        self.assertEqual((config['site_token'], config['eis_token']), ('fixture-site', 'fixture-eis'))
+
+    def test_custom_intervals_survive_repeat_install(self):
+        config = {'interval_seconds': 90, 'interval_custom': True, 'search_interval_seconds': 120}
+        configure_intervals(config)
+        self.assertEqual((config['interval_seconds'], config['search_interval_seconds']), (90, 120))
+
+    def test_explicit_search_override_does_not_change_queue(self):
+        config = {'interval_seconds': 90, 'interval_custom': True, 'search_interval_seconds': 300}
+        configure_intervals(config, search_interval_seconds=30)
+        self.assertEqual((config['interval_seconds'], config['search_interval_seconds']), (90, 30))
+
+    def test_invalid_saved_search_interval_is_rejected(self):
+        for value in (0, 29, 3601, True, '60'):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                configure_intervals({'search_interval_seconds': value})
 
 
 class InstallerCredentialTests(unittest.TestCase):
