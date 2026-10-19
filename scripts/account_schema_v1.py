@@ -295,7 +295,9 @@ CREATE TABLE IF NOT EXISTS account_manager_campaign_targets (
         CHECK(status IN ('preparing','active','setup_failed','submitted','completed','cancelled')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     submitted_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    date_from TEXT NOT NULL DEFAULT '',
+    date_to TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS account_manager_campaign_owner ON account_manager_campaign_targets(manager_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS account_manager_campaign_assignee ON account_manager_campaign_targets(user_id,status);

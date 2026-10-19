@@ -36,6 +36,8 @@ COPY tests/test_thematic_finding_submissions.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_finding_submissions.py'
 COPY tests/test_legal_applicability.py tests/test_clarification_identity.py tests/test_v348_protocol_identity.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_applicability.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_clarification_identity.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v348_protocol_identity.py'
+COPY tests/test_thematic_period.py tests/test_manager_campaign_period.py tests/test_audit_evidence_coverage.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_period.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manager_campaign_period.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_evidence_coverage.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
