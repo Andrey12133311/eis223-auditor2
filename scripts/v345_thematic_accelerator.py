@@ -348,6 +348,12 @@ async def _one(ns,item,sem):
             return item,"retry",[],type(exc).__name__
 
 def _persist(ns,results):
+    from v333_dedup_ui import collapse,_same_finding
+    from v352_dashboard_truth import collapse_legal_events
+    # Incoming-result normalization has no database dependency. In particular,
+    # fuzzy documentary comparisons must not occupy SQLite's single writer.
+    results=[(item,state,collapse(findings) if state in ("completed","retry") else findings,detail)
+             for item,state,findings,detail in results]
     c=_open(ns)
     saved_events=[]
     applied=0
@@ -379,14 +385,12 @@ def _persist(ns,results):
             customer=c.execute("SELECT customer FROM purchases WHERE reg_number=?",(reg,)).fetchone()
             if not customer or original.customer_form(customer[0]) not in set(json.loads(campaign["legal_forms"])):continue
             if state in ("completed","retry"):
-                from v333_dedup_ui import collapse,_same_finding
-                from v352_dashboard_truth import collapse_legal_events
                 previous=[dict(r) for r in c.execute(
                     """SELECT title,law,evidence,category,code,document,source_url,law_url
                        FROM thematic_findings WHERE batch_id=? AND reg=?""",
                     (batch,reg))]
-                previous_count=None
-                for f in collapse(findings):
+                previous_before=None
+                for f in findings:
                     if any(_same_finding(old,f,"title") for old in previous):
                         continue
                     inserted=c.execute("""INSERT OR IGNORE INTO thematic_findings
@@ -397,13 +401,12 @@ def _persist(ns,results):
                        f.get("code") or "",f.get("document") or "",
                        f.get("source_url") or "",f.get("law_url") or ""))
                     if inserted.rowcount==1:
-                        if previous_count is None:
-                            previous_count=len(collapse_legal_events(previous))
+                        if previous_before is None:
+                            previous_before=list(previous)
                         previous.append(f)
-                if previous_count is not None:
-                    gained=len(collapse_legal_events(previous))-previous_count
-                    if gained>0:
-                        saved_events.append((batch,reg,gained,item.get("analysis_version",ANALYSIS_VERSION)))
+                if previous_before is not None:
+                    saved_events.append((batch,reg,previous_before,previous,
+                                         item.get("analysis_version",ANALYSIS_VERSION)))
             old=c.execute("SELECT retry_attempts FROM thematic_items WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
             attempts=(int(old[0])+1) if state=="retry" else 0
             delay=min(MAX_RETRY_SECONDS,RECHECK_SECONDS*2**min(5,max(0,attempts-1)))
@@ -423,14 +426,26 @@ def _persist(ns,results):
                item.get("source_version"),item.get("semantic_version"),item.get("engine_signature"),batch,reg))
             applied+=1
         c.commit()
-        for batch,reg,gained,version in saved_events:
-            print(f"THEMATIC_EVIDENCE_SAVED reg={reg} new_unique_findings={gained} "
-                  f"analysis_version={version} batch={batch}",flush=True)
-        return applied
     except BaseException:
         c.rollback()
         raise
     finally:c.close()
+    # Exact before/after snapshots preserve the log's meaning without another
+    # DB read. This potentially expensive grouping is diagnostic only: failure
+    # after a successful commit must never cause retry/release of that result.
+    for batch,reg,before,after,version in saved_events:
+        try:
+            gained=len(collapse_legal_events(after))-len(collapse_legal_events(before))
+            if gained>0:
+                print(f"THEMATIC_EVIDENCE_SAVED reg={reg} new_unique_findings={gained} "
+                      f"analysis_version={version} batch={batch}",flush=True)
+        except Exception as exc:
+            try:
+                print(f"THEMATIC_DIAGNOSTIC_FAILED batch={batch} reg={reg} "
+                      f"committed=True type={type(exc).__name__}",flush=True)
+            except Exception:
+                pass  # A broken log sink cannot invalidate committed evidence.
+    return applied
 
 def _request_missing_originals(ns,results=()):
     """Enqueue missing thematic originals independently of the legal batch.

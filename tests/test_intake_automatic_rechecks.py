@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -241,9 +243,83 @@ class IntakeAutomaticRechecks(unittest.IsolatedAsyncioTestCase):
         for i in range(520):(self.root/"eis223_public_browser_intake"/str(10000000000+i)).mkdir()
         later="99999999999";self.prepare(later)
         con=self.connect();con.execute("DELETE FROM purchases WHERE reg_number=?",(later,));con.commit();con.close()
-        for _ in range(18):await self.tick(source="eis223_public_browser_intake")
-        await self.settled(2,reg=later)
-        self.assertIn(later,[entry[0] for entry in self.calls])
+        # A slow host may exhaust a sweep before all 32 rows are examined.
+        # Control only this module's clocks, leaving asyncio and SQLite real.
+        elapsed=[0.0];wall=[originals.time.time()];seen=[]
+        clock=SimpleNamespace(monotonic=lambda:elapsed[0],time=lambda:wall[0],
+                              strftime=originals.time.strftime,gmtime=originals.time.gmtime)
+        has_intake=originals._has_review_intake
+        def budgeted_intake(reg):
+            seen.append(reg);elapsed[0]+=.25
+            return has_intake(reg)
+
+        # Reproduce a real slow SQLite commit's exclusive lock at the tail
+        # page: the orphan is adopted while the other review opens its DB.
+        # The old eager two-calls assertion failed here despite the orphan
+        # succeeding and the other procurement retaining durable retry state.
+        locked=threading.Event();read_failed=threading.Event();errors=[]
+        class SlowCommit(sqlite3.Connection):
+            def execute(connection,sql,parameters=()):
+                if sql=="BEGIN IMMEDIATE" and not locked.is_set():
+                    result=super().execute("BEGIN EXCLUSIVE")
+                    locked.set()
+                    if not read_failed.wait(5):
+                        raise AssertionError("The competing review did not encounter the held SQLite lock")
+                    return result
+                return super().execute(sql,parameters)
+        def slow_connect():
+            db=sqlite3.connect(self.db_path,timeout=.1,factory=SlowCommit)
+            db.row_factory=sqlite3.Row
+            return db
+        restore=originals._restore_intake_rows;initial_repairs=[0]
+        def concurrent_restore(ns,reg):
+            if reg==REG:
+                initial_repairs[0]+=1
+                if initial_repairs[0]==2:  # Worker, after the scan's pointer check.
+                    if not locked.wait(5):raise AssertionError("Orphan adoption did not acquire its SQLite lock")
+                    try:return restore(ns,reg)
+                    except sqlite3.OperationalError as exc:
+                        errors.append(str(exc));read_failed.set();raise
+            return restore(ns,reg)
+
+        source="eis223_public_browser_intake"
+        with patch.object(originals,"time",clock),patch.object(originals,"_has_review_intake",side_effect=budgeted_intake),\
+                patch.object(originals,"_restore_intake_rows",side_effect=concurrent_restore):
+            ns=self.ns;ns["conn"]=slow_connect
+            # 522 names at 20 examined rows per five-second sweep: exactly 27
+            # bounded passes, with the persisted cursor surviving a restart.
+            for index in range(27):
+                if index==10:
+                    ns=self.install();ns["conn"]=slow_connect
+                result=await self.tick(source=source,ns=ns)
+                self.assertEqual(result["visited"],20 if index<26 else 2)
+                self.assertLessEqual(result["admitted"],originals.MAX_REVIEW_ADMISSIONS)
+                cursor=json.loads((self.root/"eis223_official_review_jobs"/".revisit-cursor.json").read_text())
+                self.assertEqual(cursor[source],seen[-1] if index<26 else "")
+            self.assertEqual(seen,sorted([str(10000000000+i) for i in range(520)]+[REG,later]))
+            await self.settled(1,reg=later)
+            self.assertEqual(errors,["database is locked"])
+            self.assertEqual([entry[0] for entry in self.calls],[later])
+            failed=self.state(REG)
+            self.assertEqual((failed["status"],failed["reason"],failed["attempts"]),("failed","OperationalError",1))
+            self.assertGreater(failed["next_retry_at"],wall[0])
+            self.assertNotIn("last_semantic_version",failed)
+
+            # Retry survives a second restart, cannot run early, then resumes
+            # at its actual persisted deadline. No state/backoff is rewritten.
+            restarted=self.install()
+            self.assertEqual((await self.tick(source="eis223_official_review_jobs",ns=restarted,after=""))["admitted"],0)
+            self.assertEqual(self.state(REG)["next_retry_at"],failed["next_retry_at"])
+            wall[0]=failed["next_retry_at"]
+            self.assertEqual((await self.tick(source="eis223_official_review_jobs",ns=restarted,after=""))["admitted"],1)
+            await self.settled(2)
+            self.assertCountEqual([entry[0] for entry in self.calls],[REG,later])
+            for reg in (REG,later):
+                self.assertEqual(self.state(reg)["status"],"completed")
+                self.assertEqual(self.state(reg)["next_retry_at"],0)
+            for _ in range(3):
+                self.assertEqual((await self.tick(source=source,ns=restarted,after="10000000519"))["admitted"],0)
+            self.assertEqual(len(self.calls),2)
 
     async def test_admissions_and_live_tasks_are_bounded_and_excess_uploads_durable(self):
         regs=[REG]+[str(32616233662+i) for i in range(9)]
