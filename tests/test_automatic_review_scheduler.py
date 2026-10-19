@@ -513,6 +513,17 @@ class SnapshotWorkerDiagnostics(DatabaseFixture, unittest.IsolatedAsyncioTestCas
         with self.connect() as con:
             con.execute("UPDATE v332_audit_queue SET state='pending' WHERE reg=?", (reg,))
         real_watermark = general.review_watermark
+        real_defer_retry = general.defer_retry
+        retry_committed, release_retry = threading.Event(), threading.Event()
+        deferred_log = f'V332 AUDIT_DEFERRED reg={reg} '
+        def defer_retry(*args, **kwargs):
+            delay = real_defer_retry(*args, **kwargs)
+            # The commit is observable before its worker-thread result returns.
+            # Hold that boundary so the test must synchronize both milestones.
+            retry_committed.set()
+            if not release_retry.wait(5):
+                raise AssertionError('Post-commit retry hold was not released')
+            return delay
         errors = True
         def watermark(ns, number):
             if errors:raise SemanticSnapshotError('byte_budget')
@@ -527,6 +538,7 @@ class SnapshotWorkerDiagnostics(DatabaseFixture, unittest.IsolatedAsyncioTestCas
             while not predicate():await real_sleep(.005)
         with patch.object(general, 'GENERAL_WORKERS', 1), \
              patch.object(general, 'review_watermark', side_effect=watermark), \
+             patch.object(general, 'defer_retry', side_effect=defer_retry), \
              patch.object(general, 'inspect_one', engine), \
              patch.object(general, 'refresh_changed', return_value=0), \
              patch.object(general, 'add_new_verified', return_value=0), \
@@ -534,8 +546,9 @@ class SnapshotWorkerDiagnostics(DatabaseFixture, unittest.IsolatedAsyncioTestCas
             general.install(self.ns)
             await self.ns['app'].startups[0]()
             try:
-                await asyncio.wait_for(wait_for(lambda:self.row(reg)['retry_count'] == 1), 5)
+                await asyncio.wait_for(wait_for(retry_committed.is_set), 5)
                 row = self.row(reg)
+                self.assertEqual(row['retry_count'], 1)
                 self.assertEqual(row['state'], 'pending')
                 self.assertEqual(row['last_semantic_version'], before['last_semantic_version'])
                 self.assertEqual(row['last_engine_signature'], before['last_engine_signature'])
@@ -548,6 +561,13 @@ class SnapshotWorkerDiagnostics(DatabaseFixture, unittest.IsolatedAsyncioTestCas
                 self.assertEqual(slot['last_error_reg'], reg)
                 self.assertEqual(slot['last_error_phase'], 'source')
                 self.assertTrue(slot['last_error_at'])
+                self.assertTrue(retry_committed.is_set())
+                self.assertNotIn(deferred_log, self.output.getvalue())
+                release_retry.set()
+                # A committed retry is not proof that the async continuation
+                # has logged its classification. Wait for this attempt's log,
+                # then independently verify its database/source error fields.
+                await asyncio.wait_for(wait_for(lambda:deferred_log in self.output.getvalue()), 5)
                 self.assertIn('database_busy=False reason=source_snapshot_byte_budget', self.output.getvalue())
                 errors = False
                 with self.connect() as con:
@@ -560,6 +580,7 @@ class SnapshotWorkerDiagnostics(DatabaseFixture, unittest.IsolatedAsyncioTestCas
                 self.assertIsNone(slot['last_error_reg'])
                 self.assertIsNone(slot['last_error_at'])
             finally:
+                release_retry.set()
                 self.ns['_v332_campaign_worker'].cancel()
                 await asyncio.gather(self.ns['_v332_campaign_worker'], return_exceptions=True)
 

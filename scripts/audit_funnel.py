@@ -20,7 +20,8 @@ import uuid
 
 CURRENT = ContextVar("audit_funnel", default=None)
 COUNTS = frozenset(("documents", "unreadable", "readable_input_documents", "verified_documents", "analysis_documents",
-    "analyzer_candidates", "checklist_candidates", "confirmed", "review", "ok",
+    "analyzer_candidates", "analyzer_violation", "analyzer_check", "analyzer_risk", "analyzer_other", "analyzer_invalid",
+    "checklist_candidates", "confirmed", "review", "ok",
     "selected_before_collapse", "selected_after_collapse", "persist_input",
     "persisted_confirmed", "persisted_review", "persisted_ok"))
 REASONS = frozenset(("no_readable_documents", "no_verified_documents", "source_incomplete",
@@ -122,7 +123,18 @@ def observe(kind, *values):
     elif kind == "incomplete":
         if values[0]:_add(event, "reasons", "source_incomplete")
     elif kind == "analyzer_results":
-        _add(event, "counts", "analyzer_candidates", len(_rows(values[0])))
+        rows = _rows(values[0])
+        _add(event, "counts", "analyzer_candidates", len(rows))
+        # Fixed kinds only: an output row is not necessarily a claimed
+        # violation. Never serialize arbitrary kind names or inspect prose.
+        for row in rows:
+            if not isinstance(row, dict):
+                key = "analyzer_invalid"
+            else:
+                category = row.get("kind")
+                key = ("analyzer_" + category if isinstance(category, str)
+                       and category in ("violation", "check", "risk") else "analyzer_other")
+            _add(event, "counts", key)
     elif kind == "checklist_results":
         checks = _rows(values[0])
         _add(event, "counts", "checklist_candidates", len(checks))

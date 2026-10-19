@@ -7,6 +7,7 @@ increment confirmed violation counts.
 """
 from __future__ import annotations
 import hashlib
+import audit_funnel
 import re
 from functools import wraps
 
@@ -381,12 +382,14 @@ def install(ns):
         definitive=[v for v in cases if v["classification"]=="violation"]
         admissions=_admission_cases(p,docs)
         if p.get("reg")=="32616324151" or cases:
-            print(f"V324 FAS_EVIDENCE reg={p.get('reg')} "
-                  f"sme_confirmed={any(c.get('scope') for c in cases)} "
-                  f"agreements={len(cases)} verified_extra_documents={len(definitive)} "
+            print(f"V324 FAS_EVIDENCE reg={audit_funnel.valid_registration(p.get('reg')) or 'unavailable'} "
+                  f"agreement_scope_confirmed={any(c.get('scope') for c in cases)} "
+                  f"agreement_cases={len(cases)} definitive_agreement_cases={len(definitive)} "
                   f"review_only={sum(c['classification']!='violation' for c in cases)} "
-                  f"collective_admission={len(admissions)} "
-                  f"nmcd_verified={p.get('price_num') is not None}",
+                  f"agreements_without_confirmed_scope={sum(c['classification']=='needs_scope' for c in cases)} "
+                  f"agreements_application_duty_unproven={sum(c['classification']=='review' for c in cases)} "
+                  f"collective_admission_cases={len(admissions)} "
+                  f"price_present={p.get('price_num') is not None}",
                   flush=True)
         # Only an affirmative tender-specific, hash-verified condition
         # matching an explicit FAS legal determination is counted. The

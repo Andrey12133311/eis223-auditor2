@@ -381,6 +381,95 @@ class AuditReservation(str):
         return value
 
 
+# A single durable handoff lets an existing worker revisit a terminal row even
+# when a legacy first-pass backlog is already above the admission high-water.
+# These are scheduler hints in the existing cursor table, never result watermarks.
+_RECHECK_IDENTITY=("reg","state","updated_at","last_semantic_version",
+                   "last_engine_signature","reservation_token","next_retry_at",
+                   "retry_count","last_result_token")
+_RECHECK_MATCH=" AND ".join(key+" IS ?" for key in _RECHECK_IDENTITY)
+
+
+def recheck_handoff(c):
+    scope="general-recheck-handoff:"+CAMPAIGN
+    raw=scan_cursor(c,scope)
+    if not raw:return ""
+    saved=json.loads(raw)
+    if saved.get("claim_token") and not c.execute(
+            "SELECT 1 FROM v332_audit_queue WHERE campaign=? AND reg=? "
+            "AND state='running' AND reservation_token=?",
+            (CAMPAIGN,saved["reg"],saved["claim_token"])).fetchone():
+        # Completion, retry or startup recovery releases only this exact hint.
+        c.execute("UPDATE v382_audit_scan_cursors SET cursor='' WHERE scope=? AND cursor=?",
+                  (scope,raw))
+        c.commit()
+        return scan_cursor(c,scope)
+    return raw
+
+
+def ordinary_ready(c):
+    return c.execute("""SELECT 1 FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
+        WHERE q.campaign=? AND q.state='pending' AND q.next_retry_at<=?
+        AND eis_business_company(p.customer)=1 AND (q.receipt_ready=1 OR EXISTS(
+            SELECT 1 FROM docs d WHERE d.reg_number=q.reg AND COALESCE(d.local_path,'')<>''
+            AND d.status IN ('checked','downloaded_no_text'))) LIMIT 1""",
+        (CAMPAIGN,time.time())).fetchone() is not None
+
+
+def claim_recheck_handoff(c):
+    """Freshness-check one terminal hint, then fence one existing worker claim."""
+    scope="general-recheck-handoff:"+CAMPAIGN
+    turn="general-recheck-turn:"+CAMPAIGN
+    raw=scan_cursor(c,scope)
+    if not raw:return None
+    saved=json.loads(raw)
+    if saved.get("claim_token"):return None
+    if scan_cursor(c,turn)=="pending" and ordinary_ready(c):return None
+    values=[saved[key] for key in _RECHECK_IDENTITY]
+    row=c.execute("SELECT * FROM v332_audit_queue WHERE campaign=? AND "+_RECHECK_MATCH,
+                  [CAMPAIGN,*values]).fetchone()
+    eligible=False
+    receipt_ready=False
+    if row is not None:
+        try:
+            # Recheck after staging: sources can change or revert before a
+            # worker becomes free. No hashing occurs in a writer transaction.
+            receipt_ready,source_error=receipt_readiness(saved["reg"])
+            ready=receipt_ready or source_error or c.execute(
+                "SELECT 1 FROM docs WHERE reg_number=? AND COALESCE(local_path,'')<>'' "
+                "AND status IN ('checked','downloaded_no_text') LIMIT 1",(saved["reg"],)).fetchone()
+            current=None if source_error else semantic_source_version(c,saved["reg"])
+            retry=saved["state"]=="failed" and locked_error(row["error"])
+            eligible=bool(ready and (retry or saved["last_semantic_version"]!=current or
+                                    saved["last_engine_signature"]!=engine_signature()))
+            receipt_ready=bool(receipt_ready or source_error)
+        except (SemanticSnapshotError,EngineSignatureError,OSError) as exc:
+            print(f"GENERAL_HANDOFF_RETRY reg={saved['reg']} type={type(exc).__name__}",flush=True)
+    c.execute("BEGIN IMMEDIATE")
+    if scan_cursor(c,scope)!=raw or (scan_cursor(c,turn)=="pending" and ordinary_ready(c)):
+        c.commit()
+        return None
+    save_scan_cursor(c,scope,"")
+    claimed=None
+    if eligible:
+        token=uuid.uuid4().hex
+        changed=c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,
+            reservation_token=?,receipt_ready=?,next_retry_at=0,
+            last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
+            WHERE campaign=? AND """+_RECHECK_MATCH+""" AND next_retry_at<=?
+            AND EXISTS(SELECT 1 FROM purchases p WHERE p.reg_number=v332_audit_queue.reg
+                AND eis_business_company(p.customer)=1)""",
+            [now(),token,int(receipt_ready),saved["reg"],CAMPAIGN,*values,time.time()]).rowcount
+        if changed:
+            save_scan_cursor(c,scope,json.dumps({"reg":saved["reg"],"claim_token":token}))
+            save_scan_cursor(c,turn,"pending")
+            claimed=AuditReservation(saved["reg"],token)
+    c.commit()
+    if claimed is not None:
+        print(f"GENERAL_RECHECK_CLAIM reg={claimed} direct_handoff=True",flush=True)
+    return claimed
+
+
 def claim_next(ns):
     """Atomically reserve an audit row; prefer already downloaded originals."""
     from v342_thematic_queue import business_company
@@ -391,6 +480,12 @@ def claim_next(ns):
         c.create_function("eis_business_company",1,business_company,deterministic=True)
         c.execute("BEGIN IMMEDIATE")
         ensure_source_column(c)
+        ensure_scan_cursors(c)
+        c.commit()
+        handoff=claim_recheck_handoff(c)
+        if handoff is not None:return handoff
+        ordinary_handoff=scan_cursor(c,"general-recheck-handoff:"+CAMPAIGN)
+        c.execute("BEGIN IMMEDIATE")
         row=c.execute("""SELECT q.reg FROM v332_audit_queue q
             JOIN purchases p ON p.reg_number=q.reg
             WHERE q.campaign=? AND q.state='pending'
@@ -452,7 +547,14 @@ def claim_next(ns):
                                  AND eis_business_company(p.customer)=1)""",
                     (now(),token,reg,CAMPAIGN,reg,selected["updated_at"],selected["reservation_token"],
                      selected["next_retry_at"],time.time(),reg)).rowcount
-                if changed:claimed=AuditReservation(reg,token)
+                if changed:
+                    claimed=AuditReservation(reg,token)
+                    save_scan_cursor(c,"general-recheck-turn:"+CAMPAIGN,"")
+            if claimed is None and scan_cursor(c,"general-recheck-handoff:"+CAMPAIGN)==ordinary_handoff:
+                # Cached receipt readiness can outlive a temporary read error.
+                # Give ordinary work one bounded opportunity, not an infinite
+                # veto over the same handoff. Do not clear a newer hint's turn.
+                save_scan_cursor(c,"general-recheck-turn:"+CAMPAIGN,"")
             c.commit()
             return claimed
         reg=str(row[0])
@@ -462,6 +564,7 @@ def claim_next(ns):
                      WHERE campaign=? AND reg=? AND state='pending'""",
                   (now(),token,reg,CAMPAIGN,reg))
         assert c.execute("SELECT changes()").fetchone()[0]==1
+        save_scan_cursor(c,"general-recheck-turn:"+CAMPAIGN,"")
         c.commit()
         return AuditReservation(reg,token)
     except BaseException:
@@ -482,9 +585,14 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
         ensure_scan_cursors(c)
         c.commit()
         if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():return 0
-        limit=min(MAX_RECHECK_ADMISSIONS,max(0,admission_limit),
-                  max(0,READY_HIGH_WATER-ready_work(c)))
+        limit=min(MAX_RECHECK_ADMISSIONS,max(0,admission_limit))
         if not limit:return 0
+        available=max(0,READY_HIGH_WATER-ready_work(c))
+        handoff=recheck_handoff(c)
+        if not available and handoff:return 0
+        # Above high-water, scan only for one hint. Do not admit more pending
+        # work, displace pending/running rows, or reserve an extra worker.
+        limit=min(limit,available) if available else 1
         scope="general:"+CAMPAIGN
         cursor=scan_cursor(c,scope)
         rows=c.execute("""SELECT q.*,
@@ -505,6 +613,7 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
             if last!=cursor and time.monotonic()>=deadline:break
             last=row["reg"]
             inspected+=1
+            if not available and row["next_retry_at"]>time.time():continue
             try:
                 receipt_ready,source_error=receipt_readiness(row["reg"])
                 if not row["ready"] and not receipt_ready and not source_error:continue
@@ -525,6 +634,11 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
         c.execute("BEGIN IMMEDIATE")
         available=min(limit,max(0,READY_HIGH_WATER-ready_work(c)))
         count=0
+        handoff_staged=bool(changed and not available and not scan_cursor(c,"general-recheck-handoff:"+CAMPAIGN))
+        if handoff_staged:
+            row=changed[0][0]
+            save_scan_cursor(c,"general-recheck-handoff:"+CAMPAIGN,
+                             json.dumps({key:row[key] for key in _RECHECK_IDENTITY}))
         for row,receipt_ready in changed:
             if count>=available:break
             result=c.execute("""UPDATE v332_audit_queue SET state='pending',
@@ -544,6 +658,7 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
             save_scan_cursor(c,scope,"" if at_end else last)
         c.commit()
         print(f"GENERAL_RECHECK_SWEEP inspected={inspected} admitted={count} snapshot_errors={errors} "
+              f"handoff_staged={int(handoff_staged)} "
               f"elapsed_seconds={time.monotonic()-started:.3f} semantics=bounded_v1",flush=True)
         return count
     except BaseException:

@@ -88,5 +88,5 @@ jobs:
           python -m unittest discover -s tests -p 'test_thematic_persist_lock_scope.py'
           python -m unittest discover -s tests -p 'test_thematic_index_lock_scope.py'
           python -m unittest discover -s tests -p 'test_v343_card_presentation.py'
-          python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
+          python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_automatic_recheck_fairness test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
           node tests/test_account_frontend_requests.cjs
