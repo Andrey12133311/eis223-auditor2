@@ -162,7 +162,8 @@ async def independent_review(ns,reg,categories):
  docs,unreadable=source["docs"],source["unreadable"]
  incomplete=bool(unreadable or source["source_incomplete"])
  for key,value in source["p"].items():
-    if value and (not p.get(key) or key in ("method","submission_end","submission_start")):
+    if value is not None and value != "" and (not p.get(key) or key in ("method","published","submission_end","submission_start",
+                                                   "deadline","price","price_num")):
        p[key]=value
  verified=[d for d in docs if is_official(d) and str(d.get("text") or "").strip()]
  audit_funnel.observe("documents_thematic",docs,unreadable,verified)

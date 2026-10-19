@@ -114,11 +114,16 @@ def official_xml_documents(reg):
     return list(records.values())
 
 
-def official_notice(reg):
-    """Use the newest explicit notice revision, never ZIP/hash listing order."""
+def official_notice_record(reg):
+    """Keep the exact verified revision alongside its explicit legal context."""
     from eis223_soap_xml import revision_key
     notices=[item for item in official_xml_documents(reg) if item[0]["xml_family"]=="notice"]
-    return max(notices,key=lambda item:revision_key(item[0]))[1] if notices else None
+    return max(notices,key=lambda item:revision_key(item[0])) if notices else (None,None)
+
+
+def official_notice(reg):
+    """Use the newest explicit notice revision, never ZIP/hash listing order."""
+    return official_notice_record(reg)[1]
 
 
 def official_notice_revisions(reg):
@@ -274,18 +279,27 @@ def _read_original(reg,uid):
     return path,receipt,digest
 
 
-async def offline_audit(ns,reg,collect_only=False):
+async def saved_review_context(ns,reg,docs):
+    """Refresh source metadata while reusing receipt-authenticated documents."""
+    return await offline_audit(ns,reg,collect_only=True,_collected_docs=docs)
+
+
+async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
     """Use only local official XML and saved original bytes, no remote I/O.
 
     collect_only=True is for the comprehensive local-document legal sweep:
     return verified source documents without saving, removing, or replacing
-    any existing database rows, findings, or original bytes.
+    any existing database rows, findings, or original bytes. The internal
+    _collected_docs path reuses documents already authenticated by stored_docs;
+    it refreshes the same source context without extracting those bytes twice.
     """
+    if _collected_docs is not None and not collect_only:
+        raise ValueError("Precollected documents are only available for local review")
     from v381_audit_scheduling import run_file_io
     if not REG.fullmatch(reg):raise ValueError("Invalid official registry number")
     allowed=await run_file_io(allowed_documents,reg)
     if not allowed:raise ValueError("Verified EIS XML has no documents")
-    notice=await asyncio.to_thread(official_notice,reg)
+    notice_record,notice=await asyncio.to_thread(official_notice_record,reg)
     public={}
     if notice is None:
         # Public search and the document page are visited by the user's browser;
@@ -354,8 +368,22 @@ async def offline_audit(ns,reg,collect_only=False):
        "deadline":end or previous.get("deadline") or "",
        "url":ns.get("old_eis_url",lambda r:"https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber="+r)(reg)}
 
+    if notice_record is not None:
+        # This in-memory marker comes only from the current hash-verified XML,
+        # never from stored card JSON. Later wrappers must not replace these
+        # facts with an older card or silently resolve conflicting revisions.
+        fields={"method":field(notice,"purchaseCodeName"),
+                "published":field(notice,"publicationDateTime"),
+                "submission_start":field(notice,"applSubmisionStartDate")[:10],
+                "submission_end":field(notice,"submissionCloseDateTime")[:10]}
+        xml_price=money(verified_xml_nmcd(notice))
+        p["_current_soap_context"]={"record":notice_record,
+            "fields":{key:value for key,value in fields.items() if value},
+            "price":({"price":xml_price[0],"price_num":xml_price[1]} if xml_price else {})}
+
     extractor=ns.get("extract_text")
-    if extractor is None:raise RuntimeError("Existing original-document text extractor unavailable")
+    if extractor is None and _collected_docs is None:
+        raise RuntimeError("Existing original-document text extractor unavailable")
     # The incoming and repeated audit must see the same evidence order.
     # The legacy DOCX extractor appends every table after all paragraphs,
     # breaking dated request/reply pairs and dropping otherwise readable
@@ -363,9 +391,9 @@ async def offline_audit(ns,reg,collect_only=False):
     from v314_eis_metadata import document_text
     def extract_original(path):
         return document_text(path,extractor)
-    docs=[]
+    docs=list(_collected_docs) if _collected_docs is not None else []
     dedup_by_sha={}
-    for uid,item in allowed.items():
+    for uid,item in (allowed.items() if _collected_docs is None else ()):
         stored=await run_file_io(_read_original,reg,uid)
         if stored is None:continue
         path,receipt,sha=stored

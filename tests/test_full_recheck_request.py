@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -195,7 +196,7 @@ class FullRecheckRequestTests(unittest.TestCase):
         after = {t: self.c.execute("SELECT * FROM " + t).fetchall() for t in tables}
         self.assertEqual(before, after)
         created = {r[0] for r in self.c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'full_recheck_%'")}
-        self.assertEqual(created, {"full_recheck_requests", "full_recheck_members"})
+        self.assertEqual(created, {"full_recheck_requests", "full_recheck_members", "full_recheck_targets", "full_recheck_receipts"})
 
     def test_inventory_contains_only_aggregate_public_safe_fields(self):
         report = self.create()
@@ -653,6 +654,349 @@ class FullRecheckRequestTests(unittest.TestCase):
         self.receipt(claim, metrics={"documents_read": 1, "verified_original_documents": 1, "new_findings": 3})
         self.c.rollback()
         self.assertEqual(ledger.inventory(self.c, REQUEST)["committed_new_findings"], 0)
+
+
+# Exact four compatibility functions from production f68c762. Kept inline so
+# the mandatory Docker tests require no Git executable or extra fixture file.
+LEGACY_FUNCTIONS = '''
+def claim_member(c, request_id, reg, *, now=None, lease_seconds=300, general_token=None):
+    """CAS one member. A supplied normal claim must be fresh for this request.
+
+    The caller must hold its per-reg execution lock plus a write transaction.
+    No pre-request or unidentifiable normal work can acknowledge this request.
+    """
+    _transaction(c)
+    stamp, duration = _time(now), _lease_seconds(lease_seconds)
+    _request_id(request_id)
+    reg = str(reg)
+    if not _REG.fullmatch(reg) or has_active_claim(c, reg):
+        return None
+    request = c.execute("SELECT db_snapshot_at,campaign FROM full_recheck_requests WHERE request_id=? AND status='active'", (request_id,)).fetchone()
+    if request is None:
+        return None
+    if not c.execute("SELECT 1 FROM purchases WHERE reg_number=?", (reg,)).fetchone():
+        c.execute("UPDATE full_recheck_members SET status='blocked',reason='missing_purchase',updated_at=? "
+            "WHERE request_id=? AND reg=? AND status IN ('pending','retry','waiting_originals')", (stamp, request_id, reg))
+        return None
+    # Active thematic claims block, including reserved queued work.
+    clauses = _ordinary_blockers(c)
+    if _exists(c, "thematic_items"):
+        theme_clause = next(clause for clause in clauses if "thematic_items" in clause)
+        if not c.execute("SELECT 1 FROM (SELECT ? AS reg) m WHERE " + theme_clause, (reg,)).fetchone():
+            return None
+    if _exists(c, "v332_audit_queue"):
+        columns = {row[1] for row in c.execute("PRAGMA table_info(v332_audit_queue)")}
+        if general_token is None:
+            if c.execute("SELECT 1 FROM v332_audit_queue WHERE reg=? AND state='running' LIMIT 1", (reg,)).fetchone():
+                return None
+        else:
+            _token(general_token)
+            if not {"campaign", "updated_at", "reservation_token"} <= columns:
+                return None
+            active = c.execute("SELECT campaign,reservation_token,updated_at FROM v332_audit_queue WHERE reg=? AND state='running'", (reg,)).fetchall()
+            if len(active) != 1 or active[0][0] != request[1] or active[0][1] != general_token:
+                return None
+            updated = _updated_epoch(active[0][2])
+            if updated is None or updated < request[0]:
+                return None
+    elif general_token is not None:
+        return None
+    attempt, lease = uuid.uuid4().hex, uuid.uuid4().hex
+    changed = c.execute("""UPDATE full_recheck_members SET status='running',reason='',updated_at=?,
+        next_retry_at=0,lease_token=?,lease_until=?,attempt_id=?,general_token=?,attempt_count=attempt_count+1,
+        source_version='',engine_signature='',receipt_attempt_id='',result_token='',result_source_version='',
+        result_engine_signature='',full_verified_read=0,result_committed_at=NULL
+        WHERE request_id=? AND reg=? AND status IN ('pending','retry','waiting_originals') AND (?<>'' OR next_retry_at<=?)""",
+        (stamp, lease, stamp + duration, attempt, general_token or "", request_id, reg, general_token or "", stamp)).rowcount
+    return Claim(reg, request_id, attempt, lease, general_token or "") if changed == 1 else None
+
+def _refresh_request(c, request_id):
+    c.execute("""UPDATE full_recheck_requests SET status='completed' WHERE request_id=? AND status='active'
+        AND NOT EXISTS(SELECT 1 FROM full_recheck_members WHERE request_id=? AND status<>'completed')""", (request_id, request_id))
+
+def finish_member(c, claim, *, result_token):
+    """Acknowledge only the exact fully verified committed attempt receipt.
+
+    Lease expiry after the result commit cannot erase that receipt. This write
+    remains safe after expiry because a superseding attempt changes its token.
+    """
+    _transaction(c)
+    identity = _claim_where(claim)
+    _token(result_token)
+    changed = c.execute("""UPDATE full_recheck_members SET status='completed',reason='',lease_until=0,
+        next_retry_at=0 WHERE request_id=? AND reg=? AND attempt_id=? AND lease_token=?
+        AND status IN ('running','completed') AND receipt_attempt_id=attempt_id AND result_token=?
+        AND full_verified_read=1 AND result_committed_at IS NOT NULL
+        AND source_version<>'' AND source_version=result_source_version
+        AND engine_signature<>'' AND engine_signature=result_engine_signature""", (*identity, result_token)).rowcount
+    if changed != 1:
+        raise StaleClaim("No matching fully verified result receipt to acknowledge")
+    _refresh_request(c, claim.request_id)
+
+def recover_expired(c, claim, *, now=None):
+    """Recover one exact lease only while caller holds its exclusive execution lock.
+
+    No global recovery is provided: expiry alone does not prove a worker stopped.
+    A durable fully verified receipt is finalized without rerunning the audit;
+    incomplete/uncommitted attempts become retry, never successful completion.
+    """
+    _transaction(c)
+    stamp = _time(now)
+    row = _dict_one(c.execute("""SELECT * FROM full_recheck_members WHERE request_id=? AND reg=? AND attempt_id=?
+        AND lease_token=? AND status='running' AND lease_until<=?""", (*_claim_where(claim), stamp)))
+    if row is None:
+        return None
+    complete = (row["full_verified_read"] == 1 and row["receipt_attempt_id"] == claim.attempt_id
+        and bool(row["result_token"]) and row["result_committed_at"] is not None
+        and bool(row["source_version"]) and row["source_version"] == row["result_source_version"]
+        and bool(row["engine_signature"]) and row["engine_signature"] == row["result_engine_signature"])
+    if complete:
+        finish_member(c, claim, result_token=row["result_token"])
+        return "completed"
+    c.execute("""UPDATE full_recheck_members SET status='retry',reason='lease_expired',updated_at=?,
+        next_retry_at=?,lease_until=0 WHERE request_id=? AND reg=? AND attempt_id=? AND lease_token=? AND status='running'""",
+        (stamp, stamp, *_claim_where(claim)))
+    return "retry"
+'''
+
+
+class EngineTargetTests(unittest.TestCase):
+    setUp = FullRecheckRequestTests.setUp
+    create = FullRecheckRequestTests.create
+    write = FullRecheckRequestTests.write
+    claim = FullRecheckRequestTests.claim
+    member = FullRecheckRequestTests.member
+    watermark = FullRecheckRequestTests.watermark
+    receipt = FullRecheckRequestTests.receipt
+    def legacy(self):
+        scope = dict(vars(ledger))
+        exec(LEGACY_FUNCTIONS, scope)
+        return scope
+
+    def target(self, engine="engine-v2", generation=1):
+        with self.write():
+            return ledger.activate_target(self.c, REQUEST, generation=generation, engine_signature=engine, now=1010)
+
+    def complete(self, reg=A, engine="engine-v1", token="old-result"):
+        claim = self.claim(reg)
+        self.watermark(claim, engine_signature=engine)
+        with self.write():
+            self.receipt(claim, engine_signature=engine, token=token,
+                         metrics={"new_findings": 3, "new_checks": 4, "documents_read": 2})
+            ledger.finish_member(self.c, claim, result_token=token)
+        return claim
+
+    def reopen(self, engine="engine-v2", generation=1, **kw):
+        with self.write():
+            return ledger.reopen_completed(self.c, REQUEST, engine_signature=engine, generation=generation, now=1011, **kw)
+
+    def test_target_cas_and_equal_generation_conflict_are_durable(self):
+        before = self.create()
+        self.assertTrue(self.target())
+        self.assertFalse(self.target())
+        target = ledger.engine_target(self.c, REQUEST)
+        with self.assertRaises(ledger.TargetConflict):
+            self.target("engine-other")
+        self.assertTrue(self.target("engine-v3", 2))
+        with self.assertRaises(ledger.TargetConflict):
+            self.target("engine-v2", 1)
+        self.assertEqual(ledger.engine_target(self.c, REQUEST)["generation"], 2)
+        self.assertEqual(target["generation"], 1)
+        ledger.initialize(self.c)
+        with sqlite3.connect(self.path) as reopened:
+            self.assertEqual(ledger.engine_target(reopened, REQUEST), ledger.engine_target(self.c, REQUEST))
+        after = ledger.inventory(self.c, REQUEST)
+        for key in ("actual_count", "membership_digest", "db_snapshot_at", "source_captured_at", "manual_excluded_count"):
+            self.assertEqual(before[key], after[key])
+        self.assertEqual(after["current_completed"], 0)
+        self.assertEqual(after["current_pending"], 3)
+
+    def test_reopen_is_bounded_completed_only_and_keeps_success_across_partial_retry(self):
+        self.create()
+        old = self.complete()
+        running = self.claim(C)
+        untouched = {r: self.member(r) for r in (B, C)}
+        queue = self.c.execute("SELECT * FROM v332_audit_queue").fetchall()
+        self.target()
+        self.assertEqual(self.reopen(limit=1), 1)
+        self.assertEqual(self.reopen(limit=1), 0)
+        self.assertEqual({r: self.member(r) for r in (B, C)}, untouched)
+        self.assertEqual(self.c.execute("SELECT * FROM v332_audit_queue").fetchall(), queue)
+        before = self.c.execute("SELECT * FROM full_recheck_receipts").fetchall()
+        self.assertEqual(len(before), 1)
+        fresh = self.claim(now=1012, engine_signature="engine-v2", generation=1)
+        with self.write():
+            ledger.set_review_watermark(self.c, fresh, source_version="source-v1", engine_signature="engine-v2", now=1013)
+            self.receipt(fresh, full=False, engine_signature="engine-v2", token="partial", now=1014,
+                         metrics={"documents_read": 1, "new_findings": 0})
+            ledger.defer_member(self.c, fresh, status="retry", reason="unreadable_documents", now=1015)
+        self.assertEqual(self.c.execute("SELECT * FROM full_recheck_receipts WHERE attempt_id=?", (old.attempt_id,)).fetchall(), before)
+        self.assertEqual((self.member()["total_new_findings"], self.member()["total_new_checks"]), (3, 4))
+        self.assertEqual(ledger.inventory(self.c, REQUEST)["current_completed"], 0)
+        self.assertEqual(self.member(C)["attempt_id"], running.attempt_id)
+
+    def test_old_source_finishes_after_scan_and_is_reopened_despite_legacy_completed(self):
+        self.c.execute("DELETE FROM v332_audit_queue WHERE reg<>?", (A,))
+        self.create()
+        old = self.claim()
+        self.watermark(old)
+        with self.write():
+            self.receipt(old, token="old-result")
+        self.target()
+        self.assertEqual(self.reopen(), 0)  # Active work is never reset.
+        with self.write():
+            self.legacy()["finish_member"](self.c, old, result_token="old-result")
+        summary = ledger.inventory(self.c, REQUEST)
+        self.assertEqual(summary["legacy_status"], "completed")
+        self.assertEqual(summary["status"], "active")
+        self.assertEqual((summary["current_completed"], summary["stale_completed"]), (0, 1))
+        self.assertEqual(self.reopen(), 1)
+        # Crash/restart after reopen but before an OLD build clears the row.
+        with sqlite3.connect(self.path) as restarted:
+            self.assertEqual(restarted.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0], 1)
+        with self.write():
+            legacy_claim = self.legacy()["claim_member"](self.c, REQUEST, A, now=1012)
+        self.assertIsNotNone(legacy_claim)
+        self.assertEqual(self.member()["result_token"], "")
+        self.assertEqual(self.c.execute("SELECT result_token FROM full_recheck_receipts WHERE attempt_id=?", (old.attempt_id,)).fetchone()[0], "old-result")
+
+    def test_old_source_recovery_after_activation_remains_historical_until_scan(self):
+        self.create()
+        old = self.claim(lease_seconds=2)
+        self.watermark(old)
+        with self.write():
+            self.receipt(old, now=1002.5)
+        self.target()
+        with self.write():
+            self.assertEqual(self.legacy()["recover_expired"](self.c, old, now=1012), "completed")
+        self.assertEqual(ledger.inventory(self.c, REQUEST)["current_completed"], 0)
+        self.assertEqual(self.reopen(), 1)
+
+    def test_new_ack_and_recovery_do_not_acknowledge_obsolete_full_receipt(self):
+        self.create()
+        first = self.claim(A, lease_seconds=20)
+        second = self.claim(B, lease_seconds=20)
+        for claim in (first, second):
+            self.watermark(claim)
+            with self.write():
+                self.receipt(claim)
+        self.target()
+        with self.write():
+            self.assertEqual(ledger.finish_member(self.c, first, result_token="result-v1"), "retry")
+            self.assertEqual(ledger.recover_expired(self.c, second, now=1030), "retry")
+        for reg in (A, B):
+            self.assertEqual((self.member(reg)["status"], self.member(reg)["reason"]), ("retry", "engine_changed"))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0], 2)
+
+    def test_claims_require_target_engine_generation_and_matching_completion_is_idempotent(self):
+        self.c.execute("DELETE FROM v332_audit_queue WHERE reg<>?", (A,))
+        self.create()
+        self.target()
+        self.assertIsNone(self.claim())
+        self.assertIsNone(self.claim(engine_signature="engine-v2", generation=0))
+        self.assertIsNone(self.claim(engine_signature="engine-v1", generation=1))
+        self.assertEqual(ledger.select_candidates(self.c, REQUEST, now=1012), [])
+        self.assertEqual(ledger.select_candidates(self.c, REQUEST, now=1012, engine_signature="engine-v2", generation=1), [A])
+        claim = self.claim(now=1012, engine_signature="engine-v2", generation=1)
+        with self.write():
+            ledger.set_review_watermark(self.c, claim, source_version="source-v1", engine_signature="engine-v2", now=1013)
+            self.receipt(claim, engine_signature="engine-v2", now=1014)
+            self.assertEqual(ledger.finish_member(self.c, claim, result_token="result-v1"), "completed")
+            self.assertEqual(ledger.finish_member(self.c, claim, result_token="result-v1"), "completed")
+        self.assertEqual(self.reopen(), 0)
+        summary = ledger.inventory(self.c, REQUEST)
+        self.assertEqual((summary["status"], summary["current_completed"], summary["current_pending"]), ("completed", 1, 0))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0], 1)
+
+    def test_pre_upgrade_disabled_recovery_requires_no_new_tables(self):
+        self.create()
+        claim = self.claim(lease_seconds=2)
+        self.watermark(claim)
+        with self.write():
+            self.receipt(claim, now=1002.5)
+        self.c.execute("DROP TABLE full_recheck_targets")
+        self.c.execute("DROP TABLE full_recheck_receipts")
+        with self.write():
+            self.assertEqual(ledger.recover_expired(self.c, claim, now=1010), "completed")
+        self.assertEqual(self.member()["status"], "completed")
+        self.assertFalse(ledger._exists(self.c, "full_recheck_targets"))
+        self.assertFalse(ledger._exists(self.c, "full_recheck_receipts"))
+
+    def test_completed_catchup_pages_are_bounded_and_restart_fair(self):
+        self.create()
+        for reg in (A, B, C):
+            self.complete(reg, token="receipt-" + reg)
+        self.target()
+        for expected in (1, 2, 3):
+            self.assertEqual(self.reopen(limit=1), 1)
+            ledger.initialize(self.c)  # Restart initialization cannot reset progress.
+            self.assertEqual(ledger.inventory(self.c, REQUEST)["states"]["retry"], expected)
+        self.assertEqual(self.reopen(limit=1), 0)
+        self.assertEqual(ledger.inventory(self.c, REQUEST)["committed_new_findings"], 9)
+        for invalid in (False, 0, 129):
+            with self.assertRaises(ValueError):
+                self.reopen(limit=invalid)
+
+    def test_concurrent_target_activation_cannot_downgrade(self):
+        self.create()
+        def activate(generation):
+            with sqlite3.connect(self.path, timeout=2) as c:
+                c.execute("BEGIN IMMEDIATE")
+                try:
+                    ledger.activate_target(c, REQUEST, generation=generation, engine_signature="engine-" + str(generation))
+                except ledger.TargetConflict:
+                    return "conflict"
+            return "accepted"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(activate, (2, 1)))
+        self.assertIn("accepted", results)
+        self.assertEqual(ledger.engine_target(self.c, REQUEST)["generation"], 2)
+        self.assertEqual(ledger.engine_target(self.c, REQUEST)["engine_signature"], "engine-2")
+
+    def test_process_exit_before_and_after_target_commit_preserves_atomic_history(self):
+        self.create()
+        claim = self.complete()
+        self.c.execute("DELETE FROM full_recheck_receipts")  # Existing production receipt before this upgrade.
+        script = """
+import os, sqlite3, sys
+sys.path.insert(0, sys.argv[3])
+import full_recheck_request as ledger
+c=sqlite3.connect(sys.argv[1], isolation_level=None)
+c.execute('BEGIN IMMEDIATE')
+ledger.activate_target(c, sys.argv[2], generation=1, engine_signature='engine-v2', now=1010)
+ledger.reopen_completed(c, sys.argv[2], engine_signature='engine-v2', generation=1, limit=1, now=1011)
+if sys.argv[4]=='commit': c.commit()
+os._exit(73)
+"""
+        for phase in ("rollback", "commit"):
+            result = subprocess.run([sys.executable, "-c", script, str(self.path), REQUEST,
+                                     str(Path(ledger.__file__).parent), phase], check=False)
+            self.assertEqual(result.returncode, 73)
+            ledger.initialize(self.c)
+            if phase == "rollback":
+                self.assertIsNone(ledger.engine_target(self.c, REQUEST))
+                self.assertEqual(self.member()["status"], "completed")
+                self.assertEqual(self.c.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0], 0)
+            else:
+                self.assertEqual(ledger.engine_target(self.c, REQUEST)["engine_signature"], "engine-v2")
+                self.assertEqual(self.member()["status"], "retry")
+                self.assertEqual(self.c.execute("SELECT attempt_id FROM full_recheck_receipts").fetchone()[0], claim.attempt_id)
+
+    def test_catchup_and_receipt_history_rollback_atomically_without_cross_request_rows(self):
+        self.create()
+        self.complete()
+        self.create(request="unrelated-request")
+        other = self.member(request="unrelated-request")
+        self.target()
+        self.c.execute("DELETE FROM full_recheck_receipts")  # Simulate a pre-upgrade successful receipt.
+        self.c.execute("BEGIN IMMEDIATE")
+        ledger.reopen_completed(self.c, REQUEST, engine_signature="engine-v2", generation=1, now=1012)
+        self.c.rollback()
+        self.assertEqual(self.member()["status"], "completed")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0], 0)
+        self.assertEqual(self.reopen(), 1)
+        self.assertEqual(self.member(request="unrelated-request"), other)
+        self.assertEqual(self.c.execute("SELECT DISTINCT request_id FROM full_recheck_receipts").fetchall(), [(REQUEST,)])
 
 
 if __name__ == "__main__":

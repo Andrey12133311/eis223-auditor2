@@ -668,7 +668,7 @@ def _semantic_originals(io, root, reg, documents, manifest, xml):
     return sources
 
 
-def _semantic_cards(purchases, facts, prices, reg):
+def _semantic_cards(purchases, facts, prices, reg, notice=None):
     from v311_verified_customer import _official_source
     result = {}
     for row in facts:
@@ -685,9 +685,15 @@ def _semantic_cards(purchases, facts, prices, reg):
         if not isinstance(values, list):
             raise SemanticSnapshotError("invalid_card_prices")
         result["direct"]["prices"] = _unique([_selected(price, _PRICE_FIELDS) for price in values if isinstance(price, dict)])
+        if notice and (fields or values):
+            from v341_eis_facts import card_predates_notice
+            result["direct"]["precedes_notice"] = card_predates_notice(payload.get("captured_at"),notice)
     for row in prices:
         if _official_source(row.get("source_page"), reg):
             result["price"] = _selected(row, _PRICE_FIELDS + ("source_page", "conflict", "alternative_price"))
+            if notice and not result.get("direct", {}).get("prices"):
+                from v341_eis_facts import card_predates_notice
+                result["price"]["precedes_notice"] = card_predates_notice(row.get("captured_at"),notice)
     for row in purchases:
         card = _semantic_json(row.get("card_fields_json"), "purchases.card_fields_json")
         # Only source-labelled card facts are independent evidence. Ignore
@@ -744,12 +750,15 @@ def _semantic_source_version(con, reg) -> str:
         _CARD_FIELDS + ("source", "url", "card_fields_json"))
     facts = _semantic_rows(con, "v341_card_facts", "reg", reg, ("source_page", "payload"))
     prices = _semantic_rows(con, "v338_card_price", "reg", reg,
-        _PRICE_FIELDS + ("source_page", "conflict", "alternative_price"))
-    cards = _semantic_cards(purchases, facts, prices, reg)
+        _PRICE_FIELDS + ("source_page", "conflict", "alternative_price", "captured_at"))
     io = _SemanticIO()
     data_root = root()
     manifest = _semantic_manifest(io, data_root, reg)
     xml, invalid_xml = _semantic_xml(io, data_root, reg)
+    from eis223_soap_xml import revision_key
+    notices=[record for record in xml if record.get("xml_family")=="notice"]
+    notice=max(notices,key=revision_key) if notices else None
+    cards = _semantic_cards(purchases, facts, prices, reg, notice)
     originals = _semantic_originals(io, data_root, reg, documents, manifest, xml)
     payload = {"format": 1, "reg": reg, "cards": cards, "manifest": manifest,
                "xml": xml, "invalid_xml": invalid_xml, "originals": originals}

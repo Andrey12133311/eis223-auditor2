@@ -3,6 +3,15 @@
 No endpoint, extra analysis pool, legal revision bump or global queue reset.
 The ledger and aggregate diagnostics are operational, never a shared ownerless
 HTTP response. Originals and existing evidence are handled by the same engine.
+
+Operational policy: the explicit correction generation is monotonic and paired
+with the final integrated engine hash. Reusing a generation with a different
+hash fails closed, including a same-generation rollback. Older builds may keep
+saving legal results and legacy completed flags; those flags are historical,
+not current-engine coverage. Only this build's enabled turns repair them. A
+rollback to a pre-target build pauses target fulfillment but does not erase its
+membership, target, successful prior receipts or cumulative credits. Keep the
+same epoch and return to the matching build to resume. No import-time work.
 """
 from __future__ import annotations
 
@@ -18,6 +27,11 @@ LEASE_SECONDS = 300
 RENEW_SECONDS = 30
 PAGE_SIZE = 8
 INVENTORY_SECONDS = 300
+# Authorized semantic correction generation, not a deployment or legal quota.
+# Future changed engines need an explicitly reviewed higher generation. Equal
+# generation/different signature disables request claims; it never retargets.
+TARGET_GENERATION = 1
+CATCHUP_PAGE_SIZE = 32
 
 
 @contextmanager
@@ -53,6 +67,7 @@ def initialize(ns):
     finally:
         c.close()
     if not epoch:
+        state.pop("target_conflict", None)
         state.pop("request_id", None)
         return
     # This release authorizes exactly one user instruction, not a mechanism
@@ -65,6 +80,26 @@ def initialize(ns):
     c = ns["conn"]()
     try:
         summary = ledger.create_request(c, epoch, ns.get("_verified_set235"), expected_count=3058)
+    finally:
+        c.close()
+    from v332_all_procurements_audit import engine_signature
+    signature = engine_signature()
+    try:
+        with transaction(ns) as c:
+            ledger.activate_target(c, epoch, generation=TARGET_GENERATION, engine_signature=signature)
+            ledger.reopen_completed(c, epoch, generation=TARGET_GENERATION,
+                                    engine_signature=signature, limit=CATCHUP_PAGE_SIZE)
+    except ledger.TargetConflict:
+        state.pop("request_id", None)
+        state["target_conflict"] = True
+        print("FULL_RECHECK_TARGET conflict=True generation=" + str(TARGET_GENERATION), flush=True)
+        return
+    state["engine_signature"] = signature
+    state["target_generation"] = TARGET_GENERATION
+    state.pop("target_conflict", None)
+    c = ns["conn"]()
+    try:
+        summary = ledger.inventory(c, epoch)
     finally:
         c.close()
     # Publication to the workers follows the committed complete snapshot only.
@@ -83,12 +118,13 @@ def heartbeat(ns):
         state["inventory"] = collect(ns)
         state["inventory_at"] = time.monotonic()
         print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
-    if not request_id(ns):
+    epoch = request_id(ns) or (AUTHORIZED_EPOCH if state.get("target_conflict") else None)
+    if not epoch:
         return
     import full_recheck_request as ledger
     c = ns["conn"]()
     try:
-        summary = ledger.inventory(c, request_id(ns))
+        summary = ledger.inventory(c, epoch)
     finally:
         c.close()
     print("FULL_RECHECK_PROGRESS " + json.dumps(summary, ensure_ascii=False), flush=True)
@@ -125,6 +161,34 @@ def note_snapshot(ns, reg, snapshot):
                             engine_signature=snapshot.get("last_engine_signature") or "unavailable-engine")
 
 
+def _receipt_failure(snapshot, details, verified, unreadable):
+    """First failed precondition in the existing completion predicate's order.
+
+    Fixed diagnostic codes only. Keep short-circuit evaluation (including
+    malformed-input failures) identical to the completion check below.
+    """
+    if not verified > 0:
+        return "no_verified_documents"
+    if not verified == int(details.get("documents_read") or 0):
+        return "unverified_readable_documents"
+    if not unreadable == 0:
+        return "unreadable_documents"
+    if details.get("source_incomplete"):
+        return "source_incomplete"
+    if snapshot.get("source_error"):
+        return "source_unavailable"
+    expected, received = details.get("original_expected"), details.get("original_received")
+    if expected is None or received is None:
+        return "unknown_original_coverage"
+    if not received >= expected:
+        return "missing_originals"
+    if not snapshot.get("last_semantic_version"):
+        return "source_unavailable"
+    if not snapshot.get("last_engine_signature"):
+        return "engine_unavailable"
+    return ""
+
+
 async def prepare_receipt(ns, reg, details):
     if getattr(reg, "full_recheck_claim", None) is None:
         return
@@ -138,11 +202,22 @@ async def prepare_receipt(ns, reg, details):
                 and received is not None and received >= expected
                 and bool(snapshot.get("last_semantic_version"))
                 and bool(snapshot.get("last_engine_signature")))
+    reason = "" if complete else _receipt_failure(snapshot, details, verified, unreadable)
     if complete:
         from v332_all_procurements_audit import file_stage
         after = await file_stage(ns, "full_request_verify_source", _snapshot, ns, reg)
         complete = (after.get("last_semantic_version") == snapshot["last_semantic_version"]
                     and after.get("last_engine_signature") == snapshot["last_engine_signature"])
+        if not complete:
+            if not after.get("last_semantic_version"):
+                reason = "source_unavailable"
+            elif after.get("last_semantic_version") != snapshot["last_semantic_version"]:
+                reason = "source_changed"
+            elif not after.get("last_engine_signature"):
+                reason = "engine_unavailable"
+            else:
+                reason = "engine_changed"
+    reg.full_recheck_failure_reason = reason
     reg.full_recheck_receipt = {"source_version": snapshot.get("last_semantic_version") or "unavailable-source",
                               "engine_signature": snapshot.get("last_engine_signature") or "unavailable-engine",
                               "full_verified_read": bool(complete),
@@ -204,7 +279,10 @@ def _finish(ns, reg, state, detail):
         missing = expected is not None and received is not None and received < expected
         waiting = missing or (not detail.get("documents_found") and not detail.get("source_incomplete"))
         status = "waiting_originals" if waiting else "retry"
-        reason = "missing_originals" if waiting else "partial_or_unverified_documents"
+        reason = ("missing_originals" if waiting else
+                  getattr(reg, "full_recheck_failure_reason", "") or
+                  ("no_readable_documents" if state == "no_readable_documents" else
+                   "partial_or_unverified_documents"))
         defer_member(c, claim, status=status, reason=reason, retry_after=600,
                      metrics=context.get("metrics"))
 
@@ -249,7 +327,7 @@ def _attach(ns, reg):
     from full_recheck_request import claim_member
     with transaction(ns) as c:
         return claim_member(c, request_id(ns), str(reg), general_token=reg.reservation_token,
-                            lease_seconds=LEASE_SECONDS)
+                            lease_seconds=LEASE_SECONDS, **_target_args(ns))
 
 
 def _attachable(ns, reg):
@@ -346,18 +424,29 @@ async def release(ns, reg):
         raise
 
 
+def _target_args(ns):
+    state = ns.get("_full_recheck") or {}
+    return {"engine_signature": state.get("engine_signature"), "generation": state.get("target_generation")}
+
+
+def _catch_up(ns):
+    # Do not gate on legacy request.status: a rolling old worker can finish
+    # after the previous scan. Target coverage, not that legacy flag, is final.
+    from full_recheck_request import reopen_completed
+    with transaction(ns) as c:
+        return reopen_completed(c, request_id(ns), limit=CATCHUP_PAGE_SIZE, **_target_args(ns))
+
+
 def _candidates(ns):
     import full_recheck_request as ledger
     state = ns["_full_recheck"]
     c = ns["conn"]()
     try:
         rows = ledger.select_candidates(c, request_id(ns), limit=PAGE_SIZE,
-                                        after_reg=state.get("cursor", ""))
+                                        after_reg=state.get("cursor", ""), **_target_args(ns))
         if not rows and state.get("cursor"):
             state["cursor"] = ""
-            rows = ledger.select_candidates(c, request_id(ns), limit=PAGE_SIZE)
-        if rows:
-            state["cursor"] = rows[-1]
+            rows = ledger.select_candidates(c, request_id(ns), limit=PAGE_SIZE, **_target_args(ns))
         return rows
     finally:
         c.close()
@@ -376,7 +465,7 @@ def _claim(ns, number):
         # missing originals mean it has not become runnable yet.
         if row and row["state"] == "pending" and business_company(row["customer"]):
             return None
-        claim = ledger.claim_member(c, request_id(ns), number, lease_seconds=LEASE_SECONDS)
+        claim = ledger.claim_member(c, request_id(ns), number, lease_seconds=LEASE_SECONDS, **_target_args(ns))
         if claim is None:
             return None
         reg = AuditReservation(str(claim), claim.lease_token)
@@ -464,7 +553,12 @@ async def _run_one(ns, slot):
     await recover(ns)
     if not request_id(ns):
         return False
+    await thread_call(_catch_up, ns)
     for number in await thread_call(_candidates, ns):
+        # Advance only a visited row. A turn can return after its first attempt;
+        # advancing to the page end would repeatedly skip fresh members when
+        # leading retries become due again before the full rotation finishes.
+        ns["_full_recheck"]["cursor"] = number
         ordinary, ready = await thread_call(_ordinary_pending, ns, number)
         if ordinary:
             if not ready:
