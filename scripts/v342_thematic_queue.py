@@ -82,7 +82,12 @@ def init(ns):
    if col not in evidence_cols:
     c.execute("ALTER TABLE thematic_findings ADD COLUMN "+col+" TEXT NOT NULL DEFAULT ''")
   c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_evidence_by_purchase ON thematic_findings(batch_id,reg)")
-  from scripts.v385_msp_reassessment import initialize as initialize_reassessments
+  # Early Docker selftests expose scripts/ alone; account routes use the package.
+  try:
+   from scripts.v385_msp_reassessment import initialize as initialize_reassessments
+  except ModuleNotFoundError as exc:
+   if exc.name != "scripts":raise
+   from v385_msp_reassessment import initialize as initialize_reassessments
   initialize_reassessments(c)
   c.commit()
  finally:c.close()
@@ -265,7 +270,11 @@ def overview(ns,batch):
    "evaluation":r"оценк|критери|балл"}
   from v352_dashboard_truth import collapse_legal_events
   from v365_consultant_refs import enrich
-  from scripts.v384_thematic_findings import read_thematic_items
+  try:
+   from scripts.v384_thematic_findings import read_thematic_items
+  except ModuleNotFoundError as exc:
+   if exc.name != "scripts":raise
+   from v384_thematic_findings import read_thematic_items
   canonical=read_thematic_items(c,batch)
   unique=[r for r in canonical if r["effective_status"]=="confirmed"]
   revised=[r for r in canonical if r["effective_status"]!="confirmed"]
@@ -353,13 +362,21 @@ def _thematic_history_records(ns, permitted_ids=None):
    except (ValueError,TypeError):item["categories"]=[]
    batch=item["id"]
    rev=c.execute("SELECT COALESCE(MAX(rowid),0) FROM thematic_findings WHERE batch_id=?",(batch,)).fetchone()[0]
-   from scripts.v385_msp_reassessment import revision as reassessment_revision
+   try:
+    from scripts.v385_msp_reassessment import revision as reassessment_revision
+   except ModuleNotFoundError as exc:
+    if exc.name != "scripts":raise
+    from v385_msp_reassessment import revision as reassessment_revision
    stamp=(int(item["stored_rows"]),int(rev),reassessment_revision(c,batch))
    cached=_HISTORY_COUNT_CACHE.get(batch)
    if cached and cached[0]==stamp:
     unique,titles,revised_count=cached[1:]
    else:
-    from scripts.v384_thematic_findings import read_thematic_items
+    try:
+     from scripts.v384_thematic_findings import read_thematic_items
+    except ModuleNotFoundError as exc:
+     if exc.name != "scripts":raise
+     from v384_thematic_findings import read_thematic_items
     classified=read_thematic_items(c,batch)
     unique=sum(f["effective_status"]=="confirmed" for f in classified)
     titles=list(dict.fromkeys(f["title"] for f in classified
@@ -714,7 +731,11 @@ def install(ns):
   unique_print=findings
   confirmed_count=sum(f.get("effective_status","confirmed")=="confirmed" for f in unique_print)
   rows="<p><b>Подтверждённых нарушений: "+str(confirmed_count)+"</b></p>"
-  from scripts.v385_msp_reassessment import scope_display
+  try:
+   from scripts.v385_msp_reassessment import scope_display
+  except ModuleNotFoundError as exc:
+   if exc.name != "scripts":raise
+   from v385_msp_reassessment import scope_display
   current_msp=scope_display(unique_print)
   if current_msp:rows+="<p><b>Закупка только для МСП:</b> "+escape(current_msp)+"</p>"
   for f in unique_print:

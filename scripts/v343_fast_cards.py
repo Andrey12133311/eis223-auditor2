@@ -346,7 +346,11 @@ def render(reg,data,thematic=None,account_review=False):
         if not val(p,'price') and val(p,'price_num') is not None:
             keys[4]=('Стоимость закупки',val(p,'price_num'))
         from v383_msp_scope import display as msp_display
-        from scripts.v385_msp_reassessment import scope_display
+        try:
+            from scripts.v385_msp_reassessment import scope_display
+        except ModuleNotFoundError as exc:
+            if exc.name != "scripts":raise
+            from v385_msp_reassessment import scope_display
         current_msp=scope_display((thematic or {}).get('findings') or [])
         keys.append(('Закупка только для МСП',current_msp or msp_display(p)))
         basic='<div class="grid">'+''.join('<div><b>'+esc(k)+':</b> '+text(v)+'</div>' for k,v in keys)+'</div>'
