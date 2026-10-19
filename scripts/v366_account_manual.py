@@ -49,6 +49,65 @@ def link_run(owner_id, reg_number, job_id):
         )
 
 
+def _prepare_legal_recheck(ns, reg_number):
+    """Snapshot one explicit request using only the application's SQLite file.
+
+    Preflight precedes download/owner-link I/O, so a concurrent completion
+    cannot be reset by a delayed request based on the old result. The scoped
+    utility owns eligibility, compare-and-set and its restrictive authorizer.
+    No caller-supplied database path or original root is accepted.
+    """
+    import scoped_legal_recheck as scoped
+    regs=scoped.validate_regs([reg_number])
+    conn=ns["conn"]()
+    try:
+        databases=conn.execute("PRAGMA database_list").fetchall()
+        filename=next((row[2] for row in databases if row[1]=="main"),None)
+    finally:
+        conn.close()
+    path=scoped._existing_path(filename,"Application database")
+    # app.py stores eis223.db and original-document directories under DATA.
+    data_root=path.parent
+    return path,data_root,scoped._read_plan(path,regs,data_root)
+
+
+def _start_linked_recheck(ns, owner_id, reg_number, priority):
+    """Download, associate with this owner, then apply the scoped legal reset.
+
+    PostgreSQL and SQLite cannot share a transaction. A failed owner link must
+    not enqueue a legal rerun; a failed reset must not be reported as accepted.
+    Retries reuse pending downloads and leave pending/running audits untouched.
+    """
+    import scoped_legal_recheck as scoped
+    from v301_search_jobs import _enqueue
+    try:
+        path,data_root,plan=_prepare_legal_recheck(ns,reg_number)
+    except Exception as exc:
+        raise HTTPException(503,"Не удалось подготовить повторную правовую проверку. Запуск не подтверждён.") from exc
+    try:
+        job,created=_enqueue(ns,"reg",reg_number,1,priority,"",True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503,"Не удалось подтвердить запуск загрузки ЕИС. Повторите попытку.") from exc
+    try:
+        link_run(owner_id,reg_number,job["id"])
+    except Exception as exc:
+        raise HTTPException(503,
+            "Задание загрузки ЕИС принято, но сохранение в личном кабинете не удалось. "
+            "Повторная правовая проверка не подтверждена. Повторите запуск; ожидающая проверка не дублируется.") from exc
+    try:
+        scoped._apply_plan(path,plan,data_root)
+    except Exception as exc:
+        raise HTTPException(503,
+            "Задание загрузки ЕИС сохранено в личном кабинете, но повторная правовая проверка "
+            "не подтверждена. Повторите запуск; ожидающая проверка не дублируется.") from exc
+    item=plan[0]["item"]
+    legal={"action":item["action"],"reason":item["reason"],
+           "state":item.get("state_after",item["state"])}
+    return job,created,legal
+
+
 class InnSearchRequest(BaseModel):
     inn: str = Field(strict=True, pattern=r"^(?:[0-9]{10}|[0-9]{12})$")
 
@@ -276,21 +335,10 @@ async def start_manual_check(reg_number:str, request:Request):
     ns=getattr(request.app.state,"eis223_manual_ns",None)
     if ns is None:
         raise HTTPException(503,"Серверный загрузчик ЕИС не подключён")
-    # Existing pending EIS work is reused by the queue: no artificial
-    # check/doc/finding increment and no second job for the same pending reg.
-    from v301_search_jobs import _enqueue
-    job,created=await asyncio.to_thread(
-        _enqueue,ns,"reg",reg_number,1,0,"",True)
-    # For a missing PG mapping, the EIS job is still real, never a fake result.
-    # A retry reuses the unfinished job and completes the owner association.
-    try:
-        await asyncio.to_thread(link_run,owner,reg_number,job["id"])
-    except Exception as exc:
-        raise HTTPException(503,
-            "Задание ЕИС принято, но сохранение в личном кабинете не удалось. "
-            "Повторите запуск; ожидающая проверка не дублируется.") from exc
+    job,created,legal=await asyncio.to_thread(
+        _start_linked_recheck,ns,owner,reg_number,0)
     return {"reg_number":reg_number,"job_id":job["id"],
-            "job_status":job["status"],"created":created}
+            "job_status":job["status"],"created":created,"legal_recheck":legal}
 
 
 @router.delete("/{reg_number}")
