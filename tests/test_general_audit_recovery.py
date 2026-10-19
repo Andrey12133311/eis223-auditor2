@@ -408,15 +408,31 @@ class WorkerRecovery(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
     async def test_cancel_during_persist_waits_for_commit_before_releasing_reg(self):
         reg = self.purchase()
         entered, release = threading.Event(), threading.Event()
+        committed = threading.Event()
         original = audit.persist
-        def delayed_persist(*args, **kwargs):
-            entered.set()
-            if not release.wait(3): raise AssertionError("test did not release persist")
-            return original(*args, **kwargs)
+        class CommitBarrier:
+            def __init__(barrier, connection): barrier.connection = connection
+            def __getattr__(barrier, name): return getattr(barrier.connection, name)
+            def commit(barrier):
+                # An entered persist wrapper has not acquired SQLite's writer
+                # yet and can still fail BUSY during shutdown. Synchronize on
+                # the real uncommitted result, whose commit must be settled.
+                self.assertTrue(barrier.connection.in_transaction)
+                self.assertEqual(barrier.connection.execute(
+                    "SELECT COUNT(*) FROM findings WHERE reg_number=? AND kind='violation'",
+                    (reg,)).fetchone()[0], 1)
+                entered.set()
+                if not release.wait(3): raise AssertionError("test did not release commit")
+                result = barrier.connection.commit()
+                committed.set()
+                return result
+        def delayed_persist(ns, *args, **kwargs):
+            return original({**ns, "conn": lambda: CommitBarrier(self.connect())}, *args, **kwargs)
         self.stack.enter_context(patch.object(audit, "persist", side_effect=delayed_persist))
         campaign = await self.start()
         try:
             await self.until(entered.is_set)
+            self.assertEqual(self.findings(reg), 0, "The held transaction must still be uncommitted")
             campaign.cancel()
             await self.real_sleep(.025)
             self.assertFalse(campaign.done())
@@ -424,7 +440,58 @@ class WorkerRecovery(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
         await asyncio.wait_for(asyncio.gather(campaign, return_exceptions=True), 3)
+        self.assertTrue(committed.is_set())
         self.assertEqual(self.row(reg)["state"], "pending")
+        self.assertEqual(self.findings(reg), 1)
+        self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 1)
+
+    async def test_cancelled_busy_persist_remains_pending_and_can_be_reclaimed(self):
+        reg = self.purchase()
+        entered, release = threading.Event(), threading.Event()
+        failures = []
+        original = audit.persist
+        def blocked_persist(*args, **kwargs):
+            entered.set()
+            if not release.wait(3): raise AssertionError("test did not release persist")
+            blocker = self.connect()
+            try:
+                blocker.execute("BEGIN IMMEDIATE")
+                return original(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                failures.append(exc)
+                raise
+            finally:
+                blocker.rollback()
+                blocker.close()
+        with patch.object(audit, "persist", side_effect=blocked_persist):
+            campaign = await self.start()
+            try:
+                await self.until(entered.is_set)
+                old_token = self.row(reg)["reservation_token"]
+                campaign.cancel()
+                await self.real_sleep(.025)
+                self.assertFalse(campaign.done())
+                self.assertEqual(self.row(reg)["state"], "running")
+            finally:
+                release.set()
+            await asyncio.wait_for(asyncio.gather(campaign, return_exceptions=True), 3)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0].sqlite_errorcode, sqlite3.SQLITE_BUSY)
+        self.assertEqual(self.row(reg)["state"], "pending")
+        self.assertEqual(self.row(reg)["reservation_token"], "")
+        self.assertEqual(self.findings(reg), 0)
+        self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 0)
+        # A cancelled failed transaction never acknowledges the old result.
+        # Its durable row remains claimable and the next attempt saves once.
+        claimed = audit.claim_next(self.ns)
+        self.assertEqual(claimed, reg)
+        self.assertNotEqual(claimed.reservation_token, old_token)
+        watermark = audit.review_watermark(self.ns, claimed)
+        state, detail = await audit.inspect_one(self.ns, claimed)
+        audit.mark(self.ns, claimed, state,
+                   {**{key: value for key, value in detail.items() if key != "source_incomplete"},
+                    **{key: value for key, value in watermark.items() if key != "source_error"}})
+        self.assertEqual(self.row(reg)["state"], "completed")
         self.assertEqual(self.findings(reg), 1)
         self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 1)
 
