@@ -30,6 +30,7 @@ EV="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
 for prefix,value in (("office",OO),("text",TX),("draw",DR),("xlink",XL)):
     ET.register_namespace(prefix,value)
 REG=re.compile(r"^3[0-9]{10}$")
+BATCH=re.compile(r"^[0-9a-f]{24}$")
 INN=re.compile(r"^[0-9]{10}(?:[0-9]{2})?$")
 ORG_ABBR=frozenset(("ООО","АО","ПАО","НАО","ОАО","ЗАО","ИП","ГУП","ФГУП","МУП",
                      "ФГБОУ","ФГБУ","ФКУ","ГБУ","МАУ","АНО","НКО","ФГАУ","ФКП"))
@@ -93,14 +94,55 @@ def _safe_odt(binary):
 
 def _compatible_template(xml):
     try:
-        node=ET.fromstring(xml)
-        pars=list(node.iter("{"+TX+"}p"))
-        corpus=" ".join("".join(x.itertext()) for x in pars)
-        return (len(pars)>35 and "СЛУЖЕБНАЯ ЗАПИСКА" in corpus
-          and "С учетом вышеизложенного" in corpus
-          and "Заместитель начальника Управления" in corpus
-          and "223-ФЗ" in corpus)
-    except ET.ParseError:return False
+        _template_layout(ET.fromstring(xml))
+        return True
+    except (ET.ParseError,ValueError):return False
+
+def _template_layout(node):
+    """Verify the source anchors before the known template's positional fills.
+
+    Both renderers use this source layout. A broadly similar memo with an added
+    paragraph must fail closed instead of retaining another procurement's text.
+    Nested signature-table paragraphs remain part of the original sequence.
+    """
+    body=node.find(".//{"+OO+"}text")
+    paras=list(body.iter("{"+TX+"}p")) if body is not None else []
+    def plain(index):
+        return re.sub(r"\s+"," ","".join(paras[index].itertext())).strip().casefold().replace("ё","е")
+    if (len(paras)!=57 or plain(16)!="служебная записка"
+            or not plain(20) or "223-фз" not in plain(21)
+            or not plain(29).startswith("с учетом вышеизложенного")
+            or "заместитель начальника управления" not in plain(32)
+            or not plain(33)):
+        raise ValueError("Структура шаблона не соответствует исходной служебной записке")
+    return body,paras
+
+def _clear_source_registration(*nodes):
+    """Clear the old memo's number in visible text and ODF field definitions."""
+    numbers={"2026-139205"}
+    field_tags={"{"+TX+"}"+name for name in
+                ("user-field-decl","user-field-get","user-field-input")}
+    for node in nodes:
+        for field in node.iter():
+            if field.tag not in field_tags or field.get("{"+TX+"}name")!="ProjectNumber":
+                continue
+            numbers.update(value for value in (
+                field.get("{"+OO+"}string-value","").strip(),
+                "".join(field.itertext()).strip()) if value)
+            if "{"+OO+"}string-value" in field.attrib:
+                field.set("{"+OO+"}string-value","")
+            for child in field.iter():
+                child.text=""
+                if child is not field:child.tail=""
+    # Do this before inserting current procurement data or personal requisites.
+    for node in nodes:
+        for element in node.iter():
+            for attr in ("text","tail"):
+                value=getattr(element,attr)
+                if value:
+                    for number in sorted(numbers,key=len,reverse=True):
+                        value=value.replace(number,"")
+                    setattr(element,attr,value)
 
 def _zip_content(items):
     mem=io.BytesIO()
@@ -138,6 +180,30 @@ def _read_purchase(ns,reg):
         if not accepted:
             raise HTTPException(409,"Служебная записка не формируется: нет нарушения с документальными основаниями")
         return p,accepted
+    finally:c.close()
+
+def _read_thematic_purchase(ns,batch,reg):
+    """Read the chosen campaign's evidence, without a general-audit fallback."""
+    from v384_thematic_findings import thematic_items
+    findings=thematic_items(ns,batch,reg)
+    documented=[]
+    for finding in findings:
+        title=str(finding.get("title") or "").strip()
+        evidence=str(finding.get("evidence") or "").strip()
+        if not title or not evidence or re.search(
+                r"риск|требует проверки|не найдена информация",title,re.I):
+            continue
+        documented.append(finding)
+    if not documented:
+        raise HTTPException(409,"Служебная записка не формируется: в выбранной тематической проверке нет нарушения с документальными основаниями")
+    c=ns["conn"]()
+    try:
+        c.row_factory=None
+        cur=c.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,))
+        names=[d[0] for d in cur.description]
+        row=cur.fetchone()
+        if not row:raise HTTPException(404,"Закупка не найдена в базе")
+        return dict(zip(names,row)),documented
     finally:c.close()
 
 def _plain_company(text):
@@ -209,15 +275,24 @@ def _text(element):
     return "".join(element.itertext())
 
 def _set_paragraph(par,new):
+    from v321_memo_layout import _leading_tabs
+    leading_tabs=_leading_tabs(par)
     for child in list(par):par.remove(child)
-    par.text=str(new)
+    par.text="" if leading_tabs else str(new)
+    for _ in range(leading_tabs):
+        tab=ET.SubElement(par,"{"+TX+"}tab")
+    if leading_tabs:tab.tail=str(new)
 
 def _append_consultant_links(par, finding):
     """Clickable statute link in ODT; leave all legal and evidentiary text as is."""
     from v365_consultant_refs import references
     refs=references(finding)
     for ref in refs[:3]:
-        if not len(par):
+        if len(par):
+            previous=par[-1]
+            if not previous.tail or not previous.tail[-1].isspace():
+                previous.tail=(previous.tail or "")+" "
+        elif not par.text or not par.text[-1].isspace():
             par.text=(par.text or "")+" "
         link=ET.SubElement(par,"{"+TX+"}a",{
             "{"+XL+"}type":"simple",
@@ -285,11 +360,27 @@ def _render_odt(template,p,findings,organization,fields):
             items={n:z.read(n) for n in z.namelist()}
     except (zipfile.BadZipFile,KeyError) as exc:
         raise HTTPException(503,"Сохранённый шаблон ODT повреждён") from exc
-    node=ET.fromstring(items["content.xml"])
-    body=node.find(".//{"+OO+"}text")
-    if body is None:raise HTTPException(503,"Шаблон ODT не содержит текста")
-    paras=list(body.iter("{"+TX+"}p"))
-    if len(paras)<35:raise HTTPException(503,"Неверная структура служебной записки")
+    try:
+        node=ET.fromstring(items["content.xml"])
+        style=ET.fromstring(items["styles.xml"])
+        body,paras=_template_layout(node)
+    except (KeyError,ET.ParseError,ValueError) as exc:
+        raise HTTPException(503,"Структура сохранённого шаблона ODT не соответствует исходной служебной записке. Установите исходный шаблон повторно.") from exc
+    _clear_source_registration(node,style)
+    positions=((13,"recipient"),(18,"greeting"),(32,"signer_role"),(33,"signer"),
+               (55,"executor"),(56,"phone"))
+    supplied={}
+    for _,key in positions:
+        if key not in fields:continue
+        value=str(fields.get(key) or "").strip()
+        if len(value)>=200 or any(ord(char)<32 and char not in "\t\n\r" for char in value):
+            raise HTTPException(422,"Реквизит служебной записки содержит недопустимые символы или превышает 199 символов: "+key)
+        supplied[key]=value
+    if ("recipient" in supplied and "greeting" not in supplied
+            and supplied["recipient"]!=_text(paras[13]).strip()):
+        # The source salutation names its original recipient. Do not invent a
+        # replacement or retain that name when another recipient is supplied.
+        _set_paragraph(paras[18],"")
     # Identify semantic fields before removing spacers or adding findings.
     # Word-exported templates can rename P21/P24, so final-page layout must
     # not depend on their incidental paragraph-style names.
@@ -359,21 +450,13 @@ def _render_odt(template,p,findings,organization,fields):
             if child is para:continue
             if child.text:child.text=_nonbreaking(child.text)
             if child.tail:child.tail=_nonbreaking(child.tail)
-    for para in body.iter("{"+TX+"}p"):
-        if "2026-139205" in _text(para):
-            _set_paragraph(para,"")
-    for el in node.iter():
-        if el.text and "2026-139205" in el.text:
-            el.text=el.text.replace("2026-139205","")
     # Optional fields are copied only where sample already contains those
     # official recipient/signature lines.
-    for idx,key in ((13,"recipient"),(18,"greeting"),(32,"signer_role"),(33,"signer"),
-                    (55,"executor"),(56,"phone")):
-        v=str(fields.get(key) or "").strip()
-        if (v or (key in ("recipient","executor","phone") and key in fields)) and idx<len(paras) and len(v)<200:
+    for idx,key in positions:
+        v=supplied.get(key,"")
+        if v or (key in ("recipient","executor","phone") and key in supplied):
             _set_paragraph(paras[idx],v)
     # Remove the barcode belonging to the original registered memo, preserve crest.
-    style=ET.fromstring(items["styles.xml"])
     for parent in style.iter():
         for child in list(parent):
             if child.tag=="{"+DR+"}frame":
@@ -459,21 +542,29 @@ def install(ns):
         print("V304 OFFICIAL_MEMO_TEMPLATE_SAVED bytes="+str(len(safe)),flush=True)
         return {"installed":True,"format":"ODT","macros_removed":True,"bytes":len(safe)}
 
-    async def build_memo(reg,fields=None):
+    async def build_memo(reg,fields=None,*,thematic_batch=None):
         if not REG.fullmatch(reg):raise HTTPException(422,"Неверный номер закупки")
+        if thematic_batch is not None and not BATCH.fullmatch(thematic_batch):
+            raise HTTPException(422,"Некорректный номер тематической проверки")
         pfile=template_path()
         if not pfile.is_file():
             raise HTTPException(409,"Шаблон ODT ещё не установлен. Откройте /api/v304/memo-template/upload")
-        p,findings=await asyncio.to_thread(_read_purchase,ns,reg)
+        if thematic_batch is None:
+            p,findings=await asyncio.to_thread(_read_purchase,ns,reg)
+        else:
+            p,findings=await asyncio.to_thread(_read_thematic_purchase,ns,thematic_batch,reg)
         org,source=await company_name(p)
         if not org:raise HTTPException(409,"Отсутствует наименование заказчика")
         fields=fields if isinstance(fields,dict) else {}
         odt=await asyncio.to_thread(_render_odt,pfile.read_bytes(),p,findings,org,fields)
-        print(f"V304 MEMO_GENERATED reg={reg} verified_findings={len(findings)} format=odt name_source={source}",flush=True)
+        origin=(" batch="+thematic_batch) if thematic_batch is not None else ""
+        print(f"V304 MEMO_GENERATED reg={reg} verified_findings={len(findings)} format=odt name_source={source}"+origin,flush=True)
+        filename=(f"sluzhebnaya_zapiska_thematic_{thematic_batch}_{reg}.odt"
+                  if thematic_batch is not None else f"sluzhebnaya_zapiska_{reg}.odt")
         return Response(odt,media_type="application/vnd.oasis.opendocument.text",
-            headers={"Content-Disposition":f'attachment; filename="sluzhebnaya_zapiska_{reg}.odt"',
+            headers={"Content-Disposition":f'attachment; filename="{filename}"',
                      "X-Company-Name-Source":source,
-                     "Cache-Control":"no-store"})
+                     "Cache-Control":"private,no-store" if thematic_batch is not None else "no-store"})
 
     app.state.eis223_build_memo=build_memo
 
@@ -488,6 +579,19 @@ def install(ns):
     async def memo_file(reg:str,request:Request):
         fields=await asyncio.to_thread(saved_fields,request,reg)
         return await build_memo(reg,fields)
+
+    @app.get("/api/v304/thematic-memo/{batch}/{reg}.odt")
+    async def thematic_memo_file(batch:str,reg:str,request:Request):
+        if not BATCH.fullmatch(batch) or not REG.fullmatch(reg):
+            raise HTTPException(422,"Некорректный номер проверки или закупки")
+        # This download is private even when legacy shared reads are enabled.
+        # Query parameters can never choose an owner or supply another user's fields.
+        if request.scope.get("eis223_account_id") is None:
+            raise HTTPException(401,"Требуется авторизация")
+        import v360_thematic_ownership as ownership
+        await asyncio.to_thread(ownership.require_owned,request,batch)
+        fields=await asyncio.to_thread(saved_fields,request,reg)
+        return await build_memo(reg,fields,thematic_batch=batch)
 
     # Existing memo download button POSTs to the v218 route. Intercept here
     # rather than ship the obsolete memo text and layout.

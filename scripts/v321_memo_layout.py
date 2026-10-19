@@ -17,12 +17,14 @@ ST="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
 FO="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
 DR="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
 SVG="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+TB="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+XL="http://www.w3.org/1999/xlink"
 STYLE_NAME="EIS223MemoBody321"
 EXECUTOR_STYLE="EIS223MemoExecutor381"
 EXECUTOR_TEXT_STYLE="EIS223MemoExecutorText381"
 EXECUTOR_FRAME_STYLE="EIS223MemoExecutorFrame381"
 XML_ID="{http://www.w3.org/XML/1998/namespace}id"
-for prefix,uri in (("office",OO),("text",TX),("style",ST),("fo",FO),("draw",DR),("svg",SVG)):
+for prefix,uri in (("office",OO),("text",TX),("style",ST),("fo",FO),("draw",DR),("svg",SVG),("table",TB),("xlink",XL)):
     ET.register_namespace(prefix,uri)
 
 def _odf_string(element):
@@ -50,36 +52,75 @@ def _nonbreaking(text):
     return re.sub(r"(?i)(?<![а-яёa-z])("+prep+r") +(?=\S)",
                   lambda m:m.group(1)+"\u00a0",text)
 
+def _leading_tabs(par):
+    """Count the template's first-line tab stops, including tabs inside spans."""
+    count=0
+    def visit(node):
+        nonlocal count
+        if node.tag=="{"+TX+"}tab":
+            count+=1;return True
+        if node.text and node.text.strip():return False
+        for child in node:
+            if not visit(child):return False
+            if child.tail and child.tail.strip():return False
+        return True
+    visit(par)
+    return count
+
 def _set(par,value):
+    tabs=_leading_tabs(par)
     for child in list(par):par.remove(child)
     par.text=_nonbreaking(_clean(value))
-    par.set("{"+TX+"}style-name",STYLE_NAME)
+    if tabs:
+        value=par.text;par.text=""
+        for _ in range(tabs):tab=ET.SubElement(par,"{"+TX+"}tab")
+        tab.tail=value
+    if not par.get("{"+TX+"}style-name"):
+        par.set("{"+TX+"}style-name",STYLE_NAME)
 
-def _style(root):
+def _flatten(par):
+    """Normalize inline typography while retaining actual clickable article links."""
+    parts=[];leading_tabs=_leading_tabs(par)
+    def visit(node):
+        nonlocal leading_tabs
+        if node.tag=="{"+TX+"}a":
+            link=copy.deepcopy(node)
+            for child in list(link):link.remove(child)
+            link.text=_nonbreaking(_clean(_odf_string(node)))
+            link.tail=None
+            parts.append(link)
+        elif node.tag=="{"+TX+"}tab" and leading_tabs:
+            parts.append(ET.Element(node.tag,dict(node.attrib)))
+            leading_tabs-=1
+        elif node.tag in {"{"+TX+"}"+name for name in ("s","tab","line-break","soft-page-break")}:
+            parts.append(_odf_string(node))
+        else:
+            parts.append(node.text or "")
+            for child in node:
+                visit(child);parts.append(child.tail or "")
+    visit(par)
+    for child in list(par):par.remove(child)
+    par.text=""
+    last=None
+    for part in parts:
+        if not isinstance(part,str):
+            par.append(part);last=part;continue
+        part=part.replace("\u00a0"," ").replace("\u200b","")
+        part=re.sub(r"\s+"," ","".join(c if c>=" " else " " for c in part))
+        part=_nonbreaking(part)
+        if last is None:par.text+=part
+        else:last.tail=(last.tail or "")+part
+    par.text=par.text.lstrip()
+    if last is None:par.text=par.text.rstrip()
+    elif last.tail:last.tail=last.tail.rstrip()
+
+def _style(root,paragraphs):
     styles=root.find("{"+OO+"}automatic-styles")
     if styles is None:
         styles=ET.Element("{"+OO+"}automatic-styles")
         root.insert(0,styles)
-    for old in list(styles):
-        if old.tag=="{"+ST+"}style" and old.get("{"+ST+"}name")==STYLE_NAME:
-            styles.remove(old)
-    style=ET.SubElement(styles,"{"+ST+"}style",{
-        "{"+ST+"}name":STYLE_NAME,
-        "{"+ST+"}family":"paragraph",
-        "{"+ST+"}parent-style-name":"Standard"})
-    ET.SubElement(style,"{"+ST+"}paragraph-properties",{
-        "{"+FO+"}text-align":"justify",
-        # The memo body is justified; signature and address blocks keep template styles.
-        "{"+ST+"}justify-single-word":"false",
-        "{"+FO+"}text-indent":"1.25cm",
-        "{"+FO+"}margin-left":"0cm",
-        "{"+FO+"}margin-right":"0cm",
-        "{"+FO+"}margin-top":"0cm",
-        "{"+FO+"}margin-bottom":"0.11cm",
-        "{"+FO+"}line-height":"120%",
-        "{"+FO+"}orphans":"2",
-        "{"+FO+"}widows":"2"})
-    ET.SubElement(style,"{"+ST+"}text-properties",{
+    defined={s.get("{"+ST+"}name"):s for s in styles.findall("{"+ST+"}style")}
+    text_properties={
         "{"+ST+"}font-name":"Times New Roman",
         "{"+FO+"}font-family":"Times New Roman",
         "{"+FO+"}font-size":"14pt",
@@ -87,7 +128,27 @@ def _style(root):
         "{"+FO+"}font-style":"normal",
         "{"+FO+"}color":"#000000",
         "{"+ST+"}font-size-asian":"14pt",
-        "{"+ST+"}font-size-complex":"14pt"})
+        "{"+ST+"}font-size-complex":"14pt"}
+    assigned={}
+    for paragraph in paragraphs:
+        original=paragraph.get("{"+TX+"}style-name","Standard")
+        if original not in assigned:
+            name=STYLE_NAME+("_"+str(len(assigned)) if assigned else "")
+            # Automatic styles must be copied, not used as named-style parents.
+            # Keep the uploaded template's margins, indentation, tabs and spacing.
+            style=copy.deepcopy(defined[original]) if original in defined else ET.Element("{"+ST+"}style",{
+                "{"+ST+"}family":"paragraph","{"+ST+"}parent-style-name":original})
+            style.set("{"+ST+"}name",name)
+            properties=style.find("{"+ST+"}paragraph-properties")
+            if properties is None:
+                properties=ET.SubElement(style,"{"+ST+"}paragraph-properties")
+            if "{"+FO+"}text-align" not in properties.attrib:
+                properties.set("{"+FO+"}text-align","justify")
+            font=style.find("{"+ST+"}text-properties")
+            if font is None:font=ET.SubElement(style,"{"+ST+"}text-properties")
+            font.attrib.update(text_properties)
+            styles.append(style);assigned[original]=name
+        paragraph.set("{"+TX+"}style-name",assigned[original])
 
 
 def _executor_block(root,body):
@@ -114,11 +175,17 @@ def _executor_block(root,body):
     block=current[executor_idx:executor_idx+2]
     if not block:
         return
-    # Use the last actual signature paragraph as anchor, never a layout blank.
+    # The real uploaded template keeps both signature lines inside a table.
+    # Anchor to the signature paragraph, reserve space after its outer container.
     anchor=next((p for p in reversed(current[signer_idx:executor_idx])
-                 if _clean(_odf_string(p)) and p in direct),None)
+                 if _clean(_odf_string(p))),None)
     if anchor is None:
         return
+    parents={child:parent for parent in body.iter() for child in parent}
+    container=anchor
+    while parents.get(container) is not body:
+        container=parents.get(container)
+        if container is None:return
     styles=root.find("{"+OO+"}automatic-styles")
     # Keep the closing request and both signature lines together. Otherwise
     # the last name alone can become the anchor of an almost-empty last page.
@@ -161,14 +228,26 @@ def _executor_block(root,body):
         reserved_lines+=max(1,math.ceil(units/56))+len(list(paragraph.iter("{"+TX+"}line-break")))
     reserve=(max(0.7,(reserved_lines*8.2+3)/28.34646) if reserved_lines else 0)
     anchor_original=anchor.get("{"+TX+"}style-name","Standard")
-    anchor_style=ET.SubElement(styles,"{"+ST+"}style",{
-        "{"+ST+"}name":"EIS223MemoSignatureEnd",
+    anchor_style=copy.deepcopy(defined[anchor_original]) if anchor_original in defined else ET.Element("{"+ST+"}style",{
         "{"+ST+"}family":"paragraph","{"+ST+"}parent-style-name":anchor_original})
-    ET.SubElement(anchor_style,"{"+ST+"}paragraph-properties",{
+    anchor_style.set("{"+ST+"}name","EIS223MemoSignatureEnd")
+    anchor_properties=anchor_style.find("{"+ST+"}paragraph-properties")
+    if anchor_properties is None:anchor_properties=ET.SubElement(anchor_style,"{"+ST+"}paragraph-properties")
+    anchor_properties.attrib.update({
         "{"+FO+"}margin-bottom":"0cm","{"+FO+"}keep-with-next":"always" if reserve else "auto",
         "{"+FO+"}break-before":"auto","{"+FO+"}break-after":"auto"})
+    styles.append(anchor_style)
     anchor.set("{"+TX+"}style-name","EIS223MemoSignatureEnd")
-    parents={child:parent for parent in body.iter() for child in parent}
+    if container.tag=="{"+TB+"}table":
+        original=container.get("{"+TB+"}style-name","")
+        table_style=copy.deepcopy(defined[original]) if original in defined else ET.Element("{"+ST+"}style",{
+            "{"+ST+"}family":"table"})
+        table_style.set("{"+ST+"}name","EIS223MemoSignatureTable")
+        properties=table_style.find("{"+ST+"}table-properties")
+        if properties is None:properties=ET.SubElement(table_style,"{"+ST+"}table-properties")
+        properties.set("{"+FO+"}keep-with-next","always" if reserve else "auto")
+        styles.append(table_style)
+        container.set("{"+TB+"}style-name","EIS223MemoSignatureTable")
     for paragraph in block:
         parents[paragraph].remove(paragraph)
     # A source template may keep the executor in a separate anchored frame.
@@ -193,7 +272,7 @@ def _executor_block(root,body):
         "{"+FO+"}margin-bottom":"0cm","{"+FO+"}keep-with-next":"auto",
         "{"+FO+"}break-before":"auto","{"+FO+"}break-after":"auto"})
     ET.SubElement(reserve_style,"{"+ST+"}text-properties",{"{"+FO+"}font-size":"1pt"})
-    body.insert(list(body).index(anchor)+1,ET.Element("{"+TX+"}p",{
+    body.insert(list(body).index(container)+1,ET.Element("{"+TX+"}p",{
         "{"+TX+"}style-name":"EIS223MemoExecutorReserve"}))
     for name,family in ((EXECUTOR_STYLE,"paragraph"),(EXECUTOR_TEXT_STYLE,"text")):
         style=ET.SubElement(styles,"{"+ST+"}style",{
@@ -241,6 +320,23 @@ def _evidence(f):
     s=_clean(f.get("evidence"),1700)
     return s.rstrip(" .;:")+"." if s else ""
 
+def _finding(par,f,prefix):
+    value=prefix+"«"+_document(f)+"» установлено: "+_title(f)
+    law=_clean(f.get("law"),700)
+    if law:value+=" Правовое основание: "+law.rstrip(" .;")+"."
+    _set(par,value)
+    from v365_consultant_refs import references
+    for reference in references(f)[:3]:
+        if len(par):
+            if not (par[-1].tail or "").endswith((" ","\u00a0")):
+                par[-1].tail=(par[-1].tail or "")+" "
+        elif not (par.text or "").endswith((" ","\u00a0")):
+            par.text=(par.text or "")+" "
+        link=ET.SubElement(par,"{"+TX+"}a",{
+            "{"+XL+"}type":"simple","{"+XL+"}href":reference["url"]})
+        link.text="КонсультантПлюс: "+reference["label"]
+        link.tail=" "
+
 def format_service_memo(data:bytes,findings:list[dict])->bytes:
     """Normalize the memo as a structured ODT, without changing its findings."""
     if not findings:
@@ -256,22 +352,23 @@ def format_service_memo(data:bytes,findings:list[dict])->bytes:
     paras=list(body.iter("{"+TX+"}p"))
     if len(paras)<34 or "СЛУЖЕБНАЯ ЗАПИСКА" not in _odf_string(paras[16]):
         raise ValueError("Неизвестная структура официального ODT-шаблона")
-    _style(root)
+    _style(root,paras[20:30])
     main=findings[0]
-    _set(paras[26],"В документе «"+_document(main)+"» установлено следующее: "+_title(main))
+    _finding(paras[26],main,"В документе ")
     # The raw source excerpt is already retained with the verified finding.
     # Do not repeat that technical file/fragment dump in the service memo.
     body.remove(paras[27])
     # Every verified violation remains in its own paragraph, including #3/#4.
     place=list(body).index(paras[28])
     for f in findings[1:]:
-        desc=ET.Element("{"+TX+"}p")
-        _set(desc,"Дополнительно в документе «"+_document(f)+"» установлено: "+_title(f))
+        desc=ET.Element("{"+TX+"}p",{"{"+TX+"}style-name":paras[26].get("{"+TX+"}style-name")})
+        for _ in range(_leading_tabs(paras[26])):ET.SubElement(desc,"{"+TX+"}tab")
+        _finding(desc,f,"Дополнительно в документе ")
         body.insert(place,desc);place+=1
     # The remaining boilerplate keeps the template's words and order; remove
     # only stray inline runs/tabs that produce incompatible font sizes.
     for par in paras[20:30]:
-        _set(par,_odf_string(par))
+        _flatten(par)
     _executor_block(root,body)
     finished=ET.tostring(root,encoding="utf-8",xml_declaration=True)
     buf=io.BytesIO()

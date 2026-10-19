@@ -75,6 +75,7 @@ SHARED_READ_PATTERNS = tuple(map(re.compile, (
 
 
 THEMATIC_CARD = re.compile(r"^/thematic/card/[0-9a-f]{24}/3[0-9]{10}/?$")
+THEMATIC_MEMO = re.compile(r"^/api/v304/thematic-memo/[0-9a-f]{24}/3[0-9]{10}\.odt$")
 THEMATIC_STATUS = re.compile(r"^/api/thematic/[0-9a-f]{24}(?:/stop)?$")
 THEMATIC_CLASSIFY = re.compile(r"^/api/thematic/classify/3[0-9]{10}$")
 
@@ -84,6 +85,7 @@ def thematic_user_route(path, method):
     if method in ("GET", "HEAD"):
         return (path in ("/thematic", "/api/thematic/history")
                 or THEMATIC_CARD.fullmatch(path) is not None
+                or THEMATIC_MEMO.fullmatch(path) is not None
                 or THEMATIC_CLASSIFY.fullmatch(path) is not None
                 or (THEMATIC_STATUS.fullmatch(path) is not None
                     and not path.endswith("/stop")))

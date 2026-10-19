@@ -57,6 +57,10 @@ def competitive_kind(method):
 
 def db(ns):
  c=ns["conn"]();c.row_factory=sqlite3.Row;return c
+def sqlite_busy(exc):
+ code=getattr(exc,"sqlite_errorcode",None)
+ if code is not None:return code&255 in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED)
+ return "locked" in str(exc).lower() or "busy" in str(exc).lower()
 def init(ns):
  c=db(ns)
  try:
@@ -145,8 +149,14 @@ async def independent_review(ns,reg,categories):
  p=as_procurement(purchase)
  if not business_company(p.get("customer")):return "excluded_company",[]
  docs,unreadable=await stored_docs(ns,reg,rows)
- verified=[d for d in docs if is_official(d)]
- if not verified:return "waiting_originals",[]
+ verified=[d for d in docs if is_official(d) and str(d.get("text") or "").strip()]
+ if not verified:
+    # A missing original needs the EIS intake; an existing but temporarily
+    # unreadable file needs a later extraction attempt, with bounded backoff.
+    from pathlib import Path
+    available=await asyncio.to_thread(lambda:any(Path(r["local_path"]).is_file()
+        for r in rows if r.get("local_path"))) if unreadable else False
+    return ("retry" if available else "waiting_originals"),[]
  # Both halves of the general engine can establish violations. Running
  # analyze alone silently omitted the confirmed checklist rules here.
  analyzer=ns.get("analyze")
@@ -189,6 +199,7 @@ async def independent_review(ns,reg,categories):
  for f in findings if isinstance(findings,list) else []:
     if not isinstance(f,dict) or f.get("kind")!="violation":continue
     if not str(f.get("law") or "").strip():continue
+    if not str(f.get("evidence") or "").strip():continue
     # Provenance requirements are exactly as strict as the main engine:
     # neither a plausible title nor a local unverified file is enough.
     if not ((f.get("document") and norm_name(f["document"]) in names) or
@@ -209,7 +220,7 @@ async def independent_review(ns,reg,categories):
  # This only changes new presentation/persistence, never deletes historical
  # thematic results. Different dated acts and documentary sources stay distinct.
  from v352_dashboard_truth import collapse_legal_events
- return "completed",collapse_legal_events(selected)
+ return ("retry" if unreadable else "completed"),collapse_legal_events(selected)
 
 def overview(ns,batch):
  c=db(ns)
@@ -286,13 +297,21 @@ def overview(ns,batch):
 _HISTORY_COUNT_CACHE={}
 
 def thematic_history_records(ns, permitted_ids=None):
+ """Retry a fresh bounded read after a transient SQLite lock, never stale rows."""
+ for attempt in range(3):
+  try:return _thematic_history_records(ns,permitted_ids)
+  except sqlite3.OperationalError as exc:
+   if not sqlite_busy(exc) or attempt==2:raise
+   time.sleep(.05*(attempt+1))
+
+def _thematic_history_records(ns, permitted_ids=None):
  """Show unique legal incidents, not repeated saved excerpts, in history."""
  from v352_dashboard_truth import collapse_legal_events
  if permitted_ids is not None and not permitted_ids:
   return {"batches":[]}
  c=db(ns)
  try:
-  c.execute("PRAGMA busy_timeout=1500")
+  c.execute("PRAGMA busy_timeout=500")
   placeholders=",".join("?" for _ in permitted_ids) if permitted_ids is not None else ""
   owner_filter=(" WHERE b.id IN ("+placeholders+")") if permitted_ids is not None else ""
   rows=c.execute("""SELECT b.id,b.categories,b.created_at,b.status,b.date_from,b.date_to,

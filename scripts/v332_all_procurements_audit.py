@@ -10,16 +10,18 @@
 """
 from __future__ import annotations
 
-from audit_db_retry import run_db,is_busy
 import asyncio
 import hashlib
 import json
 import os
 import re
+import sqlite3
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from audit_source_version import source_version
 from v295_eis_originals import allowed_documents, saved_document, root, uid_from_url
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
@@ -27,7 +29,7 @@ from v381_audit_scheduling import (audit_signals, background_audit,
                                    ordered_map, run_file_io)
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
-RULE_REVISION="2026-10-18-v380-v372-protocol-identity-evidence"
+RULE_REVISION="2026-10-19-v380-v372-readable-evidence-recovery"
 DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
@@ -39,6 +41,12 @@ MAX_DOC_ROWS=900
 # with one slot reserved for foreground/manual checks.
 FILE_BATCH_SIZE=12
 GENERAL_WORKERS=4
+RETRY_BASE_SECONDS=1.0
+RETRY_MAX_SECONDS=30.0
+HEARTBEAT_SECONDS=60.0
+QUEUE_POLL_SECONDS=30.0
+DOCUMENT_RETRY_BASE_SECONDS=90.0
+DOCUMENT_RETRY_MAX_SECONDS=1800.0
 PRIORITY=["32616233661","32616324151","32616287360"]
 
 def now():
@@ -48,6 +56,47 @@ def connect(ns):
     c=ns["conn"]()
     c.execute("PRAGMA busy_timeout=12000")
     return c
+
+
+def transient_sqlite(exc):
+    """Retry lock contention, including extended BUSY/LOCKED error codes."""
+    if not isinstance(exc,sqlite3.OperationalError):return False
+    code=getattr(exc,"sqlite_errorcode",None)
+    if code is not None:
+        return (code & 255) in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED)
+    # Older Python/SQLite and persisted legacy errors have only this text.
+    return locked_error(str(exc))
+
+
+def locked_error(message):
+    value=str(message or "").lower()
+    return any(text in value for text in
+               ("database is locked","database table is locked","database schema is locked"))
+
+
+def ensure_source_column(c):
+    columns={row[1] for row in c.execute("PRAGMA table_info(v332_audit_queue)")}
+    for name,definition in (("last_source_version","TEXT NOT NULL DEFAULT ''"),
+                            ("retry_count","INTEGER NOT NULL DEFAULT 0"),
+                            ("next_retry_at","REAL NOT NULL DEFAULT 0"),
+                            ("last_result_token","TEXT NOT NULL DEFAULT ''"),
+                            ("last_counted_token","TEXT NOT NULL DEFAULT ''")):
+        if name not in columns:
+            c.execute("ALTER TABLE v332_audit_queue ADD COLUMN "+name+" "+definition)
+
+
+def evidence_version(ns,reg):
+    c=connect(ns)
+    try:return source_version(c,reg)
+    finally:c.close()
+
+
+def runtime_snapshot(ns):
+    state=ns.get("_v332_runtime") or {}
+    workers={key:dict(value) for key,value in state.get("workers",{}).items()}
+    return {**{key:value for key,value in state.items() if key!="workers"},
+            "live_workers":sum(bool(value.get("alive")) for value in workers.values()),
+            "workers":workers}
 
 def dashboard_regs(ns,include_new=False):
     """Freeze the actual automatic main-page membership, not the whole DB.
@@ -110,6 +159,7 @@ def initialize(ns):
             c.execute("ALTER TABLE v332_audit_queue ADD COLUMN audit_revision TEXT NOT NULL DEFAULT ''")
         if "last_doc_id" not in columns:
             c.execute("ALTER TABLE v332_audit_queue ADD COLUMN last_doc_id INTEGER NOT NULL DEFAULT 0")
+        ensure_source_column(c)
         if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():
             c.execute("CREATE INDEX IF NOT EXISTS idx_v332_docs_version ON docs(reg_number,id)")
         p=c.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
@@ -179,9 +229,11 @@ def progress(ns):
             COALESCE(SUM(CASE WHEN state='completed' THEN documents_found ELSE 0 END),0),
             COALESCE(SUM(CASE WHEN state='completed' THEN documents_read ELSE 0 END),0),
             COALESCE(SUM(CASE WHEN state='completed' THEN verified_original_documents ELSE 0 END),0),
-            COALESCE(SUM(CASE WHEN state='completed' THEN new_findings ELSE 0 END),0),
-            COALESCE(SUM(CASE WHEN state='completed' THEN new_checks ELSE 0 END),0)
+            COALESCE(SUM(new_findings),0),
+            COALESCE(SUM(new_checks),0)
             FROM v332_audit_queue WHERE campaign=?""",(CAMPAIGN,)).fetchone()
+        deferred=c.execute("""SELECT COUNT(*),MIN(next_retry_at) FROM v332_audit_queue
+            WHERE campaign=? AND state='pending' AND next_retry_at>?""",(CAMPAIGN,time.time())).fetchone()
         return {
             "campaign":CAMPAIGN,
             "status":"finished" if not states.get("pending",0) and not states.get("running",0) else "running",
@@ -195,7 +247,10 @@ def progress(ns):
             "verified_EIS_documents_in_completed":int(sums[3]),
             "new_evidence_based_findings":int(sums[4]),
             "new_legal_review_items":int(sums[5]),
-            "note":"Fixed subset: up to 1253 purchases from the main automatic list; source-backed facts and available originals are analysed. Missing documents are not declared violation-free."
+            "scheduled_retries":int(deferred[0]),
+            "next_retry_at":deferred[1],
+            "runtime":runtime_snapshot(ns),
+            "note":"The automatic EIS-verified queue expands with new eligible purchases. Available originals and changed evidence are analysed; missing documents are not declared violation-free."
         }
     finally:c.close()
 
@@ -208,21 +263,23 @@ def claim_next(ns):
         # SQLite LIKE does not case-fold Cyrillic or normalize quoted names.
         c.create_function("eis_business_company",1,business_company,deterministic=True)
         c.execute("BEGIN IMMEDIATE")
+        ensure_source_column(c)
         row=c.execute("""SELECT q.reg FROM v332_audit_queue q
             JOIN purchases p ON p.reg_number=q.reg
             WHERE q.campaign=? AND q.state='pending'
+            AND q.next_retry_at<=?
             AND EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg
-                AND COALESCE(d.local_path,'')<>'' AND d.status='checked')
+                AND COALESCE(d.local_path,'')<>'' AND d.status IN ('checked','downloaded_no_text'))
             AND eis_business_company(p.customer)=1
             ORDER BY CASE q.reg WHEN '32616233661' THEN 0
              WHEN '32616324151' THEN 1
              WHEN '32616287360' THEN 2 ELSE 3 END,
-            q.reg LIMIT 1""",(CAMPAIGN,)).fetchone()
+            q.reg LIMIT 1""",(CAMPAIGN,time.time())).fetchone()
         if not row:
             c.commit()
             return None
         reg=str(row[0])
-        c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,
+        c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,next_retry_at=0,
                      last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
                      WHERE campaign=? AND reg=? AND state='pending'""",
                   (now(),reg,CAMPAIGN,reg))
@@ -235,25 +292,53 @@ def claim_next(ns):
     finally:c.close()
 
 def refresh_changed(ns):
-    """Queue only newly supported rules or actually added local documents."""
+    """Revisit changed evidence and recover legacy lock failures, once.
+
+    Source inspection/stat calls run with no write transaction. Conditional
+    updates cannot replace a result or reservation made since this snapshot.
+    """
     c=connect(ns)
     try:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():
             return 0
+        ensure_source_column(c)
+        rows=c.execute("""SELECT q.reg,q.state,q.updated_at,q.audit_revision,
+                   q.last_doc_id,q.last_source_version,q.error,q.next_retry_at,
+                   COALESCE(MAX(d.id),0) AS doc_version,
+                   COALESCE(SUM(CASE WHEN d.status IN ('checked','downloaded_no_text')
+                       AND COALESCE(d.local_path,'')<>'' THEN 1 ELSE 0 END),0) AS ready
+            FROM v332_audit_queue q LEFT JOIN docs d ON d.reg_number=q.reg
+            WHERE q.campaign=? AND (q.state IN ('completed','failed','no_readable_documents')
+                OR (q.state='pending' AND q.next_retry_at>0))
+            GROUP BY q.reg""",(CAMPAIGN,)).fetchall()
+        changed=[]
+        for row in rows:
+            retry=row["state"]=="failed" and locked_error(row["error"])
+            if not row["ready"] and not retry:continue
+            current=source_version(c,row["reg"]) if row["ready"] else ""
+            if row["state"]=="pending":
+                # A changed original bypasses a scheduled extraction retry;
+                # unchanged failed/partial text waits for the bounded delay.
+                revisit=row["last_source_version"]!=current
+            else:
+                revisit=(retry or row["audit_revision"]!=RULE_REVISION or
+                    row["last_doc_id"]<row["doc_version"] or
+                    row["last_source_version"]!=current)
+            if not revisit:continue
+            reason=("Повтор после временной блокировки базы данных" if retry else
+                    "Новая редакция методики или изменившиеся оригиналы ЕИС")
+            changed.append((reason,CAMPAIGN,row["reg"],row["state"],row["updated_at"],
+                            row["audit_revision"],row["last_doc_id"],row["last_source_version"],
+                            row["next_retry_at"]))
+        if not changed:return 0
         c.execute("BEGIN IMMEDIATE")
-        c.execute("""UPDATE v332_audit_queue
-            SET state='pending',error='Новая редакция методики или новые оригиналы ЕИС'
-            WHERE campaign=? AND state IN ('completed','failed','no_readable_documents')
-              AND EXISTS (
-                SELECT 1 FROM docs d WHERE d.reg_number=v332_audit_queue.reg
-                 AND d.status='checked' AND COALESCE(d.local_path,'')<>'')
-              AND (audit_revision<>? OR last_doc_id<
-                  COALESCE((SELECT MAX(d2.id) FROM docs d2
-                            WHERE d2.reg_number=v332_audit_queue.reg),0))""",
-                  (CAMPAIGN,RULE_REVISION))
-        changed=int(c.execute("SELECT changes()").fetchone()[0])
+        before=c.total_changes
+        c.executemany("""UPDATE v332_audit_queue SET state='pending',error=?,next_retry_at=0,retry_count=0
+            WHERE campaign=? AND reg=? AND state=? AND updated_at IS ?
+              AND audit_revision=? AND last_doc_id=? AND last_source_version=? AND next_retry_at=?""",changed)
+        count=c.total_changes-before
         c.commit()
-        return changed
+        return count
     except BaseException:
         if c.in_transaction:c.rollback()
         raise
@@ -267,28 +352,95 @@ def next_reg(ns):
         return str(row[0]) if row else None
     finally:c.close()
 
+
+def result_token(reg,details):
+    if details.get("result_token"):return str(details["result_token"])
+    if "new_findings" not in details and "new_checks" not in details:return None
+    # Direct maintenance calls have no worker token. Repeating the same
+    # revision/source/result must still be an idempotent update.
+    payload=json.dumps([reg,RULE_REVISION,details],ensure_ascii=False,sort_keys=True,default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def mark(ns,reg,state,details=None):
     if state not in ("pending","running","completed","no_readable_documents","failed"):
         raise ValueError("Unknown queue status")
     details=details or {}
     keys={"documents_found","documents_read","documents_unreadable",
           "verified_original_documents","original_expected","original_received",
-          "new_findings","new_checks","error"}
+          "new_findings","new_checks","error","last_source_version","result_token"}
     if set(details)-keys:raise ValueError("Unknown progress field")
     c=connect(ns)
     try:
+        ensure_source_column(c)
+        if state in ("completed","no_readable_documents","failed") and "last_source_version" not in details:
+            # Workers supply their pre-analysis snapshot. Preserve the public
+            # synchronous helper for maintenance/selftests that mark directly.
+            details={**details,"last_source_version":source_version(c,reg)}
         assignments="state=?,updated_at=?"
         params=[state,now()]
+        token=result_token(reg,details)
         for k,v in details.items():
-            assignments+=","+k+"=?"
+            if k=="result_token":continue
+            if k in ("new_findings","new_checks"):
+                assignments+=","+k+"=COALESCE("+k+",0)+CASE WHEN last_counted_token=? THEN 0 ELSE ? END"
+                params.append(token)
+            else:assignments+=","+k+"=?"
             params.append(v)
         if state in ("completed","no_readable_documents","failed"):
             assignments+=",audit_revision=?"
             params.append(RULE_REVISION)
+        if state=="completed":
+            assignments+=",retry_count=0,next_retry_at=0"
+        if token:
+            assignments+=",last_result_token=?,last_counted_token=?"
+            params.extend([token,token])
         params.extend([CAMPAIGN,reg])
+        condition=" AND last_result_token<>?" if token else ""
+        if token:params.append(token)
         c.execute("UPDATE v332_audit_queue SET "+assignments+
-                  " WHERE campaign=? AND reg=?",params)
+                  " WHERE campaign=? AND reg=?"+condition,params)
         c.commit()
+    finally:c.close()
+
+
+def defer_retry(ns,reg,details,reason):
+    """Retain partial evidence and schedule a bounded retry, without completion."""
+    allowed={"documents_found","documents_read","documents_unreadable",
+             "verified_original_documents","original_expected","original_received",
+             "new_findings","new_checks","last_source_version"}
+    c=connect(ns)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        ensure_source_column(c)
+        row=c.execute("SELECT retry_count,next_retry_at,last_result_token FROM v332_audit_queue WHERE campaign=? AND reg=?",
+                      (CAMPAIGN,reg)).fetchone()
+        if row is None:raise LookupError("Audit reservation disappeared")
+        token=result_token(reg,details)
+        if token and row[2]==token:
+            c.commit()
+            return max(0,float(row[1])-time.time())
+        attempts=int(row[0])+1
+        delay=min(DOCUMENT_RETRY_MAX_SECONDS,DOCUMENT_RETRY_BASE_SECONDS*(2**min(attempts-1,10)))
+        assignments="state='pending',updated_at=?,retry_count=?,next_retry_at=?,error=?"
+        values=[now(),attempts,time.time()+delay,reason]
+        for key,value in details.items():
+            if key in allowed:
+                if key in ("new_findings","new_checks"):
+                    assignments+=","+key+"=COALESCE("+key+",0)+CASE WHEN last_counted_token=? THEN 0 ELSE ? END"
+                    values.append(token)
+                else:assignments+=","+key+"=?"
+                values.append(value)
+        if token:
+            assignments+=",last_result_token=?,last_counted_token=?"
+            values.extend([token,token])
+        values.extend([CAMPAIGN,reg])
+        c.execute("UPDATE v332_audit_queue SET "+assignments+" WHERE campaign=? AND reg=?",values)
+        c.commit()
+        return delay
+    except BaseException:
+        if c.in_transaction:c.rollback()
+        raise
     finally:c.close()
 
 def existing(ns,reg):
@@ -298,7 +450,7 @@ def existing(ns,reg):
         if p is None:raise LookupError("Procurement disappeared from DB")
         rows=[dict(r) for r in c.execute("""SELECT id,name,url,doc_type,published_at,
             local_path,status,metadata_json,final_url FROM docs
-            WHERE reg_number=? AND COALESCE(local_path,'')<>'' AND status='checked' ORDER BY id LIMIT ?""",(reg,MAX_DOC_ROWS))]
+            WHERE reg_number=? AND COALESCE(local_path,'')<>'' AND status IN ('checked','downloaded_no_text') ORDER BY id LIMIT ?""",(reg,MAX_DOC_ROWS))]
         return dict(p),rows
     finally:c.close()
 
@@ -456,7 +608,7 @@ def is_official(doc):
             and HEX.fullmatch(str(m.get("sha256") or "")) is not None
             and bool(uid_from_url(m.get("source_url") or "")))
 
-def persist(ns,reg,findings,checks):
+def persist(ns,reg,findings,checks,progress_token=None):
     """Append only unseen findings/checks; never delete previous legal results."""
     c=connect(ns)
     try:
@@ -471,7 +623,7 @@ def persist(ns,reg,findings,checks):
             SELECT field_path AS code,item AS title,law,evidence,document,source_url
               FROM checks WHERE reg_number=? AND status='violation'
             """,(reg,reg)).fetchall()]
-        new_f=new_c=0
+        new_f=new_c=confirmed_checks=0
         for f in findings:
             if not isinstance(f,dict) or f.get("kind")!="violation":continue
             code=str(f.get("code") or "")[:100]
@@ -519,6 +671,7 @@ def persist(ns,reg,findings,checks):
                     ck.get("law_url"),ck.get("location")))
             new_c+=1
             if status=="violation":
+                confirmed_checks+=1
                 previous.append({**ck,"title":item,"code":path})
         if new_f or new_c:
             counts=c.execute("""SELECT
@@ -530,6 +683,16 @@ def persist(ns,reg,findings,checks):
             c.execute("""UPDATE purchases SET
                 violations=?,checks_ok=?,checks_attention=? WHERE reg_number=?""",
                 (*[int(v) for v in counts],reg))
+        if progress_token and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'").fetchone():
+            # Legal facts and their cumulative campaign credit commit together.
+            # A crash before mark/defer cannot erase their recorded growth.
+            ensure_source_column(c)
+            c.execute("""UPDATE v332_audit_queue SET
+                new_findings=COALESCE(new_findings,0)+?,
+                new_checks=COALESCE(new_checks,0)+?,last_counted_token=?
+                WHERE campaign=? AND reg=? AND last_counted_token<>?""",
+                (new_f+confirmed_checks,new_c-confirmed_checks,progress_token,
+                 CAMPAIGN,reg,progress_token))
         c.commit()
         return new_f,new_c
     except:
@@ -580,7 +743,7 @@ async def inspect_one(ns,reg):
     from v342_identity import subject,valid_inn
     metadata=await asyncio.to_thread(from_documents,reg,docs,_name(purchase.get("customer")))
     if metadata:
-        await asyncio.to_thread(apply_metadata,ns,reg,metadata)
+        await thread_call(apply_metadata,ns,reg,metadata)
         if not subject(purchase.get("title")) and metadata.get("title"):
             purchase["title"]=metadata["title"]
         if not _name(purchase.get("customer")) and metadata.get("customer"):
@@ -600,8 +763,10 @@ async def inspect_one(ns,reg):
     checker=ns.get("build_checks")
     if not callable(analyzer) or not callable(checker):
         raise RuntimeError("No legal analyzer installed")
-    findings=await asyncio.to_thread(analyzer,purchase,docs)
-    checks=await asyncio.to_thread(checker,purchase,detail,card,docs)
+    # Installed analyzer wrappers can persist official card facts too. A
+    # cancellation must settle those writes before another worker takes reg.
+    findings=await thread_call(analyzer,purchase,docs)
+    checks=await thread_call(checker,purchase,detail,card,docs)
     verified_sources={d.get("name") for d in readable if is_official(d)}
     verified_urls={str((d.get("meta") or {}).get("source_url"))
                    for d in readable if is_official(d)}
@@ -631,15 +796,104 @@ async def inspect_one(ns,reg):
             "location":f.get("location") or "",
             "note":"Документ не подтверждён квитанцией ЕИС; в число установленных нарушений не включено"
         })
-    new_f,new_c=await run_db(persist,ns,reg,accepted,checks,stage="general_persist")
+    token=uuid.uuid4().hex
+    # Keep the computed evidence and token while a short write lock clears.
+    # Retrying the whole inspection would needlessly rerun legal analyzers.
+    new_f,new_c=await retry_operation(ns,"persist",lambda:thread_call(
+        persist,ns,reg,accepted,checks,token))
     return ("completed",{
         "documents_found":len(docs)+unreadable,
         "documents_read":counted,"documents_unreadable":unreadable,
         "verified_original_documents":verified_count,
         "original_expected":expected,"original_received":received,
         "new_findings":new_f,"new_checks":new_c,
+        "result_token":token,
         "error":None
     })
+
+def retry_delay(attempt):
+    return min(RETRY_MAX_SECONDS,RETRY_BASE_SECONDS*(2**min(attempt-1,10)))
+
+
+async def settle_task(task):
+    """Finish a shielded executor operation before releasing its reservation."""
+    while True:
+        try:return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():raise
+            # Repeated shutdown cancellation must not abandon a SQLite thread
+            # that may still commit an atomic reservation or result.
+            continue
+
+
+async def thread_call(function,*args):
+    task=asyncio.create_task(asyncio.to_thread(function,*args))
+    try:return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:await settle_task(task)
+        except Exception:pass
+        raise
+
+
+async def retry_operation(ns,phase,operation,worker=None):
+    attempt=0
+    while True:
+        if worker is not None:worker["phase"]=phase
+        try:
+            result=await operation()
+            if attempt:
+                print(f"V332 SQLITE_RECOVERED phase={phase} attempts={attempt}",flush=True)
+            return result
+        except Exception as exc:
+            if not transient_sqlite(exc):raise
+            attempt+=1
+            delay=retry_delay(attempt)
+            message=f"{type(exc).__name__}: {str(exc)[:180]}"
+            runtime=ns.get("_v332_runtime")
+            if runtime is not None:
+                runtime["last_error"]=message
+                runtime["last_error_at"]=now()
+            if worker is not None:
+                worker.update(phase="retrying_"+phase,last_error=message,
+                              retries=worker.get("retries",0)+1)
+            print(f"V332 SQLITE_RETRY phase={phase} "
+                  f"worker={(worker or {}).get('id','service')} "
+                  f"reg={(worker or {}).get('reg')} attempt={attempt} "
+                  f"delay_seconds={delay} error={message}",flush=True)
+            await asyncio.sleep(delay)
+
+
+def return_running(ns,reg):
+    """Return an unfinished reservation; never overwrite a committed result."""
+    c=connect(ns)
+    try:
+        c.execute("""UPDATE v332_audit_queue SET state='pending',updated_at=?,
+            error='Возобновление прерванной проверки'
+            WHERE campaign=? AND reg=? AND state='running'""",(now(),CAMPAIGN,reg))
+        c.commit()
+    finally:c.close()
+
+
+async def release_reservation(ns,reg):
+    cleanup=asyncio.create_task(retry_operation(ns,"release",lambda:thread_call(
+        return_running,ns,reg)))
+    try:await settle_task(cleanup)
+    except Exception as exc:
+        # Startup also resets durable running rows if storage itself is broken.
+        print(f"V332 RELEASE_FAILED reg={reg} type={type(exc).__name__} "
+              f"reason={str(exc)[:180]}",flush=True)
+
+
+async def claim_safely(ns):
+    """Cancellation waits for the real claim thread and returns any late claim."""
+    task=asyncio.create_task(asyncio.to_thread(claim_next,ns))
+    try:return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:reg=await settle_task(task)
+        except Exception:reg=None
+        if reg is not None:await release_reservation(ns,reg)
+        raise
+
 
 def install(ns):
     app=ns["app"]
@@ -666,87 +920,117 @@ def install(ns):
 
     @app.on_event("startup")
     async def start_campaign():
+        previous=ns.get("_v332_campaign_worker")
+        if previous is not None and not previous.done():return
+        runtime={"status":"starting","started_at":now(),"last_error":None,
+                 "last_error_at":None,"last_completed_at":None,
+                 "workers":{str(i):{"id":i,"alive":False,"phase":"starting",
+                                    "reg":None,"retries":0}
+                            for i in range(1,GENERAL_WORKERS+1)}}
+        ns["_v332_runtime"]=runtime
+        ns["_v332_tasks"]={}
         async def work():
             await asyncio.sleep(14)
-            try:
-                base=await asyncio.to_thread(initialize,ns)
-                print("V332 CAMPAIGN_STARTED "+json.dumps(base,ensure_ascii=False),flush=True)
-            except Exception as exc:
-                print("V332 INIT_FAILED type="+type(exc).__name__+
-                      " reason="+str(exc)[:200],flush=True)
-                return
-            async def mark_result(reg,state,details):
-                # Retain the already-computed result while the database is busy.
-                # Each bounded retry closes its connection before yielding;
-                # other workers keep running and cancellation still propagates.
-                while True:
-                    try:
-                        return await run_db(mark,ns,reg,state,details,stage="general_mark")
-                    except Exception as exc:
-                        if not is_busy(exc):raise
-                        await asyncio.sleep(2)
-
+            attempts=0
+            while True:
+                try:
+                    base=await thread_call(initialize,ns)
+                    print("V332 CAMPAIGN_STARTED "+json.dumps(base,ensure_ascii=False),flush=True)
+                    runtime["status"]="running"
+                    break
+                except Exception as exc:
+                    attempts+=1
+                    runtime.update(status="retrying_initialization",
+                                   last_error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                                   last_error_at=now())
+                    print("V332 INIT_FAILED type="+type(exc).__name__+
+                          " reason="+str(exc)[:200]+" retry_seconds="+str(retry_delay(attempts)),flush=True)
+                    await asyncio.sleep(retry_delay(attempts))
             async def worker(worker_id):
                 index=0
                 signals=audit_signals(ns)
-                while True:
-                    version=signals.version("general")
-                    try:
-                        reg=await run_db(claim_next,ns,stage="general_claim")
-                    except Exception as exc:
-                        if not is_busy(exc):raise
-                        # A busy claim has changed no queue row. Keep this
-                        # worker and its siblings alive rather than cancelling
-                        # the whole campaign through gather().
-                        await asyncio.sleep(2)
-                        continue
-                    if reg is None:
-                        await signals.wait("general",version,30)
-                        continue
-                    try:
-                        started=time.monotonic()
-                        # EIS originals are already stored; no HTTP/EIS request.
-                        # Keep the four existing audit workers; foreground
-                        # file extraction always has reserved capacity.
-                        with background_audit():
-                            state,detail=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
-                        await mark_result(reg,state,detail)
-                        elapsed_ms=round((time.monotonic()-started)*1000,1)
-                        index+=1
-                        if state=="completed":
-                            print(f"V332 AUDITED reg={reg} worker={worker_id} docs={detail['documents_read']}/"
-                                  f"{detail['documents_found']} verified={detail['verified_original_documents']} "
-                                  f"originals={detail['original_received']}/{detail['original_expected']} "
-                                  f"new_findings={detail['new_findings']} new_checks={detail['new_checks']} "
-                                  f"elapsed_ms={elapsed_ms}",
-                                  flush=True)
-                        elif index<=4 or index%20==0:
-                            print(f"V332 NO_DOCUMENT_TEXT reg={reg}",flush=True)
-                    except asyncio.CancelledError:
-                        await asyncio.to_thread(mark,ns,reg,"pending",
-                                                {"error":"Перезапуск Railway"})
-                        raise
-                    except Exception as exc:
-                        index+=1
-                        await mark_result(reg,"failed",{"error":str(exc)[:300]})
-                        print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
-                              f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
-                    if index%20==0:
+                slot=runtime["workers"][str(worker_id)]
+                reg=None
+                try:
+                    while True:
+                        version=signals.version("general")
+                        reg=await retry_operation(ns,"claim",lambda:claim_safely(ns),slot)
+                        slot["reg"]=reg
+                        if reg is None:
+                            slot["phase"]="waiting_for_documents"
+                            await signals.wait("general",version,QUEUE_POLL_SECONDS)
+                            continue
+                        snapshot=None
                         try:
-                            state=await run_db(progress,ns,stage="general_progress")
-                            print("V332 CAMPAIGN_PROGRESS "+json.dumps(state,ensure_ascii=False),flush=True)
+                            started=time.monotonic()
+                            async def review():
+                                nonlocal snapshot
+                                # Source/stat reads precede analysis and run
+                                # outside the short claim/result transactions.
+                                snapshot=await thread_call(evidence_version,ns,reg)
+                                with background_audit():
+                                    return await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
+                            state,detail=await retry_operation(ns,"inspect",review,slot)
+                            result={**detail,"last_source_version":snapshot,
+                                    "result_token":detail.get("result_token") or uuid.uuid4().hex}
+                            incomplete=(state=="no_readable_documents" or
+                                        int(detail.get("documents_unreadable") or 0)>0)
+                            if incomplete:
+                                reason=("Не все доступные оригиналы удалось прочитать; назначен повтор" if
+                                        state=="completed" else
+                                        "Текст доступных оригиналов пока не прочитан; назначен повтор")
+                                delay=await retry_operation(ns,"save_partial",lambda:thread_call(
+                                    defer_retry,ns,reg,result,reason),slot)
+                                print(f"V332 DOCUMENT_RETRY reg={reg} reason=partial "
+                                      f"delay_seconds={delay}",flush=True)
+                            else:
+                                await retry_operation(ns,"save",lambda:thread_call(
+                                    mark,ns,reg,state,result),slot)
+                            elapsed_ms=round((time.monotonic()-started)*1000,1)
+                            index+=1
+                            slot["last_success_at"]=now()
+                            if state=="completed":
+                                if not incomplete:runtime["last_completed_at"]=slot["last_success_at"]
+                                print(f"V332 AUDITED reg={reg} worker={worker_id} docs={detail['documents_read']}/"
+                                      f"{detail['documents_found']} verified={detail['verified_original_documents']} "
+                                      f"originals={detail['original_received']}/{detail['original_expected']} "
+                                      f"new_findings={detail['new_findings']} new_checks={detail['new_checks']} "
+                                      f"elapsed_ms={elapsed_ms} partial={incomplete}",flush=True)
+                            elif index<=4 or index%20==0:
+                                print(f"V332 NO_DOCUMENT_TEXT reg={reg}",flush=True)
+                        except asyncio.CancelledError:raise
+                        except asyncio.TimeoutError:
+                            detail={"result_token":uuid.uuid4().hex}
+                            if snapshot is not None:detail["last_source_version"]=snapshot
+                            reason="Проверка превысила 600 секунд; назначен повтор без удаления результатов"
+                            delay=await retry_operation(ns,"save_timeout",lambda:thread_call(
+                                defer_retry,ns,reg,detail,reason),slot)
+                            print(f"V332 DOCUMENT_RETRY reg={reg} reason=timeout "
+                                  f"delay_seconds={delay}",flush=True)
                         except Exception as exc:
-                            if not is_busy(exc):raise
-                            print("V332 PROGRESS_DELAY database_busy=True",flush=True)
-                    await asyncio.sleep(.05)
+                            index+=1
+                            error=str(exc)[:300]
+                            slot["last_error"]=f"{type(exc).__name__}: {error}"
+                            detail={"error":error}
+                            if snapshot is not None:detail["last_source_version"]=snapshot
+                            await retry_operation(ns,"save_failure",lambda:thread_call(
+                                mark,ns,reg,"failed",detail),slot)
+                            print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
+                                  f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
+                        reg=None
+                        slot["reg"]=None
+                        await asyncio.sleep(.05)
+                finally:
+                    if reg is not None:await release_reservation(ns,reg)
+                    slot.update(reg=None,phase="stopped")
             async def refresh_queue():
                 signals=audit_signals(ns)
                 while True:
                     version=signals.version("evidence")
                     started=time.monotonic()
                     try:
-                        new=await asyncio.to_thread(add_new_verified,ns)
-                        refreshed=await asyncio.to_thread(refresh_changed,ns)
+                        new=await retry_operation(ns,"queue_add",lambda:thread_call(add_new_verified,ns))
+                        refreshed=await retry_operation(ns,"queue_refresh",lambda:thread_call(refresh_changed,ns))
                         if refreshed or new:
                             signals.notify("general")
                             print("V381 QUEUE_WAKEUP new="+str(new)+
@@ -757,15 +1041,68 @@ def install(ns):
                         print("V381 QUEUE_REFRESH_FAILED type="+type(exc).__name__,flush=True)
                     # Independent of slow audits: newly ready evidence can
                     # enter a freed worker immediately, with polling fallback.
-                    await signals.wait("evidence",version,30)
-            tasks=[asyncio.create_task(worker(i+1)) for i in range(GENERAL_WORKERS)]
-            tasks.append(asyncio.create_task(refresh_queue()))
+                    await signals.wait("evidence",version,QUEUE_POLL_SECONDS)
+
+            async def heartbeat():
+                while True:
+                    await asyncio.sleep(HEARTBEAT_SECONDS)
+                    try:
+                        state=await thread_call(progress,ns)
+                    except Exception as exc:
+                        runtime.update(last_error=f"{type(exc).__name__}: {str(exc)[:180]}",
+                                       last_error_at=now())
+                        state={"campaign":CAMPAIGN,"progress_error":runtime["last_error"],
+                               "runtime":runtime_snapshot(ns)}
+                    print("V332 HEARTBEAT "+json.dumps(state,ensure_ascii=False),flush=True)
+
+            async def supervise(name,factory,slot=None):
+                attempts=0
+                while True:
+                    task=asyncio.create_task(factory(),name="general-audit-"+name)
+                    ns["_v332_tasks"][name]=task
+                    if slot is not None:slot["alive"]=True
+                    try:
+                        await task
+                        raise RuntimeError("Audit service ended unexpectedly")
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():
+                            task.cancel()
+                            await asyncio.gather(task,return_exceptions=True)
+                            raise
+                        # An individually cancelled service is restarted;
+                        # only cancellation of its supervisor means shutdown.
+                        attempts+=1
+                        print(f"V332 SERVICE_RESTART service={name} error=cancelled "
+                              f"retry_seconds={retry_delay(attempts)}",flush=True)
+                    except Exception as exc:
+                        attempts+=1
+                        runtime.update(last_error=f"{type(exc).__name__}: {str(exc)[:180]}",
+                                       last_error_at=now())
+                        print(f"V332 SERVICE_RESTART service={name} "
+                              f"error={runtime['last_error']} retry_seconds={retry_delay(attempts)}",flush=True)
+                    finally:
+                        if slot is not None:slot["alive"]=False
+                    await asyncio.sleep(retry_delay(attempts))
+
+            tasks=[asyncio.create_task(supervise("worker-"+str(i),lambda i=i:worker(i),
+                         runtime["workers"][str(i)])) for i in range(1,GENERAL_WORKERS+1)]
+            tasks.append(asyncio.create_task(supervise("queue",refresh_queue)))
+            tasks.append(asyncio.create_task(supervise("heartbeat",heartbeat)))
             try:
                 await asyncio.gather(*tasks)
             finally:
                 for task in tasks:task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
+                runtime["status"]="stopped"
         ns["_v332_campaign_worker"]=asyncio.create_task(work(),name="general-audit-campaign")
+        def campaign_finished(task):
+            runtime["status"]="stopped"
+            if not task.cancelled() and task.exception() is not None:
+                error=task.exception()
+                runtime.update(status="failed",last_error=f"{type(error).__name__}: {str(error)[:180]}",
+                               last_error_at=now())
+                print("V332 CAMPAIGN_STOPPED error="+runtime["last_error"],flush=True)
+        ns["_v332_campaign_worker"].add_done_callback(campaign_finished)
     print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
           "evidence_only=True",flush=True)

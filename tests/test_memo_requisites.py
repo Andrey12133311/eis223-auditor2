@@ -12,10 +12,12 @@ import unittest
 from fastapi import Response, HTTPException
 from pydantic import ValidationError
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 from scripts import v367_private_features as memo
 from scripts.account_pages_v1 import MEMOS
 from scripts.account_schema_v1 import SCHEMA
 from v304_official_memo_odt import _render_odt, OO, TX
+from memo_fixture import memo_template
 
 REG='32616412317'
 OTHER='32616412318'
@@ -73,16 +75,20 @@ def test_saved_values_used_for_export():
 
 
 def fixture():
-    root=ET.Element('{'+OO+'}document-content')
-    ET.SubElement(root,'{'+OO+'}automatic-styles')
-    body=ET.SubElement(ET.SubElement(root,'{'+OO+'}body'),'{'+OO+'}text')
-    for i in range(60):
-        p=ET.SubElement(body,'{'+TX+'}p');p.text={13:'Template recipient',16:'СЛУЖЕБНАЯ ЗАПИСКА',32:'Signature role',33:'Signature name',55:'Default executor',56:'Default phone'}.get(i,'Sample text')
+    # Exercise the renderer's actual accepted source layout while keeping the
+    # distinctive requisite values used by these persistence/export checks.
+    with zipfile.ZipFile(io.BytesIO(memo_template())) as z:
+        items={name:z.read(name) for name in z.namelist()}
+    root=ET.fromstring(items['content.xml'])
+    body=root.find('.//{'+OO+'}text')
+    paragraphs=list(body.iter('{'+TX+'}p'))
+    for index,value in {13:'Template recipient',33:'Signature name',
+                        55:'Default executor',56:'Default phone'}.items():
+        paragraphs[index].text=value
+    items['content.xml']=ET.tostring(root)
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w') as z:
-        z.writestr('mimetype','application/vnd.oasis.opendocument.text')
-        z.writestr('content.xml',ET.tostring(root))
-        z.writestr('styles.xml',ET.tostring(ET.Element('{'+OO+'}document-styles')))
+        for name,binary in items.items():z.writestr(name,binary)
     return out.getvalue()
 
 
@@ -94,7 +100,7 @@ def test_odt_uses_edits_preserves_signature_defaults_and_clear():
         binary=_render_odt(source,{'reg_number':REG,'title':'Предмет закупки'},findings,'ООО «Пример»',fields)
         with zipfile.ZipFile(io.BytesIO(binary)) as z:
             text=' '.join(ET.fromstring(z.read('content.xml')).itertext())
-        assert 'Signature name' in text and 'Signature role' in text
+        assert 'Signature name' in text and 'Заместитель начальника Управления' in text
         assert ('New recipient' in text)==bool(fields.get('recipient'))
         assert ('New executor' in text)==bool(fields.get('executor'))
         if not fields:assert 'Template recipient' in text and 'Default executor' in text and 'Default phone' in text
