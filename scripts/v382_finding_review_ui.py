@@ -24,7 +24,7 @@ const node=(tag,value)=>{const el=document.createElement(tag);el.textContent=val
 function state(reg,batch=''){
  const id=reg+'|'+batch;
  if(!states.has(id))states.set(id,{items:null,manager:false,error:'',request:null,queued:false,
-  version:0,busy:new Set(),messages:new Map()});
+  version:0,busy:new Set(),rechecking:new Set(),messages:new Map()});
  return states.get(id);
 }
 async function api(url,method='GET'){
@@ -53,10 +53,18 @@ function draw(box,reg,s,batch=''){
    box.append(node('p',(status==='submitted'&&item.review.decision==='returned'?
     'Предыдущее замечание руководителя: ':'Комментарий руководителя: ')+item.review.comment));
   }
+  const invalidated=item.effective_status&&item.effective_status!=='confirmed';
+  if(item.reassessment)box.append(node('p',item.reassessment.reason||'Применимость правил МСП перепроверена.'));
   const submit=node('button',busy?'Отправляем…':'Направить на согласование руководителю');
-  submit.type='button';submit.disabled=busy||!s.manager||['submitted','approved','rejected','returned'].includes(status);
+  submit.type='button';submit.disabled=busy||invalidated||!s.manager||['submitted','approved','rejected','returned'].includes(status);
   submit.onclick=()=>send(reg,key,batch);
   box.append(submit);
+  if(batch&&item.code==='223-SME-BID-SECURITY-OVER-TWO-PERCENT'){
+   const recheck=node('button',s.rechecking.has(key)?'Перепроверяем МСП…':'Перепроверить признак МСП');
+   recheck.type='button';recheck.className='secondary';recheck.disabled=busy;
+   recheck.onclick=()=>recheckMsp(reg,key,batch);box.append(recheck);
+   box.append(node('p','Проверяются сохранённые официальные источники только для этого вывода о пределе 2%. Исходное доказательство и согласования сохраняются.'));
+  }
   if(!s.manager)box.append(node('p','Руководитель не назначен. Обратитесь к администратору, чтобы отправить нарушение на согласование.'));
   if(s.messages.has(key))box.append(node('p',s.messages.get(key)));
  }
@@ -94,7 +102,7 @@ function load(reg,fresh=false,batch=''){
 async function send(reg,key,batch=''){
  const s=state(reg,batch),item=s.items?.find(x=>x.finding_key===key);
  const current=item?.submission?.status||item?.review?.decision||'';
- if(!item||!s.manager||s.busy.has(key)||['submitted','approved','rejected','returned'].includes(current))return;
+ if(!item||!s.manager||s.busy.has(key)||(item.effective_status&&item.effective_status!=='confirmed')||['submitted','approved','rejected','returned'].includes(current))return;
  s.busy.add(key);s.version++;s.messages.delete(key);paint(reg,batch);
  try{
   const result=await api('/me/finding-submissions/'+encodeURIComponent(reg)+'/'+encodeURIComponent(key)+'/submit'+(batch?'?batch='+encodeURIComponent(batch):''),'POST');
@@ -104,6 +112,20 @@ async function send(reg,key,batch=''){
  finally{
   // A GET begun before this POST cannot replace the mutation result.
   s.version++;await load(reg,true,batch);s.busy.delete(key);paint(reg,batch);
+ }
+}
+async function recheckMsp(reg,key,batch){
+ const s=state(reg,batch),item=s.items?.find(x=>x.finding_key===key);
+ if(!batch||!item||item.code!=='223-SME-BID-SECURITY-OVER-TWO-PERCENT'||s.busy.has(key))return;
+ s.busy.add(key);s.rechecking.add(key);s.version++;s.messages.delete(key);paint(reg,batch);
+ let refreshed=false;
+ try{
+  await api('/me/thematic/'+encodeURIComponent(batch)+'/'+encodeURIComponent(reg)+'/findings/'+encodeURIComponent(key)+'/msp-recheck','POST');
+  refreshed=true;location.reload();
+ }catch(e){s.messages.set(key,'Перепроверку не удалось завершить: '+e.message)}
+ finally{
+  s.version++;s.busy.delete(key);s.rechecking.delete(key);
+  if(!refreshed){await load(reg,true,batch);paint(reg,batch)}
  }
 }
 window.EISFindingReview={control,load};

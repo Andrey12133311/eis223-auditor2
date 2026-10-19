@@ -1,5 +1,6 @@
 """Thematic downloads use the official ODT and the current owner's campaign."""
 import io
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -30,6 +31,7 @@ THEMATIC_TITLE = "Тематическое нарушение срока раз�
 GENERAL_TITLE = "Только общее нарушение срока разъяснений"
 OTHER_CATEGORY = "Нарушение вне выбранного направления"
 BOB_TITLE = "Нарушение обеспечения из другой тематической проверки"
+MSP_TITLE = "Размер обеспечения заявки превышает 2% НМЦД в закупке только для МСП"
 
 
 class Selection:
@@ -228,6 +230,81 @@ class ThematicMemoOdtTests(unittest.TestCase):
         self.assertIn(THEMATIC_TITLE, text)
         for row in extra:
             self.assertIn(row[3], text)
+
+    def reassess_msp(self, state, *, only_msp=False):
+        from scripts import v385_msp_reassessment as reassessment
+        from v384_thematic_findings import thematic_items
+        with sqlite3.connect(self.database) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY,reg_number TEXT)")
+            db.execute("UPDATE thematic_batches SET categories=? WHERE id=?",
+                       ('["dates","security"]', ALICE_BATCH))
+            db.execute("DELETE FROM thematic_findings WHERE batch_id=? AND category='security'",
+                       (ALICE_BATCH,))
+            if only_msp:
+                db.execute("DELETE FROM thematic_findings WHERE batch_id=? AND category='dates'",
+                           (ALICE_BATCH,))
+            db.execute("INSERT INTO thematic_findings VALUES(?,?,?,?,?,?,?,?,?,?)", (
+                ALICE_BATCH, REG, "security", MSP_TITLE, "ПП РФ № 1352, п. 23",
+                "В документации предусмотрено обеспечение заявки в размере 5% НМЦД.",
+                reassessment.ELIGIBLE_CODE, "Извещение.pdf",
+                "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid=" + "A" * 32, ""))
+        ns = {"conn": lambda: sqlite3.connect(self.database)}
+        item = next(row for row in thematic_items(ns, ALICE_BATCH, REG)
+                    if row["code"] == reassessment.ELIGIBLE_CODE)
+        purchase = {"reg": REG, "_msp_source_token": reassessment.read_source_token(ns, REG)}
+        if state != "unknown":
+            purchase["fact_evidence"] = {"sme_only": {"value": state == "yes",
+                "source": "official_eis_card", "evidence": "Только МСП: " + state}}
+        docs = []
+        if state == "conflict":
+            text = "Участниками закупки могут быть только субъекты малого и среднего предпринимательства: Да"
+            docs = [{"name": "Извещение.pdf", "status": "checked", "text": text,
+                     "meta": {"source": "official_eis_original",
+                              "source_url": item["source_url"],
+                              "sha256": hashlib.sha256(text.encode()).hexdigest()}}]
+        result = reassessment.record_reassessment(ns, "alice", ALICE_BATCH, REG,
+                                                  item["finding_key"], purchase, docs)
+        self.assertEqual(result["reassessment"]["scope"]["state"], state)
+        return result
+
+    def test_revised_only_cannot_generate_false_memo_or_fall_back_to_general(self):
+        self.add_general_finding()
+        for state in ("no", "unknown", "conflict"):
+            with self.subTest(state=state):
+                self.reassess_msp(state, only_msp=True)
+                with self.read_only_connection() as db:
+                    before = list(db.iterdump())
+                response = self.client.get(self.path())
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertNotIn("application/vnd.oasis.opendocument.text", response.headers["content-type"])
+                with self.read_only_connection() as db:
+                    self.assertEqual(list(db.iterdump()), before)
+
+    def test_revised_findings_are_excluded_but_remaining_confirmed_enter_memo(self):
+        for state in ("no", "unknown", "conflict"):
+            with self.subTest(state=state):
+                self.reassess_msp(state)
+                with self.read_only_connection() as db:
+                    before = list(db.iterdump())
+                text = self.text_from_odt(self.client.get(self.path()))
+                self.assertIn(THEMATIC_TITLE, text)
+                self.assertNotIn(MSP_TITLE, text)
+                self.assertNotIn("5% НМЦД", text)
+                with self.read_only_connection() as db:
+                    self.assertEqual(list(db.iterdump()), before)
+
+    def test_confirmed_msp_reassessment_still_enters_official_memo(self):
+        self.reassess_msp("yes", only_msp=True)
+        text = self.text_from_odt(self.client.get(self.path()))
+        self.assertIn(MSP_TITLE, text)
+        self.assertIn("Извещение.pdf", text)
+
+    def test_stale_confirmed_reassessment_cannot_generate_false_memo(self):
+        self.reassess_msp("yes", only_msp=True)
+        with sqlite3.connect(self.database) as db:
+            db.execute("UPDATE purchases SET method='Изменённый способ' WHERE reg_number=?", (REG,))
+        response = self.client.get(self.path())
+        self.assertEqual(response.status_code, 409, response.text)
 
 
 class OfficialTemplateSafetyTests(unittest.TestCase):

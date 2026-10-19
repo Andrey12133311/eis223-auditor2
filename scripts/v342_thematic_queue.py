@@ -82,6 +82,8 @@ def init(ns):
    if col not in evidence_cols:
     c.execute("ALTER TABLE thematic_findings ADD COLUMN "+col+" TEXT NOT NULL DEFAULT ''")
   c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_evidence_by_purchase ON thematic_findings(batch_id,reg)")
+  from scripts.v385_msp_reassessment import initialize as initialize_reassessments
+  initialize_reassessments(c)
   c.commit()
  finally:c.close()
 def now():return datetime.now(timezone.utc).isoformat()
@@ -263,11 +265,11 @@ def overview(ns,batch):
    "evaluation":r"оценк|критери|балл"}
   from v352_dashboard_truth import collapse_legal_events
   from v365_consultant_refs import enrich
-  raw=[dict(r) for r in c.execute("SELECT reg,title,category,law,evidence,code,document,source_url,law_url FROM thematic_findings WHERE batch_id=? ORDER BY rowid DESC LIMIT 750",(batch,)).fetchall()]
-  unique=[]
-  for reg in dict.fromkeys(f["reg"] for f in raw):
-   unique.extend(collapse_legal_events([f for f in raw if f["reg"]==reg]))
-  matches=[enrich({"reg":r["reg"],"title":r["title"],
+  from scripts.v384_thematic_findings import read_thematic_items
+  canonical=read_thematic_items(c,batch)
+  unique=[r for r in canonical if r["effective_status"]=="confirmed"]
+  revised=[r for r in canonical if r["effective_status"]!="confirmed"]
+  matches=[enrich({"reg":r["reg_number"],"title":r["title"],
                    "categories":[r["category"]],"law":r["law"],
                    "law_url":r.get("law_url"),"code":r.get("code"),
                    "evidence":r["evidence"] or ""}) for r in unique[:500]]
@@ -313,7 +315,7 @@ def overview(ns,batch):
    else:
     itm["detail"]="Запрос оригиналов ожидает подключения загрузчика ЕИС"
   worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
-  return {"worker":worker,"bridge":bridge,"storage":storage,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),**period_fields(b),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
+  return {"worker":worker,"bridge":bridge,"storage":storage,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),**period_fields(b),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"reassessed_findings":revised,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
  finally:c.close()
 _HISTORY_COUNT_CACHE={}
 
@@ -351,22 +353,22 @@ def _thematic_history_records(ns, permitted_ids=None):
    except (ValueError,TypeError):item["categories"]=[]
    batch=item["id"]
    rev=c.execute("SELECT COALESCE(MAX(rowid),0) FROM thematic_findings WHERE batch_id=?",(batch,)).fetchone()[0]
-   stamp=(int(item["stored_rows"]),int(rev))
+   from scripts.v385_msp_reassessment import revision as reassessment_revision
+   stamp=(int(item["stored_rows"]),int(rev),reassessment_revision(c,batch))
    cached=_HISTORY_COUNT_CACHE.get(batch)
    if cached and cached[0]==stamp:
-    unique=cached[1]
+    unique,titles,revised_count=cached[1:]
    else:
-    grouped={}
-    for f in c.execute("""SELECT reg,category,title,law,evidence,
-                           document,source_url,code,law_url
-                           FROM thematic_findings WHERE batch_id=?""",(batch,)):
-     grouped.setdefault(f["reg"],[]).append(dict(f))
-    unique=sum(len(collapse_legal_events(group)) for group in grouped.values())
-    _HISTORY_COUNT_CACHE[batch]=(stamp,unique)
+    from scripts.v384_thematic_findings import read_thematic_items
+    classified=read_thematic_items(c,batch)
+    unique=sum(f["effective_status"]=="confirmed" for f in classified)
+    titles=list(dict.fromkeys(f["title"] for f in classified
+       if f["effective_status"]=="confirmed" and f["title"]))[:35]
+    revised_count=sum(f["effective_status"]!="confirmed" for f in classified)
+    _HISTORY_COUNT_CACHE[batch]=(stamp,unique,titles,revised_count)
    item["violations"]=unique
-   item["violation_types"]=[r[0] for r in c.execute(
-     "SELECT DISTINCT title FROM thematic_findings WHERE batch_id=? "
-     "AND title IS NOT NULL AND title<>'' LIMIT 35",(batch,))]
+   item["violation_types"]=titles
+   item["reassessed_findings"]=revised_count
    item["customers"]=[]
    if customer_col:
     item["customers"]=[organization_display_name(r[0]) for r in c.execute(
@@ -523,6 +525,17 @@ async function refresh(){
  if(pending!==request||location.hash.slice(1)!==batch)return;
  out.replaceChildren();shownBatch=batch;status.textContent='';
  const names={queued:'В очереди',submitted:'Передано на проверку',completed:'Проверено',waiting_originals:'Ожидаются оригиналы ЕИС',waiting_engine:'Ожидается обработчик',retry:'Повторная попытка',outside_period:'Вне выбранного периода'};const heading=document.createElement('p');heading.textContent='Статус: '+(j.status==='active'?'Работает':'Остановлена');out.append(heading);const period=document.createElement('p');period.className='thematic-saved-period';period.textContent='Дата размещения в ЕИС: '+thematicPeriod(j);out.append(period);const bridge=document.createElement('p');bridge.textContent='Проверка сохранённых оригиналов: '+(j.worker?.active?'серверный обработчик работает':'серверный обработчик недоступен')+'. Загрузка новых документов ЕИС: '+(j.bridge?.active?'подключена':'не подключена')+'; ожидают загрузки: '+(j.bridge?.queued??'неизвестно');out.append(bridge);if(j.storage?.blocked){const warning=document.createElement('p');warning.style.cssText='font-weight:600;color:#9a3412';warning.textContent='Недостаточно места в хранилище Railway (свободно '+j.storage.free_mb+' МБ). Новые запросы и результаты не смогут сохраняться, пока место не освободится. Сохранённые оригиналы не удаляются.';out.append(warning)}for(const [key,num] of Object.entries(j.counts||{})){const line=document.createElement('p');line.textContent=(names[key]||key)+': '+num;out.append(line)}const stop=document.createElement('button');stop.textContent='Остановить проверку';stop.disabled=j.status!=='active';stop.onclick=async()=>{if(!confirm('Остановить тематическую проверку?'))return;await fetch('/api/thematic/'+encodeURIComponent(j.id)+'/stop',{method:'POST'});refresh()};out.append(stop);const qh=document.createElement('h3');qh.textContent='Закупки в тематической проверке';out.append(qh);const table=document.createElement('table');table.style.cssText='width:100%;border-collapse:collapse';for(const p of j.items||[]){const tr=document.createElement('tr');for(const value of [p.reg,names[p.status]||p.status,p.detail||'']){const td=document.createElement('td');td.style.cssText='border-bottom:1px solid #ddd;padding:7px';td.textContent=value;tr.append(td)}const a=document.createElement('a');a.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(p.reg);a.textContent='Карточка проверки';const td=document.createElement('td');td.append(a);tr.append(td);table.append(tr)}out.append(table);const h=document.createElement('h3');h.textContent='Подтверждённые нарушения по выбранным категориям';out.append(h);const findings=j.confirmed_matching_findings||[];if(!findings.length){const p=document.createElement('p');p.textContent='Подтверждённых нарушений пока нет';out.append(p)}for(const f of findings){const item=document.createElement('article');item.style.cssText='border-left:4px solid #b91c1c;background:#fff5f5;margin:12px 0;padding:12px';const strong=document.createElement('strong');const cardUrl='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(f.reg);const registration=document.createElement('a');registration.className='thematic-registration';registration.href=cardUrl;registration.textContent='Номер закупки ЕИС: '+f.reg;item.append(registration);strong.textContent=f.title;item.append(strong);const detail=document.createElement('p');detail.textContent=f.evidence||'';item.append(detail);if(f.law){const law=document.createElement('p');law.textContent='Правовое основание: '+f.law;item.append(law)}if(f.consultant_url){const norm=document.createElement('a');norm.href=f.consultant_url;norm.target='_blank';norm.rel='noopener noreferrer';norm.textContent='КонсультантПлюс · '+(f.consultant_citation||'Текст нормы');item.append(norm)}const card=document.createElement('a');card.href=cardUrl;card.textContent='Карточка проверки и служебная записка';item.append(card);out.append(item)}
+ const revised=j.reassessed_findings||[];
+ if(revised.length){
+  const title=document.createElement('h3');title.textContent='Пересмотренные выводы / требуют проверки: '+revised.length;out.append(title);
+  for(const f of revised){
+   const article=document.createElement('article'),name=document.createElement('strong'),reason=document.createElement('p'),link=document.createElement('a');
+   name.textContent=f.title;reason.textContent=f.reassessment?.reason||'Вывод требует повторной проверки.';
+   link.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(f.reg_number);
+   link.textContent='Первоначальное доказательство и результат перепроверки · '+f.reg_number;
+   article.append(name,reason,link);out.append(article);
+  }
+ }
  }catch(error){
   if(pending!==request||location.hash.slice(1)!==batch)return;
   if(shownBatch!==batch)out.textContent='Не удалось открыть сохранённую проверку.';
@@ -699,7 +712,16 @@ def install(ns):
   from v352_dashboard_truth import collapse_legal_events
   from v343_fast_cards import legal_links
   unique_print=findings
-  rows="".join("<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'><h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORIES.get(f["category"],f["category"])))+"</p><p><b>Правовое основание:</b> "+escape(str(f["law"] or "Не указано"))+"</p>"+legal_links(f,f.get("law"),f.get("law_url"))+"<p style='white-space:pre-wrap'><b>Установленные обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>" for f in unique_print)
+  confirmed_count=sum(f.get("effective_status","confirmed")=="confirmed" for f in unique_print)
+  rows="<p><b>Подтверждённых нарушений: "+str(confirmed_count)+"</b></p>"
+  from scripts.v385_msp_reassessment import scope_display
+  current_msp=scope_display(unique_print)
+  if current_msp:rows+="<p><b>Закупка только для МСП:</b> "+escape(current_msp)+"</p>"
+  for f in unique_print:
+   revised=f.get("effective_status","confirmed")!="confirmed"
+   reassessment=f.get("reassessment") or {}
+   banner=("<p><b>Пересмотренный вывод / требуется проверка.</b> "+escape(str(reassessment.get("reason") or ""))+"</p>") if revised else ""
+   rows+="<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'>"+banner+"<h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORIES.get(f["category"],f["category"])))+"</p><p><b>Правовое основание первоначального вывода:</b> "+escape(str(f["law"] or "Не указано"))+"</p>"+legal_links(f,f.get("law"),f.get("law_url"))+"<p style='white-space:pre-wrap'><b>Сохранённые обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>"
   owner=request.scope.get("eis223_account_id")
   requisites={}
   if owner:

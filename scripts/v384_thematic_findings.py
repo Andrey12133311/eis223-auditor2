@@ -44,28 +44,49 @@ def thematic_items(ns, batch, reg):
     """Caller checks the batch owner; never substitute general-audit findings."""
     if not BATCH.fullmatch(batch) or not REG.fullmatch(reg):
         raise HTTPException(422, "Некорректный номер проверки или закупки")
-    from v352_dashboard_truth import collapse_legal_events
     db = ns["conn"]()
     try:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=1500")
         db.execute("PRAGMA query_only=ON")
-        row = db.execute("SELECT b.categories FROM thematic_batches b JOIN thematic_items i "
-            "ON i.batch_id=b.id WHERE b.id=? AND i.reg=?", (batch, reg)).fetchone()
-        if row is None:
-            raise HTTPException(404, "Закупка не найдена в тематической проверке")
-        try:
-            categories = json.loads(row[0])
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(409, "Направления тематической проверки повреждены") from exc
-        if not isinstance(categories, list) or not all(isinstance(x, str) for x in categories):
-            raise HTTPException(409, "Направления тематической проверки повреждены")
-        raw = [dict(r) for r in db.execute("SELECT category,title,law,evidence,code,document,source_url,law_url "
-            "FROM thematic_findings WHERE batch_id=? AND reg=? ORDER BY rowid", (batch, reg))
-            if r["category"] in categories]
-        return [canonical_item(reg, item) for item in collapse_legal_events(raw)]
+        return read_thematic_items(db, batch, reg)
     finally:
         db.close()
+
+
+def read_thematic_items(db, batch, reg=None):
+    """One ordering, canonical identity and status overlay for every reader.
+
+Historical evidence stays in this result. Callers count only confirmed items
+and display the others as revised/review evidence, never as new violations.
+"""
+    from v352_dashboard_truth import collapse_legal_events
+    from scripts.v385_msp_reassessment import apply_reassessments
+    if not BATCH.fullmatch(batch) or (reg is not None and not REG.fullmatch(reg)):
+        raise HTTPException(422, "Некорректный номер проверки или закупки")
+    row = db.execute("SELECT categories FROM thematic_batches WHERE id=?", (batch,)).fetchone()
+    if row is None or (reg is not None and not db.execute(
+            "SELECT 1 FROM thematic_items WHERE batch_id=? AND reg=?", (batch, reg)).fetchone()):
+        raise HTTPException(404, "Закупка не найдена в тематической проверке")
+    try:
+        categories = json.loads(row[0])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(409, "Направления тематической проверки повреждены") from exc
+    if not isinstance(categories, list) or not all(isinstance(x, str) for x in categories):
+        raise HTTPException(409, "Направления тематической проверки повреждены")
+    grouped = {}
+    condition, params = (" AND reg=?", (batch, reg)) if reg is not None else ("", (batch,))
+    for source in db.execute("SELECT reg,category,title,law,evidence,code,document,source_url,law_url "
+            "FROM thematic_findings WHERE batch_id=?" + condition + " ORDER BY rowid", params):
+        item = dict(source)
+        if item["category"] in categories:
+            grouped.setdefault(item["reg"], []).append(item)
+    result = []
+    for number, raw in grouped.items():
+        canonical = [canonical_item(number, item) for item in collapse_legal_events(raw)]
+        result.extend({**item, "batch_id": batch} for item in
+                      apply_reassessments(db, batch, number, canonical))
+    return result
 
 
 def review_items(db, ns, owner, reg, general_items):

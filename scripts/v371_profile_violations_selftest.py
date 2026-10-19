@@ -158,7 +158,9 @@ def user_only_violations():
     assert "current_account(request)[0]" in src
     assert "WHERE user_id=%s" in src
     assert "FROM account_manager_campaign_targets" in src
-    assert "FROM thematic_findings" in src
+    assert "canonical_item" in src and "apply_reassessments" in src
+    assert "ORDER BY rowid DESC LIMIT 1200" in src
+    assert 'effective_status' in src and 'confirmed' in src
     assert "collapse_legal_events" in src
     assert "SELECT batch_id,title" in src
     assert "require_admin" not in src
@@ -167,7 +169,7 @@ def user_only_violations():
     assert "needs_review" in src
     assert "law_url" in src
     assert '"count":len(prepared[:500])' in src
-    assert '"truncated":len(data)>=1200' in src
+    assert '"truncated":len(recent)>=1200' in src
     manager_src=inspect.getsource(team)
     assert "u.last_name,u.first_name,u.patronymic" in manager_src
     assert "t.manager_id=%s" in manager_src

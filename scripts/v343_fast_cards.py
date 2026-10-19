@@ -223,7 +223,12 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
         if labels:
             extra='<p class="meta"><b>Подтверждения в оригиналах ЕИС:</b> '+(
                 '; '.join(labels))+'</p>'
-    heading=('<p class="meta"><b>Карточка нарушения</b></p>' if kind=="legal" else "")
+    reassessment=(item or {}).get("reassessment")
+    revised=(item or {}).get("effective_status","confirmed")!="confirmed"
+    heading=('<p class="meta"><b>'+('Первоначальный вывод — пересмотрен' if revised else 'Карточка нарушения')+'</b></p>' if kind=="legal" else "")
+    if reassessment:
+        heading+='<p class="meta msp-reassessment"><b>Перепроверка применимости правил МСП:</b> '+esc(reassessment.get("reason"))+\
+            ' <span>Дата: '+esc(reassessment.get("created_at"))+'</span></p>'
     origin=source_link(source,document or "Оригинал ЕИС")
     source_html=('<p class="finding-source"><b>Источник:</b> '+(origin or esc(document))+
                  ('. '+esc((item or {}).get("location")) if (item or {}).get("location") else '')+
@@ -271,13 +276,17 @@ def render_thematic_panel(reg,thematic,account_review=False):
       "waiting_engine":"Ожидается обработчик","retry":"Повторная попытка",
       "excluded_company":"Форма заказчика не соответствует выборке"}
     result=['<section class="panel" id="thematic-results">',
-      '<h2>Нарушения: '+str(len(rows))+'</h2>',
+      '<h2>Нарушения: '+str(sum(item.get("effective_status","confirmed")=="confirmed" for item in rows))+'</h2>',
       '<div class="grid"><div><b>Состояние проверки:</b> '+esc(names.get(state,state))+
       '</div><div><b>Выбранные направления:</b> '+
       esc(', '.join(labels.get(c,c) for c in selected) or "Не указаны")+
       '</div></div>']
     if thematic.get("detail"):
         result.append('<p class="meta">'+esc(thematic["detail"])+'</p>')
+    revised=sum(item.get("effective_status","confirmed")!="confirmed" for item in rows)
+    if revised:
+        result.append('<p class="meta"><b>Пересмотренные выводы / требуют проверки: '+str(revised)+
+                      '.</b> Первоначальные доказательства и решения руководителя сохранены ниже.</p>')
     if account_review:
         from scripts.account_memo_requisites_ui_v1 import render_memo_requisites_editor
         result.append(render_memo_requisites_editor(reg))
@@ -337,7 +346,9 @@ def render(reg,data,thematic=None,account_review=False):
         if not val(p,'price') and val(p,'price_num') is not None:
             keys[4]=('Стоимость закупки',val(p,'price_num'))
         from v383_msp_scope import display as msp_display
-        keys.append(('Закупка только для МСП',msp_display(p)))
+        from scripts.v385_msp_reassessment import scope_display
+        current_msp=scope_display((thematic or {}).get('findings') or [])
+        keys.append(('Закупка только для МСП',current_msp or msp_display(p)))
         basic='<div class="grid">'+''.join('<div><b>'+esc(k)+':</b> '+text(v)+'</div>' for k,v in keys)+'</div>'
         basic+='<p class="meta">Документы: проверено '+str(int(val(p,'documents_checked') or 0))+' из '+str(int(val(p,'documents_found') or dtotal))+'</p>'
         eis=source_link(p.get('url'),'Открыть карточку ЕИС')
