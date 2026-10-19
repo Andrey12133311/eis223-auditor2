@@ -405,45 +405,146 @@ class WorkerRecovery(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.row(reg)["state"], "pending")
         self.assertEqual(original(self.ns), reg)
 
-    async def test_cancel_during_persist_waits_for_commit_before_releasing_reg(self):
+    async def cancel_during_commit(self, hold_seconds=.025):
         reg = self.purchase()
-        entered, release = threading.Event(), threading.Event()
-        committed = threading.Event()
-        original = audit.persist
-        class CommitBarrier:
-            def __init__(barrier, connection): barrier.connection = connection
-            def __getattr__(barrier, name): return getattr(barrier.connection, name)
-            def commit(barrier):
-                # An entered persist wrapper has not acquired SQLite's writer
-                # yet and can still fail BUSY during shutdown. Synchronize on
-                # the real uncommitted result, whose commit must be settled.
-                self.assertTrue(barrier.connection.in_transaction)
-                self.assertEqual(barrier.connection.execute(
-                    "SELECT COUNT(*) FROM findings WHERE reg_number=? AND kind='violation'",
-                    (reg,)).fetchone()[0], 1)
-                entered.set()
-                if not release.wait(3): raise AssertionError("test did not release commit")
-                result = barrier.connection.commit()
-                committed.set()
+        entered, release, committed = threading.Event(), threading.Event(), threading.Event()
+        released = []
+
+        class CommitGate(sqlite3.Connection):
+            findings_written = False
+
+            def execute(con, sql, *args, **kwargs):
+                result = super().execute(sql, *args, **kwargs)
+                if sql.lstrip().startswith("INSERT INTO findings"):
+                    con.findings_written = True
                 return result
-        def delayed_persist(ns, *args, **kwargs):
-            return original({**ns, "conn": lambda: CommitBarrier(self.connect())}, *args, **kwargs)
-        self.stack.enter_context(patch.object(audit, "persist", side_effect=delayed_persist))
+
+            def executemany(con, sql, *args, **kwargs):
+                result = super().executemany(sql, *args, **kwargs)
+                if sql.lstrip().startswith("INSERT INTO findings"):
+                    con.findings_written = True
+                return result
+
+            def commit(con):
+                if con.findings_written:
+                    # Gate the actual writer transaction, after its legal rows
+                    # and counter are written. A pre-BEGIN gate can instead hit
+                    # SQLITE_BUSY and legitimately roll back during shutdown.
+                    entered.set()
+                    release.wait()  # The test's finally always releases this.
+                super().commit()
+                if con.findings_written:
+                    committed.set()
+                    con.findings_written = False
+
+        def connect():
+            con = sqlite3.connect(self.path, check_same_thread=False, factory=CommitGate)
+            con.row_factory = sqlite3.Row
+            return con
+
+        original_return = audit.return_running
+        def return_after_commit(ns, number):
+            self.assertTrue(committed.is_set(), "reservation released before real commit")
+            original_return(ns, number)
+            released.append((str(number), number.reservation_token))
+
+        self.stack.enter_context(patch.dict(self.ns, {"conn": connect}))
+        self.stack.enter_context(patch.object(audit, "return_running", side_effect=return_after_commit))
         campaign = await self.start()
         try:
             await self.until(entered.is_set)
-            self.assertEqual(self.findings(reg), 0, "The held transaction must still be uncommitted")
+            reservation = self.row(reg)["reservation_token"]
             campaign.cancel()
-            await self.real_sleep(.025)
+            await self.real_sleep(hold_seconds)
             self.assertFalse(campaign.done())
             self.assertEqual(self.row(reg)["state"], "running")
+            self.assertFalse(committed.is_set())
+            self.assertEqual(self.findings(reg), 0)  # Still uncommitted to readers.
+            self.assertEqual(released, [])
         finally:
             release.set()
         await asyncio.wait_for(asyncio.gather(campaign, return_exceptions=True), 3)
         self.assertTrue(committed.is_set())
+        self.assertEqual(released.count((reg, reservation)), 1)
+        self.assertEqual(len(released), len(set(released)))
         self.assertEqual(self.row(reg)["state"], "pending")
         self.assertEqual(self.findings(reg), 1)
         self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 1)
+
+    async def test_cancel_during_persist_waits_for_commit_before_releasing_reg(self):
+        await self.cancel_during_commit()
+
+    async def test_slow_cancelled_commit_outlives_old_fixture_deadline(self):
+        # A slow runner must not turn the commit gate into a test-only failure.
+        await self.cancel_during_commit(3.05)
+
+    async def test_cancelled_busy_persist_preserves_history_and_replays_once(self):
+        reg = self.purchase()
+        with self.connect() as con:
+            con.execute("INSERT INTO findings(reg_number,code,kind,title,evidence) "
+                        "VALUES(?,'history','violation','Earlier finding','Earlier evidence')", (reg,))
+            history = tuple(con.execute("SELECT * FROM findings WHERE reg_number=?", (reg,)).fetchone())
+        entered, release = threading.Event(), threading.Event()
+        failures, returned = [], []
+        original_persist, original_return = audit.persist, audit.return_running
+
+        def delayed_persist(*args, **kwargs):
+            entered.set()
+            release.wait()
+            try:
+                return original_persist(*args, **kwargs)
+            except Exception as exc:
+                failures.append(exc)
+                raise
+
+        def record_return(ns, number):
+            original_return(ns, number)
+            returned.append((str(number), number.reservation_token))
+
+        with patch.object(audit, "persist", side_effect=delayed_persist), \
+                patch.object(audit, "return_running", side_effect=record_return):
+            campaign = await self.start()
+            blocker = None
+            try:
+                await self.until(entered.is_set)
+                reservation = self.row(reg)["reservation_token"]
+                blocker = self.lock_database()
+                campaign.cancel()
+                await self.real_sleep(.025)
+                self.assertFalse(campaign.done())
+                self.assertEqual(self.row(reg)["state"], "running")
+                release.set()
+                # The 50 ms busy timeout now has a deliberate competing writer.
+                await self.until(lambda: bool(failures))
+                self.assertEqual(len(failures), 1)
+                self.assertIsInstance(failures[0], sqlite3.OperationalError)
+                self.assertTrue(audit.transient_sqlite(failures[0]))
+            finally:
+                release.set()
+                if blocker is not None:
+                    blocker.rollback()
+            await asyncio.wait_for(asyncio.gather(campaign, return_exceptions=True), 3)
+        self.assertEqual(returned.count((reg, reservation)), 1)
+        self.assertEqual(len(returned), len(set(returned)))
+        self.assertEqual(self.row(reg)["state"], "pending")
+        self.assertEqual(self.findings(reg), 1)
+        self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 0)
+        with self.connect() as con:
+            self.assertEqual(tuple(con.execute("SELECT * FROM findings WHERE id=?", (history[0],)).fetchone()), history)
+
+        await self.start()
+        await self.until(lambda: self.row(reg)["state"] == "completed")
+        self.assertEqual(self.findings(reg), 2)
+        self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 1)
+        # Replaying identical evidence must not credit it a second time.
+        with self.connect() as con:
+            con.execute("UPDATE v332_audit_queue SET state='pending' WHERE reg=?", (reg,))
+        notify_evidence(self.ns)
+        await self.until(lambda: self.row(reg)["state"] == "completed")
+        self.assertEqual(self.findings(reg), 2)
+        self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"], 1)
+        with self.connect() as con:
+            self.assertEqual(tuple(con.execute("SELECT * FROM findings WHERE id=?", (history[0],)).fetchone()), history)
 
     async def test_cancelled_busy_persist_remains_pending_and_can_be_reclaimed(self):
         reg = self.purchase()

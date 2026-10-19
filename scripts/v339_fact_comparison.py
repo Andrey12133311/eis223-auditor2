@@ -8,27 +8,30 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 from decimal import Decimal
 from functools import wraps
 
 from v331_broad_legal import verified
 from v335_price_recovery import money
+from v341_eis_facts import DATE_TOKEN, parse_day
 
 LAW_URL="https://www.consultant.ru/document/cons_doc_LAW_116964/"
 MAX_DOCUMENTS=400
 MAX_LENGTH=650000
 MAX_SIGNALS=35
-DAY=r"(?P<date>20\d{2}-\d{2}-\d{2}|\d{1,2}[.]\d{1,2}[.]20\d{2})"
+# Keep comparison evidence aligned with the verified-document fact parser.
+# A Russian-month date or DOCX table separator must not disappear here after
+# the same explicitly labelled deadline was successfully extracted upstream.
+DAY=r"(?P<date>"+DATE_TOKEN+r")"
 DATE_FIELDS=(
  ("submission_end","Окончание подачи заявок","223-ФЗ, ст. 4 ч. 9 п. 7; ч. 10 п. 8",
   re.compile(r"(?:дат[аы]\s+и\s+врем[яе]\s+окончани\w*\s+(?:срока\s+)?подач\w*\s+заяв\w*|"
              r"окончани\w*\s+(?:срока\s+)?подач\w*\s+заяв\w*)"
-             r"\s*[:—–=\-\s]{0,38}"+DAY,re.I)),
+             r"\s*[:：|—–=\-\s]{0,38}"+DAY,re.I)),
  ("submission_start","Начало подачи заявок","223-ФЗ, ст. 4 ч. 9 п. 7",
   re.compile(r"(?:дат[аы]\s+и\s+врем[яе]\s+начал\w*\s+подач\w*\s+заяв\w*|"
              r"начал\w*\s+(?:срока\s+)?подач\w*\s+заяв\w*)"
-             r"\s*[:—–=\-\s]{0,38}"+DAY,re.I)),
+             r"\s*[:：|—–=\-\s]{0,38}"+DAY,re.I)),
 )
 PRICE_PATTERN=r"(?P<price>\d{1,3}(?:[ \u00a0]\d{3})+(?:[,.]\d{1,2})?|\d{4,15}(?:[,.]\d{1,2})?)"
 PRICE_FIELDS=(
@@ -56,14 +59,8 @@ PAYMENT=re.compile(
  r"\s+(?P<type>рабоч\w*|календарн\w*)\s+дн\w*",re.I)
 
 def _date(raw):
-    s=str(raw or "").strip()
-    x=re.search(r"20\d{2}-\d{2}-\d{2}|\d\d?[.]\d\d?[.]20\d{2}",s)
-    if not x:return None
-    try:
-        v=x.group(0)
-        if "-" in v:return datetime.strptime(v,"%Y-%m-%d").date()
-        return datetime.strptime(v,"%d.%m.%Y").date()
-    except ValueError:return None
+    match=re.search(DATE_TOKEN,str(raw or ""),re.I)
+    return parse_day(match[0]) if match else None
 
 def _price(raw):
     amount=money(raw)

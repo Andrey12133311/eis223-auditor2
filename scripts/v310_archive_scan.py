@@ -57,22 +57,22 @@ def _list(path):
         with zipfile.ZipFile(path) as z:
             items=z.infolist()
             if len(items)>MAX_MEMBERS:return [],["Слишком много файлов в ZIP"]
-            return [(i.filename,i.file_size) for i in items if not i.is_dir() and not
+            return [(i.filename,i.file_size,index) for index,i in enumerate(items) if not i.is_dir() and not
                     (i.external_attr>>16 & 0o170000)==0o120000],[]
     if tarfile.is_tarfile(path):
         with tarfile.open(path,"r:*") as t:
             m=t.getmembers()
             if len(m)>MAX_MEMBERS:return [],["Слишком много файлов в TAR"]
-            return [(i.name,i.size) for i in m if i.isfile()],[]
+            return [(i.name,i.size,index) for index,i in enumerate(m) if i.isfile()],[]
     # RAR/7z/CAB handled by libarchive's audited bsdtar utility.
     if kind in (".gz",".bz2",".xz") and not tarfile.is_tarfile(path):
-        return [(path.stem,MAX_MEMBER)],[]
+        return [(path.stem,MAX_MEMBER,None)],[]
     proc=subprocess.run(["bsdtar","-tf",str(path)],capture_output=True,
                         timeout=18,check=False)
     if proc.returncode!=0:return [],["Архив libarchive не прочитан"]
     listing=proc.stdout[:70000].decode("utf-8","replace").splitlines()
     if len(listing)>MAX_MEMBERS:return [],["Слишком много файлов в архиве"]
-    return [(name,MAX_MEMBER) for name in listing if not name.endswith("/")],[]
+    return [(name,MAX_MEMBER,None) for name in listing if not name.endswith("/")],[]
 
 def _read_stream(stream):
     out=stream.read(MAX_MEMBER+1)
@@ -104,15 +104,19 @@ def _bsdtar_read(path,name):
             proc.kill()
             proc.wait(timeout=3)
 
-def _read_member(path,name):
+def _read_member(path,name,entry_index=None):
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
-            info=z.getinfo(name)
-            if info.file_size>MAX_MEMBER or info.flag_bits&1:raise ValueError("Большой или зашифрованный ZIP")
+            info=z.infolist()[entry_index] if entry_index is not None else z.getinfo(name)
+            if info.filename!=name:raise ValueError("Запись ZIP изменилась после перечисления")
+            if (info.file_size>MAX_MEMBER or info.flag_bits&1 or info.is_dir() or
+                    (info.external_attr>>16 & 0o170000)==0o120000):
+                raise ValueError("Большой, зашифрованный или небезопасный ZIP")
             with z.open(info) as inp:return _read_stream(inp)
     if tarfile.is_tarfile(path):
         with tarfile.open(path,"r:*") as t:
-            member=t.getmember(name)
+            member=t.getmembers()[entry_index] if entry_index is not None else t.getmember(name)
+            if member.name!=name:raise ValueError("Запись TAR изменилась после перечисления")
             if not member.isfile() or member.size>MAX_MEMBER:raise ValueError("Небезопасный TAR")
             with t.extractfile(member) as inp:return _read_stream(inp)
     ext=archive_kind(path)
@@ -137,7 +141,7 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
     stats={"files":0,"bytes":0}
     seen=set()
 
-    def visit(current,prefix,depth):
+    def visit(current,prefix,depth,ancestry=()):
         if depth>MAX_DEPTH:
             warnings.append("Превышена глубина вложенных архивов");return
         try:
@@ -146,26 +150,45 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
                 zipfile.BadZipFile,subprocess.SubprocessError) as exc:
             warnings.append("Не удалось открыть архив: "+type(exc).__name__);return
         warnings.extend(notes)
-        for name,size in members:
+        counts={}
+        for name,_,_ in members:counts[name]=counts.get(name,0)+1
+        for name,size,entry_index in members:
             if stats["files"]>=MAX_MEMBERS:
                 warnings.append("Лимит числа вложений исчерпан");break
             if not safe_member(name):
                 warnings.append("Пропущен небезопасный путь внутри архива");continue
             extension=Path(name).suffix.lower()
             if extension not in DOC_EXT and extension not in ARCHIVE_EXT:continue
+            duplicate=counts[name]>1
+            if duplicate:
+                # Name-based libarchive extraction cannot prove which occurrence
+                # was returned. Never concatenate or invent its source identity.
+                if entry_index is None:
+                    warnings.append("Повторяющееся имя внутри архива: "+name[:80])
+                    continue
+                # A resolved ZIP/TAR occurrence is not incomplete coverage.
+                # Its displayed source name below carries the disambiguation;
+                # a warning would incorrectly force endless collection retry.
             if size>MAX_MEMBER:
                 warnings.append("Слишком крупный вложенный документ");continue
             try:
-                data=_read_member(current,name)
+                data=_read_member(current,name,entry_index)
                 if not data or stats["bytes"]+len(data)>MAX_EXPANDED:
                     warnings.append("Превышен допустимый объём распаковки");continue
                 stats["files"]+=1
                 stats["bytes"]+=len(data)
                 sha=hashlib.sha256(data).hexdigest()
-                internal=prefix+"/"+name if prefix else name
-                logical_key=(internal,sha)
+                # Byte-identical copies at the same source path remain one
+                # evidence item. Keep archive boundaries/indexes separate from
+                # display paths: a literal root path can resemble a nested one.
+                logical_key=(ancestry,name,sha)
                 if logical_key in seen:continue
                 seen.add(logical_key)
+                # Put generated labels before the source filename. A suffix after
+                # an explicit event number would make strict legal parsers
+                # interpret it as an ambiguous continuation of that number.
+                shown=("[запись "+str(entry_index+1)+"] " if duplicate else "")+name
+                internal=prefix+"/"+shown if prefix else shown
                 folder=root/sha[:2]
                 folder.mkdir(parents=True,exist_ok=True,mode=0o700)
                 temp_file=folder/(sha+extension)
@@ -191,7 +214,7 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
                     finally:
                         if os.path.exists(tmp):os.unlink(tmp)
                 if extension in ARCHIVE_EXT and depth<MAX_DEPTH:
-                    visit(temp_file,internal,depth+1)
+                    visit(temp_file,internal,depth+1,ancestry+((name,entry_index),))
                     continue
                 if extension not in DOC_EXT:continue
                 try:
@@ -208,8 +231,24 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
                     warnings.append("Нет читаемого текста: "+name[:80]);continue
                 records.append({"name":internal,"path":temp_file,"sha256":sha,
                                 "text":text,"bytes":len(data)})
-            except (OSError,ValueError,KeyError,RuntimeError,tarfile.TarError,
+            except (OSError,ValueError,KeyError,IndexError,RuntimeError,tarfile.TarError,
                     zipfile.BadZipFile,subprocess.SubprocessError,EOFError) as exc:
                 warnings.append("Ошибка вложения "+name[:70]+": "+type(exc).__name__)
     visit(path,"",0)
+    # Member display names feed the stored URL fragment. Reserve every proposed
+    # name first, then disambiguate collisions with nested/literal paths without
+    # stealing a genuine member's name. Work is bounded by MAX_MEMBERS.
+    names={}
+    for record in records:names[record["name"]]=names.get(record["name"],0)+1
+    reserved=set(names)
+    for index,record in enumerate(records):
+        name=record["name"]
+        if names[name]<2:continue
+        suffix=index+1
+        candidate="[источник "+str(suffix)+"] "+name
+        while candidate in reserved:
+            suffix+=1
+            candidate="[источник "+str(suffix)+"] "+name
+        reserved.add(candidate)
+        record["name"]=candidate
     return records,warnings[:30]

@@ -6,6 +6,7 @@ with short database transactions and bounded concurrent legal analyses.
 """
 from __future__ import annotations
 import asyncio
+import audit_funnel
 import json
 import sqlite3
 import time
@@ -312,7 +313,9 @@ def _require_item_reservation(c,item):
         raise LookupError("Thematic audit reservation superseded")
 
 
+@audit_funnel.trace("thematic","analysis",registration="item")
 async def _one(ns,item,sem,pending=None):
+    audit_funnel.bind(item)
     async with sem:
         try:
             if not await _retry_db(_start_item,ns,item):return item,"superseded",[],""
@@ -329,7 +332,10 @@ async def _one(ns,item,sem,pending=None):
             # fresh pre-analysis source/engine snapshot are mandatory. A cached
             # result never carries the released reservation into this attempt.
             reused=_reuse_pending_result(item,pending) if pending is not None else None
-            if reused is not None:return reused
+            if reused is not None:
+                # No analyzer ran on this attempt; retain that distinction.
+                audit_funnel.observe("outcomes_thematic",reused[2])
+                return reused
             from audit_write_guard import background_write_guard
             with background_audit(), background_write_guard(lambda c:_require_item_reservation(c,item)):
                 # Include waiting for a physical file permit and both legal
@@ -338,6 +344,8 @@ async def _one(ns,item,sem,pending=None):
                 state,findings=await asyncio.wait_for(
                     original.independent_review(ns,item["reg"],item["categories"]),
                     timeout=ITEM_TIMEOUT_SECONDS)
+            audit_funnel.observe("outcomes_thematic",findings)
+            audit_funnel.bind(item)
             if item.get("source_error"):state="retry"
             description={
               "completed":"Проверено по сохранённым оригиналам ЕИС",
@@ -348,6 +356,7 @@ async def _one(ns,item,sem,pending=None):
             if state=="retry" and item.get("source_error"):description=item["source_error"]
             return item,state,findings,description
         except asyncio.TimeoutError:
+            audit_funnel.observe("gate","analysis_timeout")
             for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
             # Extraction threads retain their real physical permits until they
             # exit. This cancelled read-only review cannot persist a late result.
@@ -355,6 +364,7 @@ async def _one(ns,item,sem,pending=None):
                   f"timeout_seconds={ITEM_TIMEOUT_SECONDS}",flush=True)
             return item,"retry",[],"Превышено время проверки оригиналов; запланирован повтор"
         except Exception as exc:
+            audit_funnel.observe("gate","analysis_failed")
             for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
             return item,"retry",[],type(exc).__name__
 
@@ -399,7 +409,11 @@ async def _review_or_reuse(ns,item,sem,pending):
 
 
 def _retain_pending_result(pending,result):
-    item=result[0]
+    # Diagnostic metadata must not change PR72 byte-limit admission or eviction.
+    # Reused attempts get a fresh trace and explicitly unobserved analysis.
+    item=dict(result[0])
+    item.pop("_audit_funnel",None)
+    result=(item,*result[1:])
     key=(item["batch"],item["reg"])
     entry=pending.get(key)
     if entry is not None:
@@ -422,11 +436,12 @@ def _thematic_result_snapshot(c,batch,reg):
         WHERE batch_id=? AND reg=? ORDER BY rowid""",(batch,reg)).fetchall()]
 
 
-def _plan_thematic_results(results,snapshots):
+def _plan_thematic_results(results,snapshots,diagnostic_events=None):
     from v333_dedup_ui import _same_finding
     previous_by_key={key:list(rows) for key,rows in snapshots.items()}
     planned=[]
     for item,state,findings,detail in results:
+        diagnostic=audit_funnel.pending(diagnostic_events,item,findings,state)
         previous=previous_by_key[(item["batch"],item["reg"])]
         before=list(previous)
         inserted=[]
@@ -437,15 +452,19 @@ def _plan_thematic_results(results,snapshots):
             unique_keys={(f.get("category"),f.get("title"),f.get("evidence")) for f in previous
                          if all(f.get(k) is not None for k in ("category","title","evidence"))}
             for f in findings:
-                if any(_same_finding(old,f,"title") for old in previous):continue
+                if any(_same_finding(old,f,"title") for old in previous):
+                    audit_funnel.increment(diagnostic,"reasons","duplicate")
+                    continue
                 key=(f["category"],f["title"],f.get("evidence"))
                 # Match the table's historical UNIQUE constraint too. SQLite
                 # allows repeated NULLs; all non-NULL keys are binary strings.
-                if all(value is not None for value in key) and key in unique_keys:continue
+                if all(value is not None for value in key) and key in unique_keys:
+                    audit_funnel.increment(diagnostic,"reasons","duplicate")
+                    continue
                 inserted.append(f)
                 previous.append(f)
                 if all(value is not None for value in key):unique_keys.add(key)
-        planned.append((item,state,inserted,detail,before,list(previous)))
+        planned.append((item,state,inserted,detail,before,list(previous),diagnostic))
     return planned
 
 
@@ -458,12 +477,15 @@ def _persist(ns,results):
              for item,state,findings,detail in results]
     c=_open(ns)
     saved_events=[]
+    diagnostic_events=[]
     applied=0
     try:
         for attempt in range(4):
             snapshots={(item["batch"],item["reg"]):_thematic_result_snapshot(c,item["batch"],item["reg"])
                        for item,_,_,_ in results}
-            planned=_plan_thematic_results(results,snapshots)
+            # Each snapshot rebase owns a fresh summary; stale plans are silent.
+            diagnostic_events=[]
+            planned=_plan_thematic_results(results,snapshots,diagnostic_events)
             c.execute("BEGIN IMMEDIATE")
             # Rebase the legal comparisons if a concurrent save changed the
             # same result. Unrelated intake writes do not invalidate this work.
@@ -473,33 +495,44 @@ def _persist(ns,results):
             break
         else:
             raise sqlite3.OperationalError("database is locked: thematic results changed during save")
-        for item,state,findings,detail,before,after in planned:
+        for item,state,findings,detail,before,after,diagnostic in planned:
             batch,reg=item["batch"],item["reg"]
-            if state=="superseded":continue
+            if state=="superseded":
+                audit_funnel.increment(diagnostic,"reasons","reservation_changed")
+                continue
             # Do not resurrect an already deleted or stopped thematic campaign.
             campaign=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
             if not campaign:
+                audit_funnel.increment(diagnostic,"reasons","campaign_inactive")
                 continue
             row=c.execute("SELECT status,reservation_token,retry_attempts FROM thematic_items "
                 "WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
-            if not row:continue
+            if not row:
+                audit_funnel.increment(diagnostic,"reasons","reservation_changed")
+                continue
             if item.get("reservation_token"):
                 if (row["status"]!="running" or row["reservation_token"]!=item["reservation_token"]
-                    or item.get("campaign_guard")!=_campaign_identity(campaign)):continue
+                    or item.get("campaign_guard")!=_campaign_identity(campaign)):
+                    audit_funnel.increment(diagnostic,"reasons","reservation_changed")
+                    continue
             elif row["reservation_token"]:
                 # Legacy direct callers cannot mutate a durably owned attempt.
+                audit_funnel.increment(diagnostic,"reasons","reservation_changed")
                 continue
             scope,scope_args=selection_sql(c,campaign)
             # A later EIS metadata correction must not persist a new result
             # outside the chosen period while a slow original was being read.
             if not c.execute("SELECT 1 FROM purchases p WHERE p.reg_number=? AND "+scope,
                              (reg,*scope_args)).fetchone():
+                audit_funnel.increment(diagnostic,"reasons","outside_period")
                 c.execute("UPDATE thematic_items SET status='outside_period',reservation_token='',"
                           "detail='Дата размещения закупки не входит в выбранный период',updated_at=? "
                           "WHERE batch_id=? AND reg=?",(original.now(),batch,reg))
                 continue
             customer=c.execute("SELECT customer FROM purchases WHERE reg_number=?",(reg,)).fetchone()
-            if not customer or original.customer_form(customer[0]) not in set(json.loads(campaign["legal_forms"])):continue
+            if not customer or original.customer_form(customer[0]) not in set(json.loads(campaign["legal_forms"])):
+                audit_funnel.increment(diagnostic,"reasons","company_scope_changed")
+                continue
             if state in ("completed","retry"):
                 added=0
                 for f in findings:
@@ -513,6 +546,7 @@ def _persist(ns,results):
                     added+=int(inserted.rowcount==1)
                 if added!=len(findings):
                     raise sqlite3.OperationalError("database is locked: thematic insert changed during save")
+                audit_funnel.increment(diagnostic,"counts","persisted_confirmed",added)
                 if added:
                     saved_events.append((batch,reg,before,after,item.get("analysis_version",ANALYSIS_VERSION)))
             attempts=(int(row["retry_attempts"])+1) if state=="retry" else 0
@@ -532,11 +566,13 @@ def _persist(ns,results):
                item.get("analysis_version",ANALYSIS_VERSION),attempts,retry_at,
                item.get("source_version"),item.get("semantic_version"),item.get("engine_signature"),batch,reg))
             applied+=1
+            audit_funnel.applied(diagnostic)
         c.commit()
     except BaseException:
         c.rollback()
         raise
     finally:c.close()
+    audit_funnel.emit_committed(diagnostic_events)
     # Exact before/after snapshots keep diagnostic counting outside the writer.
     # Neither grouping nor a broken log sink can invalidate committed evidence.
     for batch,reg,before,after,version in saved_events:
