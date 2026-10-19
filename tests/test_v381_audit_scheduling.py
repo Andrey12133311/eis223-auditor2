@@ -195,8 +195,11 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(general, "initialize", return_value={}), \
              patch.object(general, "claim_next", side_effect=claim), \
+             patch.object(general, "evidence_version", return_value="fixture"), \
              patch.object(general, "inspect_one", side_effect=inspect), \
              patch.object(general, "mark"), \
+             patch.object(general, "defer_retry", return_value=90), \
+             patch.object(general, "return_running"), \
              patch.object(general, "add_new_verified", return_value=0), \
              patch.object(general, "refresh_changed", side_effect=refresh), \
              patch.object(general.asyncio, "sleep", side_effect=sleep):
@@ -342,6 +345,12 @@ class ThematicSelectionTests(unittest.TestCase):
             db.execute("UPDATE thematic_items SET status='completed',last_ready_count=1,"
                        "last_doc_id=(SELECT MAX(id) FROM docs WHERE reg_number=reg),last_analysis_version=?",
                        (fast.ANALYSIS_VERSION,))
+            # These fixtures represent audits already completed on the current
+            # inputs, including the same-row evidence snapshot.
+            regs = [row[0] for row in db.execute("SELECT reg FROM thematic_items").fetchall()]
+            from audit_source_version import source_version
+            db.executemany("UPDATE thematic_items SET last_source_version=? WHERE reg=?",
+                           [(source_version(db, reg), reg) for reg in regs])
             target = str(32610000000+3001)
             db.execute("INSERT INTO docs VALUES(4000,?, '/fixtures/new.pdf','checked')",(target,))
         selected = fast._prepare(self.ns)

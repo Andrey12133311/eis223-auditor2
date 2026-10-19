@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import sqlite3
 import sys
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -15,6 +16,7 @@ import v341_precise_legal as legal
 from audit_db_retry import run_db_sync
 from test_general_thematic_parity import P, REG, docs
 import test_general_company_claim as company_fixture
+import test_general_audit_counters as counter_fixture
 
 
 class StageRetries(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +51,10 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
         c = fixture.connect()
         c.execute("ALTER TABLE v332_audit_queue ADD COLUMN error TEXT")
         c.execute("ALTER TABLE v332_audit_queue ADD COLUMN audit_revision TEXT DEFAULT ''")
+        for column in ('documents_found','documents_read','documents_unreadable',
+                       'verified_original_documents','original_expected','original_received',
+                       'new_findings','new_checks'):
+            c.execute("ALTER TABLE v332_audit_queue ADD COLUMN " + column + " INTEGER DEFAULT 0")
         c.commit(); c.close()
         class App:
             def __init__(self): self.startups = []
@@ -61,7 +67,9 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
         async def inspect(ns, reg):
             analyzed.append(reg)
             if reg == first: raise sqlite3.OperationalError('database is locked')
-            return 'no_readable_documents', {}
+            return 'completed', {'documents_found':1,'documents_read':1,
+                'documents_unreadable':0,'verified_original_documents':1,
+                'original_expected':1,'original_received':1,'new_findings':0,'new_checks':0}
         real_sleep = asyncio.sleep
         async def sleep(seconds): await real_sleep(0 if seconds == 14 else seconds)
         with patch.object(general, 'initialize', return_value={}), \
@@ -76,16 +84,104 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
                         c = fixture.connect()
                         rows = {r['reg']: dict(r) for r in c.execute('SELECT * FROM v332_audit_queue')}
                         c.close()
-                        if rows[first]['state'] == 'pending' and rows[first]['error'] and rows[second]['state'] == 'no_readable_documents':
+                        if rows[first]['state'] == 'pending' and rows[first]['error'] and rows[second]['state'] == 'completed':
                             return rows
                         await real_sleep(.01)
                 rows = await asyncio.wait_for(settled(), 2)
                 self.assertEqual(rows[first]['audit_revision'], '')
+                self.assertEqual(rows[first]['retry_count'], 1)
+                self.assertGreater(rows[first]['next_retry_at'], time.time())
+                self.assertLessEqual(rows[first]['next_retry_at'], time.time() + general.BUSY_RETRY_BASE_SECONDS)
+                self.assertEqual(rows[second]['audit_revision'], general.RULE_REVISION)
                 self.assertFalse(ns['_v332_campaign_worker'].done())
+                self.assertEqual(general.runtime_snapshot(ns)['live_workers'], 4)
                 self.assertEqual(analyzed.count(first), 1)
+                self.assertEqual(analyzed.count(second), 1)
                 self.assertIsNone(general.claim_next(ns))
-                ns['_v332_busy_until'][first] = 0
-                self.assertEqual(general.claim_next(ns), first)
+                # A new process namespace still observes the durable cooldown.
+                fresh_ns = {'conn':fixture.connect}
+                self.assertIsNone(general.claim_next(fresh_ns))
+                c = fixture.connect()
+                c.execute("UPDATE v332_audit_queue SET next_retry_at=0 WHERE reg=?", (first,))
+                c.commit(); c.close()
+                self.assertEqual(general.claim_next(fresh_ns), first)
+            finally:
+                ns['_v332_campaign_worker'].cancel()
+                await asyncio.gather(ns['_v332_campaign_worker'], return_exceptions=True)
+
+    async def test_exhausted_result_mark_preserves_committed_token_and_counter(self):
+        fixture = counter_fixture.GeneralAuditCounters()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        reg = counter_fixture.REG
+        general.return_running(fixture.ns, reg)
+        class App:
+            def __init__(self): self.startups = []
+            def get(self, *a, **kw): return lambda fn: fn
+            def on_event(self, event):
+                def register(fn): self.startups.append(fn); return fn
+                return register
+        ns = {**fixture.ns, 'app':App()}
+        tokens = []; attempted_results = []; busy = True
+        original_mark = general.mark
+        async def inspect(ns, reg):
+            token = 'save-budget-' + str(len(tokens) + 1)
+            tokens.append(token)
+            new_f, new_c = await general.thread_call(
+                general.persist, ns, reg, [fixture.finding()], [], token)
+            return 'completed', fixture.result(token, new_f, new_c)
+        def mark(ns, reg, state, detail):
+            if state == 'completed' and busy:
+                attempted_results.append(dict(detail))
+                raise sqlite3.OperationalError('database is locked')
+            return original_mark(ns, reg, state, detail)
+        def row():
+            with fixture.connection() as db:
+                return dict(db.execute('SELECT * FROM v332_audit_queue WHERE reg=?', (reg,)).fetchone())
+        real_sleep = asyncio.sleep
+        async def sleep(seconds): await real_sleep(0 if seconds == 14 else seconds)
+        async def wait_for_row(predicate):
+            while True:
+                value = row()
+                if predicate(value): return value
+                await real_sleep(.005)
+        with patch.object(general, 'inspect_one', side_effect=inspect), \
+             patch.object(general, 'mark', side_effect=mark), \
+             patch.object(general, 'DB_STAGE_RETRY_SECONDS', .025), \
+             patch.object(general, 'RETRY_BASE_SECONDS', .01), \
+             patch.object(general, 'RETRY_MAX_SECONDS', .01), \
+             patch.object(general.asyncio, 'sleep', side_effect=sleep):
+            general.install(ns); await ns['app'].startups[0]()
+            try:
+                deferred = await asyncio.wait_for(wait_for_row(
+                    lambda value:value['state']=='pending' and value['retry_count']==1), 2)
+                self.assertFalse(ns['_v332_campaign_worker'].done())
+                self.assertEqual(general.runtime_snapshot(ns)['live_workers'], 4)
+                self.assertEqual(tokens, ['save-budget-1'])
+                self.assertTrue(attempted_results)
+                self.assertTrue(all(value['result_token']==tokens[0] for value in attempted_results))
+                self.assertEqual(deferred['last_counted_token'], tokens[0])
+                self.assertEqual(deferred['last_result_token'], tokens[0])
+                self.assertEqual(deferred['audit_revision'], '')
+                self.assertGreater(deferred['next_retry_at'], time.time())
+                fixture.assert_counts(1)
+                fresh_ns = {'conn':fixture.connect, '_verified_set235':lambda:[reg]}
+                general.initialize(fresh_ns)
+                self.assertIsNone(general.claim_next(fresh_ns))
+                self.assertEqual(general.progress(fresh_ns)['new_evidence_based_findings'], 1)
+                busy = False
+                with fixture.connection() as db:
+                    db.execute('UPDATE v332_audit_queue SET next_retry_at=0 WHERE reg=?', (reg,))
+                general.audit_signals(ns).notify('general')
+                completed = await asyncio.wait_for(wait_for_row(lambda value:value['state']=='completed'), 2)
+                self.assertEqual(tokens, ['save-budget-1', 'save-budget-2'])
+                self.assertEqual(completed['retry_count'], 0)
+                self.assertEqual(completed['next_retry_at'], 0)
+                fixture.assert_counts(1)
+                # A delayed failure for an older result cannot undo completion.
+                general.defer_retry(fresh_ns, reg, {'result_token':'stale-result'},
+                                    'late busy report', general.BUSY_RETRY_BASE_SECONDS)
+                self.assertEqual(row(), completed)
             finally:
                 ns['_v332_campaign_worker'].cancel()
                 await asyncio.gather(ns['_v332_campaign_worker'], return_exceptions=True)

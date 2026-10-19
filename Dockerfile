@@ -19,7 +19,7 @@ RUN python -m py_compile scripts/v375_staff_center.py scripts/v375_task_autoload
 COPY tests/test_eis223_soap_archive.py tests/test_eis_server_worker.py tests/test_eis_inn_search.py tests/test_eis_vps_worker.py tests/test_eis_vps_pipeline.py tests/test_eis_vps_installer.py tests/test_eis_vps_only.py tests/test_eis_vps_only_offline.py tests/test_eis_vps_only_ui.py tests/test_eis_upload_rejection_logging.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_eis*.py'
 COPY tests/test_extraction_throughput.py tests/test_v381_audit_scheduling.py tests/test_memo_requisites.py tests/test_organization_display.py tests/test_v381_memo_layout.py tests/memo_fixture.py tests/
-RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_extraction_throughput.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_audit_scheduling.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_requisites.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_organization_display.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_memo_layout.py'
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_extraction_throughput.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_audit_scheduling.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_requisites.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_organization_display.py' && EIS_MEMO_RENDER_TESTS=1 PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_memo_layout.py'
 COPY tests/test_customer_name_completion.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_customer_name_completion.py'
 COPY tests/test_v382_finding_submissions.py tests/
@@ -28,6 +28,8 @@ COPY tests/test_manual_navigation_fix.py tests/test_personal_inn_search.py tests
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manual_navigation_fix.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_personal_inn_search.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manual_inn_ui.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_dashboard_filter_reset.py'
 COPY tests/test_memo_download_access.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_download_access.py'
+COPY tests/test_thematic_memo_odt.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_memo_odt.py'
 COPY tests/test_account_connection_pool.py tests/test_account_request_responsiveness.py tests/test_page_response_performance.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_account_connection_pool.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_account_request_responsiveness.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_page_response_performance.py'
 COPY tests/test_memo_requisites_ui.py tests/
@@ -38,6 +40,14 @@ COPY tests/test_legal_applicability.py tests/test_clarification_identity.py test
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_applicability.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_clarification_identity.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v348_protocol_identity.py'
 COPY tests/test_thematic_period.py tests/test_manager_campaign_period.py tests/test_audit_evidence_coverage.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_period.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manager_campaign_period.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_evidence_coverage.py'
+COPY tests/test_audit_source_version.py tests/test_general_audit_recovery.py tests/test_general_audit_counters.py tests/test_thematic_recovery.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_source_version.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_audit_recovery.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_audit_counters.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_recovery.py'
+COPY tests/test_audit_db_retry.py tests/test_price_recovery_lock_scope.py tests/test_reconciliation_lock_scope.py tests/test_v372_document_coverage.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_db_retry.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_price_recovery_lock_scope.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_reconciliation_lock_scope.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v372_document_coverage.py'
+COPY tests/test_general_company_claim.py tests/test_general_thematic_parity.py tests/test_general_db_stage_retry.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_company_claim.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_thematic_parity.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_db_stage_retry.py'
+COPY tests/test_v383_msp_scope.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v383_msp_scope.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

@@ -12,77 +12,117 @@ import time
 from datetime import datetime,timezone
 import v342_thematic_queue as original
 from v381_audit_scheduling import background_audit
-from audit_db_retry import run_db
 from thematic_period import index_campaign, selection_sql, joined_selection_sql
+from audit_source_version import source_version
 
 MAX_CONCURRENT=4
 MAX_PER_BATCH=18
 MAX_PER_CYCLE=36
 RECHECK_SECONDS=90
 INDEX_SECONDS=90
-# The previous thematic path did not run build_checks. Revisit saved originals
-# once after enabling those evidence-based rules, including completed checks.
-ANALYSIS_VERSION=2
+# Establish a source snapshot once for historical completed reviews. Prior
+# findings remain intact; only newly evidenced legal episodes are appended.
+ANALYSIS_VERSION=3
+DB_RETRY_DELAYS=(.15,.4)
+MAX_RETRY_SECONDS=1800
+ITEM_TIMEOUT_SECONDS=600
 
 def _open(ns):
     c=original.db(ns)
     c.execute("PRAGMA busy_timeout=2500")
     return c
 
+async def _retry_db(operation,*args):
+    """Retry a complete short operation after its failed connection is closed."""
+    for attempt in range(len(DB_RETRY_DELAYS)+1):
+        try:
+            return await asyncio.to_thread(operation,*args)
+        except sqlite3.OperationalError as exc:
+            if not original.sqlite_busy(exc) or attempt==len(DB_RETRY_DELAYS):
+                raise
+            print(f"THEMATIC_DB_RETRY operation={getattr(operation,'__name__',type(operation).__name__)} attempt={attempt+1}",flush=True)
+            await asyncio.sleep(DB_RETRY_DELAYS[attempt])
+
+def _index_batch(ns,batch):
+    c=_open(ns)
+    try:
+        # Serialize before reading a scope that is about to be written. Commit
+        # each campaign independently, rather than holding all campaign writes
+        # while reading source versions or running legal analysis.
+        c.execute("BEGIN IMMEDIATE")
+        campaign=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
+        if campaign:
+            index_campaign(c,campaign,original.customer_form,original.now())
+        c.commit()
+    except BaseException:
+        c.rollback()
+        raise
+    finally:c.close()
+
 def _prepare(ns):
     clock=time.time()
     c=_open(ns)
     try:
         campaigns=c.execute("SELECT * FROM thematic_batches WHERE status='active' ORDER BY created_at,id").fetchall()
-        # Continue after the last served campaign if historical/imported
-        # active campaigns exceed the normal three-campaign UI limit.
-        previous=ns.get("_v381_last_thematic_batch")
-        for index,camp in enumerate(campaigns):
-            if camp["id"]==previous:
-                campaigns=campaigns[index+1:]+campaigns[:index+1]
-                break
-        if clock-original.WORKER_STATE.get("index_at",0)>INDEX_SECONDS:
-            for camp in campaigns:
-                index_campaign(c,camp,original.customer_form,original.now())
-            c.commit()
-            original.WORKER_STATE["index_at"]=clock
+    finally:c.close()
+    # Continue after the last served campaign if historical/imported
+    # active campaigns exceed the normal three-campaign UI limit.
+    previous=ns.get("_v381_last_thematic_batch")
+    for index,camp in enumerate(campaigns):
+        if camp["id"]==previous:
+            campaigns=campaigns[index+1:]+campaigns[:index+1]
+            break
+    if clock-original.WORKER_STATE.get("index_at",0)>INDEX_SECONDS:
+        for camp in campaigns:
+            _index_batch(ns,camp["id"])
+        original.WORKER_STATE["index_at"]=clock
+    c=_open(ns)
+    try:
         by_campaign=[]
+        versions={}
         for camp in campaigns:
             selected=[]
             scope,scope_args=selection_sql(c,camp)
-            # Fast indexed subqueries avoid scanning or re-reading original files
-            # that have not changed since the last successful legal evaluation.
+            # MAX(id) alone cannot see a repaired file or a new metadata/text
+            # revision in the same docs row. Finish the read before stat'ing
+            # files; no write transaction is held while checking source versions.
             rows=c.execute("""
              SELECT t.reg,t.status,t.updated_at,t.last_doc_id,t.last_ready_count,t.last_analysis_version,
+              t.last_source_version,t.retry_attempts,
               (SELECT COALESCE(MAX(id),0) FROM docs d WHERE d.reg_number=t.reg) doc_id,
               (SELECT COUNT(*) FROM docs d
                  WHERE d.reg_number=t.reg AND COALESCE(d.local_path,'')!=''
-                   AND d.status='checked') ready_count
+                   AND d.status IN ('checked','downloaded_no_text')) ready_count
              FROM thematic_items t JOIN purchases p ON p.reg_number=t.reg WHERE t.batch_id=?
                AND t.status IN ('queued','waiting_originals','waiting_engine','retry','completed')
                AND (t.status!='completed'
-                    OR t.last_analysis_version<? AND EXISTS(
+                    OR EXISTS(
                         SELECT 1 FROM docs d WHERE d.reg_number=t.reg
-                         AND COALESCE(d.local_path,'')!='' AND d.status='checked')
+                         AND COALESCE(d.local_path,'')!='' AND d.status IN ('checked','downloaded_no_text'))
                     OR t.last_doc_id<(SELECT COALESCE(MAX(id),0) FROM docs d WHERE d.reg_number=t.reg)
-                    OR t.last_ready_count<(SELECT COUNT(*) FROM docs d
-                       WHERE d.reg_number=t.reg AND COALESCE(d.local_path,'')!='' AND d.status='checked'))
+                    )
                AND """+scope+"""
              ORDER BY CASE WHEN EXISTS(
                  SELECT 1 FROM docs d WHERE d.reg_number=t.reg
-                  AND COALESCE(d.local_path,'')!='' AND d.status='checked'
+                  AND COALESCE(d.local_path,'')!='' AND d.status IN ('checked','downloaded_no_text')
                ) THEN 0 ELSE 1 END,
                CASE WHEN t.status='queued' THEN 0
                     WHEN t.status='waiting_originals' THEN 1
                     WHEN t.status='retry' THEN 2 ELSE 3 END,
-               t.updated_at ASC LIMIT 3000
-            """,(camp["id"],ANALYSIS_VERSION,*scope_args)).fetchall()
+               t.updated_at ASC,t.reg
+            """,(camp["id"],*scope_args)).fetchall()
             count=0
             for row in rows:
                 if count>=MAX_PER_BATCH:break
                 doc_id=int(row["doc_id"] or 0)
                 ready=int(row["ready_count"] or 0)
-                new_evidence=doc_id>int(row["last_doc_id"] or 0) or ready>int(row["last_ready_count"] or 0)
+                reg=row["reg"]
+                if reg not in versions:
+                    versions[reg]=source_version(c,reg)
+                version=versions[reg]
+                new_evidence=(doc_id>int(row["last_doc_id"] or 0)
+                              or ready>int(row["last_ready_count"] or 0)
+                              or version!=row["last_source_version"])
                 state=row["status"]
                 updated_rules=state=="completed" and ready>0 and int(row["last_analysis_version"] or 0)<ANALYSIS_VERSION
                 if state=="completed" and not new_evidence and not updated_rules:
@@ -90,11 +130,15 @@ def _prepare(ns):
                 if state in ("waiting_originals","waiting_engine","retry") and not new_evidence:
                     try:age=clock-datetime.fromisoformat(row["updated_at"]).timestamp()
                     except (ValueError,TypeError):age=RECHECK_SECONDS
-                    if age<RECHECK_SECONDS:continue
+                    delay=RECHECK_SECONDS
+                    if state=="retry":
+                        delay=min(MAX_RETRY_SECONDS,RECHECK_SECONDS*2**min(5,max(0,int(row["retry_attempts"] or 0)-1)))
+                    if age<delay:continue
                 selected.append({
                   "batch":camp["id"],"reg":row["reg"],
                   "categories":json.loads(camp["categories"]),
-                  "ready":ready,"doc_id":doc_id,"analysis_version":ANALYSIS_VERSION})
+                  "ready":ready,"doc_id":doc_id,"analysis_version":ANALYSIS_VERSION,
+                  "source_version":version})
                 count+=1
             by_campaign.append(selected)
         # A third active campaign must not wait forever behind 18 + 18 jobs
@@ -116,13 +160,25 @@ async def _one(ns,item,sem):
             return (item,"waiting_originals",[],"Ожидаются доступные оригиналы ЕИС")
         try:
             with background_audit():
-                state,findings=await original.independent_review(ns,item["reg"],item["categories"])
+                # Include waiting for a physical file permit and both legal
+                # engine stages. Their own file timeout begins after acquire;
+                # without an outer deadline one stuck item held the cycle open.
+                state,findings=await asyncio.wait_for(
+                    original.independent_review(ns,item["reg"],item["categories"]),
+                    timeout=ITEM_TIMEOUT_SECONDS)
             description={
               "completed":"Проверено по сохранённым оригиналам ЕИС",
               "waiting_originals":"Ожидаются подтверждённые оригиналы ЕИС",
+              "retry":"Часть оригиналов временно не удалось прочитать; запланирован повтор",
               "excluded_company":"Форма заказчика не соответствует выборке"
             }.get(state,"Тематическая юридическая проверка")
             return item,state,findings,description
+        except asyncio.TimeoutError:
+            # Extraction threads retain their real physical permits until they
+            # exit. This cancelled read-only review cannot persist a late result.
+            print(f"THEMATIC_REVIEW_TIMEOUT batch={item['batch']} reg={item['reg']} "
+                  f"timeout_seconds={ITEM_TIMEOUT_SECONDS}",flush=True)
+            return item,"retry",[],"Превышено время проверки оригиналов; запланирован повтор"
         except Exception as exc:
             return item,"retry",[],type(exc).__name__
 
@@ -149,7 +205,7 @@ def _persist(ns,results):
                           "detail='Дата размещения закупки не входит в выбранный период',updated_at=? "
                           "WHERE batch_id=? AND reg=?",(original.now(),batch,reg))
                 continue
-            if state=="completed":
+            if state in ("completed","retry"):
                 from v333_dedup_ui import collapse,_same_finding
                 from v352_dashboard_truth import collapse_legal_events
                 previous=[dict(r) for r in c.execute(
@@ -177,14 +233,21 @@ def _persist(ns,results):
                         saved_events.append((batch,reg,gained,item.get("analysis_version",ANALYSIS_VERSION)))
             c.execute("""UPDATE thematic_items SET status=?,detail=?,updated_at=?,
               last_doc_id=?,last_ready_count=?,
-              last_analysis_version=CASE WHEN ?='completed' THEN ? ELSE last_analysis_version END
+              last_analysis_version=CASE WHEN ?='completed' THEN ? ELSE last_analysis_version END,
+              retry_attempts=CASE WHEN ?='retry' AND last_source_version=? THEN retry_attempts+1
+                                  WHEN ?='retry' THEN 1 ELSE 0 END,
+              last_source_version=?
               WHERE batch_id=? AND reg=?""",
               (state,detail,original.now(),item["doc_id"],item["ready"],state,
-               item.get("analysis_version",ANALYSIS_VERSION),batch,reg))
+               item.get("analysis_version",ANALYSIS_VERSION),state,item.get("source_version",""),
+               state,item.get("source_version",""),batch,reg))
         c.commit()
         for batch,reg,gained,version in saved_events:
             print(f"THEMATIC_EVIDENCE_SAVED reg={reg} new_unique_findings={gained} "
                   f"analysis_version={version} batch={batch}",flush=True)
+    except BaseException:
+        c.rollback()
+        raise
     finally:c.close()
 
 def _request_missing_originals(ns,results=()):
@@ -304,7 +367,7 @@ async def faster_tick(ns):
     if original.storage_health()["blocked"]:
         original.WORKER_STATE["last_error"]="Недостаточно места на диске Railway для сохранения проверок"
         return
-    items=await run_db(_prepare,ns,stage="thematic_prepare")
+    items=await _retry_db(_prepare,ns)
     original.WORKER_STATE["last_batch_size"]=len(items)
     if not items:
         # Missing originals are dispatched even when no legal recheck is due.
@@ -321,7 +384,17 @@ async def faster_tick(ns):
             result=await finished
             # Durable progress is visible immediately, even while another
             # procurement is still extracting a slow PDF or large archive.
-            await run_db(_persist,ns,[result],stage="thematic_persist")
+            try:
+                await _retry_db(_persist,ns,[result])
+            except Exception as exc:
+                # The transaction rolled back, including its source watermark.
+                # Leave this row eligible for retry and let every other finished
+                # analysis save its result instead of cancelling the whole batch.
+                item=result[0]
+                original.WORKER_STATE["last_error"]=type(exc).__name__+": "+str(exc)[:120]
+                print(f"THEMATIC_ITEM_RETRY batch={item['batch']} reg={item['reg']} "
+                      f"stage=persist type={type(exc).__name__} error={str(exc)[:120]!r}",flush=True)
+                continue
             processed+=1
             completed+=int(result[1]=="completed")
             if first_result_ms is None:first_result_ms=round((time.monotonic()-started)*1000,1)
@@ -343,6 +416,7 @@ async def faster_tick(ns):
 def install(ns):
     c=_open(ns)
     try:
+        c.execute("BEGIN IMMEDIATE")
         cols={x[1] for x in c.execute("PRAGMA table_info(thematic_items)")}
         if "last_doc_id" not in cols:
             c.execute("ALTER TABLE thematic_items ADD COLUMN last_doc_id INTEGER NOT NULL DEFAULT 0")
@@ -350,16 +424,23 @@ def install(ns):
             c.execute("ALTER TABLE thematic_items ADD COLUMN last_ready_count INTEGER NOT NULL DEFAULT 0")
         if "last_analysis_version" not in cols:
             c.execute("ALTER TABLE thematic_items ADD COLUMN last_analysis_version INTEGER NOT NULL DEFAULT 0")
+        if "last_source_version" not in cols:
+            c.execute("ALTER TABLE thematic_items ADD COLUMN last_source_version TEXT NOT NULL DEFAULT ''")
+        if "retry_attempts" not in cols:
+            c.execute("ALTER TABLE thematic_items ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0")
         c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_status ON thematic_items(batch_id,status,updated_at)")
-        # Old completed checks already occurred; initialise their source version
-        # once to avoid a pointless full recheck of every historic completed item.
+        # Retain legacy document-watermark compatibility. The new analysis
+        # revision still requires one real review before saving a source digest.
         c.execute("""UPDATE thematic_items SET last_doc_id=COALESCE((
            SELECT MAX(d.id) FROM docs d WHERE d.reg_number=thematic_items.reg),0),
            last_ready_count=(SELECT COUNT(*) FROM docs d
              WHERE d.reg_number=thematic_items.reg
-               AND COALESCE(d.local_path,'')!='' AND d.status='checked')
+               AND COALESCE(d.local_path,'')!='' AND d.status IN ('checked','downloaded_no_text'))
              WHERE status='completed' AND last_doc_id=0 AND last_ready_count=0""")
         c.commit()
+    except BaseException:
+        c.rollback()
+        raise
     finally:c.close()
     original.tick=faster_tick
     original.WORKER_STATE["interval_seconds"]=20
