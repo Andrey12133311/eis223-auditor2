@@ -29,7 +29,7 @@ from audit_source_version import (source_version, semantic_source_version, Seman
 from legal_audit_revision import engine_signature, EngineSignatureError
 from v295_eis_originals import (allowed_documents, saved_document, root, uid_from_url,
                                _merge_source_metadata, _review_source_version, HTTPException)
-from v298_eis_only import offline_audit
+from v298_eis_only import offline_audit,saved_review_context
 from v314_eis_metadata import document_text
 from v381_audit_scheduling import (audit_signals, background_audit,
                                    ordered_map, run_file_io)
@@ -1163,13 +1163,20 @@ async def collect_saved_evidence(ns,reg,rows):
     if metadata_incomplete:
         source_incomplete=True
         source_error=source_error or "Часть официальных XML ЕИС ещё не поддерживается или не подтверждена"
-    if received_uids-represented:
+    if received_uids:
         try:
-            # Pull from REAL, locally saved and receipt-validated originals;
-            # it processes every received archive member too.
-            result=await asyncio.wait_for(
-                offline_audit(ns,reg,collect_only=True),timeout=280)
-            official=result.get("docs") or []
+            if received_uids-represented:
+                # Pull from REAL, locally saved and receipt-validated originals;
+                # it processes every received archive member too.
+                result=await asyncio.wait_for(
+                    offline_audit(ns,reg,collect_only=True),timeout=280)
+                official=result.get("docs") or []
+            else:
+                # Persisted documents do not establish that the purchase row
+                # has current SOAP/card metadata. Re-read the same verified
+                # context as intake, without extracting every original twice.
+                result=await asyncio.wait_for(
+                    saved_review_context(ns,reg,other),timeout=60)
         except Exception as exc:
             # The readable stored subset can still yield proven findings,
             # but a failed collection has not examined every received original.
@@ -1188,6 +1195,71 @@ async def collect_saved_evidence(ns,reg,rows):
         for alias in (d.get("meta") or {}).get("identical_sources") or []:
             if isinstance(alias,dict):seen_uids.add(uid_from_url(alias.get("url") or ""))
     source_incomplete=source_incomplete or bool(received_uids-seen_uids)
+
+    def expanded_archive_parent_count():
+        # Intake repair can restore an original ZIP as downloaded_no_text.
+        # stored_docs rejects that container at FILE_EXT, before extracting any
+        # legal text. Reconcile only those exact rows with this collection's
+        # successful expansion; a suffix/status alone is never proof.
+        from v310_archive_scan import ARCHIVE_EXT
+        data_root=root().resolve()
+        readable_members={
+            (uid_from_url(m.get("source_url") or ""),m.get("archive_sha256"))
+            for d in official for m in [d.get("meta") or {}]
+            if m.get("source")=="official_eis_archive_member" and is_official(d)
+            and m.get("uid")==uid_from_url(m.get("source_url") or "")
+            and HEX.fullmatch(str(m.get("archive_sha256") or ""))
+            and len(str(d.get("text") or "").strip())>=3}
+        expanded=set()
+        for d in official:
+            m=d.get("meta") or {}
+            uid=uid_from_url(m.get("source_url") or "")
+            sha=m.get("sha256")
+            if (d.get("status")!="archive_processed" or
+                m.get("source")!="official_eis_archive" or m.get("archive_warnings") or
+                not uid or m.get("uid")!=uid or not HEX.fullmatch(str(sha or "")) or
+                (uid,sha) not in readable_members):
+                continue
+            try:
+                parent=saved_document(reg,uid)
+                if (parent is None or parent[1]["sha256"]!=sha or
+                    parent[0].resolve(strict=True)!=Path(d.get("local") or "").resolve(strict=True)):
+                    continue
+                # Only aliases emitted by the fresh collector qualify. Each
+                # was independently read/hash-checked before deduplication.
+                sources=[{"uid":uid,"url":m["source_url"]},
+                         *(m.get("identical_sources") or [])]
+                for alias in sources:
+                    if not isinstance(alias,dict):continue
+                    alias_uid=uid_from_url(alias.get("url") or "")
+                    if not alias_uid or alias.get("uid")!=alias_uid:continue
+                    receipt=saved_document(reg,alias_uid)
+                    if receipt is None or receipt[1]["sha256"]!=sha:continue
+                    path=receipt[0].resolve(strict=True)
+                    if (path.is_relative_to(data_root) and path.is_file() and
+                        path.suffix.lower() in ARCHIVE_EXT and path.suffix.lower() not in FILE_EXT and
+                        0<path.stat().st_size<=MAX_BYTES):
+                        expanded.add((alias_uid,sha,path))
+            except (OSError,ValueError,TypeError,KeyError,RuntimeError):
+                continue
+        count=0
+        for row in rows:
+            try:
+                m=json.loads(row.get("metadata_json") or "{}")
+                if not isinstance(m,dict):continue
+                uid=uid_from_url(m.get("source_url") or row.get("url") or "")
+                if (m.get("source") not in ("official_eis_original","official_eis_archive") or
+                    (m.get("uid") and m["uid"]!=uid) or not row.get("local_path")):
+                    continue
+                path=Path(row["local_path"]).resolve(strict=True)
+                if (uid,m.get("sha256"),path) in expanded:count+=1
+            except (OSError,ValueError,TypeError,RuntimeError):
+                continue
+        return count
+
+    if unreadable and official:
+        unreadable-=await run_file_io(expanded_archive_parent_count)
+    # Merging may import stored aliases; reconciliation above uses only fresh proof.
     docs=merge_docs(official,other)
     # Collection may return an unreadable original instead of raising. Inspect
     # the deduplicated result so a readable copy can satisfy the same evidence;
@@ -1195,6 +1267,7 @@ async def collect_saved_evidence(ns,reg,rows):
     source_incomplete=source_incomplete or any(
         d.get("status") in ("downloaded_no_text","archive_unreadable") or
         bool((d.get("meta") or {}).get("archive_warnings")) for d in docs)
+
     return {"docs":docs,"unreadable":unreadable,
             "original_expected":expected,"original_received":received,
             "source_incomplete":source_incomplete,
@@ -1227,7 +1300,8 @@ async def _inspect_one(ns,reg):
     expected,received=source["original_expected"],source["original_received"]
     source_incomplete=source["source_incomplete"]
     for key,value in source["p"].items():
-        if value and (not purchase.get(key) or key in ("method","submission_end","submission_start")):
+        if value is not None and value != "" and (not purchase.get(key) or key in ("method","published","submission_end","submission_start",
+                                                                "deadline","price","price_num")):
             purchase[key]=value
     card=source["card"] or card
     detail=source["detail"] or detail

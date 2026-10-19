@@ -211,6 +211,91 @@ def document_facts(docs):
     return result
 
 
+def card_predates_notice(captured_at, record):
+    """Only two explicit, timezone-aware instants establish source order.
+
+    Date-only or timezone-less values cannot prove an intra-day ordering.
+    A later capture is not proof that a different legal revision is current.
+    """
+    def instant(value):
+        raw=str(value or "")
+        if not re.search(r"[T ]\d{2}:\d{2}",raw):return None
+        try:
+            value=datetime.fromisoformat(raw.replace("Z","+00:00"))
+            return value if value.utcoffset() is not None else None
+        except (ValueError,TypeError,OverflowError):return None
+    capture=instant(captured_at)
+    # Publication establishes that this exact verified notice was available.
+    # A later XML modification time alone does not prove an earlier field was
+    # legally superseded, so use it only if publication is absent.
+    notice=instant(record.get("publication") or record.get("modified"))
+    return bool(capture is not None and notice is not None and capture<notice)
+
+
+def reconcile_notice_context(purchase, direct):
+    """Keep current SOAP facts; conflicting unordered card versions are review."""
+    context=purchase.get("_current_soap_context")
+    if not isinstance(context,dict):return
+    record=context.get("record") or {}
+    if (record.get("reg_number")!=str(purchase.get("reg") or "") or
+        record.get("xml_family")!="notice" or
+        not re.fullmatch(r"[0-9a-f]{64}",str(record.get("xml_sha256") or ""))):return
+    proof=purchase.setdefault("fact_evidence",{})
+    conflicts={}
+    fields=direct.get("fields") or {}
+    older=card_predates_notice(direct.get("captured_at"),record)
+    def evidence(value):
+        return {"value":value,"source":"official_eis_xml",
+                "source_url":purchase.get("url") or "","document":record.get("xml_filename"),
+                "xml_sha256":record["xml_sha256"],"archive_sha256":record.get("archive_sha256"),
+                "version":record.get("version"),"evidence":str(value)}
+    def equal(key, left, right):
+        if key in ("published","submission_start","submission_end"):
+            return parse_day(left) is not None and parse_day(left)==parse_day(right)
+        return compact(left).casefold()==compact(right).casefold()
+    for key,value in (context.get("fields") or {}).items():
+        if key not in ("method","published","submission_start","submission_end"):continue
+        card_value=fields.get(key)
+        if card_value not in (None,"") and not equal(key,value,card_value) and not older:
+            conflicts[key]={"source":"official_eis_context_conflict","value":None,
+                "evidence":"Не установлена действующая редакция противоречащих сведений ЕИС",
+                "alternatives":[evidence(value),{"value":card_value,"source":"official_eis_card",
+                    "source_url":direct.get("field_source_page",direct.get("source_page")),
+                    "captured_at":direct.get("captured_at")}]}
+            purchase[key]=None
+            proof[key]=conflicts[key]
+        else:
+            purchase[key]=value
+            proof[key]=evidence(value)
+    xml_price=context.get("price") or {}
+    selected=chosen_price(direct.get("prices") or [])
+    if xml_price and selected and selected.get("price_kind")=="nmcd":
+        same=money(xml_price.get("price"))==money(selected.get("price"))
+        price_older=card_predates_notice(direct.get("price_captured_at",direct.get("captured_at")),record)
+        if not same and not price_older:
+            conflicts["price"]={"source":"official_eis_context_conflict","value":None,
+                "evidence":"Не установлена действующая редакция противоречащей НМЦД ЕИС",
+                "alternatives":[evidence(xml_price.get("price")),
+                    {"value":selected.get("price"),"source":"official_eis_card",
+                     "source_url":direct.get("source_page"),
+                     "captured_at":direct.get("price_captured_at",direct.get("captured_at"))}]}
+            purchase.update(price="",price_num=None)
+            purchase.pop("verified_price_source",None)
+            proof["price"]=conflicts["price"]
+        elif not same:
+            purchase.update(xml_price)
+            purchase["price_kind"]="nmcd"
+            purchase.pop("verified_price_source",None)
+            proof["price"]=evidence(xml_price["price"])
+    purchase["_official_context_conflicts"]=conflicts
+    # Missing publication context must not activate modern competitive rules;
+    # a known method cannot resolve an unordered historical-edition conflict.
+    if "method" in conflicts or "published" in conflicts:
+        purchase["method"]=""
+        purchase.pop("purchase_method",None)
+    purchase["deadline"]=purchase.get("submission_end") or ""
+
+
 def enrich(ns, purchase, docs, card=None, detail=None):
     reg = str(purchase.get("reg") or purchase.get("reg_number") or "")
     proof = document_facts(docs)
@@ -227,6 +312,8 @@ def enrich(ns, purchase, docs, card=None, detail=None):
             row = db.execute("SELECT * FROM v338_card_price WHERE reg=? AND conflict=0", (reg,)).fetchone()
             if row and _official_source(row["source_page"], reg):
                 direct = {**direct, "source_page": row["source_page"],
+                          "field_source_page": direct.get("source_page"),
+                          "price_captured_at": row["captured_at"],
                           "prices": [{"price": row["price"], "price_num": row["price_num"],
                                       "price_kind": row["price_kind"], "price_label": row["price_label"]}]}
         except sqlite3.OperationalError:
@@ -258,8 +345,26 @@ def enrich(ns, purchase, docs, card=None, detail=None):
                         price_kind=selected["price_kind"], price_source_url=direct["source_page"])
         purchase["verified_price_source"] = {"kind": selected["price_kind"],
             "price": selected["price"], "source": direct["source_page"]}
+    reconcile_notice_context(purchase,direct)
+    conflicts=purchase.get("_official_context_conflicts") or {}
+    if purchase.get("_current_soap_context"):
+        # Only resolved summary values flow to later wrappers. The raw source
+        # snapshots and their alternatives remain available as evidence.
+        current_card=dict(saved_card(purchase))
+        current_summary=dict(current_card.get("summary") or {})
+        current_summary.update({key:purchase.get(key) for key in
+            ("method","published","submission_start","submission_end","price","price_num")})
+        current_card["summary"]=current_summary
+        purchase["card_fields_json"]=current_card
+        scope=resolve(purchase,docs)
+        purchase["sme_scope"],purchase["sme_only"]=scope["state"],scope["value"]
+        purchase["fact_evidence"]["sme_scope"]=scope
     if card is not None:
         summary=card.setdefault("summary", {})
+        if conflicts:
+            for key in conflicts:summary[key]=purchase.get(key)
+            if "method" in conflicts or "published" in conflicts:summary["method"]=""
+            if "price" in conflicts:summary["price_num"]=None
         if not purchase.get("price_kind") and summary.get("price_kind"):
             purchase["price_kind"]=summary["price_kind"]
         summary.update({k: purchase[k] for k in
@@ -272,7 +377,8 @@ def enrich(ns, purchase, docs, card=None, detail=None):
             card["price_formula"] = direct["price_formula"]
     if detail is not None:
         detail.update(purchaseMethodName=purchase.get("method"), publicationDate=purchase.get("published"),
-                      submissionStart=purchase.get("submission_start"), submissionEnd=purchase.get("submission_end"))
+                      submissionStart=purchase.get("submission_start"), submissionEnd=purchase.get("submission_end"),
+                      initialSum=purchase.get("price"))
     return purchase
 
 
@@ -292,6 +398,10 @@ def persist_facts(ns, purchase):
             values = {}
             for key, item in evidence.items():
                 column = "published_at" if key == "published" else key
+                # Intake owns the source-labelled purchase row. Rechecks keep
+                # current XML provenance below without changing their own
+                # semantic source token merely by filling derived cache fields.
+                if item.get("source")=="official_eis_xml":continue
                 if column in row and (not row[column] or item.get("source") == "official_eis_card"):
                     values[column] = item["value"]
             if values.get("submission_end") and "deadline" in row:

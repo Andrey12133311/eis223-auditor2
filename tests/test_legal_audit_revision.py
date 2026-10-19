@@ -146,6 +146,10 @@ def analyze(values): return stored_docs(values)
                   'v347_text_cache','v348_cross_document_legal','v352_dashboard_truth','v353_episode_guard','v383_msp_scope'}
         self.assertTrue(required <= set(revision.DEPENDENCY_REGISTRY))
         self.assertIn('collect_saved_evidence',revision.DEPENDENCY_REGISTRY['v332_all_procurements_audit'])
+        self.assertIn('saved_review_context',revision.DEPENDENCY_REGISTRY['v298_eis_only'])
+        self.assertIn('official_notice_record',revision.DEPENDENCY_REGISTRY['v298_eis_only'])
+        self.assertIn('card_predates_notice',revision.DEPENDENCY_REGISTRY['v341_eis_facts'])
+        self.assertIn('reconcile_notice_context',revision.DEPENDENCY_REGISTRY['v341_eis_facts'])
         self.assertIn('event_occurrence_text',revision.DEPENDENCY_REGISTRY['v348_cross_document_legal'])
         self.assertNotIn('v345_thematic_accelerator',revision.DEPENDENCY_REGISTRY)
         self.assertNotIn('v381_audit_scheduling',revision.DEPENDENCY_REGISTRY)
@@ -174,6 +178,11 @@ def analyze(values): return stored_docs(values)
         baseline=revision.engine_signature()
         original=revision._read_engine
         changes=(
+            ('v341_eis_facts.py','capture<notice','capture<=notice'),
+            ('v341_eis_facts.py','not equal(key,value,card_value) and not older',
+                                  'not equal(key,value,card_value)'),
+            ('v336_legal_matrix.py','if "price" in (p.get("_official_context_conflicts") or {}):return None',
+                                    'if False:return None'),
             ('v324_official_price.py','RUBLE_TOKEN=r"руб(?:ль|ля|лей)?','RUBLE_TOKEN=r"руб(?:ль|ля)?'),
             ('v348_cross_document_legal.py','text,count=1) if pattern else text','text,count=2) if pattern else text'),
             ('v332_all_procurements_audit.py','bool(received_uids-seen_uids)','bool(received_uids)'),

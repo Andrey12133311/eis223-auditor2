@@ -253,6 +253,7 @@ def verified_price(p,docs):
     explicit NMCD in verified originals. Conflicting revisions or lot prices
     remain unknown even when one happens to equal the DB/card price.
     """
+    if "price" in (p.get("_official_context_conflicts") or {}):return None
     expected=money(p.get("price_num"))
     if expected and expected[1]<=0:return None
     expected_value=Decimal(str(expected[1])) if expected else None

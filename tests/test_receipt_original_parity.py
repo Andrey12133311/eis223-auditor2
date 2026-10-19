@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import zipfile
 
 from docx import Document
@@ -608,6 +608,410 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual((self.themed(reg)[0]["status"], len(self.themed(reg)[1])), ("completed", 1))
         self.assertEqual(path.read_bytes(), data)
         self.assertEqual(archive_path.read_bytes(), wrapped.getvalue())
+
+
+class SavedCardContext(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
+    """Receipt-backed saved-doc rechecks must use the same current notice as intake."""
+
+    def setUp(self):
+        super().setUp()
+        import v341_eis_facts as facts
+        import v348_cross_document_legal as cross
+        import v372_auto_regulation_protocols as protocols
+        with self.connect() as con:
+            for declaration in ('source TEXT', 'url TEXT', 'customer_inn TEXT', 'price TEXT', 'price_num REAL', 'submission_start TEXT',
+                                'deadline TEXT', 'card_fields_json TEXT'):
+                con.execute('ALTER TABLE purchases ADD COLUMN ' + declaration)
+        self.observed = []
+        self.observed_checks = []
+        self.ns['analyze'] = lambda p, docs: self.observed.append(deepcopy(p)) or []
+        self.ns['build_checks'] = lambda p, detail, card, docs: self.observed_checks.append(
+            deepcopy((p, detail, card))) or []
+        from v311_verified_customer import _initialize
+        _initialize(self.ns)
+        facts.initialize(self.ns)
+        legal.install(self.ns)
+        cross.install(self.ns)
+        protocols.install(self.ns)
+
+    def soap(self, reg, *, version=1, method='Открытый конкурс',
+             published='2026-10-01T10:00:00+03:00', deadline='2026-10-30',
+             price='125000.00', kind='purchaseNotice', xml_reg=None):
+        import eis223_soap_xml as xml_reader
+        from xml.sax.saxutils import escape
+        xml_reg = xml_reg or reg
+        identity = (f'<registrationNumber>{xml_reg}</registrationNumber>'
+                    if kind in xml_reader.NOTICE_TYPES else
+                    f'<registrationNumber>{xml_reg}-01</registrationNumber>'
+                    f'<purchaseInfo><purchaseNoticeNumber>{xml_reg}</purchaseNoticeNumber></purchaseInfo>')
+        attachments = ''.join('<document><fileName>' + escape(item['name']) +
+                              '</fileName><url>' + escape(item['url']) + '</url></document>'
+                              for item in self.originals[reg])
+        name = f'{kind}_{xml_reg}_{version}.xml'
+        raw = (f'<{kind} xmlns="{xml_reader.PURCHASE_NS}"><{kind}Data>{identity}'
+               f'<guid>notice-{version}</guid><version>{version}</version>'
+               f'<name>Поставка материалов</name><purchaseCodeName>{escape(method)}</purchaseCodeName>'
+               f'<publicationDateTime>{published}</publicationDateTime>'
+               f'<applSubmisionStartDate>2026-10-01</applSubmisionStartDate>'
+               f'<submissionCloseDateTime>{deadline}</submissionCloseDateTime>'
+               f'<lots><lot><lotData><initialSum>{price}</initialSum></lotData></lot></lots>'
+               f'<attachments>{attachments}</attachments></{kind}Data></{kind}>').encode()
+        record, _ = xml_reader.parse_document(raw, name)
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr(name, raw)
+        data = stream.getvalue()
+        digest = hashlib.sha256(data).hexdigest()
+        folder = self.folder / 'eis223_official_archive_inbox' / reg
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (digest + '.zip')
+        path.write_bytes(data)
+        receipt = folder / (digest + '.json')
+        receipt.write_text(json.dumps({'reg_number': reg, 'source': 'official_eis_soap_archive',
+                                      'archive_sha256': digest, 'notices': [record]}))
+        return path, receipt
+
+    def stale_purchase(self, reg, **values):
+        fields = {'method': '', 'published_at': '', 'submission_start': '',
+                  'submission_end': '', 'deadline': '', 'price': '', 'price_num': None,
+                  'card_fields_json': '{}', **values}
+        with self.connect() as con:
+            con.execute('UPDATE purchases SET ' + ','.join(key + '=?' for key in fields) +
+                        ' WHERE reg_number=?', (*fields.values(), reg))
+
+    async def source(self, reg):
+        _, rows = general.existing(self.ns, reg)
+        return await general.collect_saved_evidence(self.ns, reg, rows)
+
+    async def assert_both(self, reg, expected):
+        first = await general.inspect_one(self.ns, reg)
+        selected = await thematic.independent_review(self.ns, reg, ['dates'])
+        self.assertEqual(first[0], 'completed')
+        self.assertEqual(self.findings(reg), expected)
+        self.assertEqual(len(selected[1]), expected)
+        self.assertEqual((await general.inspect_one(self.ns, reg))[1]['new_findings'], 0)
+        return first, selected
+
+    async def test_all_persisted_originals_receive_same_context_without_second_extraction(self):
+        reg = self.purchase()
+        self.stale_purchase(reg)
+        self.soap(reg)
+        before = {path: path.read_bytes() for path in self.folder.rglob('*')
+                  if path.is_file() and path.suffix in ('.docx', '.zip', '.json')}
+        # This helper reads original bytes only in the supplemental collector.
+        # stored_docs still performs its own receipt/hash authentication.
+        with patch.object(incoming, '_read_original', side_effect=AssertionError('duplicate original read')):
+            source = await self.source(reg)
+            first, selected = await self.assert_both(reg, 1)
+        self.assertFalse(source['source_incomplete'])
+        self.assertEqual(source['original_received'], 1)
+        self.assertEqual(source['p']['method'], 'Открытый конкурс')
+        self.assertEqual(source['p']['price_num'], 125000)
+        self.assertEqual(source['card']['summary']['submission_end'], '2026-10-30')
+        self.assertEqual(source['detail']['purchaseMethodName'], 'Открытый конкурс')
+        self.assertEqual(first[1]['new_findings'], 1)
+        self.assertEqual(selected[1][0]['code'], '223-3.2-3-CLARIFICATION-RESPONSE-LATE')
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        with self.connect() as con:
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM docs').fetchone()[0], 1)
+
+    async def test_persisted_and_receipt_only_paths_have_identical_legal_result(self):
+        reg = self.purchase()
+        self.stale_purchase(reg)
+        self.soap(reg)
+        _, selected = await self.assert_both(reg, 1)
+        with self.connect() as con:
+            con.execute("UPDATE docs SET status='downloaded' WHERE reg_number=?", (reg,))
+        # No source bytes or source metadata changed, only docs readiness.
+        self.stale_purchase(reg)
+        result = await thematic.independent_review(self.ns, reg, ['dates'])
+        self.assertEqual(result, selected)
+        self.assertEqual((await general.inspect_one(self.ns, reg))[1]['new_findings'], 0)
+
+    async def test_latest_explicit_revision_replaces_stale_price_publication_method_and_deadline(self):
+        reg = self.purchase()
+        self.stale_purchase(reg, method='Закупка у единственного поставщика',
+                            published_at='2018-10-01', submission_end='2026-09-01',
+                            price='999.00', price_num=999)
+        self.soap(reg, version=2, price='250000.00')
+        # Written later but explicitly older: never select by file/hash order.
+        self.soap(reg, version=1, method='Закупка у единственного поставщика',
+                  published='2018-10-01', deadline='2026-09-01', price='999.00')
+        await self.assert_both(reg, 1)
+        self.assertTrue(self.observed)
+        for purchase in self.observed:
+            self.assertEqual((purchase['method'], purchase['published'][:10],
+                              purchase['submission_end'], purchase['price_num']),
+                             ('Открытый конкурс', '2026-10-01', '2026-10-30', 250000))
+
+    async def test_explicit_zero_price_does_not_keep_stale_nonzero_number(self):
+        reg = self.purchase()
+        self.stale_purchase(reg, price='999.00', price_num=999)
+        self.soap(reg, price='0.00')
+        await self.assert_both(reg, 1)
+        self.assertTrue(all(p['price'] == '0.00' and p['price_num'] == 0 for p in self.observed))
+
+    async def test_latest_noncompetitive_notice_cannot_inherit_old_competitive_scope(self):
+        reg = self.purchase()
+        self.soap(reg, version=1)
+        self.soap(reg, version=2, method='Закупка у единственного поставщика')
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(p['method'] == 'Закупка у единственного поставщика' for p in self.observed))
+
+    async def test_legacy_publication_from_current_notice_stays_outside_modern_rule(self):
+        reg = self.purchase()
+        self.soap(reg, version=2, published='2018-10-01')
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(p['published'].startswith('2018-') for p in self.observed))
+
+    async def test_generic_document_word_does_not_supply_unknown_method(self):
+        reg = self.purchase()
+        self.document(reg, 'Общий раздел: конкурс, аукцион, запрос предложений проводятся по положению.')
+        self.stale_purchase(reg)
+        self.soap(reg, method='')
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(not p['method'] for p in self.observed))
+
+    async def test_tampered_or_foreign_soap_does_not_supply_context(self):
+        for number, mode in enumerate(('bytes', 'receipt_hash', 'foreign_registry'), 1):
+            with self.subTest(mode=mode):
+                reg = self.purchase(number)
+                self.stale_purchase(reg)
+                path, receipt = self.soap(reg, xml_reg='32619999999' if mode == 'foreign_registry' else reg)
+                if mode == 'bytes':
+                    path.write_bytes(path.read_bytes() + b'tampered')
+                elif mode == 'receipt_hash':
+                    value = json.loads(receipt.read_text())
+                    value['notices'][0]['xml_sha256'] = '0' * 64
+                    receipt.write_text(json.dumps(value))
+                await self.assert_both(reg, 0)
+                self.assertFalse((await self.source(reg))['p'].get('method'))
+
+    async def test_protocol_fields_cannot_replace_current_notice_context(self):
+        reg = self.purchase()
+        self.stale_purchase(reg)
+        self.soap(reg, kind='purchaseProtocol')
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(not p['method'] for p in self.observed))
+
+    async def test_context_read_failure_remains_retryable_with_readable_documents(self):
+        reg = self.purchase()
+        self.stale_purchase(reg)
+        self.soap(reg)
+        with patch.object(general, 'saved_review_context',
+                          new=AsyncMock(side_effect=asyncio.TimeoutError), create=True) as read_context:
+            source = await self.source(reg)
+        read_context.assert_awaited_once()
+        self.assertTrue(source['source_incomplete'])
+        self.assertEqual(len(source['docs']), 1)
+        self.assertEqual(source['p'], {})
+
+
+    def card_snapshot(self, reg, *, captured='2026-09-01T10:00:00+03:00', fields=None, price=None):
+        source = 'https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=' + reg
+        payload = {'reg_number': reg, 'source_page': source, 'captured_at': captured,
+                   'fields': fields or {}, 'field_evidence': {key: str(value) for key, value in (fields or {}).items()},
+                   'prices': ([{'price': price, 'price_num': float(price), 'price_kind': 'nmcd',
+                                'price_label': 'НМЦД', 'currency': 'RUB'}] if price is not None else [])}
+        with self.connect() as con:
+            con.execute('INSERT OR REPLACE INTO v341_card_facts VALUES(?,?,?,?)',
+                        (reg, source, captured, json.dumps(payload, ensure_ascii=False)))
+        return payload
+
+    def price_snapshot(self, reg, *, captured, price='999.00'):
+        import v338_card_prices as prices
+        prices.initialize(self.ns)
+        source = 'https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=' + reg
+        with self.connect() as con:
+            con.execute('INSERT OR REPLACE INTO v338_card_price(reg,source_page,captured_at,price,price_num,'
+                        'price_kind,price_label,conflict,alternative_price) VALUES(?,?,?,?,?,?,?,0,?)',
+                        (reg, source, captured, price, float(price), 'nmcd', 'НМЦД', ''))
+
+    def snapshots(self):
+        with self.connect() as con:
+            return [tuple(row) for row in con.execute('SELECT * FROM v341_card_facts ORDER BY reg')]
+
+    async def test_demonstrably_older_card_cannot_override_current_soap_fields(self):
+        reg = self.purchase()
+        self.soap(reg)
+        self.card_snapshot(reg, fields={'method': 'Закупка у единственного поставщика',
+            'published': '2018-10-01', 'submission_start': '2018-10-01', 'submission_end': '2018-10-30'},
+            price='999.00')
+        before = self.snapshots()
+        await self.assert_both(reg, 1)
+        for p in self.observed:
+            self.assertEqual((p['method'], p['published'][:10], p['submission_end'], p['price_num']),
+                             ('Открытый конкурс', '2026-10-01', '2026-10-30', 125000))
+            self.assertEqual(p['fact_evidence']['method']['source'], 'official_eis_xml')
+            self.assertEqual(p['_official_context_conflicts'], {})
+        self.assertEqual(self.snapshots(), before)
+
+    async def test_current_noncompetitive_soap_defeats_older_competitive_card(self):
+        reg = self.purchase()
+        self.soap(reg, method='Закупка у единственного поставщика')
+        self.card_snapshot(reg, fields={'method': 'Открытый конкурс'})
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(p['method'] == 'Закупка у единственного поставщика' for p in self.observed))
+
+    async def test_later_undated_and_same_day_imprecise_conflicts_remain_review(self):
+        for number, captured in enumerate(('2026-10-02T10:00:00+03:00', '', 'invalid',
+                                           '2026-10-01', '2026-10-01T09:00:00'), 1):
+            with self.subTest(captured=captured):
+                reg = self.purchase(number)
+                self.soap(reg)
+                self.card_snapshot(reg, captured=captured,
+                                   fields={'method': 'Закупка у единственного поставщика'})
+                before = self.snapshots()
+                await self.assert_both(reg, 0)
+                observed = [p for p in self.observed if p['reg'] == reg]
+                self.assertTrue(all(not p['method'] and 'method' in p['_official_context_conflicts'] for p in observed))
+                with self.connect() as con:
+                    self.assertTrue(con.execute("SELECT 1 FROM checks WHERE reg_number=? AND status='check' "
+                                                "AND field_path='v341-clarification-applicability'", (reg,)).fetchone())
+                self.assertEqual(self.snapshots(), before)
+                for p, detail, card in self.observed_checks:
+                    if p['reg'] != reg:continue
+                    self.assertFalse(detail['purchaseMethodName'])
+                    self.assertFalse(card['summary']['method'])
+                    self.assertFalse(p['card_fields_json']['summary']['method'])
+
+    async def test_publication_only_conflict_blocks_modern_applicability(self):
+        reg = self.purchase()
+        self.soap(reg, published='2018-10-01T10:00:00+03:00')
+        self.card_snapshot(reg, captured='2026-10-02T10:00:00+03:00',
+                           fields={'published': '2026-10-01'})
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(not p['method'] and 'published' in p['_official_context_conflicts'] for p in self.observed))
+
+    async def test_deadline_conflict_cannot_fall_back_to_stored_deadline(self):
+        reg = self.purchase()
+        self.soap(reg)
+        self.card_snapshot(reg, captured='2026-10-02T10:00:00+03:00',
+                           fields={'submission_end': '2026-11-20'})
+        await self.assert_both(reg, 0)
+        self.assertTrue(all(not p['submission_end'] and not p['deadline'] for p in self.observed))
+
+    async def test_agreeing_later_card_does_not_block_verified_context(self):
+        reg = self.purchase()
+        self.soap(reg)
+        self.card_snapshot(reg, captured='2026-10-02T10:00:00+03:00',
+            fields={'method': 'Открытый конкурс', 'published': '01.10.2026', 'submission_end': '30.10.2026'},
+            price='125000.00')
+        await self.assert_both(reg, 1)
+        self.assertTrue(all(not p['_official_context_conflicts'] for p in self.observed))
+
+    async def test_v338_price_uses_its_own_capture_provenance(self):
+        for number, direct_time, price_time, expected in (
+            (1, '2026-09-01T10:00:00+03:00', '2026-10-02T10:00:00+03:00', None),
+            (2, '2026-10-02T10:00:00+03:00', '2026-09-01T10:00:00+03:00', 125000),
+            (3, '2026-09-01T10:00:00+03:00', '', None),
+        ):
+            with self.subTest(expected=expected, direct_time=direct_time, price_time=price_time):
+                reg = self.purchase(number)
+                self.soap(reg)
+                self.card_snapshot(reg, captured=direct_time, fields={'method': 'Открытый конкурс'})
+                self.price_snapshot(reg, captured=price_time)
+                with self.connect() as con:
+                    before = [tuple(row) for row in con.execute('SELECT * FROM v338_card_price ORDER BY reg')]
+                # Price uncertainty alone does not disable unrelated date rules.
+                await self.assert_both(reg, 1)
+                observed = [p for p in self.observed if p['reg'] == reg]
+                self.assertTrue(all(p['price_num'] == expected for p in observed))
+                self.assertTrue(all(('price' in p['_official_context_conflicts']) == (expected is None) for p in observed))
+                with self.connect() as con:
+                    self.assertEqual([tuple(row) for row in con.execute('SELECT * FROM v338_card_price ORDER BY reg')], before)
+
+    async def test_unordered_price_does_not_repopulate_from_original_or_saved_evidence(self):
+        import v336_legal_matrix as matrix
+        reg = self.purchase()
+        self.document(reg, 'НМЦД: 125000 рублей. Обеспечение заявки: 1000 рублей.')
+        # Give the price clause its ordinary documentation identity, rather
+        # than allowing this fixture's default clarification filename to hide it.
+        with self.connect() as con:
+            con.execute("UPDATE docs SET name='Документация.docx' WHERE id=(SELECT MAX(id) FROM docs)")
+        self.soap(reg)
+        self.card_snapshot(reg, captured='2026-10-02T10:00:00+03:00', price='999.00')
+        card_source = self.snapshots()[0][1]
+        prior = {'previous_prices': [{'price': '500.00'}],
+                 'price_evidence': {'source': 'official_eis_card', 'price': '999.00',
+                                   'price_kind': 'nmcd', 'source_url': card_source}}
+        with self.connect() as con:
+            con.execute('UPDATE purchases SET price=?,price_num=?,card_fields_json=? WHERE reg_number=?',
+                        ('999.00', 999, json.dumps(prior), reg))
+        source = await self.source(reg)
+        p = source['p']
+        import v341_eis_facts as facts
+        for _ in range(2):
+            facts.enrich(self.ns, p, source['docs'], source['card'], source['detail'])
+            self.assertIsNone(p['price_num'])
+            self.assertNotIn('verified_price_source', p)
+            self.assertFalse(source['detail']['initialSum'])
+            self.assertIsNone(source['card']['summary']['price_num'])
+            self.assertIsNone(p['card_fields_json']['summary']['price_num'])
+            self.assertIsNone(matrix.verified_price(p, source['docs']))
+            findings, checks = matrix.security_findings(p, source['docs'])
+            self.assertEqual(findings, [])
+            self.assertTrue(any(c['field_path'] == 'v336-bid-security-needs-verified-nmcd' for c in checks))
+        await self.assert_both(reg, 1)  # Only the independent, proven date event.
+        with self.connect() as con:
+            saved = json.loads(con.execute('SELECT card_fields_json FROM purchases WHERE reg_number=?', (reg,)).fetchone()[0])
+        self.assertEqual(saved['previous_prices'], prior['previous_prices'])
+        self.assertEqual(saved['price_evidence'], prior['price_evidence'])
+
+    async def test_semantic_context_relation_changes_once_without_capture_replay_churn(self):
+        reg = self.purchase()
+        self.soap(reg)
+        def version():
+            with self.connect() as con:
+                return sources.semantic_source_version(con, reg)
+        self.card_snapshot(reg, fields={'method': 'Закупка у единственного поставщика'})
+        before = version()
+        self.card_snapshot(reg, captured='2026-09-02T10:00:00+03:00',
+                           fields={'method': 'Закупка у единственного поставщика'})
+        self.assertEqual(version(), before)
+        self.card_snapshot(reg, captured='2026-10-02T10:00:00+03:00',
+                           fields={'method': 'Закупка у единственного поставщика'})
+        conflict = version()
+        self.assertNotEqual(conflict, before)
+        self.card_snapshot(reg, captured='2026-10-03T10:00:00+03:00',
+                           fields={'method': 'Закупка у единственного поставщика'})
+        self.assertEqual(version(), conflict)
+        await self.assert_both(reg, 0)
+        self.assertEqual(version(), conflict)
+
+    async def test_source_labelled_blank_purchase_has_semantic_fixed_point(self):
+        for number, with_card in enumerate((False, True), 1):
+            with self.subTest(with_card=with_card):
+                reg = self.purchase(number)
+                source_url = 'https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=' + reg
+                self.stale_purchase(reg, source='official_eis_getDocsIP', url=source_url)
+                self.soap(reg)
+                if with_card:
+                    self.card_snapshot(reg, fields={'method': 'Закупка у единственного поставщика'})
+                def version():
+                    with self.connect() as con:
+                        return sources.semantic_source_version(con, reg)
+                before = version()
+                await self.assert_both(reg, 1)
+                self.assertEqual(version(), before)
+                with self.connect() as con:
+                    row = con.execute('SELECT method,published_at,submission_start,submission_end FROM purchases WHERE reg_number=?',
+                                      (reg,)).fetchone()
+                self.assertEqual(tuple(row), ('', '', '', ''))
+
+    def test_capture_order_uses_actual_instants_and_requires_precision(self):
+        from v341_eis_facts import card_predates_notice
+        notice = {'publication': '2026-10-01T10:00:00+03:00', 'modified': '2026-10-10T10:00:00+03:00'}
+        for captured, expected in (
+            ('2026-10-01T06:59:59+00:00', True),
+            ('2026-10-01T08:00:00+01:00', False),
+            ('2026-10-01T09:00:00+00:00', False),
+            ('2026-10-02T10:00:00+03:00', False),
+            ('2026-10-01', False), ('2026-10-01T06:00:00', False), ('', False), ('invalid', False),
+        ):
+            with self.subTest(captured=captured):
+                self.assertIs(card_predates_notice(captured, notice), expected)
+        self.assertFalse(card_predates_notice('2026-10-01T00:00:00+00:00', {'publication': '2026-10-01'}))
 
 
 if __name__ == "__main__":

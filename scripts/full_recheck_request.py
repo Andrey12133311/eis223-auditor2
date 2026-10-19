@@ -1,6 +1,6 @@
 """Explicit, frozen full-dashboard recheck requests; no ordinary queue resets.
 
-This module owns only two additive SQLite tables. Request IDs are supplied by an
+This module owns only additive, request-scoped operational SQLite tables. Request IDs are supplied by an
 explicit operation/configuration, never inferred from an engine revision or a
 deployment. All runtime writes use the caller's transaction and never commit.
 Only ``create_request`` owns its transaction and requires an idle connection.
@@ -32,7 +32,9 @@ NULLABLE_METRICS = frozenset(("original_expected", "original_received"))
 REASONS = frozenset(("", "noncanonical_registration", "missing_purchase", "waiting_originals",
     "incomplete_read", "source_changed", "source_unavailable", "engine_changed", "engine_unavailable",
     "lease_expired", "interrupted", "sqlite_busy", "analysis_error", "unsupported_original", "blocked",
-    "missing_originals", "partial_or_unverified_documents", "interrupted_attempt"))
+    "missing_originals", "partial_or_unverified_documents", "interrupted_attempt",
+    "no_readable_documents", "no_verified_documents", "unverified_readable_documents",
+    "unreadable_documents", "source_incomplete", "unknown_original_coverage"))
 _REG = re.compile(r"3[0-9]{10}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9_.:/+\-]{1,256}\Z")
 _REQUEST_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,128}\Z")
@@ -44,6 +46,10 @@ class SnapshotError(RuntimeError):
 
 class StaleClaim(LookupError):
     """The exact attempt no longer has permission to persist results."""
+
+
+class TargetConflict(RuntimeError):
+    """A release cannot silently replace an equal or newer semantic target."""
 
 
 class Claim(str):
@@ -58,7 +64,7 @@ class Claim(str):
 
 
 def initialize(c):
-    """Add only the request/member tables and indexes; never commit or migrate."""
+    """Idempotently add operational tables/indexes; never rebuild or commit."""
     c.execute("""CREATE TABLE IF NOT EXISTS full_recheck_requests(
         request_id TEXT PRIMARY KEY, created_at REAL NOT NULL,
         source_captured_at REAL NOT NULL, db_snapshot_at REAL NOT NULL,
@@ -89,6 +95,94 @@ def initialize(c):
     """)
     c.execute("CREATE INDEX IF NOT EXISTS full_recheck_due ON full_recheck_members(request_id,status,next_retry_at,reg)")
     c.execute("CREATE INDEX IF NOT EXISTS full_recheck_reserved ON full_recheck_members(reg,status)")
+    c.execute("""CREATE TABLE IF NOT EXISTS full_recheck_targets(
+        request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation>0),
+        engine_signature TEXT NOT NULL, activated_at REAL NOT NULL,
+        FOREIGN KEY(request_id) REFERENCES full_recheck_requests(request_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS full_recheck_receipts(
+        request_id TEXT NOT NULL, reg TEXT NOT NULL, attempt_id TEXT NOT NULL,
+        lease_token TEXT NOT NULL, general_token TEXT NOT NULL,
+        result_token TEXT NOT NULL, source_version TEXT NOT NULL, engine_signature TEXT NOT NULL,
+        full_verified_read INTEGER NOT NULL, result_committed_at REAL NOT NULL,
+        metrics_json TEXT NOT NULL, PRIMARY KEY(request_id,reg,attempt_id))""")
+
+
+def engine_target(c, request_id):
+    if not _exists(c, "full_recheck_targets"):
+        return None
+    return _dict_one(c.execute("SELECT * FROM full_recheck_targets WHERE request_id=?", (_request_id(request_id),)))
+
+
+def _target_accepts(c, request_id, engine_signature, generation):
+    target = engine_target(c, request_id)
+    return target is None or (target["engine_signature"] == engine_signature and target["generation"] == generation)
+
+
+def activate_target(c, request_id, *, generation, engine_signature, now=None):
+    """CAS an explicitly authorized semantic correction, never a deployment ID.
+
+    Generation is monotonic by policy; hashes have no ordering. Equal generation
+    plus a different signature fails closed. An older process cannot downgrade.
+    Only the enabled, already frozen request is retargeted; membership is never
+    reread. A legacy completed flag cannot suppress this authorized catch-up.
+    """
+    _transaction(c)
+    _request_id(request_id)
+    _token(engine_signature)
+    if isinstance(generation, bool) or not isinstance(generation, int) or not 1 <= generation <= 1000000:
+        raise ValueError("A bounded positive semantic correction generation is required")
+    if not c.execute("SELECT 1 FROM full_recheck_requests WHERE request_id=?", (request_id,)).fetchone():
+        raise TargetConflict("The frozen request does not exist")
+    target = engine_target(c, request_id)
+    if target and (generation < target["generation"] or
+                   (generation == target["generation"] and engine_signature != target["engine_signature"])):
+        raise TargetConflict("The durable engine target is newer or incompatible")
+    if target and generation == target["generation"]:
+        return False
+    c.execute("""INSERT INTO full_recheck_targets VALUES(?,?,?,?)
+        ON CONFLICT(request_id) DO UPDATE SET generation=excluded.generation,
+        engine_signature=excluded.engine_signature,activated_at=excluded.activated_at
+        WHERE excluded.generation>full_recheck_targets.generation""",
+        (request_id, generation, engine_signature, _time(now)))
+    c.execute("UPDATE full_recheck_requests SET status='active' WHERE request_id=?", (request_id,))
+    return True
+
+
+def _archive_receipt(c, row):
+    """Immutable first receipt per attempt; no source text or legal findings."""
+    if not _exists(c, "full_recheck_receipts") or not row["result_token"] or not row["receipt_attempt_id"] or row["result_committed_at"] is None:
+        return
+    c.execute("""INSERT OR IGNORE INTO full_recheck_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (row["request_id"], row["reg"], row["receipt_attempt_id"], row["lease_token"], row["general_token"],
+         row["result_token"], row["result_source_version"], row["result_engine_signature"],
+         row["full_verified_read"], row["result_committed_at"],
+         json.dumps({key: row[key] for key in METRICS}, sort_keys=True, separators=(",", ":"))))
+
+
+def reopen_completed(c, request_id, *, engine_signature, generation, limit=32, now=None):
+    """Bounded completed-only repair; leave every pending/running lease alone.
+
+    Run on every enabled turn, even if old rolling code sets legacy status to
+    completed. Copy successful history atomically before reopening, so an old
+    claim implementation cannot erase it. No new request, quota or rule epoch.
+    """
+    _transaction(c)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_CANDIDATES:
+        raise ValueError("Catch-up page limit is out of bounds")
+    if not _target_accepts(c, request_id, engine_signature, generation) or engine_target(c, request_id) is None:
+        return 0
+    cursor = c.execute("""SELECT * FROM full_recheck_members WHERE request_id=? AND status='completed'
+        AND result_engine_signature<>? ORDER BY reg LIMIT ?""", (request_id, engine_signature, limit))
+    rows = [dict(zip((col[0] for col in cursor.description), row)) for row in cursor.fetchall()]
+    stamp = _time(now)
+    for row in rows:
+        _archive_receipt(c, row)
+        c.execute("""UPDATE full_recheck_members SET status='retry',reason='engine_changed',
+            updated_at=?,next_retry_at=0 WHERE request_id=? AND reg=? AND status='completed'
+            AND result_engine_signature<>?""", (stamp, request_id, row["reg"], engine_signature))
+    if rows:
+        c.execute("UPDATE full_recheck_requests SET status='active' WHERE request_id=?", (request_id,))
+    return len(rows)
 
 
 def _time(value=None):
@@ -152,6 +246,20 @@ def inventory(c, request_id):
         metrics_basis="latest_recorded_attempt_per_member", committed_new_findings=totals[0], committed_new_checks=totals[1],
         unique_attempted=totals[2], total_attempts=totals[3],
         expected_matches_actual=request["expected_count"] == request["actual_count"])
+    target = engine_target(c, request_id)
+    if target:
+        current = c.execute("""SELECT COUNT(*) FROM full_recheck_members WHERE request_id=?
+            AND status='completed' AND full_verified_read=1 AND result_committed_at IS NOT NULL
+            AND receipt_attempt_id=attempt_id AND result_token<>''
+            AND source_version<>'' AND source_version=result_source_version
+            AND engine_signature=result_engine_signature AND result_engine_signature=?""",
+            (request_id, target["engine_signature"])).fetchone()[0]
+        request.update(legacy_status=request["status"], target_generation=target["generation"],
+            target_engine_signature=target["engine_signature"], target_activated_at=target["activated_at"],
+            current_completed=current, current_pending=request["actual_count"]-current,
+            stale_completed=counts["completed"]-current,
+            coverage_basis="full_committed_receipt_for_target_engine",
+            status="completed" if current == request["actual_count"] else "active")
     return request
 
 
@@ -294,14 +402,16 @@ def _ordinary_blockers(c):
     return clauses
 
 
-def select_candidates(c, request_id, *, limit=8, now=None, after_reg=""):
+def select_candidates(c, request_id, *, limit=8, now=None, after_reg="", engine_signature=None, generation=None):
     """Read a bounded eligible page without reserving or resetting any queue."""
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_CANDIDATES:
         raise ValueError("Candidate limit is out of bounds")
+    if not _target_accepts(c, request_id, engine_signature, generation):
+        return []
     clauses = _ordinary_blockers(c)
     clauses.append("NOT EXISTS(SELECT 1 FROM full_recheck_members active WHERE active.reg=m.reg AND active.status='running')")
     sql = """SELECT m.reg FROM full_recheck_members m JOIN full_recheck_requests r ON r.request_id=m.request_id
-        WHERE m.request_id=? AND r.status='active' AND m.status IN ('pending','retry','waiting_originals')
+        WHERE m.request_id=? AND (r.status='active' OR EXISTS(SELECT 1 FROM full_recheck_targets t WHERE t.request_id=r.request_id)) AND m.status IN ('pending','retry','waiting_originals')
         AND m.next_retry_at<=? AND m.reg>? AND """ + " AND ".join(clauses) + " ORDER BY m.reg LIMIT ?"
     return [row[0] for row in c.execute(sql, (_request_id(request_id), _time(now), after_reg, limit))]
 
@@ -328,7 +438,7 @@ def _updated_epoch(value):
         return None
 
 
-def claim_member(c, request_id, reg, *, now=None, lease_seconds=300, general_token=None):
+def claim_member(c, request_id, reg, *, now=None, lease_seconds=300, general_token=None, engine_signature=None, generation=None):
     """CAS one member. A supplied normal claim must be fresh for this request.
 
     The caller must hold its per-reg execution lock plus a write transaction.
@@ -338,9 +448,11 @@ def claim_member(c, request_id, reg, *, now=None, lease_seconds=300, general_tok
     stamp, duration = _time(now), _lease_seconds(lease_seconds)
     _request_id(request_id)
     reg = str(reg)
+    if not _target_accepts(c, request_id, engine_signature, generation):
+        return None
     if not _REG.fullmatch(reg) or has_active_claim(c, reg):
         return None
-    request = c.execute("SELECT db_snapshot_at,campaign FROM full_recheck_requests WHERE request_id=? AND status='active'", (request_id,)).fetchone()
+    request = c.execute("SELECT db_snapshot_at,campaign FROM full_recheck_requests r WHERE request_id=? AND (status='active' OR EXISTS(SELECT 1 FROM full_recheck_targets t WHERE t.request_id=r.request_id))", (request_id,)).fetchone()
     if request is None:
         return None
     if not c.execute("SELECT 1 FROM purchases WHERE reg_number=?", (reg,)).fetchone():
@@ -370,6 +482,9 @@ def claim_member(c, request_id, reg, *, now=None, lease_seconds=300, general_tok
                 return None
     elif general_token is not None:
         return None
+    prior = _dict_one(c.execute("SELECT * FROM full_recheck_members WHERE request_id=? AND reg=?", (request_id, reg)))
+    if prior:
+        _archive_receipt(c, prior)
     attempt, lease = uuid.uuid4().hex, uuid.uuid4().hex
     changed = c.execute("""UPDATE full_recheck_members SET status='running',reason='',updated_at=?,
         next_retry_at=0,lease_token=?,lease_until=?,attempt_id=?,general_token=?,attempt_count=attempt_count+1,
@@ -449,11 +564,15 @@ def record_receipt(c, claim, *, source_version, engine_signature, result_token, 
         + " WHERE request_id=? AND reg=? AND attempt_id=? AND lease_token=? AND status='running'",
         (claim.attempt_id, result_token, source_version, engine_signature, int(full_verified_read), stamp,
          *values.values(), values["new_findings"], values["new_checks"], *_claim_where(claim)))
+    _archive_receipt(c, require_claim(c, claim, now=stamp))
 
 
 def _refresh_request(c, request_id):
-    c.execute("""UPDATE full_recheck_requests SET status='completed' WHERE request_id=? AND status='active'
-        AND NOT EXISTS(SELECT 1 FROM full_recheck_members WHERE request_id=? AND status<>'completed')""", (request_id, request_id))
+    mismatch = (" OR EXISTS(SELECT 1 FROM full_recheck_targets t WHERE t.request_id=m.request_id "
+                "AND t.engine_signature<>m.result_engine_signature)" if _exists(c, "full_recheck_targets") else "")
+    c.execute("UPDATE full_recheck_requests SET status='completed' WHERE request_id=? AND status='active' "
+        "AND NOT EXISTS(SELECT 1 FROM full_recheck_members m WHERE request_id=? AND (status<>'completed'"
+        + mismatch + "))", (request_id, request_id))
 
 
 def finish_member(c, claim, *, result_token):
@@ -465,6 +584,15 @@ def finish_member(c, claim, *, result_token):
     _transaction(c)
     identity = _claim_where(claim)
     _token(result_token)
+    row = _dict_one(c.execute("""SELECT * FROM full_recheck_members WHERE request_id=? AND reg=?
+        AND attempt_id=? AND lease_token=? AND status IN ('running','completed')""", identity))
+    target = engine_target(c, claim.request_id)
+    if row and _full_receipt(row, claim) and row["result_token"] == result_token and target and row["result_engine_signature"] != target["engine_signature"]:
+        _archive_receipt(c, row)
+        c.execute("""UPDATE full_recheck_members SET status='retry',reason='engine_changed',
+            next_retry_at=0,lease_until=0 WHERE request_id=? AND reg=? AND attempt_id=? AND lease_token=?""", identity)
+        c.execute("UPDATE full_recheck_requests SET status='active' WHERE request_id=?", (claim.request_id,))
+        return "retry"
     changed = c.execute("""UPDATE full_recheck_members SET status='completed',reason='',lease_until=0,
         next_retry_at=0 WHERE request_id=? AND reg=? AND attempt_id=? AND lease_token=?
         AND status IN ('running','completed') AND receipt_attempt_id=attempt_id AND result_token=?
@@ -474,6 +602,7 @@ def finish_member(c, claim, *, result_token):
     if changed != 1:
         raise StaleClaim("No matching fully verified result receipt to acknowledge")
     _refresh_request(c, claim.request_id)
+    return "completed"
 
 
 def defer_member(c, claim, *, status, reason, retry_after=600, metrics=None, now=None):
@@ -531,6 +660,13 @@ def expired_members(c, request_id, *, now=None, limit=64):
         (_request_id(request_id), _time(now), limit))]
 
 
+def _full_receipt(row, claim):
+    return (row["full_verified_read"] == 1 and row["receipt_attempt_id"] == claim.attempt_id
+        and bool(row["result_token"]) and row["result_committed_at"] is not None
+        and bool(row["source_version"]) and row["source_version"] == row["result_source_version"]
+        and bool(row["engine_signature"]) and row["engine_signature"] == row["result_engine_signature"])
+
+
 def recover_expired(c, claim, *, now=None):
     """Recover one exact lease only while caller holds its exclusive execution lock.
 
@@ -544,13 +680,9 @@ def recover_expired(c, claim, *, now=None):
         AND lease_token=? AND status='running' AND lease_until<=?""", (*_claim_where(claim), stamp)))
     if row is None:
         return None
-    complete = (row["full_verified_read"] == 1 and row["receipt_attempt_id"] == claim.attempt_id
-        and bool(row["result_token"]) and row["result_committed_at"] is not None
-        and bool(row["source_version"]) and row["source_version"] == row["result_source_version"]
-        and bool(row["engine_signature"]) and row["engine_signature"] == row["result_engine_signature"])
+    complete = _full_receipt(row, claim)
     if complete:
-        finish_member(c, claim, result_token=row["result_token"])
-        return "completed"
+        return finish_member(c, claim, result_token=row["result_token"])
     c.execute("""UPDATE full_recheck_members SET status='retry',reason='lease_expired',updated_at=?,
         next_retry_at=?,lease_until=0 WHERE request_id=? AND reg=? AND attempt_id=? AND lease_token=? AND status='running'""",
         (stamp, stamp, *_claim_where(claim)))
