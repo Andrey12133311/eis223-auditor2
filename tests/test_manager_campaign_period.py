@@ -55,6 +55,10 @@ class IdentityStore:
         return False
 
     def execute(self, sql, args=()):
+        if "SELECT COUNT(*) FROM account_thematic_batches" in " ".join(sql.split()):
+            owner, active_ids = args
+            count = sum(str(who) == str(owner) and batch in active_ids for who, batch in self.owners)
+            return Result([(count,)])
         if "SELECT manager_id FROM account_manager_teams" in sql:
             return Result([(MANAGER,)])
         if "INSERT INTO account_manager_campaign_targets" in sql:
@@ -95,6 +99,12 @@ class CampaignPeriodTests(unittest.TestCase):
         self.request = SimpleNamespace(app=SimpleNamespace(
             state=SimpleNamespace(eis223_manual_ns=self.ns)))
         self.identity = IdentityStore()
+        env = patch.dict("os.environ", {"EIS223_AUTH_ENFORCE": "true", "EIS223_ACCOUNTS_MOUNT": "true"})
+        env.start()
+        self.addCleanup(env.stop)
+        identity_connection = patch("scripts.account_api_v1.connect", lambda: self.identity)
+        identity_connection.start()
+        self.addCleanup(identity_connection.stop)
         for name, value in (
             ("connect", lambda: self.identity),
             ("require_origin", lambda request: None),
@@ -143,7 +153,8 @@ class CampaignPeriodTests(unittest.TestCase):
 
     def test_failed_setup_retry_preserves_period_and_owner(self):
         for suffix in "abc":
-            campaigns._insert_real_batch(self.ns, suffix * 24, ["docs"], ["ООО"])
+            campaigns._insert_real_batch(self.ns, suffix * 24, ["docs"], ["ООО"], owner_id=EMPLOYEE)
+            self.identity.owners.add((EMPLOYEE, suffix * 24))
         with self.assertRaises(HTTPException) as failure:
             campaigns.create(campaigns.CampaignCreate(**payload(
                 date_from="2026-10-01", date_to="2026-10-19")), self.request)
@@ -156,6 +167,9 @@ class CampaignPeriodTests(unittest.TestCase):
         visible = campaigns._format(rows[0])
         self.assertEqual((visible["date_from"], visible["date_to"]),
                          ("2026-10-01", "2026-10-19"))
+        with self.assertRaises(HTTPException) as still_full:
+            campaigns.retry(str(record["id"]), self.request)
+        self.assertEqual(still_full.exception.status_code, 429)
         with sqlite3.connect(self.file) as db:
             db.execute("UPDATE thematic_batches SET status='stopped' WHERE id=?", ("a" * 24,))
         result = campaigns.retry(str(record["id"]), self.request)
@@ -168,11 +182,21 @@ class CampaignPeriodTests(unittest.TestCase):
         self.assertEqual(stored, ("2026-10-01", "2026-10-19"))
         self.assertIn((EMPLOYEE, record["batch_id"]), self.identity.owners)
 
+    def test_manager_campaign_uses_assignee_capacity_not_foreign_active_batches(self):
+        for suffix in "abc":
+            campaigns._insert_real_batch(self.ns, suffix * 24, ["docs"], ["ООО"], owner_id=MANAGER)
+            self.identity.owners.add((MANAGER, suffix * 24))
+        response = campaigns.create(campaigns.CampaignCreate(**payload()), self.request)
+        self.assertIn((EMPLOYEE, response["batch_id"]), self.identity.owners)
+        self.assertNotIn((MANAGER, response["batch_id"]), self.identity.owners)
+        with sqlite3.connect(self.file) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM thematic_batches WHERE status='active'").fetchone()[0], 4)
+
     def test_repeated_insert_keeps_existing_scope(self):
         identifier = "d" * 24
         for _ in range(2):
             campaigns._insert_real_batch(self.ns, identifier, ["dates"], ["ООО"],
-                                         "2026-10-01", "2026-10-19")
+                                         "2026-10-01", "2026-10-19", owner_id=EMPLOYEE)
         with sqlite3.connect(self.file) as db:
             rows = db.execute("SELECT date_from,date_to FROM thematic_batches").fetchall()
         self.assertEqual(rows, [("2026-10-01", "2026-10-19")])

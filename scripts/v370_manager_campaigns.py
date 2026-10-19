@@ -22,6 +22,7 @@ router=APIRouter(prefix="/manager/campaigns",tags=["manager-thematic-targets"])
 staff_router=APIRouter(prefix="/me/campaign-goals",tags=["staff-thematic-targets"])
 
 from v342_thematic_queue import CATEGORIES, LEGAL_FORMS
+import v360_thematic_ownership as ownership
 from thematic_period import normalize_period
 
 class CampaignCreate(BaseModel):
@@ -63,8 +64,8 @@ def _engine(request):
     if not ns:raise HTTPException(503,"Серверный обработчик ЕИС не подключён")
     return ns
 
-def _insert_real_batch(ns,batch,categories,forms,date_from="",date_to=""):
-    """Idempotent; enforce v342 max-three active checks in one sqlite transaction."""
+def _insert_real_batch(ns,batch,categories,forms,date_from="",date_to="",*,owner_id=None):
+    """Idempotent; enforce the owner's active-check limit under the SQLite lock."""
     from v342_thematic_queue import db,now
     date_from,date_to=normalize_period(date_from,date_to)
     con=db(ns)
@@ -73,9 +74,7 @@ def _insert_real_batch(ns,batch,categories,forms,date_from="",date_to=""):
         exists=con.execute("SELECT 1 FROM thematic_batches WHERE id=?",(batch,)).fetchone()
         if exists:
             con.commit();return "active"
-        count=con.execute("SELECT COUNT(*) FROM thematic_batches WHERE status='active'").fetchone()[0]
-        if count>=3:
-            raise HTTPException(429,"Уже работают три тематические проверки. Завершите одну перед запуском следующей.")
+        ownership.require_start_capacity(con,owner_id)
         con.execute(
             """INSERT INTO thematic_batches
                (id,categories,created_at,status,legal_forms,date_from,date_to)
@@ -176,7 +175,7 @@ def create(data:CampaignCreate,request:Request):
     # retryable setup failure; never falsely report that checking has started.
     try:
         _insert_real_batch(ns,batch,data.categories,data.legal_forms,
-                           data.date_from,data.date_to)
+                           data.date_from,data.date_to,owner_id=employee)
     except Exception as exc:
         with connect() as db:
             db.execute("UPDATE account_manager_campaign_targets SET status='setup_failed' WHERE id=%s",(goal,))
@@ -341,7 +340,7 @@ def retry(identifier:str,request:Request):
             raise HTTPException(409,"Это поручение не ожидает запуска")
         batch,categories,forms=row[3],row[4],row[5]
         date_from,date_to=row[7],row[8]
-    _insert_real_batch(ns,batch,categories,forms,date_from,date_to)
+    _insert_real_batch(ns,batch,categories,forms,date_from,date_to,owner_id=row[2])
     with connect() as db:
         db.execute("UPDATE account_manager_campaign_targets SET status='active' WHERE id=%s",(row[0],))
         _audit(db,actor,row[2],"campaign",row[0],"retry_start")

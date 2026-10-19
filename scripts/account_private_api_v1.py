@@ -1,4 +1,5 @@
 """Private staging endpoints; all access is scoped to authenticated owner."""
+import re
 from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException, Request, Response
 from scripts.account_api_v1 import connect, current_account, require_origin
@@ -67,6 +68,11 @@ def unlink_batch(batch_id: str, request: Request, response: Response):
     response.headers.update(no_store_headers())
     if not batch_id or len(batch_id) > 200 or not batch_id.isascii() or not all(c.isalnum() or c in "-_" for c in batch_id):
         raise HTTPException(422, "Некорректный идентификатор очереди")
+    if re.fullmatch(r"[0-9a-f]{24}", batch_id):
+        # A real active batch must retain its owner while it is running.
+        raise HTTPException(409,
+            "Откройте проверку в разделе «Тематические проверки» и выберите "
+            "«Остановить проверку» или «Удалить очередь».")
     with connect() as db:
         row = db.execute(
             """DELETE FROM account_thematic_batches
@@ -88,6 +94,12 @@ def save_batch(batch_id: str, request: Request, response: Response):
         raise HTTPException(422, "Некорректный идентификатор очереди")
     if batch_id.startswith("personal-"):
         raise HTTPException(409, "Используйте создание личной очереди")
+    if re.fullmatch(r"[0-9a-f]{24}", batch_id):
+        # Real ownership is assigned only by the authenticated launch flows
+        # or the guarded administrator adoption of an unassigned old batch.
+        raise HTTPException(409,
+            "Создайте свою проверку в разделе «Тематические проверки». "
+            "Привязка запущенной проверки по идентификатору недоступна.")
     with connect() as db:
         db.execute(
             """INSERT INTO account_thematic_batches(user_id,batch_id)
