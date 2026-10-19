@@ -393,6 +393,55 @@ class FunnelRuntime(unittest.TestCase):
 
 
 class FunnelIsolation(unittest.TestCase):
+    def test_analyzer_kind_counts_are_bounded_disjoint_and_do_not_mutate_outputs(self):
+        rows = [{"kind": "violation"}, {"kind": "check"}, {"kind": "risk"},
+                {"kind": "PRIVATE-UNKNOWN", "evidence": "SECRET"}, {}, None, "SECRET"]
+        before = deepcopy(rows)
+        event = funnel.new("general")
+        token = funnel.CURRENT.set(event)
+        try:funnel.observe("analyzer_results", rows)
+        finally:funnel.CURRENT.reset(token)
+        self.assertEqual(rows, before)
+        self.assertEqual(event["counts"], dict(analyzer_candidates=7, analyzer_violation=1,
+            analyzer_check=1, analyzer_risk=1, analyzer_other=2, analyzer_invalid=2))
+        output = io.StringIO()
+        with redirect_stdout(output):funnel.emit(event, "analysis")
+        self.assertNotIn("PRIVATE", output.getvalue())
+        self.assertNotIn("SECRET", output.getvalue())
+        self.assertEqual(len(records(output)), 1)
+
+    def test_analyzer_diagnostics_never_read_evidence_or_freeform_kind_objects(self):
+        class Row(dict):
+            def get(self, key, *args):
+                if key != "kind":raise AssertionError("only fixed kind can be inspected")
+                return super().get(key, *args)
+        class Unprintable:
+            def __str__(self):raise AssertionError("do not serialize an arbitrary kind")
+        event = funnel.new("thematic")
+        token = funnel.CURRENT.set(event)
+        try:funnel.observe("analyzer_results", [Row(kind=Unprintable(), evidence="SECRET")])
+        finally:funnel.CURRENT.reset(token)
+        self.assertEqual(event["counts"], dict(analyzer_candidates=1, analyzer_other=1))
+
+    def test_fas_log_describes_presence_and_case_scope_without_claiming_verification(self):
+        import v324_fas_practice as fas
+        cases = [{"classification": "needs_scope", "scope": None},
+                 {"classification": "review", "scope": "verified_scope"}]
+        ns = {"analyze": lambda *_: [{"kind": "risk"}], "build_checks": lambda *_: []}
+        fas.install(ns)
+        output = io.StringIO()
+        with patch.object(fas, "_cases", return_value=cases), \
+             patch.object(fas, "_admission_cases", return_value=[]), redirect_stdout(output):
+            result = ns["analyze"]({"reg": "PRIVATE-IDENTIFIER", "price_num": 100}, [])
+        line = output.getvalue()
+        self.assertEqual(result, [{"kind": "risk"}])
+        for expected in ("reg=unavailable", "price_present=True", "agreement_scope_confirmed=True",
+                         "agreement_cases=2", "definitive_agreement_cases=0", "collective_admission_cases=0",
+                         "agreements_without_confirmed_scope=1", "agreements_application_duty_unproven=1"):
+            self.assertIn(expected, line)
+        for forbidden in ("PRIVATE", "nmcd_verified", "sme_confirmed", "verified_extra_documents"):
+            self.assertNotIn(forbidden, line)
+
     def test_fixed_cardinality_no_text_reads_and_no_per_document_output(self):
         class Document(dict):
             def get(self, key, *args):

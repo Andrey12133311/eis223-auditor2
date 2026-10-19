@@ -205,14 +205,21 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             path = next((self.folder / "eis223_official_originals" / reg).glob("*/receipt.json"))
             if index % 2:path.write_text("invalid receipt JSON")
             else:path.unlink()
+        # High-water still blocks pending admissions, but one healthy terminal
+        # can use an existing worker before stale receipt hints are cleared.
+        direct = general.claim_next(self.ns)
+        self.assertEqual(direct, regs[16])
+        with self.connect() as con:
+            self.assertEqual(general.ready_work(con), 17)
         self.assertIsNone(general.claim_next(self.ns))
         with self.connect() as con:
-            self.assertEqual(general.ready_work(con), 0)
+            self.assertEqual(general.ready_work(con), 1)
         for reg in regs[:16]:
             self.assertEqual((self.row(reg)["state"], self.row(reg)["receipt_ready"]), ("pending", 0))
-        self.assertEqual(general.refresh_changed(dict(self.ns)), 4)
+        general.mark(self.ns, direct, "completed", general.review_watermark(self.ns, direct))
+        self.assertEqual(general.refresh_changed(dict(self.ns)), 3)
         claim = general.claim_next(dict(self.ns))
-        self.assertIn(claim, regs[16:])
+        self.assertIn(claim, regs[17:])
         self.assertTrue(claim.reservation_token)
 
     async def test_one_stored_archive_member_does_not_hide_the_other_member(self):
