@@ -107,14 +107,21 @@ class CardEventLoopTests(unittest.IsolatedAsyncioTestCase):
         entered, release = threading.Event(), threading.Event()
         loop_thread = threading.get_ident()
         thread_ids, review_flags, health_messages, card_messages = [], [], [], []
+        legal_flags = []
+        legal_snapshot = {"state": "pending", "docs_read": 3}
 
         def read(ns, reg):
             thread_ids.append(threading.get_ident())
             return "saved-data"
 
-        def render(reg, data, account_review=False):
+        def read_legal_state(ns, reg):
+            thread_ids.append(threading.get_ident())
+            return legal_snapshot
+
+        def render(reg, data, account_review=False, legal_review=None):
             thread_ids.append(threading.get_ident())
             review_flags.append(account_review)
+            legal_flags.append(legal_review)
             entered.set()
             release.wait(2)
             return "<html>saved card</html>"
@@ -133,7 +140,9 @@ class CardEventLoopTests(unittest.IsolatedAsyncioTestCase):
             health_messages.append(message)
 
         app = cards.FastCardASGI(inner, {})
-        with patch.object(cards, "read", side_effect=read), patch.object(cards, "render", side_effect=render):
+        with patch.object(cards, "read", side_effect=read), \
+             patch.object(cards, "read_legal_state", side_effect=read_legal_state), \
+             patch.object(cards, "render", side_effect=render):
             task = asyncio.create_task(app({"type": "http", "method": "GET",
                 "path": "/check-new/32610000001", "eis223_account_id": "owner"}, receive, card_send))
             try:
@@ -146,6 +155,7 @@ class CardEventLoopTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await task
         self.assertEqual(review_flags, [True])
+        self.assertEqual(legal_flags, [legal_snapshot])
         self.assertEqual(card_messages[0]["status"], 200)
         self.assertIn((b"cache-control", b"no-store"), card_messages[0]["headers"])
         self.assertIn(b"saved card", card_messages[-1]["body"])

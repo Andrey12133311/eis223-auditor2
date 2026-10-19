@@ -372,84 +372,85 @@ def apply_metadata(ns, reg, metadata):
     db = ns["conn"]()
     db.row_factory = sqlite3.Row
     try:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute("""CREATE TABLE IF NOT EXISTS v314_eis_metadata(
-            reg TEXT PRIMARY KEY, metadata_json TEXT NOT NULL, captured_at TEXT NOT NULL)""")
-        stamp = datetime.now(timezone.utc).isoformat()
-        row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-        if row is None:
-            db.commit()
-            return False
-        p = dict(row)
-        changes = {}
-        name = company(metadata.get("customer")) or _name(metadata.get("customer"))
-        current_name = _name(p.get("customer"))
-        extension = (customer_name_extension(current_name, name) and
-                     not metadata.get("customer_identity_conflict"))
-        prior = db.execute("SELECT name,inn FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
-        if extension:
-            incoming_inn = valid_inn(metadata.get("customer_inn"))
-            existing_inns = {valid_inn(p.get("customer_inn"))}
-            if prior:
-                existing_inns.add(valid_inn(prior["inn"]))
-                if not (customer_name_extension(prior["name"], name) or
-                        compact(prior["name"]).casefold() == compact(name).casefold()):
+        from audit_write_guard import guarded_transaction
+        with guarded_transaction(db):
+            db.execute("""CREATE TABLE IF NOT EXISTS v314_eis_metadata(
+                reg TEXT PRIMARY KEY, metadata_json TEXT NOT NULL, captured_at TEXT NOT NULL)""")
+            stamp = datetime.now(timezone.utc).isoformat()
+            row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+            if row is None:
+                db.commit()
+                return False
+            p = dict(row)
+            changes = {}
+            name = company(metadata.get("customer")) or _name(metadata.get("customer"))
+            current_name = _name(p.get("customer"))
+            extension = (customer_name_extension(current_name, name) and
+                         not metadata.get("customer_identity_conflict"))
+            prior = db.execute("SELECT name,inn FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
+            if extension:
+                incoming_inn = valid_inn(metadata.get("customer_inn"))
+                existing_inns = {valid_inn(p.get("customer_inn"))}
+                if prior:
+                    existing_inns.add(valid_inn(prior["inn"]))
+                    if not (customer_name_extension(prior["name"], name) or
+                            compact(prior["name"]).casefold() == compact(name).casefold()):
+                        extension = False
+                existing_inns.discard("")
+                if len(existing_inns) > 1 or (incoming_inn and existing_inns and incoming_inn not in existing_inns):
                     extension = False
-            existing_inns.discard("")
-            if len(existing_inns) > 1 or (incoming_inn and existing_inns and incoming_inn not in existing_inns):
-                extension = False
-        if name and (not current_name or extension or (
-                current_name != compact(p.get("customer")) and name == current_name)):
-            changes["customer"] = name
-            if callable(ns.get("org_form")):
-                changes["org_form"] = ns["org_form"](name)
-        identity = lambda value: re.sub(r"[^а-яёa-z0-9]", "", re.sub(
-            r"\s*\([^)]*\)\s*$", "", _name(value)).casefold())
-        same = bool(name and identity(current_name) == identity(name))
-        if name and ("customer" in changes or same):
-            inn = valid_inn(metadata.get("customer_inn"))
-            if inn and not valid_inn(p.get("customer_inn")):
-                changes["customer_inn"] = inn
-            # Official card evidence remains authoritative; keep document provenance.
-            db.execute("""INSERT INTO v311_verified_buyers
-                (reg,name,inn,evidence_page,evidence_source,captured_at) VALUES(?,?,?,?,?,?)
-                ON CONFLICT(reg) DO UPDATE SET
-                    inn=CASE WHEN v311_verified_buyers.inn='' THEN excluded.inn
-                             ELSE v311_verified_buyers.inn END
-                WHERE v311_verified_buyers.name=excluded.name""",
-                (reg,name,inn,metadata.get("source_url", ""),"official_eis_document",stamp))
-        if extension and "customer" in changes and prior:
-            db.execute("""UPDATE v311_verified_buyers SET name=?,evidence_page=?,
-                evidence_source='official_eis_document',captured_at=? WHERE reg=?""",
-                (name, metadata.get("source_url", ""), stamp, reg))
-        title = subject(metadata.get("title"))
-        if title and not subject(p.get("title")):
-            changes["title"] = title
-        # Only an explicit number extracted from an actual EIS original can
-        # fill a missing price; keep the earlier valid NMCD untouched.
-        from v335_price_recovery import price_changes,money
-        if money(metadata.get("price")):
-            changes.update(price_changes(p,metadata))
-        if changes:
-            try:
-                card = json.loads(p.get("card_fields_json") or "{}")
-                summary = card.setdefault("summary", {})
-                for key in ("customer", "customer_inn", "title", "price", "price_num"):
-                    if key in changes:
-                        summary[key] = changes[key]
-                if "price" in changes and money(changes["price"])==money(metadata.get("price")):
-                    summary["price_kind"]=metadata.get("price_kind") or "nmcd"
-                card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
-                changes["card_fields_json"] = json.dumps(card,ensure_ascii=False)
-            except (ValueError,TypeError,AttributeError):
-                pass
-            db.execute("UPDATE purchases SET " + ",".join(k+"=?" for k in changes) +
-                       " WHERE reg_number=?", (*changes.values(),reg))
-        db.execute("""INSERT INTO v314_eis_metadata(reg,metadata_json,captured_at) VALUES(?,?,?)
-            ON CONFLICT(reg) DO UPDATE SET metadata_json=excluded.metadata_json,
-                captured_at=excluded.captured_at""",(reg,json.dumps(metadata,ensure_ascii=False),stamp))
-        db.commit()
-        return bool(changes)
+            if name and (not current_name or extension or (
+                    current_name != compact(p.get("customer")) and name == current_name)):
+                changes["customer"] = name
+                if callable(ns.get("org_form")):
+                    changes["org_form"] = ns["org_form"](name)
+            identity = lambda value: re.sub(r"[^а-яёa-z0-9]", "", re.sub(
+                r"\s*\([^)]*\)\s*$", "", _name(value)).casefold())
+            same = bool(name and identity(current_name) == identity(name))
+            if name and ("customer" in changes or same):
+                inn = valid_inn(metadata.get("customer_inn"))
+                if inn and not valid_inn(p.get("customer_inn")):
+                    changes["customer_inn"] = inn
+                # Official card evidence remains authoritative; keep document provenance.
+                db.execute("""INSERT INTO v311_verified_buyers
+                    (reg,name,inn,evidence_page,evidence_source,captured_at) VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(reg) DO UPDATE SET
+                        inn=CASE WHEN v311_verified_buyers.inn='' THEN excluded.inn
+                                 ELSE v311_verified_buyers.inn END
+                    WHERE v311_verified_buyers.name=excluded.name""",
+                    (reg,name,inn,metadata.get("source_url", ""),"official_eis_document",stamp))
+            if extension and "customer" in changes and prior:
+                db.execute("""UPDATE v311_verified_buyers SET name=?,evidence_page=?,
+                    evidence_source='official_eis_document',captured_at=? WHERE reg=?""",
+                    (name, metadata.get("source_url", ""), stamp, reg))
+            title = subject(metadata.get("title"))
+            if title and not subject(p.get("title")):
+                changes["title"] = title
+            # Only an explicit number extracted from an actual EIS original can
+            # fill a missing price; keep the earlier valid NMCD untouched.
+            from v335_price_recovery import price_changes,money
+            if money(metadata.get("price")):
+                changes.update(price_changes(p,metadata))
+            if changes:
+                try:
+                    card = json.loads(p.get("card_fields_json") or "{}")
+                    summary = card.setdefault("summary", {})
+                    for key in ("customer", "customer_inn", "title", "price", "price_num"):
+                        if key in changes:
+                            summary[key] = changes[key]
+                    if "price" in changes and money(changes["price"])==money(metadata.get("price")):
+                        summary["price_kind"]=metadata.get("price_kind") or "nmcd"
+                    card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
+                    changes["card_fields_json"] = json.dumps(card,ensure_ascii=False)
+                except (ValueError,TypeError,AttributeError):
+                    pass
+                db.execute("UPDATE purchases SET " + ",".join(k+"=?" for k in changes) +
+                           " WHERE reg_number=?", (*changes.values(),reg))
+            db.execute("""INSERT INTO v314_eis_metadata(reg,metadata_json,captured_at) VALUES(?,?,?)
+                ON CONFLICT(reg) DO UPDATE SET metadata_json=excluded.metadata_json,
+                    captured_at=excluded.captured_at""",(reg,json.dumps(metadata,ensure_ascii=False),stamp))
+            db.commit()
+            return bool(changes)
     except Exception:
         db.rollback()
         raise

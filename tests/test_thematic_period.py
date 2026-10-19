@@ -67,6 +67,12 @@ class QueuePeriods(unittest.TestCase):
         c.row_factory = sqlite3.Row
         return c
 
+    def start_selected(self, item):
+        self.assertTrue(fast._start_item(self.ns, item))
+        source, engine = fast._watermark(self.ns, item["reg"])
+        item.update(source_version=source, semantic_version=source, engine_signature=engine)
+        return item
+
     def purchase(self, suffix, published, customer="ООО Пример", ready=True):
         reg = f"326100{suffix:05d}"
         with self.connect() as c:
@@ -214,6 +220,7 @@ class QueuePeriods(unittest.TestCase):
         self.campaign("2026-10-10", "2026-10-10")
         first = self.purchase(1, "2026-10-10")
         initial = fast._prepare(self.ns)
+        self.start_selected(initial[0])
         self.assertEqual([item["reg"] for item in initial], [first])
         second = self.purchase(2, "2026-10-10T23:59:00+03:00")
         self.purchase(3, "2026-10-11")
@@ -233,7 +240,7 @@ class QueuePeriods(unittest.TestCase):
     def test_scope_guard_and_persistence_reject_interleaved_metadata_writer(self):
         self.campaign("2026-10-10", "2026-10-10")
         reg = self.purchase(1, "2026-10-10")
-        selected = fast._prepare(self.ns)[0]
+        selected = self.start_selected(fast._prepare(self.ns)[0])
         historical = (self.batch, reg, "dates", "Ранее подтверждённый эпизод", "Норма", "Сохранённый источник")
         with self.connect() as c:
             c.execute("INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence) VALUES(?,?,?,?,?,?)", historical)
@@ -285,12 +292,12 @@ class QueuePeriods(unittest.TestCase):
         fast._persist(self.ns, [(selected, "completed", [later], "Проверено")])
         with self.connect() as c:
             self.assertEqual([tuple(row) for row in c.execute("SELECT batch_id,reg,category,title,law,evidence FROM thematic_findings ORDER BY rowid")], saved)
-            self.assertEqual(c.execute("SELECT status FROM thematic_items WHERE reg=?", (reg,)).fetchone()[0], "outside_period")
+            self.assertEqual(c.execute("SELECT status FROM thematic_items WHERE reg=?", (reg,)).fetchone()[0], "completed")
 
     def test_growth_diagnostic_reports_only_committed_unique_rows(self):
         self.campaign()
         reg = self.purchase(1, "2026-10-10")
-        selected = fast._prepare(self.ns)[0]
+        selected = self.start_selected(fast._prepare(self.ns)[0])
         finding = {"category": "dates", "title": "Подтверждённый эпизод",
                    "law": "Норма", "evidence": "Оригинал ЕИС"}
         messages = []
@@ -310,6 +317,8 @@ class QueuePeriods(unittest.TestCase):
             fast._persist(self.ns, [result])
             # Force the duplicate through to SQLite's UNIQUE constraint to
             # verify that INSERT OR IGNORE does not create a growth event.
+            with self.connect() as c:
+                c.execute("UPDATE thematic_items SET status='running',reservation_token=? WHERE reg=?", (selected["reservation_token"], reg))
             with patch("v333_dedup_ui._same_finding", return_value=False):
                 fast._persist(self.ns, [result])
         self.assertEqual(len(messages), 1)
@@ -330,13 +339,14 @@ class QueuePeriods(unittest.TestCase):
                               (batch, reg, thematic.now(), 1 if reg == ready else 0, 1 if reg == ready else 0))
         items = fast._prepare(self.ns)
         self.assertEqual([(item["batch"], item["reg"]) for item in items], [(self.batch, ready)])
+        self.start_selected(items[0])
         fast._persist(self.ns, [(items[0], "completed", [], "Проверено")])
         self.assertEqual(fast._prepare(self.ns), [])
         fast.install(self.ns)
         self.assertEqual(fast._prepare(self.ns), [])
-        with self.connect() as c:
-            c.execute("INSERT INTO docs(reg_number,local_path,status) VALUES(?,?,'checked')", (ready, "/fixture/new.pdf"))
-        self.assertEqual([item["reg"] for item in fast._prepare(self.ns)], [ready])
+        # An engine change (not a fake nonexistent path) requests one review.
+        with patch.object(fast, "engine_signature", return_value="new-legal-engine"):
+            self.assertEqual([item["reg"] for item in fast._prepare(self.ns)], [ready])
 
     def test_migration_preserves_existing_all_time_campaign_and_saved_evidence(self):
         self.campaign()

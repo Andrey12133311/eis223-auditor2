@@ -168,8 +168,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
     def age(self, reg, seconds):
         timestamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
         with self.connection() as c:
-            c.execute("UPDATE thematic_items SET updated_at=? WHERE batch_id=? AND reg=?",
-                      (timestamp, self.batch, reg))
+            c.execute("UPDATE thematic_items SET updated_at=?,next_retry_at=MAX(0,next_retry_at-?) WHERE batch_id=? AND reg=?",
+                      (timestamp, seconds, self.batch, reg))
 
     def short_busy_timeout(self):
         def opened(ns):
@@ -211,7 +211,7 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fast._prepare(self.ns), [])
         # Repeating the complete audit never creates another copy of either act.
         with self.connection() as c:
-            c.execute("UPDATE thematic_items SET last_analysis_version=0")
+            c.execute("UPDATE thematic_items SET last_engine_signature='previous-engine'")
         await fast.faster_tick(self.ns)
         self.assertEqual(len(self.findings(reg)), 2)
 
@@ -231,7 +231,7 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.item(reg)["last_source_version"], first_version)
         self.assertEqual(fast._prepare(self.ns), [])
 
-    async def test_restored_original_at_same_path_and_id_releases_waiting_immediately(self):
+    async def test_restored_original_at_same_path_and_id_recovers_after_deadline(self):
         reg = self.purchase()
         doc_id, path = self.document(reg)
         await fast.faster_tick(self.ns)
@@ -242,6 +242,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.findings(reg)), 1)
         self.assertEqual(fast._prepare(self.ns), [])
         path.write_bytes(data)
+        self.assertEqual(fast._prepare(self.ns), [])
+        self.age(reg, 100)
         self.assertEqual(await fast.faster_tick(self.ns), 1)
         self.assertEqual(self.item(reg)["status"], "completed")
         self.assertEqual(len(self.findings(reg)), 1)
@@ -264,7 +266,9 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.ns["analyze"] = analyzer
         await fast.faster_tick(self.ns)
         self.assertEqual(len(self.findings(reg)), 1)
-        self.assertEqual([r["reg"] for r in fast._prepare(self.ns)], [reg])
+        reserved = fast._prepare(self.ns)
+        self.assertEqual([r["reg"] for r in reserved], [reg])
+        fast._release_items(self.ns, reserved)
         await fast.faster_tick(self.ns)
         self.assertEqual(len(self.findings(reg)), 2)
         self.assertEqual(fast._prepare(self.ns), [])
@@ -361,7 +365,7 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
                 await self.wait_event(quick_saved)
                 self.assertFalse(task.done(), "The fast result must commit before the blocked review finishes")
                 self.assertEqual(self.item(quick)["status"], "completed")
-                self.assertEqual(self.item(slow)["status"], "queued")
+                self.assertEqual(self.item(slow)["status"], "running")
                 self.assertEqual(await asyncio.wait_for(task, 3), 2)
                 self.assertFalse(finished.is_set(), "The physical analyzer thread should still be blocked")
                 self.assertEqual((self.item(slow)["status"], self.item(slow)["retry_attempts"]), ("retry", 1))
@@ -383,7 +387,7 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.findings(slow)), 1)
         self.assertEqual(len(self.findings(quick)), 1)
 
-    async def test_no_usable_text_is_retry_and_new_evidence_bypasses_backoff(self):
+    async def test_no_usable_text_is_retry_and_new_evidence_preserves_backoff(self):
         reg = self.purchase()
         doc_id, _ = self.document(reg)
         self.ns["extract_text"] = lambda path: ""
@@ -396,6 +400,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fast._prepare(self.ns), [])
         self.document(reg, TEXT_B, doc_id=doc_id)
         self.ns["extract_text"] = self.extract
+        self.assertEqual(fast._prepare(self.ns), [])
+        self.age(reg, fast.MAX_RETRY_SECONDS + 1)
         await fast.faster_tick(self.ns)
         self.assertEqual(self.item(reg)["status"], "completed")
         self.assertEqual(len(self.findings(reg)), 1)
@@ -427,6 +433,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         reg = self.purchase()
         self.document(reg)
         items = fast._prepare(self.ns)
+        for item in items:
+            self.assertTrue(fast._start_item(self.ns, item))
         blocker = self.connect()
         blocker.execute("BEGIN IMMEDIATE")
         blocked = threading.Event()
@@ -443,10 +451,11 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
 
         try:
             with self.short_busy_timeout(), patch.object(fast, "_prepare", return_value=items), \
+                    patch.object(fast, "_start_item", return_value=True), \
                     patch.object(fast, "_persist", new=persist):
                 task = asyncio.create_task(fast.faster_tick(self.ns))
                 await self.wait_event(blocked)
-                self.assertEqual(self.item(reg)["status"], "queued")
+                self.assertEqual(self.item(reg)["status"], "running")
                 self.assertEqual(self.item(reg)["last_source_version"], "")
                 self.assertEqual(self.findings(reg), [])
                 blocker.rollback()
@@ -462,6 +471,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.document(first)
         self.document(second)
         items = fast._prepare(self.ns)
+        for item in items:
+            self.assertTrue(fast._start_item(self.ns, item))
         blocker = self.connect()
         blocker.execute("BEGIN IMMEDIATE")
         ready = asyncio.Event()
@@ -488,6 +499,7 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         try:
             with self.short_busy_timeout(), patch.object(fast, "DB_RETRY_DELAYS", (.01, .01)), \
                     patch.object(fast, "_prepare", return_value=items), \
+                    patch.object(fast, "_start_item", return_value=True), \
                     patch.object(fast, "_persist", new=persist), \
                     patch.object(thematic, "independent_review", side_effect=review):
                 self.assertEqual(await asyncio.wait_for(fast.faster_tick(self.ns), 3), 1)
@@ -498,6 +510,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.item(first)["last_source_version"], "")
         self.assertEqual(self.item(second)["status"], "completed")
         self.assertEqual([row["reg"] for row in self.findings()], [second])
+        self.assertEqual(fast._prepare(self.ns), [])
+        self.age(first, 100)
         await fast.faster_tick(self.ns)
         self.assertEqual(self.item(first)["status"], "completed")
         self.assertEqual(len(self.findings()), 2)
@@ -517,6 +531,8 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.findings(second)), 1)
         with self.connection() as c:
             c.execute("DROP TRIGGER fixture_fail_update")
+        self.assertEqual(fast._prepare(self.ns), [])
+        self.age(first, 100)
         await fast.faster_tick(self.ns)
         self.assertEqual(len(self.findings()), 2)
 
@@ -592,8 +608,9 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         historical = self.findings(reg)
         with self.connection() as c:
             c.execute("UPDATE thematic_batches SET date_from='2026-10-19',date_to='2026-10-19'")
-            c.execute("UPDATE thematic_items SET last_analysis_version=0")
+            c.execute("UPDATE thematic_items SET last_engine_signature='previous-engine'")
         item = fast._prepare(self.ns)[0]
+        self.assertTrue(fast._start_item(self.ns, item))
         state, findings = await thematic.independent_review(self.ns, reg, ["dates"])
         self.assertEqual(state, "completed")
         with self.connection() as c:

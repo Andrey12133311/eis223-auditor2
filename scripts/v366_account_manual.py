@@ -302,9 +302,17 @@ def _read_only_status(ns, entries):
                 "customer_inn":customer_inn,
                 "violation_types":sorted(labels)[:40],
             })
-        return data
     finally:
         conn.close()
+    from scripts.v343_fast_cards import intake_legal_state
+    for item in data:
+        if item["legal_review_state"]!="unknown":continue
+        intake=intake_legal_state(ns,item["reg_number"])
+        if not intake:continue
+        item["legal_review_state"]=intake["state"]
+        item["legal_review_documents"]=intake["documents_read"]
+        item["legal_review_completed"]=(intake["state"]=="completed" and intake["documents_read"]>0)
+    return data
 
 
 @router.get("")

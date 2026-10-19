@@ -116,12 +116,20 @@ def progress(request: Request, response: Response):
     for item in results:
         documents = int(item.get("documents_checked") or 0)
         loaded = int(item.get("documents_found") or 0)
-        if item.get("legal_review_completed"):
-            step = "Анализ завершён"
-        elif item.get("legal_review_state") in ("running", "processing"):
-            step = "Проверяются документы"
+        legal_state = item.get("legal_review_state")
+        if legal_state in ("pending", "queued"):
+            step = "Юридическая проверка в очереди"
+        elif legal_state in ("running", "processing"):
+            step = "Идёт юридическая проверка"
+        elif legal_state in ("failed", "error"):
+            step = "Ошибка юридической проверки"
+        elif legal_state == "no_readable_documents":
+            step = "Не удалось прочитать документы для юридической проверки"
+        elif legal_state == "completed":
+            step = ("Юридическая проверка завершена" if int(item.get("legal_review_documents") or 0) > 0
+                    else "Юридическая проверка не завершена: нет проверенных документов")
         elif loaded and documents:
-            step = "Анализируется содержание"
+            step = "Юридическая проверка ещё не завершена"
         elif loaded:
             step = "Документы получены"
         elif item.get("card_available"):
@@ -131,6 +139,10 @@ def progress(request: Request, response: Response):
         else:
             step = "Ожидается получение сведений"
         item["stage"] = step
+        item["previous_results_note"] = (
+            "Показаны сохранённые результаты предыдущей проверки. Новая проверка ещё не завершена."
+            if legal_state in ("pending", "queued", "running", "processing", "failed", "error")
+            and (documents > 0 or int(item.get("violations") or 0) > 0) else "")
     return {"available": True, "checks": results,
             "note": "Этапы формируются из сохранённых фактов; нет документов — нет подтверждённой проверки"}
 

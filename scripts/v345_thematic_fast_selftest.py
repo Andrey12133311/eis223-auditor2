@@ -2,12 +2,24 @@
 import asyncio
 import sqlite3
 import tempfile
+import hashlib,json
+from unittest.mock import patch
 from pathlib import Path
 import v342_thematic_queue as v342
 import v345_thematic_accelerator as v345
 
 async def test():
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, patch("v295_eis_originals.root",return_value=Path(tmp)):
+        def original(reg, uid, body):
+            digest=hashlib.sha256(body).hexdigest()
+            folder=Path(tmp)/"eis223_official_originals"/reg/uid
+            folder.mkdir(parents=True,exist_ok=True)
+            file=folder/(digest+".xml")
+            file.write_bytes(body)
+            (folder/"receipt.json").write_text(json.dumps({"reg_number":reg,"uid":uid,
+                "extension":".xml","sha256":digest,"bytes":len(body)}))
+            return str(file)
+        original("32615969056","A"*32,b"First official original")
         path=Path(tmp)/"thematic.sqlite"
         db=sqlite3.connect(path)
         db.executescript("""
@@ -55,6 +67,14 @@ async def test():
             c.execute("INSERT INTO docs VALUES(3,'32615969056','/data/eis/added.pdf','checked')")
             c.commit()
         finally:c.close()
+        original("32616432604","B"*32,b"Newly available original")
+        original("32615969056","C"*32,b"New official revision")
+        # New evidence does not erase an already scheduled extraction deadline.
+        c=connect()
+        try:
+            c.execute("UPDATE thematic_items SET next_retry_at=0,updated_at='2020-01-01T00:00:00+00:00' WHERE status='waiting_originals'")
+            c.commit()
+        finally:c.close()
         await v345.faster_tick(ns)
         c=connect()
         try:
@@ -63,7 +83,7 @@ async def test():
             assert all(x=="completed" for x in statuses.values()),statuses
         finally:c.close()
         assert count==3,count
-        print("V345_THEMATIC_FAST_SELFTEST_OK parallel_ready=True new_docs_immediate=True saved_findings=True no_duplicates=True")
+        print("V345_THEMATIC_FAST_SELFTEST_OK parallel_ready=True new_docs_once=True bounded_retry_preserved=True saved_findings=True no_duplicates=True")
 
 if __name__=="__main__":
     asyncio.run(test())

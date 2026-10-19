@@ -5,6 +5,10 @@ on:
       - 'scripts/**'
       - 'tests/test_extraction_throughput.py'
       - 'tests/test_general_original_collection_retry.py'
+      - 'tests/test_automatic*.py'
+      - 'tests/test_intake_automatic_rechecks.py'
+      - 'tests/test_semantic_audit_sources.py'
+      - 'tests/test_legal_audit_revision.py'
       - 'tests/test_legal_event_coverage.py'
       - 'tests/test_legal_security_clause_coverage.py'
       - 'tests/test_receipt_original_parity.py'
@@ -25,6 +29,7 @@ on:
       - 'tests/test_standalone_msp_imports.py'
       - 'tests/test_thematic_finding_submissions.py'
       - 'tests/test_thematic_memo_odt.py'
+      - 'tests/test_thematic_persist_lock_scope.py'
       - 'tests/test_v343_card_presentation.py'
       - 'tests/test_account_frontend_requests.cjs'
       - 'tests/memo_fixture.py'
@@ -73,5 +78,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_standalone_msp_imports.py'
           python -m unittest discover -s tests -p 'test_thematic_finding_submissions.py'
           python -m unittest discover -s tests -p 'test_thematic_memo_odt.py'
+          python -m unittest discover -s tests -p 'test_thematic_persist_lock_scope.py'
           python -m unittest discover -s tests -p 'test_v343_card_presentation.py'
+          python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
           node tests/test_account_frontend_requests.cjs

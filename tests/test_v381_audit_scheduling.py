@@ -195,7 +195,7 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(general, "initialize", return_value={}), \
              patch.object(general, "claim_next", side_effect=claim), \
-             patch.object(general, "evidence_version", return_value="fixture"), \
+             patch.object(general, "review_watermark", return_value={"last_semantic_version":"fixture","last_engine_signature":"engine"}), \
              patch.object(general, "inspect_one", side_effect=inspect), \
              patch.object(general, "mark"), \
              patch.object(general, "defer_retry", return_value=90), \
@@ -235,6 +235,9 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(thematic, "storage_health", return_value={"blocked":False}), \
              patch.object(thematic, "independent_review", side_effect=review), \
+             patch.object(fast, "_start_item", return_value=True), \
+             patch.object(fast, "_watermark", return_value=("fixture", "engine")), \
+             patch.object(fast, "_release_items", return_value=None), \
              patch.object(fast, "_prepare", return_value=items), \
              patch.object(fast, "_persist", side_effect=persist), \
              patch.object(fast, "_request_missing_originals", return_value=0):
@@ -266,6 +269,9 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
                 "doc_id":1, "categories":["dates"]}
         with patch.object(thematic, "storage_health", return_value={"blocked":False}), \
              patch.object(thematic, "independent_review", side_effect=review), \
+             patch.object(fast, "_start_item", return_value=True), \
+             patch.object(fast, "_watermark", return_value=("fixture", "engine")), \
+             patch.object(fast, "_release_items", return_value=None), \
              patch.object(fast, "_prepare", return_value=[item]), \
              patch.object(fast, "_request_missing_originals", return_value=0):
             task = asyncio.create_task(fast.faster_tick({}))
@@ -329,32 +335,39 @@ class ThematicSelectionTests(unittest.TestCase):
         self.add_sources(1)
         for index in range(40):
             self.add_batch(f"batch-{index:02}")
-        first = fast._prepare(self.ns)
-        second = fast._prepare(self.ns)
-        served = {item["batch"] for item in first + second}
-        self.assertEqual(len(first), 36)
-        self.assertEqual(len(second), 36)
-        self.assertEqual(len(served), 40)
-        self.assertEqual(second[0]["batch"], "batch-36")
+        groups = []
+        for cycle in range(5):
+            # Persisted per-campaign indexing avoids a global 90s throttle
+            # repeatedly indexing the same eight of forty rotating campaigns.
+            with patch.object(fast.time, "time", return_value=1000 + cycle * 20):
+                selected = fast._prepare(self.ns)
+            self.assertEqual(len(selected), fast.MAX_CAMPAIGNS_PER_CYCLE)
+            groups.append(selected)
+            fast._release_items(self.ns, selected)
+        self.assertEqual(len({item["batch"] for group in groups for item in group}), 40)
+        self.assertEqual(groups[1][0]["batch"], "batch-08")
 
     def test_unchanged_completed_rows_cannot_hide_new_evidence_beyond_limit(self):
         self.add_sources(3002)
         self.add_batch("a")
-        fast._prepare(self.ns)
+        target = str(32610000000 + 3001)
         with self.connect() as db:
-            db.execute("UPDATE thematic_items SET status='completed',last_ready_count=1,"
-                       "last_doc_id=(SELECT MAX(id) FROM docs WHERE reg_number=reg),last_analysis_version=?",
-                       (fast.ANALYSIS_VERSION,))
-            # These fixtures represent audits already completed on the current
-            # inputs, including the same-row evidence snapshot.
-            regs = [row[0] for row in db.execute("SELECT reg FROM thematic_items").fetchall()]
-            from audit_source_version import source_version
-            db.executemany("UPDATE thematic_items SET last_source_version=? WHERE reg=?",
-                           [(source_version(db, reg), reg) for reg in regs])
-            target = str(32610000000+3001)
-            db.execute("INSERT INTO docs VALUES(4000,?, '/fixtures/new.pdf','checked')",(target,))
-        selected = fast._prepare(self.ns)
+            db.execute("INSERT INTO thematic_items(batch_id,reg,status,updated_at,last_semantic_version,last_engine_signature) "
+                       "SELECT 'a',reg_number,'completed',?,'same','engine' FROM purchases", (thematic.now(),))
+        reads = []
+        def semantic(con, reg):
+            self.assertFalse(con.in_transaction)
+            reads.append(reg)
+            return 'new' if reg == target else 'same'
+        with patch.object(fast, 'semantic_source_version', side_effect=semantic), \
+             patch.object(fast, 'engine_signature', return_value='engine'):
+            selected = []
+            for page in range(24):
+                before = len(reads)
+                selected.extend(fast._prepare(dict(self.ns)))
+                self.assertLessEqual(len(reads) - before, fast.SCAN_PAGE_SIZE)
         self.assertEqual([item["reg"] for item in selected], [target])
+        self.assertEqual(len(reads), 3002)
 
     def test_stopped_batch_cannot_receive_late_persistence(self):
         self.add_sources(1)

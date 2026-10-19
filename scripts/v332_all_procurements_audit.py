@@ -19,9 +19,12 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
+from contextlib import nullcontext
 from pathlib import Path
 
-from audit_source_version import originals_blocked, originals_ready, source_version
+from audit_source_version import (source_version, semantic_source_version, SemanticSnapshotError,
+                                  original_sources)
+from legal_audit_revision import engine_signature, EngineSignatureError
 from v295_eis_originals import (allowed_documents, saved_document, root, uid_from_url,
                                _merge_source_metadata, _review_source_version, HTTPException)
 from v298_eis_only import offline_audit
@@ -43,6 +46,10 @@ MAX_DOC_ROWS=900
 FILE_BATCH_SIZE=12
 GENERAL_WORKERS=4
 RECEIPT_CLAIM_PAGE=64
+SCAN_PAGE_SIZE=128
+SCAN_BUDGET_SECONDS=5.0
+MAX_RECHECK_ADMISSIONS=8
+READY_HIGH_WATER=16
 RETRY_BASE_SECONDS=1.0
 RETRY_MAX_SECONDS=30.0
 DB_STAGE_RETRY_SECONDS=30.0
@@ -84,15 +91,91 @@ def ensure_source_column(c):
                             ("retry_count","INTEGER NOT NULL DEFAULT 0"),
                             ("next_retry_at","REAL NOT NULL DEFAULT 0"),
                             ("last_result_token","TEXT NOT NULL DEFAULT ''"),
-                            ("last_counted_token","TEXT NOT NULL DEFAULT ''")):
+                            ("last_counted_token","TEXT NOT NULL DEFAULT ''"),
+                            ("last_semantic_version","TEXT NOT NULL DEFAULT ''"),
+                            ("last_engine_signature","TEXT NOT NULL DEFAULT ''"),
+                            ("reservation_token","TEXT NOT NULL DEFAULT ''"),
+                            ("receipt_ready","INTEGER NOT NULL DEFAULT 0")):
         if name not in columns:
             c.execute("ALTER TABLE v332_audit_queue ADD COLUMN "+name+" "+definition)
 
 
 def evidence_version(ns,reg):
     c=connect(ns)
-    try:return source_version(c,reg)
+    try:return semantic_source_version(c,reg)
     finally:c.close()
+
+
+def ensure_scan_cursors(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS v382_audit_scan_cursors(
+        scope TEXT PRIMARY KEY,cursor TEXT NOT NULL DEFAULT '')""")
+
+
+def scan_cursor(c,scope):
+    row=c.execute("SELECT cursor FROM v382_audit_scan_cursors WHERE scope=?",(scope,)).fetchone()
+    return row[0] if row else ""
+
+
+def save_scan_cursor(c,scope,value):
+    c.execute("INSERT INTO v382_audit_scan_cursors(scope,cursor) VALUES(?,?) "
+              "ON CONFLICT(scope) DO UPDATE SET cursor=excluded.cursor",(scope,value))
+
+
+def ready_work(c):
+    # Missing originals and future retries do not consume runnable capacity.
+    from v342_thematic_queue import business_company
+    c.create_function("eis_business_company",1,business_company,deterministic=True)
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():return 0
+    return c.execute("""SELECT COUNT(*) FROM v332_audit_queue q
+        JOIN purchases p ON p.reg_number=q.reg
+        WHERE q.campaign=? AND eis_business_company(p.customer)=1 AND (q.state='running' OR
+          (q.state='pending' AND q.next_retry_at<=? AND (q.receipt_ready=1 OR EXISTS(
+            SELECT 1 FROM docs d WHERE d.reg_number=q.reg
+              AND COALESCE(d.local_path,'')<>''
+              AND d.status IN ('checked','downloaded_no_text')))))""",
+        (CAMPAIGN,time.time())).fetchone()[0]
+
+
+def receipt_readiness(reg):
+    """Bounded catalogue metadata, never proof that original bytes are valid."""
+    sources=original_sources(reg)
+    return (any(source.get("available") for source in sources),
+            next((source["scan_error"] for source in sources if source.get("scan_error")),None))
+
+
+def review_watermark(ns,reg):
+    """Capture only before inspection; callers use the physical file-I/O gate."""
+    c=connect(ns)
+    try:
+        row=c.execute("SELECT reservation_token FROM v332_audit_queue "
+                      "WHERE campaign=? AND reg=? AND state='running'",(CAMPAIGN,reg)).fetchone()
+        if row is None:raise LookupError("Audit reservation disappeared")
+        token=row[0]
+        if getattr(reg,"reservation_token",token)!=token:
+            raise LookupError("Audit reservation superseded")
+    finally:c.close()
+    _,source_error=receipt_readiness(reg)
+    if source_error:
+        # A bounded catalogue error still permits a proven readable subset,
+        # but never acknowledges the full source/engine as successfully read.
+        return {"reservation_token":token,"source_error":source_error}
+    version=evidence_version(ns,reg)
+    return {"last_semantic_version":version,"last_source_version":version,
+            "last_engine_signature":engine_signature(),"reservation_token":token}
+
+
+async def file_stage(ns,phase,function,*args,worker=None):
+    # Cancellation must settle a scanner that may commit admissions before its
+    # caller can release reservations. The physical gate also retains its slot.
+    async def operation():
+        with background_audit():
+            task=asyncio.create_task(run_file_io(function,*args))
+            try:return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:await settle_task(task)
+                except Exception:pass
+                raise
+    return await retry_operation(ns,phase,operation,worker,retry_seconds=DB_STAGE_RETRY_SECONDS)
 
 
 def runtime_snapshot(ns):
@@ -164,6 +247,7 @@ def initialize(ns):
         if "last_doc_id" not in columns:
             c.execute("ALTER TABLE v332_audit_queue ADD COLUMN last_doc_id INTEGER NOT NULL DEFAULT 0")
         ensure_source_column(c)
+        ensure_scan_cursors(c)
         if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():
             c.execute("CREATE INDEX IF NOT EXISTS idx_v332_docs_version ON docs(reg_number,id)")
         p=c.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
@@ -190,33 +274,56 @@ def initialize(ns):
         # Resume interrupted work, but never rerun a finished procurement just
         # because Railway redeployed a new code revision.
         c.execute("""UPDATE v332_audit_queue
-            SET state='pending', error='Возобновлено после перезапуска'
+            SET state='pending', reservation_token='', error='Возобновлено после перезапуска'
             WHERE campaign=? AND state='running'""",(CAMPAIGN,))
         c.commit()
-        # Re-run finished, documented originals on a new legal revision.
-        # Historical findings/checks remain append-only: no previous legal
-        # records or original documents are removed or downgraded.
-        refreshed=refresh_changed(ns)
-        if refreshed:
-            print("V350 RULE_REVISION_RECHECK queued="+str(refreshed),flush=True)
+        # Unknown historical semantic watermarks are caught up by the bounded
+        # scanner after startup. Never seed them as successfully analysed.
     finally:c.close()
     return progress(ns)
 
-def add_new_verified(ns,c=None):
-    """Append new, EIS-verified automatic entries; preserve every past status."""
-    regs=dashboard_regs(ns,include_new=True)
+def add_new_verified(ns,c=None,admission_limit=MAX_RECHECK_ADMISSIONS):
+    """One durable membership page, preserving the original frozen cohort."""
+    getter=ns.get("_verified_set235")
+    if not callable(getter):raise RuntimeError("Main-page verified membership unavailable")
+    verified={str(v) for v in getter()}
+    from v342_thematic_queue import business_company
     owns=c is None
     if owns:c=connect(ns)
     try:
-        before=c.total_changes
-        c.executemany("INSERT OR IGNORE INTO v332_audit_queue(campaign,reg) VALUES(?,?)",
-                      ((CAMPAIGN,reg) for reg in regs))
-        added=c.total_changes-before
+        ensure_source_column(c)
+        ensure_scan_cursors(c)
         c.commit()
-        if added:
-            print("V351 GENERAL_QUEUE_EXPANDED new="+str(added)+
-                  " eligible="+str(len(regs)),flush=True)
+        scope="general-membership:"+CAMPAIGN
+        cursor=scan_cursor(c,scope)
+        has_docs=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone()
+        ready_sql=("EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=p.reg_number AND COALESCE(d.local_path,'')<>'' "
+                   "AND d.status IN ('checked','downloaded_no_text'))" if has_docs else "0")
+        rows=c.execute("SELECT p.reg_number,p.customer,"+ready_sql+""" ready
+            FROM purchases p WHERE p.reg_number>?
+            AND NOT EXISTS(SELECT 1 FROM v319_manual_inputs m WHERE m.reg=p.reg_number)
+            AND NOT EXISTS(SELECT 1 FROM v332_audit_queue q WHERE q.campaign=? AND q.reg=p.reg_number)
+            ORDER BY p.reg_number LIMIT ?""",(cursor,CAMPAIGN,SCAN_PAGE_SIZE)).fetchall()
+        c.execute("BEGIN IMMEDIATE")
+        available=max(0,READY_HIGH_WATER-ready_work(c))
+        added=0
+        last=cursor
+        for row in rows:
+            if added>=min(MAX_RECHECK_ADMISSIONS,max(0,admission_limit)):break
+            last=row["reg_number"]
+            if last not in verified or not business_company(row["customer"]):continue
+            if row["ready"] and not available:continue
+            result=c.execute("INSERT OR IGNORE INTO v332_audit_queue(campaign,reg) VALUES(?,?)",(CAMPAIGN,last))
+            added+=result.rowcount
+            if row["ready"]:available-=result.rowcount
+        if admission_limit and scan_cursor(c,scope)==cursor:
+            at_end=not rows or (len(rows)<SCAN_PAGE_SIZE and last==rows[-1]["reg_number"])
+            save_scan_cursor(c,scope,"" if at_end else last)
+        c.commit()
         return added
+    except BaseException:
+        if c.in_transaction:c.rollback()
+        raise
     finally:
         if owns:c.close()
 
@@ -236,12 +343,19 @@ def progress(ns):
             COALESCE(SUM(new_findings),0),
             COALESCE(SUM(new_checks),0)
             FROM v332_audit_queue WHERE campaign=?""",(CAMPAIGN,)).fetchone()
+        has_docs=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone()
+        cohort=c.execute("""SELECT COUNT(*),COALESCE(SUM(last_semantic_version='' OR last_engine_signature=''),0)
+            FROM v332_audit_queue q WHERE campaign=? AND state IN ('completed','failed','no_readable_documents')
+            AND EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg AND COALESCE(d.local_path,'')<>''
+                       AND d.status IN ('checked','downloaded_no_text'))""",(CAMPAIGN,)).fetchone() if has_docs else (0,0)
         deferred=c.execute("""SELECT COUNT(*),MIN(next_retry_at) FROM v332_audit_queue
             WHERE campaign=? AND state='pending' AND next_retry_at>?""",(CAMPAIGN,time.time())).fetchone()
         return {
             "campaign":CAMPAIGN,
             "status":"finished" if not states.get("pending",0) and not states.get("running",0) else "running",
             "total_registered":int(sums[0]),
+            "semantic_recheck_cohort":{"terminal_with_local_documents":int(cohort[0]),
+                                       "unknown_semantic_or_engine":int(cohort[1])},
             "baseline_purchases":int(run["baseline_purchases"]),
             "baseline_checked_document_records":int(run["baseline_checked_documents"]),
             "baseline_recorded_violations":int(run["baseline_violations"]),
@@ -257,6 +371,14 @@ def progress(ns):
             "note":"The automatic EIS-verified queue expands with new eligible purchases. Available originals and changed evidence are analysed; missing documents are not declared violation-free."
         }
     finally:c.close()
+
+class AuditReservation(str):
+    """Backward-compatible reg string carrying the exact claim fencing token."""
+    def __new__(cls,reg,token):
+        value=super().__new__(cls,reg)
+        value.reservation_token=token
+        return value
+
 
 def claim_next(ns):
     """Atomically reserve an audit row; prefer already downloaded originals."""
@@ -281,95 +403,146 @@ def claim_next(ns):
             q.reg LIMIT 1""",(CAMPAIGN,time.time())).fetchone()
         if not row:
             c.commit()
-            # A receipt can precede its docs rows. Inspect a bounded page of
-            # this campaign's pending companies after releasing the writer;
-            # a rotating cursor prevents missing originals at the front from
-            # permanently hiding a received original further down the queue.
-            query="""SELECT q.reg FROM v332_audit_queue q
-                JOIN purchases p ON p.reg_number=q.reg
+            # Scan receipt-only pending work outside every writer transaction.
+            # A durable cursor survives restarts and a wall budget bounds cold IO.
+            ensure_scan_cursors(c)
+            c.commit()
+            scope="general-receipts:"+CAMPAIGN
+            after=scan_cursor(c,scope)
+            query="""SELECT q.reg,q.updated_at,q.reservation_token,q.next_retry_at,q.receipt_ready
+                FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
                 WHERE q.campaign=? AND q.state='pending' AND q.next_retry_at<=?
                   AND q.reg>? AND eis_business_company(p.customer)=1
                 ORDER BY q.reg LIMIT ?"""
-            after=ns.get("_v332_receipt_claim_after","")
             candidates=c.execute(query,(CAMPAIGN,time.time(),after,RECEIPT_CLAIM_PAGE)).fetchall()
-            if not candidates and after:
-                candidates=c.execute(query,(CAMPAIGN,time.time(),"",RECEIPT_CLAIM_PAGE)).fetchall()
+            last=after
+            selected=None
+            unavailable=[]
+            deadline=time.monotonic()+SCAN_BUDGET_SECONDS
             for candidate in candidates:
-                reg=str(candidate[0])
-                ns["_v332_receipt_claim_after"]=reg
-                if not originals_ready(reg) and not originals_blocked(reg):continue
-                c.execute("BEGIN IMMEDIATE")
-                changed=c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,next_retry_at=0,
+                if last!=after and time.monotonic()>=deadline:break
+                last=str(candidate["reg"])
+                try:ready,blocked=receipt_readiness(last)
+                except (OSError,SemanticSnapshotError) as exc:
+                    print(f"GENERAL_RECEIPT_RETRY reg={last} type={type(exc).__name__}",flush=True)
+                    continue
+                if ready or blocked:
+                    selected=candidate
+                    break
+                if candidate["receipt_ready"]:unavailable.append(candidate)
+            c.execute("BEGIN IMMEDIATE")
+            for candidate in unavailable:
+                c.execute("UPDATE v332_audit_queue SET receipt_ready=0 WHERE campaign=? AND reg=? "
+                    "AND state='pending' AND updated_at IS ? AND reservation_token=? AND next_retry_at=?",
+                    (CAMPAIGN,candidate["reg"],candidate["updated_at"],candidate["reservation_token"],candidate["next_retry_at"]))
+            if scan_cursor(c,scope)==after:
+                at_end=not candidates or (len(candidates)<RECEIPT_CLAIM_PAGE and last==candidates[-1]["reg"])
+                save_scan_cursor(c,scope,"" if at_end else last)
+            claimed=None
+            if selected is not None:
+                reg=str(selected["reg"])
+                token=uuid.uuid4().hex
+                changed=c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,
+                    reservation_token=?,receipt_ready=1,next_retry_at=0,
                     last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
-                    WHERE campaign=? AND reg=? AND state='pending' AND next_retry_at<=?
+                    WHERE campaign=? AND reg=? AND state='pending' AND updated_at IS ?
+                      AND reservation_token=? AND next_retry_at=? AND next_retry_at<=?
                       AND EXISTS(SELECT 1 FROM purchases p WHERE p.reg_number=?
                                  AND eis_business_company(p.customer)=1)""",
-                    (now(),reg,CAMPAIGN,reg,time.time(),reg)).rowcount
-                c.commit()
-                if changed==1:return reg
-            if len(candidates)<RECEIPT_CLAIM_PAGE:ns["_v332_receipt_claim_after"]=""
-            return None
+                    (now(),token,reg,CAMPAIGN,reg,selected["updated_at"],selected["reservation_token"],
+                     selected["next_retry_at"],time.time(),reg)).rowcount
+                if changed:claimed=AuditReservation(reg,token)
+            c.commit()
+            return claimed
         reg=str(row[0])
-        c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,next_retry_at=0,
+        token=uuid.uuid4().hex
+        c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,reservation_token=?,next_retry_at=0,
                      last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
                      WHERE campaign=? AND reg=? AND state='pending'""",
-                  (now(),reg,CAMPAIGN,reg))
+                  (now(),token,reg,CAMPAIGN,reg))
         assert c.execute("SELECT changes()").fetchone()[0]==1
         c.commit()
-        return reg
+        return AuditReservation(reg,token)
     except BaseException:
         if c.in_transaction:c.rollback()
         raise
     finally:c.close()
 
-def refresh_changed(ns):
-    """Revisit changed evidence and recover legacy lock failures, once.
+def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
+    """One persistent keyset page; admit stale terminal rows with exact CAS.
 
-    Source inspection/stat calls run with no write transaction. Conditional
-    updates cannot replace a result or reservation made since this snapshot.
+    No pending/running reservation, retry deadline, legal result or old source
+    watermark is modified. Hashing occurs outside every SQL transaction; the
+    async service wraps this complete bounded operation in run_file_io.
     """
     c=connect(ns)
     try:
-        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():
-            return 0
         ensure_source_column(c)
-        rows=c.execute("""SELECT q.reg,q.state,q.updated_at,q.audit_revision,
-                   q.last_doc_id,q.last_source_version,q.error,q.next_retry_at,
-                   COALESCE(MAX(d.id),0) AS doc_version,
-                   COALESCE(SUM(CASE WHEN d.status IN ('checked','downloaded_no_text')
-                       AND COALESCE(d.local_path,'')<>'' THEN 1 ELSE 0 END),0) AS ready
-            FROM v332_audit_queue q LEFT JOIN docs d ON d.reg_number=q.reg
-            WHERE q.campaign=? AND (q.state IN ('completed','failed','no_readable_documents')
-                OR (q.state='pending' AND q.next_retry_at>0))
-            GROUP BY q.reg""",(CAMPAIGN,)).fetchall()
-        changed=[]
-        for row in rows:
-            retry=row["state"]=="failed" and locked_error(row["error"])
-            ready=bool(row["ready"]) or originals_ready(row["reg"]) or originals_blocked(row["reg"])
-            if not ready and not retry:continue
-            current=source_version(c,row["reg"]) if ready else ""
-            if row["state"]=="pending":
-                # A changed original bypasses a scheduled extraction retry;
-                # unchanged failed/partial text waits for the bounded delay.
-                revisit=row["last_source_version"]!=current
-            else:
-                revisit=(retry or row["audit_revision"]!=RULE_REVISION or
-                    row["last_doc_id"]<row["doc_version"] or
-                    row["last_source_version"]!=current)
-            if not revisit:continue
-            reason=("Повтор после временной блокировки базы данных" if retry else
-                    "Новая редакция методики или изменившиеся оригиналы ЕИС")
-            changed.append((reason,CAMPAIGN,row["reg"],row["state"],row["updated_at"],
-                            row["audit_revision"],row["last_doc_id"],row["last_source_version"],
-                            row["next_retry_at"]))
-        if not changed:return 0
-        c.execute("BEGIN IMMEDIATE")
-        before=c.total_changes
-        c.executemany("""UPDATE v332_audit_queue SET state='pending',error=?,next_retry_at=0,retry_count=0
-            WHERE campaign=? AND reg=? AND state=? AND updated_at IS ?
-              AND audit_revision=? AND last_doc_id=? AND last_source_version=? AND next_retry_at=?""",changed)
-        count=c.total_changes-before
+        ensure_scan_cursors(c)
         c.commit()
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone():return 0
+        limit=min(MAX_RECHECK_ADMISSIONS,max(0,admission_limit),
+                  max(0,READY_HIGH_WATER-ready_work(c)))
+        if not limit:return 0
+        scope="general:"+CAMPAIGN
+        cursor=scan_cursor(c,scope)
+        rows=c.execute("""SELECT q.*,
+            EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg
+                AND d.status IN ('checked','downloaded_no_text')
+                AND COALESCE(d.local_path,'')<>'') ready
+            FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
+            WHERE q.campaign=? AND q.reg>? AND eis_business_company(p.customer)=1
+            AND q.state IN ('completed','failed','no_readable_documents')
+            ORDER BY q.reg LIMIT ?""",(CAMPAIGN,cursor,SCAN_PAGE_SIZE)).fetchall()
+        changed=[]
+        inspected=errors=0
+        started=time.monotonic()
+        deadline=time.monotonic()+SCAN_BUDGET_SECONDS
+        engine=engine_signature()
+        last=cursor
+        for row in rows:
+            if last!=cursor and time.monotonic()>=deadline:break
+            last=row["reg"]
+            inspected+=1
+            try:
+                receipt_ready,source_error=receipt_readiness(row["reg"])
+                if not row["ready"] and not receipt_ready and not source_error:continue
+                current=None if source_error else semantic_source_version(c,row["reg"])
+            except (SemanticSnapshotError,OSError) as exc:
+                errors+=1
+                print(f"GENERAL_SNAPSHOT_RETRY reg={row['reg']} type={type(exc).__name__}",flush=True)
+                # An unavailable snapshot is unknown, never a stable watermark.
+                continue
+            retry=row["state"]=="failed" and locked_error(row["error"])
+            if not (retry or row["last_semantic_version"]!=current or
+                    row["last_engine_signature"]!=engine):continue
+            changed.append((row,bool(receipt_ready or source_error)))
+            if len(changed)>=limit:break
+        # Commit the cursor with admissions; a racing scanner can only CAS the
+        # exact old row, and capacity is rechecked while holding the writer lock.
+        c.execute("BEGIN IMMEDIATE")
+        available=min(limit,max(0,READY_HIGH_WATER-ready_work(c)))
+        count=0
+        for row,receipt_ready in changed:
+            if count>=available:break
+            result=c.execute("""UPDATE v332_audit_queue SET state='pending',
+                error='Изменились правовые исходные данные или методика проверки',
+                updated_at=?,reservation_token='',receipt_ready=?
+                WHERE campaign=? AND reg=? AND state=? AND updated_at IS ?
+                  AND last_semantic_version=? AND last_engine_signature=?
+                  AND reservation_token=? AND next_retry_at=? AND retry_count=?
+                  AND last_result_token=?""",
+                (now(),int(receipt_ready),CAMPAIGN,row["reg"],row["state"],row["updated_at"],
+                 row["last_semantic_version"],row["last_engine_signature"],
+                 row["reservation_token"],row["next_retry_at"],row["retry_count"],row["last_result_token"]))
+            count+=result.rowcount
+        # Do not overwrite a cursor another process advanced while we hashed.
+        if scan_cursor(c,scope)==cursor:
+            at_end=not rows or (len(rows)<SCAN_PAGE_SIZE and last==rows[-1]["reg"])
+            save_scan_cursor(c,scope,"" if at_end else last)
+        c.commit()
+        print(f"GENERAL_RECHECK_SWEEP inspected={inspected} admitted={count} snapshot_errors={errors} "
+              f"elapsed_seconds={time.monotonic()-started:.3f} semantics=bounded_v1",flush=True)
         return count
     except BaseException:
         if c.in_transaction:c.rollback()
@@ -397,10 +570,12 @@ def result_token(reg,details):
 def mark(ns,reg,state,details=None):
     if state not in ("pending","running","completed","no_readable_documents","failed"):
         raise ValueError("Unknown queue status")
-    details=details or {}
+    details=dict(details or {})
+    if getattr(reg,"reservation_token",None):details.setdefault("reservation_token",reg.reservation_token)
     keys={"documents_found","documents_read","documents_unreadable",
           "verified_original_documents","original_expected","original_received",
-          "new_findings","new_checks","error","last_source_version","result_token"}
+          "new_findings","new_checks","error","last_source_version","result_token",
+          "last_semantic_version","last_engine_signature","reservation_token"}
     if set(details)-keys:raise ValueError("Unknown progress field")
     c=connect(ns)
     try:
@@ -413,14 +588,14 @@ def mark(ns,reg,state,details=None):
         params=[state,now()]
         token=result_token(reg,details)
         for k,v in details.items():
-            if k=="result_token":continue
+            if k in ("result_token","reservation_token"):continue
             if k in ("new_findings","new_checks"):
                 assignments+=","+k+"=COALESCE("+k+",0)+CASE WHEN last_counted_token=? THEN 0 ELSE ? END"
                 params.append(token)
             else:assignments+=","+k+"=?"
             params.append(v)
         if state in ("completed","no_readable_documents","failed"):
-            assignments+=",audit_revision=?"
+            assignments+=",audit_revision=?,receipt_ready=0"
             params.append(RULE_REVISION)
         if state=="completed":
             assignments+=",retry_count=0,next_retry_at=0"
@@ -430,6 +605,9 @@ def mark(ns,reg,state,details=None):
         params.extend([CAMPAIGN,reg])
         condition=" AND last_result_token<>?" if token else ""
         if token:params.append(token)
+        if details.get("reservation_token"):
+            condition+=" AND state='running' AND reservation_token=?"
+            params.append(details["reservation_token"])
         c.execute("UPDATE v332_audit_queue SET "+assignments+
                   " WHERE campaign=? AND reg=?"+condition,params)
         c.commit()
@@ -438,18 +616,22 @@ def mark(ns,reg,state,details=None):
 
 def defer_retry(ns,reg,details,reason,base_seconds=None):
     """Retain partial evidence and schedule a bounded retry, without completion."""
+    details=dict(details or {})
+    if getattr(reg,"reservation_token",None):details.setdefault("reservation_token",reg.reservation_token)
     allowed={"documents_found","documents_read","documents_unreadable",
              "verified_original_documents","original_expected","original_received",
-             "new_findings","new_checks","last_source_version"}
+             "new_findings","new_checks","last_source_version",
+             "last_semantic_version","last_engine_signature"}
     c=connect(ns)
     try:
         c.execute("BEGIN IMMEDIATE")
         ensure_source_column(c)
-        row=c.execute("SELECT retry_count,next_retry_at,last_result_token,state FROM v332_audit_queue WHERE campaign=? AND reg=?",
+        row=c.execute("SELECT retry_count,next_retry_at,last_result_token,state,reservation_token FROM v332_audit_queue WHERE campaign=? AND reg=?",
                       (CAMPAIGN,reg)).fetchone()
         if row is None:raise LookupError("Audit reservation disappeared")
         token=result_token(reg,details)
-        if row[3]!="running" or (token and row[2]==token):
+        if (row[3]!="running" or (token and row[2]==token) or
+            (details.get("reservation_token") and row[4]!=details["reservation_token"])):
             # A late retry must not overwrite a completed result or a retry
             # already saved by the operation whose reply was interrupted.
             c.commit()
@@ -651,6 +833,32 @@ def is_official(doc):
             and HEX.fullmatch(str(m.get("sha256") or "")) is not None
             and bool(uid_from_url(m.get("source_url") or "")))
 
+def require_reservation(c,reg):
+    """Fence automatic writers; explicit maintenance keeps its existing API."""
+    token=getattr(reg,"reservation_token",None)
+    if token:
+        from v342_thematic_queue import business_company
+        row=c.execute("SELECT p.customer FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg "
+            "WHERE q.campaign=? AND q.reg=? AND q.state='running' AND q.reservation_token=?",(CAMPAIGN,reg,token)).fetchone()
+        if not row or not business_company(row[0]):raise LookupError("Audit reservation superseded")
+
+
+def check_reservation(ns,reg):
+    if not getattr(reg,"reservation_token",None):return
+    c=connect(ns)
+    try:require_reservation(c,reg)
+    finally:c.close()
+
+
+def persist(ns,reg,findings,checks,progress_token=None):
+    """Append only under the caller's exact general or intake reservation."""
+    guard=ns.get("_v295_persist_guard")
+    # Intake's token/file lock is acquired before SQLite's writer transaction.
+    # Its short guard contains no source hashing, downloads or analysis.
+    with guard(reg) if callable(guard) else nullcontext():
+        return _persist_reserved(ns,reg,findings,checks,progress_token)
+
+
 def _audit_result_snapshot(c,reg):
     """Materialize and close all readers before documentary comparisons."""
     findings=[dict(row) for row in c.execute("""SELECT id,code,title,law,evidence,document,source_url
@@ -709,7 +917,7 @@ def _plan_audit_results(reg,findings,checks,snapshot):
     return new_findings,new_checks,confirmed_checks
 
 
-def persist(ns,reg,findings,checks,progress_token=None):
+def _persist_reserved(ns,reg,findings,checks,progress_token=None):
     """Append unseen results atomically without holding the writer for regex work."""
     c=connect(ns)
     try:
@@ -717,6 +925,7 @@ def persist(ns,reg,findings,checks,progress_token=None):
             snapshot=_audit_result_snapshot(c,reg)
             insert_findings,insert_checks,confirmed_checks=_plan_audit_results(reg,findings,checks,snapshot)
             c.execute("BEGIN IMMEDIATE")
+            require_reservation(c,reg)
             # Another analyzer may have committed this same procurement while
             # matching episodes. Rebase outside the writer before inserting;
             # otherwise two correct independent reviews could create duplicates.
@@ -774,14 +983,14 @@ async def collect_saved_evidence(ns,reg,rows):
     """
     source_error=None
     try:
-        allowed=await asyncio.to_thread(allowed_documents,reg)
-        await asyncio.to_thread(_review_source_version,reg)
+        allowed=await run_file_io(allowed_documents,reg)
+        await run_file_io(_review_source_version,reg)
     except HTTPException as exc:
         if exc.status_code!=409:raise
         allowed={}
         source_error=str(exc.detail)
     expected=len(allowed) if not source_error else None
-    received_uids=await asyncio.to_thread(
+    received_uids=await run_file_io(
         lambda:{uid for uid in allowed if saved_document(reg,uid) is not None})
     received=len(received_uids) if not source_error else None
     other,unreadable=await stored_docs(ns,reg,rows)
@@ -840,6 +1049,15 @@ async def collect_saved_evidence(ns,reg,rows):
 
 
 async def inspect_one(ns,reg):
+    from audit_write_guard import background_write_guard
+    intake_guard=ns.get("_v295_persist_guard")
+    outer=(lambda:intake_guard(reg)) if callable(intake_guard) else None
+    sql_guard=(lambda c:require_reservation(c,reg)) if getattr(reg,"reservation_token",None) else None
+    with background_write_guard(sql_guard,outer):
+        return await _inspect_one(ns,reg)
+
+
+async def _inspect_one(ns,reg):
     old,rows=await db_stage(ns,"existing",existing,ns,reg)
     purchase=as_procurement(old)
     card={"status":"partial","pages":{}}
@@ -864,6 +1082,7 @@ async def inspect_one(ns,reg):
     from v342_identity import subject,valid_inn
     metadata=await asyncio.to_thread(from_documents,reg,docs,_name(purchase.get("customer")))
     if metadata:
+        await db_stage(ns,"reservation",check_reservation,ns,reg)
         await db_stage(ns,"metadata",apply_metadata,ns,reg,metadata)
         if not subject(purchase.get("title")) and metadata.get("title"):
             purchase["title"]=metadata["title"]
@@ -887,7 +1106,9 @@ async def inspect_one(ns,reg):
         raise RuntimeError("No legal analyzer installed")
     # Installed analyzer wrappers can persist official card facts too. A
     # cancellation must settle those writes before another worker takes reg.
+    await db_stage(ns,"reservation",check_reservation,ns,reg)
     findings=await thread_call(analyzer,purchase,docs)
+    await db_stage(ns,"reservation",check_reservation,ns,reg)
     checks=await thread_call(checker,purchase,detail,card,docs)
     verified_sources={d.get("name") for d in readable if is_official(d)}
     verified_urls={str((d.get("meta") or {}).get("source_url"))
@@ -1003,9 +1224,11 @@ def return_running(ns,reg):
     """Return an unfinished reservation; never overwrite a committed result."""
     c=connect(ns)
     try:
+        token=getattr(reg,"reservation_token",None)
         c.execute("""UPDATE v332_audit_queue SET state='pending',updated_at=?,
-            error='Возобновление прерванной проверки'
-            WHERE campaign=? AND reg=? AND state='running'""",(now(),CAMPAIGN,reg))
+            error='Возобновление прерванной проверки',reservation_token=''
+            WHERE campaign=? AND reg=? AND state='running'
+              AND (? IS NULL OR reservation_token=?)""",(now(),CAMPAIGN,reg,token,token))
         c.commit()
     finally:c.close()
 
@@ -1022,7 +1245,9 @@ async def release_reservation(ns,reg):
 
 async def claim_safely(ns):
     """Cancellation waits for the real claim thread and returns any late claim."""
-    task=asyncio.create_task(asyncio.to_thread(claim_next,ns))
+    async def gated_claim():
+        with background_audit():return await run_file_io(claim_next,ns)
+    task=asyncio.create_task(gated_claim())
     try:return await asyncio.shield(task)
     except asyncio.CancelledError:
         try:reg=await settle_task(task)
@@ -1104,7 +1329,7 @@ def install(ns):
                                 nonlocal snapshot
                                 # Source/stat reads precede analysis and run
                                 # outside the short claim/result transactions.
-                                snapshot=await db_stage(ns,"source",evidence_version,ns,reg,worker=slot)
+                                snapshot=await file_stage(ns,"source",review_watermark,ns,reg,worker=slot)
                                 slot["phase"]="inspect"
                                 with background_audit():
                                     return await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
@@ -1113,14 +1338,15 @@ def install(ns):
                             # This diagnostic describes collection coverage;
                             # durable state/backoff carries it without a new DB
                             # column or an invented unreadable-document count.
-                            source_incomplete=bool(detail.get("source_incomplete"))
+                            source_incomplete=bool(detail.get("source_incomplete") or snapshot.get("source_error"))
                             result={key:value for key,value in detail.items() if key!="source_incomplete"}
-                            result.update(last_source_version=snapshot,
-                                          result_token=detail.get("result_token") or uuid.uuid4().hex)
+                            result.update({key:value for key,value in snapshot.items() if key!="source_error"})
+                            if snapshot.get("source_error"):result["error"]=snapshot["source_error"]
+                            result["result_token"]=detail.get("result_token") or uuid.uuid4().hex
                             incomplete=(state=="no_readable_documents" or
                                         int(detail.get("documents_unreadable") or 0)>0 or source_incomplete)
                             if incomplete:
-                                reason=((detail.get("error") or "Не завершено чтение полученных оригиналов ЕИС; назначен повтор") if source_incomplete else
+                                reason=((result.get("error") or "Не завершено чтение полученных оригиналов ЕИС; назначен повтор") if source_incomplete else
                                     "Не все доступные оригиналы удалось прочитать; назначен повтор" if
                                         state=="completed" else
                                         "Текст доступных оригиналов пока не прочитан; назначен повтор")
@@ -1144,7 +1370,7 @@ def install(ns):
                         except asyncio.CancelledError:raise
                         except asyncio.TimeoutError:
                             detail={"result_token":uuid.uuid4().hex}
-                            if snapshot is not None:detail["last_source_version"]=snapshot
+                            if snapshot is not None:detail["reservation_token"]=snapshot["reservation_token"]
                             reason="Проверка превысила 600 секунд; назначен повтор без удаления результатов"
                             delay=await retry_operation(ns,"save_timeout",lambda:thread_call(
                                 defer_retry,ns,reg,detail,reason),slot)
@@ -1154,23 +1380,27 @@ def install(ns):
                             index+=1
                             error=str(exc)[:300]
                             slot["last_error"]=f"{type(exc).__name__}: {error}"
-                            if transient_sqlite(exc):
+                            if transient_sqlite(exc) or isinstance(exc,(SemanticSnapshotError,EngineSignatureError,OSError)):
                                 # Preserve the completed result's token when
                                 # persist committed but its queue mark stayed busy.
                                 detail=dict(result) if result is not None else {"result_token":uuid.uuid4().hex}
-                                if snapshot is not None:detail["last_source_version"]=snapshot
+                                if snapshot is not None:
+                                    detail.update(snapshot if result is not None else {"reservation_token":snapshot["reservation_token"]})
                                 reason="Временная блокировка БД; проверка будет повторена без удаления результатов"
                                 delay=await retry_operation(ns,"save_busy",lambda:thread_call(
                                     defer_retry,ns,reg,detail,reason,BUSY_RETRY_BASE_SECONDS),slot)
                                 print(f"V332 AUDIT_DEFERRED reg={reg} worker={worker_id} "
                                       f"database_busy=True retry_after_seconds={delay}",flush=True)
                             else:
-                                detail={"error":error}
-                                if snapshot is not None:detail["last_source_version"]=snapshot
-                                await retry_operation(ns,"save_failure",lambda:thread_call(
-                                    mark,ns,reg,"failed",detail),slot)
+                                # Preserve prior successful watermarks on a deterministic
+                                # engine failure, but do not hot-loop its unchanged input.
+                                detail={"result_token":uuid.uuid4().hex}
+                                if snapshot is not None and snapshot.get("reservation_token"):
+                                    detail["reservation_token"]=snapshot["reservation_token"]
+                                delay=await retry_operation(ns,"save_failure",lambda:thread_call(
+                                    defer_retry,ns,reg,detail,error),slot)
                                 print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
-                                      f"error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
+                                      f"retry_after_seconds={delay} error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
                         reg=None
                         slot["reg"]=None
                         await asyncio.sleep(.05)
@@ -1183,8 +1413,9 @@ def install(ns):
                     version=signals.version("evidence")
                     started=time.monotonic()
                     try:
-                        new=await retry_operation(ns,"queue_add",lambda:thread_call(add_new_verified,ns))
-                        refreshed=await retry_operation(ns,"queue_refresh",lambda:thread_call(refresh_changed,ns))
+                        refreshed=await file_stage(ns,"queue_refresh",refresh_changed,ns)
+                        new=await retry_operation(ns,"queue_add",lambda:thread_call(
+                            add_new_verified,ns,None,MAX_RECHECK_ADMISSIONS-refreshed))
                         if refreshed or new:
                             signals.notify("general")
                             print("V381 QUEUE_WAKEUP new="+str(new)+

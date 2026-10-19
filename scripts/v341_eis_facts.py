@@ -283,30 +283,32 @@ def persist_facts(ns, purchase):
         return
     db = ns["conn"](); db.row_factory = sqlite3.Row
     try:
-        row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-        if not row:
-            return
-        row = dict(row)
-        values = {}
-        for key, item in evidence.items():
-            column = "published_at" if key == "published" else key
-            if column in row and (not row[column] or item.get("source") == "official_eis_card"):
-                values[column] = item["value"]
-        if values.get("submission_end") and "deadline" in row:
-            values["deadline"] = values["submission_end"]
-        try:
-            card = json.loads(row.get("card_fields_json") or "{}")
-        except (TypeError, ValueError):
-            card = {}
-        if not isinstance(card, dict):
-            card = {}
-        card.setdefault("fact_evidence", {}).update(evidence)
-        card.setdefault("summary", {}).update({k: purchase.get(k) for k in evidence})
-        if "card_fields_json" in row:
-            values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
-        if values:
-            db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in values)+" WHERE reg_number=?", (*values.values(), reg))
-        db.commit()
+        from audit_write_guard import guarded_transaction
+        with guarded_transaction(db):
+            row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+            if not row:
+                return
+            row = dict(row)
+            values = {}
+            for key, item in evidence.items():
+                column = "published_at" if key == "published" else key
+                if column in row and (not row[column] or item.get("source") == "official_eis_card"):
+                    values[column] = item["value"]
+            if values.get("submission_end") and "deadline" in row:
+                values["deadline"] = values["submission_end"]
+            try:
+                card = json.loads(row.get("card_fields_json") or "{}")
+            except (TypeError, ValueError):
+                card = {}
+            if not isinstance(card, dict):
+                card = {}
+            card.setdefault("fact_evidence", {}).update(evidence)
+            card.setdefault("summary", {}).update({k: purchase.get(k) for k in evidence})
+            if "card_fields_json" in row:
+                values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
+            if values:
+                db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in values)+" WHERE reg_number=?", (*values.values(), reg))
+            db.commit()
     finally:
         db.close()
 

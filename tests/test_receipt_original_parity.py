@@ -102,11 +102,20 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         return item, findings
 
     async def finish_general(self, reg):
-        state, detail = await general.inspect_one(self.ns, reg)
+        row = self.row(reg)
+        if row["state"] != "running":
+            if row["state"] == "completed":
+                # Explicit maintenance replay still proves result-token dedup.
+                general.mark(self.ns, reg, "pending")
+            self.assertEqual(general.claim_next(self.ns), reg)
+            row = self.row(reg)
+        claim = general.AuditReservation(reg, row["reservation_token"])
+        snapshot = await general.file_stage(self.ns, "test_source", general.review_watermark, self.ns, claim)
+        state, detail = await general.inspect_one(self.ns, claim)
         self.assertEqual(state, "completed")
         self.assertFalse(detail["source_incomplete"])
-        general.mark(self.ns, reg, state,
-                     {key: value for key, value in detail.items() if key != "source_incomplete"})
+        general.mark(self.ns, claim, state,
+                     {**{key: value for key, value in detail.items() if key != "source_incomplete"}, **snapshot})
         return detail
 
     async def test_receipt_only_original_has_same_confirmed_finding_in_both_audits(self):
@@ -166,20 +175,45 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                             (missing,))
         general.initialize(self.ns)
         self.assertIsNone(general.claim_next(self.ns))
-        self.assertEqual(general.claim_next(self.ns), reg)
+        self.assertEqual(general.claim_next(dict(self.ns)), reg)
+        self.assertTrue(self.row(reg)["reservation_token"])
         general.return_running(self.ns, reg)
-        original_ready = general.originals_ready
+        original_ready = general.receipt_readiness
         def taken_during_read(number):
             ready = original_ready(number)
-            if ready:
+            if ready[0]:
                 with self.connect() as writer:
                     writer.execute("UPDATE v332_audit_queue SET state='running',updated_at='other-worker' WHERE reg=?", (number,))
                     writer.commit()
             return ready
-        with patch.object(general, "originals_ready", side_effect=taken_during_read):
+        with patch.object(general, "receipt_readiness", side_effect=taken_during_read):
             self.assertIsNone(general.claim_next(self.ns))
             self.assertIsNone(general.claim_next(self.ns))
         self.assertEqual((self.row(reg)["state"], self.row(reg)["updated_at"]), ("running", "other-worker"))
+
+    def test_receipt_highwater_and_stale_hints_do_not_starve_new_work(self):
+        regs = [self.receipt_purchase(number) for number in range(1, 21)]
+        general.initialize(self.ns)
+        with self.connect() as con:
+            con.execute("UPDATE v332_audit_queue SET state='completed'")
+        self.assertEqual(general.refresh_changed(self.ns), 8)
+        self.assertEqual(general.refresh_changed(self.ns), 8)
+        self.assertEqual(general.refresh_changed(self.ns), 0)
+        with self.connect() as con:
+            self.assertEqual(general.ready_work(con), 16)
+        for index, reg in enumerate(regs[:16]):
+            path = next((self.folder / "eis223_official_originals" / reg).glob("*/receipt.json"))
+            if index % 2:path.write_text("invalid receipt JSON")
+            else:path.unlink()
+        self.assertIsNone(general.claim_next(self.ns))
+        with self.connect() as con:
+            self.assertEqual(general.ready_work(con), 0)
+        for reg in regs[:16]:
+            self.assertEqual((self.row(reg)["state"], self.row(reg)["receipt_ready"]), ("pending", 0))
+        self.assertEqual(general.refresh_changed(dict(self.ns)), 4)
+        claim = general.claim_next(dict(self.ns))
+        self.assertIn(claim, regs[16:])
+        self.assertTrue(claim.reservation_token)
 
     async def test_one_stored_archive_member_does_not_hide_the_other_member(self):
         reg = self.receipt_purchase()
@@ -259,7 +293,11 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["reg"] for item in prepared], [reg])
         self.assertEqual(prepared[0]["ready"], 0)
         self.assertTrue(prepared[0]["originals_ready"])
-        self.assertNotEqual(prepared[0]["source_version"], previous["last_source_version"])
+        current, _ = await fast._retry_file(fast._watermark, self.ns, reg)
+        self.assertNotEqual(current, previous["last_semantic_version"])
+        self.assertEqual(self.themed(reg)[0]["status"], "queued")
+        self.assertTrue(prepared[0]["reservation_token"])
+        fast._release_items(self.ns, prepared)
         self.assertEqual(general.refresh_changed(self.ns), 1)
         self.assertEqual(general.claim_next(self.ns), reg)
         self.assertEqual((await self.finish_general(reg))["new_findings"], 1)
@@ -279,6 +317,11 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((item["status"], item["retry_attempts"], len(findings)), ("retry", 1, 1))
         self.assertEqual(fast._prepare(self.ns), [])
         self.put_original(reg, docx_bytes(LATE_REPLY_B), "Второе разъяснение.docx", uid)
+        deadline = item["next_retry_at"]
+        self.assertEqual(fast._prepare(self.ns), [])
+        self.assertEqual(self.themed(reg)[0]["next_retry_at"], deadline)
+        with self.connect() as con:
+            con.execute("UPDATE thematic_items SET next_retry_at=0,updated_at='2000-01-01' WHERE reg=?", (reg,))
         await fast.faster_tick(self.ns)
         item, findings = self.themed(reg)
         self.assertEqual((item["status"], item["retry_attempts"], len(findings)), ("completed", 0, 2))
@@ -399,7 +442,18 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             finally:
                 worker.cancel()
                 await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 5)
-        self.assertEqual(general.refresh_changed(self.ns), 2)
+        # Resource recovery must preserve the already promised retry deadlines.
+        self.assertEqual(general.refresh_changed(self.ns), 0)
+        self.assertIsNone(general.claim_next(self.ns))
+        self.assertEqual(fast._prepare(self.ns), [])
+        for reg in (readable, blocked):
+            self.assertEqual(self.row(reg)["last_semantic_version"], "")
+            self.assertEqual(self.themed(reg)[0]["last_semantic_version"], "")
+        with self.connect() as con:
+            con.execute("UPDATE v332_audit_queue SET next_retry_at=0 WHERE state='pending'")
+            con.execute("UPDATE thematic_items SET next_retry_at=0,updated_at='2000-01-01' WHERE status='retry'")
+        for reg in (readable, blocked):
+            await self.finish_general(reg)
         await fast.faster_tick(self.ns)
         self.assertEqual((self.themed(readable)[0]["status"], len(self.themed(readable)[1])), ("completed", 2))
         self.assertEqual((self.themed(blocked)[0]["status"], len(self.themed(blocked)[1])), ("completed", 2))
@@ -438,7 +492,10 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(general.refresh_changed(self.ns), 1)
         self.assertEqual(general.claim_next(self.ns), reg)
         self.assertEqual((await self.finish_general(reg))["new_findings"], 0)
-        self.assertEqual([item["reg"] for item in fast._prepare(self.ns)], [reg])
+        prepared = fast._prepare(self.ns)
+        self.assertEqual([item["reg"] for item in prepared], [reg])
+        self.assertTrue(prepared[0]["reservation_token"])
+        fast._release_items(self.ns, prepared)
         await fast.faster_tick(self.ns)
         item, findings = self.themed(reg)
         self.assertNotEqual(item["last_source_version"], before)

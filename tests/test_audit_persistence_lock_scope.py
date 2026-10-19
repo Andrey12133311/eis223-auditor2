@@ -159,6 +159,30 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
             self.assertEqual(c.execute("SELECT status FROM checks").fetchone()[0],"violation")
             self.assertEqual(c.execute("SELECT COUNT(*) FROM findings").fetchone()[0],0)
 
+    def test_general_reservation_change_during_comparison_prevents_late_save(self):
+        general.persist(self.ns,REG,[self.finding()],[])
+        with self.connection() as c:
+            c.execute("CREATE TABLE v332_audit_queue(campaign TEXT,reg TEXT,state TEXT,reservation_token TEXT)")
+            c.execute("INSERT INTO v332_audit_queue VALUES(?,?,'running','old-owner')",(general.CAMPAIGN,REG))
+        old=general.AuditReservation(REG,"old-owner")
+        actual=episodes.distinct_new
+        changed=False
+        def compare(*args):
+            nonlocal changed
+            if not changed:
+                changed=True
+                with self.connection() as c:
+                    c.execute("UPDATE v332_audit_queue SET reservation_token='new-owner'")
+            return actual(*args)
+        with patch.object(episodes,"distinct_new",side_effect=compare):
+            with self.assertRaisesRegex(LookupError,"superseded"):
+                general.persist(self.ns,old,[self.finding(later=True)],[])
+        with self.connection() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM findings").fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT violations FROM purchases").fetchone()[0],1)
+            self.assertEqual(tuple(c.execute("SELECT state,reservation_token FROM v332_audit_queue").fetchone()),
+                             ("running","new-owner"))
+
     def test_thematic_concurrent_save_rebases_and_does_not_duplicate_event(self):
         first,later=self.finding(),self.finding(later=True)
         fast._persist(self.ns,[(self.item,"completed",[first],"done")])
@@ -227,7 +251,15 @@ class PendingThematicResults(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(thematic,"storage_health",return_value={"blocked":False}))
         self.stack.enter_context(patch.object(fast,"_request_missing_originals",return_value=0))
-        self.stack.enter_context(patch.object(fast,"_prepare",side_effect=lambda ns:[dict(self.item)]))
+        # Use the real scheduler and reservation lifecycle. Only the source
+        # fingerprint and legal engine are fixed inputs to this SQLite fixture.
+        with self.connection() as c:
+            c.execute("INSERT INTO docs(id,reg_number,local_path,status) VALUES(1,?,'fixture','checked')",(REG,))
+        self.stack.enter_context(patch.object(fast,"receipt_readiness",return_value=(False,None)))
+        self.stack.enter_context(patch.object(fast,"semantic_source_version",
+            side_effect=lambda c,reg:self.item["source_version"]))
+        self.stack.enter_context(patch.object(fast,"engine_signature",
+            side_effect=lambda:self.item.get("engine_signature","fixture-engine")))
         self.stack.enter_context(patch.object(fast,"DB_RETRY_DELAYS",(.005,.005)))
         actual_open=fast._open
         def short_open(ns):
@@ -236,46 +268,118 @@ class PendingThematicResults(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             return c
         self.stack.enter_context(patch.object(fast,"_open",side_effect=short_open))
         self.reviews=0
+        self.block_save=False
+        self.blocker=None
+        self.addCleanup(self.release_blocker)
         async def review(*args):
             self.reviews+=1
+            with self.connection() as c:
+                row=c.execute("SELECT status,reservation_token FROM thematic_items").fetchone()
+                self.assertEqual(row["status"],"running")
+                self.assertTrue(row["reservation_token"])
+            if self.block_save:
+                self.block_save=False
+                # Hold the real competing writer only after selection, start,
+                # fresh watermark and analysis have all finished successfully.
+                self.blocker=self.connect()
+                self.blocker.execute("BEGIN IMMEDIATE")
             return "completed",[self.finding()]
         self.stack.enter_context(patch.object(thematic,"independent_review",side_effect=review))
 
-    async def block_first_save(self):
-        blocker=self.connect()
-        blocker.execute("BEGIN IMMEDIATE")
-        try:
-            self.assertEqual(await fast.faster_tick(self.ns),0)
-        finally:
-            blocker.rollback()
-            blocker.close()
+    def release_blocker(self):
+        if self.blocker is not None:
+            self.blocker.rollback()
+            self.blocker.close()
+            self.blocker=None
+
+    def expire_cooldown(self):
         with self.connection() as c:
-            row=c.execute("SELECT status,last_source_version FROM thematic_items").fetchone()
-            self.assertEqual(tuple(row),("queued",""))
+            c.execute("UPDATE thematic_items SET next_retry_at=0")
+
+    async def block_first_save(self):
+        self.block_save=True
+        actual=fast._persist
+        failures=0
+        def persist(ns,results):
+            nonlocal failures
+            try:return actual(ns,results)
+            except sqlite3.OperationalError as exc:
+                self.assertTrue(thematic.sqlite_busy(exc))
+                failures+=1
+                if failures==len(fast.DB_RETRY_DELAYS)+1:
+                    # Cleanup must now run through the production token-fenced
+                    # release path, after the failed persistence transaction.
+                    self.release_blocker()
+                raise
+        try:
+            with patch.object(fast,"_persist",side_effect=persist):
+                self.assertEqual(await fast.faster_tick(self.ns),0)
+        finally:
+            self.release_blocker()
+        self.assertEqual(failures,len(fast.DB_RETRY_DELAYS)+1)
+        with self.connection() as c:
+            row=c.execute("SELECT status,last_source_version,reservation_token,next_retry_at FROM thematic_items").fetchone()
+            self.assertEqual(tuple(row)[:3],("queued","",""))
+            self.assertGreater(row["next_retry_at"],time.time())
             self.assertEqual(c.execute("SELECT COUNT(*) FROM thematic_findings").fetchone()[0],0)
         self.assertEqual(self.reviews,1)
+        self.assertEqual(fast._prepare(self.ns),[],"A live retry deadline must survive a new selection pass")
 
     async def test_busy_reuses_finished_evidence_without_second_legal_analysis(self):
         await self.block_first_save()
-        self.assertEqual(await fast.faster_tick(self.ns),1)
+        old_result=self.ns["_thematic_pending_results"][(BATCH,REG)]["result"]
+        old_token=old_result[0]["reservation_token"]
+        self.assertTrue(old_token)
+        self.expire_cooldown()
+        actual=fast._persist
+        saved_tokens=[]
+        def persist(ns,results):
+            current=results[0][0]
+            saved_tokens.append(current["reservation_token"])
+            self.assertNotEqual(current["reservation_token"],old_token)
+            with self.connection() as c:
+                before=dict(c.execute("SELECT * FROM thematic_items").fetchone())
+            self.assertEqual(before["status"],"running")
+            self.assertEqual(before["reservation_token"],current["reservation_token"])
+            self.assertEqual(actual(ns,[old_result]),0,"A released token cannot write into a newly owned attempt")
+            with self.connection() as c:
+                self.assertEqual(dict(c.execute("SELECT * FROM thematic_items").fetchone()),before)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM thematic_findings").fetchone()[0],0)
+            return actual(ns,results)
+        with patch.object(fast,"_persist",side_effect=persist):
+            self.assertEqual(await fast.faster_tick(self.ns),1)
+        self.assertEqual(len(saved_tokens),1)
         self.assertEqual(self.reviews,1)
         self.assertEqual(self.ns["_thematic_pending_results"],{})
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM thematic_findings").fetchone()[0],1)
-            self.assertEqual(tuple(c.execute("SELECT status,last_source_version FROM thematic_items").fetchone()),
-                             ("completed","source-before"))
+            self.assertEqual(tuple(c.execute("SELECT status,last_source_version,last_semantic_version,"
+                                            "last_engine_signature,reservation_token FROM thematic_items").fetchone()),
+                             ("completed","source-before","source-before","fixture-engine",""))
 
     async def test_new_original_invalidates_uncommitted_result_before_current_watermark(self):
         await self.block_first_save()
         self.item["source_version"]="source-after"
+        self.expire_cooldown()
         self.assertEqual(await fast.faster_tick(self.ns),1)
         self.assertEqual(self.reviews,2)
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT last_source_version FROM thematic_items").fetchone()[0],"source-after")
 
+    async def test_new_engine_invalidates_uncommitted_result_before_current_watermark(self):
+        await self.block_first_save()
+        self.item["engine_signature"]="engine-after"
+        self.expire_cooldown()
+        self.assertEqual(await fast.faster_tick(self.ns),1)
+        self.assertEqual(self.reviews,2)
+        with self.connection() as c:
+            self.assertEqual(c.execute("SELECT last_engine_signature FROM thematic_items").fetchone()[0],"engine-after")
+
     async def test_changed_categories_invalidate_uncommitted_result(self):
         await self.block_first_save()
-        self.item["categories"]=["security"]
+        with self.connection() as c:
+            c.execute("UPDATE thematic_batches SET categories='[\"security\"]'")
+        self.expire_cooldown()
         self.assertEqual(await fast.faster_tick(self.ns),1)
         self.assertEqual(self.reviews,2)
 
@@ -283,6 +387,7 @@ class PendingThematicResults(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await self.block_first_save()
         entry=self.ns["_thematic_pending_results"][(BATCH,REG)]
         entry["expires_at"]=time.monotonic()-1
+        self.expire_cooldown()
         self.assertEqual(await fast.faster_tick(self.ns),1)
         self.assertEqual(self.reviews,2)
 
