@@ -296,7 +296,7 @@ class ThematicSelectionTests(unittest.TestCase):
 
     def add_batch(self, name):
         with self.connect() as db:
-            db.execute("INSERT INTO thematic_batches VALUES(?,?,?,?,?)",
+            db.execute("INSERT INTO thematic_batches(id,categories,created_at,status,legal_forms) VALUES(?,?,?,?,?)",
                        (name, '["dates"]', "2026-10-15", "active", '["ООО"]'))
 
     def add_sources(self, count):
@@ -340,7 +340,8 @@ class ThematicSelectionTests(unittest.TestCase):
         fast._prepare(self.ns)
         with self.connect() as db:
             db.execute("UPDATE thematic_items SET status='completed',last_ready_count=1,"
-                       "last_doc_id=(SELECT MAX(id) FROM docs WHERE reg_number=reg)")
+                       "last_doc_id=(SELECT MAX(id) FROM docs WHERE reg_number=reg),last_analysis_version=?",
+                       (fast.ANALYSIS_VERSION,))
             target = str(32610000000+3001)
             db.execute("INSERT INTO docs VALUES(4000,?, '/fixtures/new.pdf','checked')",(target,))
         selected = fast._prepare(self.ns)

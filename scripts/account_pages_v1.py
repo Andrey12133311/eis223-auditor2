@@ -529,11 +529,12 @@ THEMATIC = page("Мои тематические проверки", """
 <p><a href="/">← На главную</a></p>
 <h1>Мои тематические проверки</h1>
 <p>Здесь автоматически отображаются только реальные тематические проверки, которые вы запускали под своей учётной записью. Никаких идентификаторов или отдельных очередей создавать не требуется.</p>
+<p class="eis-my-actions"><a href="/thematic">Новая тематическая проверка</a></p>
 <div id="thematic-filters" class="manual-filter-area" aria-label="Фильтры тематических проверок">
 <label>Заказчик<input id="thematic-customer" type="search" placeholder="Наименование заказчика"></label>
 <label>Статус<select id="thematic-filter-status"><option value="">Все</option><option value="active">Выполняется</option><option value="stopped">Остановлена</option><option value="completed">Завершена</option></select></label>
-<label>Дата с<input id="thematic-from" type="date"></label>
-<label>Дата по<input id="thematic-to" type="date"></label>
+<label>Дата запуска с<input id="thematic-from" type="date"></label>
+<label>Дата запуска по<input id="thematic-to" type="date"></label>
 <label>Вид нарушения<select id="thematic-type"><option value="">Все</option></select></label>
 <button type="button" id="thematic-reset">Сбросить фильтры</button></div>
 <p id="thematic-status" role="status" aria-live="polite">Загружаем ваши проверки…</p>
@@ -551,6 +552,11 @@ const labels={dates:'Сроки закупки и разъяснений',docs:'
  security:'Обеспечение',sme:'МСП',access:'Требования к участникам',protocols:'Протоколы',
  contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
 let thematicCache=[],thematicRefresh=null,thematicRefreshQueued=false;
+function thematicPeriod(check){
+ const day=value=>String(value||'').slice(0,10).split('-').reverse().join('.');
+ const from=day(check.date_from),to=day(check.date_to);
+ return from&&to?'С '+from+' по '+to+' включительно':from?'С '+from:to?'По '+to+' включительно':'За всё время';
+}
 function refresh(force=false){
  if(thematicRefresh){if(force===true)thematicRefreshQueued=true;return thematicRefresh}
  thematicRefresh=(async()=>{
@@ -608,6 +614,8 @@ function renderThematic(){
    meta.textContent=(Number.isFinite(timestamp)?'Запущена: '+new Date(timestamp).toLocaleString('ru-RU')+' · ':'')+
      'Закупок: '+Number(check.purchases||0)+' · Подтверждённых нарушений: '+Number(check.violations||0)+
      ((check.customers||[]).length?' · Заказчики: '+check.customers.slice(0,2).join(', '):'');
+   const period=document.createElement('p');period.className='eis-meta';
+   period.textContent='Дата размещения в ЕИС: '+thematicPeriod(check);
    const actions=document.createElement('div');actions.className='eis-my-actions';
    const open=document.createElement('a');open.href='/thematic#'+encodeURIComponent(check.id);open.textContent='Открыть результаты';
    const remove=document.createElement('button');remove.type='button';remove.textContent='Удалить проверку';
@@ -621,7 +629,7 @@ function renderThematic(){
      await refreshAfterDelete();
     }catch(error){status.textContent=error.message;remove.disabled=false}
    };
-   actions.append(open,remove);card.append(title,state,meta,actions);holder.append(card);
+   actions.append(open,remove);card.append(title,state,meta,period,actions);holder.append(card);
   }
 
 }
@@ -654,6 +662,8 @@ async function fetchHistorical(){
    const date=Date.parse(check.created_at);
    meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleString('ru-RU')+' · ':'')+
       'Закупок: '+Number(check.purchases||0)+' · Нарушений: '+Number(check.violations||0);
+   const period=document.createElement('p');period.className='eis-meta';
+   period.textContent='Дата размещения в ЕИС: '+thematicPeriod(check);
    const btn=document.createElement('button');btn.type='button';btn.textContent='Привязать к моему кабинету';
    btn.onclick=async()=>{
     if(!confirm('Привязать выбранную ранее запущенную тематическую проверку к вашему кабинету?'))return;
@@ -665,7 +675,7 @@ async function fetchHistorical(){
      await Promise.all([refresh(true),loadHistorical(true)]);
     }catch(error){status.textContent=error.message;btn.disabled=false}
    };
-   card.append(h,meta,btn);list.append(card);
+   card.append(h,meta,period,btn);list.append(card);
   }
  }catch(error){/* An unavailable historical migration never hides actual owned checks. */}
 }

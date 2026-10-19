@@ -117,6 +117,11 @@ let findingQueueRequest=null,findingQueueQueued=false;
 const tag=(name,cls="",value="")=>{const x=document.createElement(name);if(cls)x.className=cls;if(value!==undefined)x.textContent=String(value);return x};
 const status=(s)=>{const text=labels[s]||s||"Неизвестно";const cls=["completed","approved"].includes(s)?"good":["returned","cancelled","rejected"].includes(s)?"bad":["submitted"].includes(s)?"warn":"";return tag("span","mgr-chip "+cls,text)};
 const fmt=d=>d?new Date(d).toLocaleDateString("ru-RU"):"—";
+function thematicPeriod(check){
+ const day=value=>String(value||'').slice(0,10).split('-').reverse().join('.');
+ const from=day(check.date_from),to=day(check.date_to);
+ return from&&to?'С '+from+' по '+to+' включительно':from?'С '+from:to?'По '+to+' включительно':'За всё время';
+}
 function toast(t){const b=$("mgr-toast");b.textContent=t;b.classList.remove("mgr-hidden");clearTimeout(window._mgrToast);window._mgrToast=setTimeout(()=>b.classList.add("mgr-hidden"),4000)}
 async function api(url,method="GET",body){
  const opts={method,credentials:"same-origin",cache:"no-store",headers:{}};
@@ -334,7 +339,8 @@ function renderCampaigns(){
   const card=tag("article","mgr-entry");
   card.append(tag("h3","",item.title),
    tag("div","mgr-muted","Исполнитель: "+displayEmployee(item.employee)+" · Формы: "+item.legal_forms.join(", ")),
-   tag("div","mgr-muted",item.category_names.join(", ")));
+   tag("div","mgr-muted",item.category_names.join(", ")),
+   tag("div","mgr-muted","Дата размещения в ЕИС: "+thematicPeriod(item)));
   const result=tag("p","mgr-goal-figures",
    "Подтверждено "+item.actual_violations+" из целевых "+item.target_violations+
    " · закупок в очереди: "+item.verified_procurements);
@@ -384,7 +390,12 @@ $("mgr-goal-form").onsubmit=async event=>{
  data.categories=categories;data.legal_forms=legal_forms;
  data.target_violations=Number(data.target_violations);
  data.due_date=data.due_date||null;
+ data.date_from=data.date_from||null;data.date_to=data.date_to||null;
  if(!categories.length||!legal_forms.length){toast("Отметьте категории и формы заказчиков");return}
+ if(data.date_from&&data.date_to&&data.date_from>data.date_to){
+  const message='Дата «с» не может быть позже даты «по». Измените период размещения в ЕИС.';
+  $("mgr-goal-status").textContent=message;toast(message);$("mgr-goal-date-to").focus();return;
+ }
  button.disabled=true;
  try{
   const result=await api("/manager/campaigns","POST",data);
@@ -393,13 +404,18 @@ $("mgr-goal-form").onsubmit=async event=>{
  }catch(e){$("mgr-goal-status").textContent=e.message;toast(e.message)}
  finally{button.disabled=false}
 };
+$("mgr-goal-period-clear").onclick=()=>{
+ $("mgr-goal-date-from").value='';$("mgr-goal-date-to").value='';
+ $("mgr-goal-status").textContent='Период размещения в ЕИС: за всё время.';
+ $("mgr-goal-date-from").focus();
+};
 function renderThematic(){
  const rows=[];
  for(const item of cache.thematic||[]){
   const tr=tag("tr");
   const cats=Array.isArray(item.categories)?item.categories.join(", "):"Тематическая проверка";
   tr.append(cell(item.employee),cell(cats||"Тематическая проверка"),
-    cell(fmt(item.created_at)),cell(item.purchases||0),cell(item.violations||0),cell(status(item.status)));
+    cell(fmt(item.created_at)),cell(thematicPeriod(item)),cell(item.purchases||0),cell(item.violations||0),cell(status(item.status)));
   rows.push(tr);
  }
  mountRows("mgr-thematic-rows",rows);
@@ -811,6 +827,10 @@ __STYLE__</head><body>
 <label class="wide">Название задания<input name="title" minlength="5" maxlength="170" required placeholder="Проверить сроки и документацию заказчиков ООО и АО"></label>
 <div class="wide"><b>Категории нарушений</b><div id="mgr-goal-categories" class="mgr-goal-options"></div></div>
 <div class="wide"><b>Организационно-правовые формы заказчиков</b><div id="mgr-goal-forms" class="mgr-goal-options"></div></div>
+<label>Дата размещения в ЕИС: с<input type="date" id="mgr-goal-date-from" name="date_from" min="0001-01-01" max="9999-12-31" aria-describedby="mgr-goal-period-hint"></label>
+<label>Дата размещения в ЕИС: по<input type="date" id="mgr-goal-date-to" name="date_to" min="0001-01-01" max="9999-12-31" aria-describedby="mgr-goal-period-hint"></label>
+<div class="wide"><p class="mgr-muted" id="mgr-goal-period-hint">Обе даты входят в период проверки. Можно указать только одну дату. Без дат — за всё время.</p>
+<button type="button" class="mgr-outline" id="mgr-goal-period-clear">За всё время</button></div>
 <label>Срок исполнения<input type="date" name="due_date"></label>
 <label class="wide">Пояснение к поручению<textarea name="note" maxlength="1800" placeholder="Укажите область и особенности проверки"></textarea></label>
 <button class="mgr-primary" type="submit">Назначить и запустить тематическую проверку</button>
@@ -824,7 +844,7 @@ __STYLE__</head><body>
 <p>Только реальные запуски ЕИС, закреплённые за сотрудниками подразделения.
 Количество нарушений рассчитывается без повторного подсчёта одинаковых эпизодов.</p>
 <div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
-<th>Исполнитель</th><th>Направления</th><th>Дата</th><th>Закупок</th><th>Нарушений</th><th>Статус</th>
+<th>Исполнитель</th><th>Направления</th><th>Дата запуска</th><th>Дата размещения в ЕИС</th><th>Закупок</th><th>Нарушений</th><th>Статус</th>
 </tr></thead><tbody id="mgr-thematic-rows"></tbody></table></div>
 <p id="mgr-thematic-empty" class="mgr-muted mgr-hidden">Тематических проверок пока нет.</p></div>
 </section>

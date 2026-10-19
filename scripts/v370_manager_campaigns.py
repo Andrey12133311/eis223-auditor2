@@ -13,7 +13,7 @@ from hashlib import sha256
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 from scripts.v368_manager_workflow import supervisor, _member, _audit, _uuid
@@ -22,6 +22,7 @@ router=APIRouter(prefix="/manager/campaigns",tags=["manager-thematic-targets"])
 staff_router=APIRouter(prefix="/me/campaign-goals",tags=["staff-thematic-targets"])
 
 from v342_thematic_queue import CATEGORIES, LEGAL_FORMS
+from thematic_period import normalize_period
 
 class CampaignCreate(BaseModel):
     assignee_id:UUID
@@ -31,6 +32,13 @@ class CampaignCreate(BaseModel):
     target_violations:int=Field(ge=1,le=10000)
     due_date:date|None=None
     note:str=Field(default="",max_length=1800)
+    date_from:str|None=Field(default="",max_length=10)
+    date_to:str|None=Field(default="",max_length=10)
+
+    @model_validator(mode="after")
+    def validate_publication_period(self):
+        self.date_from,self.date_to=normalize_period(self.date_from,self.date_to)
+        return self
 
     @field_validator("categories")
     @classmethod
@@ -55,9 +63,10 @@ def _engine(request):
     if not ns:raise HTTPException(503,"Серверный обработчик ЕИС не подключён")
     return ns
 
-def _insert_real_batch(ns,batch,categories,forms):
+def _insert_real_batch(ns,batch,categories,forms,date_from="",date_to=""):
     """Idempotent; enforce v342 max-three active checks in one sqlite transaction."""
     from v342_thematic_queue import db,now
+    date_from,date_to=normalize_period(date_from,date_to)
     con=db(ns)
     try:
         con.execute("BEGIN IMMEDIATE")
@@ -68,10 +77,11 @@ def _insert_real_batch(ns,batch,categories,forms):
         if count>=3:
             raise HTTPException(429,"Уже работают три тематические проверки. Завершите одну перед запуском следующей.")
         con.execute(
-            """INSERT INTO thematic_batches(id,categories,created_at,status,legal_forms)
-               VALUES(?,?,?,'active',?)""",
+            """INSERT INTO thematic_batches
+               (id,categories,created_at,status,legal_forms,date_from,date_to)
+               VALUES(?,?,?,'active',?,?,?)""",
             (batch,json.dumps(sorted(categories),ensure_ascii=False),now(),
-             json.dumps(sorted(forms),ensure_ascii=False)))
+             json.dumps(sorted(forms),ensure_ascii=False),date_from,date_to))
         con.commit()
         return "active"
     except Exception:
@@ -83,7 +93,7 @@ def _campaign_rows(db,where,args):
     return db.execute(
         """SELECT t.id,t.manager_id,t.user_id,u.email,t.batch_id,t.title,t.categories,
                   t.legal_forms,t.target_violations,t.due_date,t.note,t.status,
-                  t.created_at,t.submitted_at,t.completed_at
+                  t.created_at,t.submitted_at,t.completed_at,t.date_from,t.date_to
            FROM account_manager_campaign_targets t
            JOIN account_users u ON u.id=t.user_id """+where+
            " ORDER BY t.created_at DESC LIMIT 150",args).fetchall()
@@ -91,6 +101,8 @@ def _campaign_rows(db,where,args):
 def _format(row,batch=None):
     actual=max(0,int((batch or {}).get("violations") or 0))
     target=row[8]
+    saved_from=row[15] if len(row)>15 else ""
+    saved_to=row[16] if len(row)>16 else ""
     return {
         "id":str(row[0]),"manager_id":str(row[1]),"user_id":str(row[2]),
         "employee":row[3],"batch_id":row[4],"title":row[5],
@@ -100,6 +112,8 @@ def _format(row,batch=None):
         "progress_percent":min(100,round(100*actual/target,1)),
         "target_met":actual>=target,
         "verified_procurements":int((batch or {}).get("purchases") or 0),
+        "date_from":(batch or {}).get("date_from") or saved_from or "",
+        "date_to":(batch or {}).get("date_to") or saved_to or "",
         "due_date":row[9].isoformat() if row[9] else None,
         "note":row[10],"status":row[11],
         "engine_status":(batch or {}).get("status","not_started"),
@@ -144,12 +158,13 @@ def create(data:CampaignCreate,request:Request):
         db.execute(
             """INSERT INTO account_manager_campaign_targets
                (id,manager_id,user_id,batch_id,title,categories,legal_forms,
-                target_violations,due_date,note)
-               VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)""",
+                target_violations,due_date,note,date_from,date_to)
+               VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s)""",
             (goal,leader[0],employee,batch,data.title.strip(),
              json.dumps(data.categories,ensure_ascii=False),
              json.dumps(data.legal_forms,ensure_ascii=False),
-             data.target_violations,data.due_date,data.note.strip()))
+             data.target_violations,data.due_date,data.note.strip(),
+             data.date_from,data.date_to))
         # This is a REAL campaign owned by the employee; no personal-ID prompt.
         db.execute(
             """INSERT INTO account_thematic_batches(user_id,batch_id)
@@ -160,7 +175,8 @@ def create(data:CampaignCreate,request:Request):
     # If SQLite is full / at concurrency limit, keep the record as an explicit
     # retryable setup failure; never falsely report that checking has started.
     try:
-        _insert_real_batch(ns,batch,data.categories,data.legal_forms)
+        _insert_real_batch(ns,batch,data.categories,data.legal_forms,
+                           data.date_from,data.date_to)
     except Exception as exc:
         with connect() as db:
             db.execute("UPDATE account_manager_campaign_targets SET status='setup_failed' WHERE id=%s",(goal,))
@@ -173,7 +189,8 @@ def create(data:CampaignCreate,request:Request):
     with connect() as db:
         db.execute("UPDATE account_manager_campaign_targets SET status='active' WHERE id=%s",(goal,))
     return {"id":str(goal),"batch_id":batch,"status":"active",
-            "actual_violations":0,"target_violations":data.target_violations}
+            "actual_violations":0,"target_violations":data.target_violations,
+            "date_from":data.date_from,"date_to":data.date_to}
 
 @router.get("")
 def manager_list(request:Request,response:Response):
@@ -303,7 +320,8 @@ def _goal(db,actor,role,identifier,lock=True):
     uid=_uuid(identifier)
     suffix=" FOR UPDATE" if lock else ""
     row=db.execute(
-        """SELECT id,manager_id,user_id,batch_id,categories,legal_forms,status
+        """SELECT id,manager_id,user_id,batch_id,categories,legal_forms,status,
+                  date_from,date_to
            FROM account_manager_campaign_targets WHERE id=%s"""+suffix,(uid,)
     ).fetchone()
     if row is None:raise HTTPException(404,"Поручение не найдено")
@@ -322,11 +340,13 @@ def retry(identifier:str,request:Request):
         if row[6] not in ("setup_failed","preparing"):
             raise HTTPException(409,"Это поручение не ожидает запуска")
         batch,categories,forms=row[3],row[4],row[5]
-    _insert_real_batch(ns,batch,categories,forms)
+        date_from,date_to=row[7],row[8]
+    _insert_real_batch(ns,batch,categories,forms,date_from,date_to)
     with connect() as db:
         db.execute("UPDATE account_manager_campaign_targets SET status='active' WHERE id=%s",(row[0],))
         _audit(db,actor,row[2],"campaign",row[0],"retry_start")
-    return {"status":"active","batch_id":batch}
+    return {"status":"active","batch_id":batch,
+            "date_from":date_from,"date_to":date_to}
 
 @router.post("/{identifier}/decision")
 def decision(identifier:str,command:CampaignState,request:Request):

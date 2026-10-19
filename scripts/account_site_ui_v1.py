@@ -469,6 +469,11 @@ bl.append(li)}
 const categoryNames={dates:'Сроки',docs:'Документация',national:'Национальный режим',
 security:'Обеспечение',sme:'МСП',access:'Участники',protocols:'Протоколы',
 contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
+const thematicPeriod=check=>{
+ const day=value=>String(value||'').slice(0,10).split('-').reverse().join('.');
+ const from=day(check.date_from),to=day(check.date_to);
+ return from&&to?'С '+from+' по '+to+' включительно':from?'С '+from:to?'По '+to+' включительно':'За всё время';
+};
 for(const item of realBatches){
  const li=document.createElement('li');
  const summary=document.createElement('div');summary.className='eis223-check-desc';
@@ -480,7 +485,9 @@ for(const item of realBatches){
  meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleDateString('ru-RU')+' · ':'')+
  'Закупок: '+Number(item.purchases||0)+' · Нарушений: '+Number(item.violations||0)+
  (item.status==='active'?' · Выполняется':' · Остановлена');
- summary.append(title,meta);li.append(summary);
+ const period=document.createElement('small');
+ period.textContent='Дата размещения в ЕИС: '+thematicPeriod(item);
+ summary.append(title,meta,period);li.append(summary);
  const details=document.createElement('a');details.href='/thematic#'+encodeURIComponent(item.id);
  details.textContent='Открыть';li.append(details);
  const del=document.createElement('button');del.type='button';del.textContent='Удалить';

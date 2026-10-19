@@ -20,6 +20,13 @@ def initialize_schema(db):
         db.execute(statement)
     db.execute("ALTER TABLE account_finding_submissions ADD COLUMN IF NOT EXISTS "
                "source_batch TEXT NOT NULL DEFAULT ''")
+    # Preserve publication bounds even if the SQLite batch cannot start yet.
+    # Existing campaigns remain unbounded; retries must use their saved period.
+    for column in ("date_from", "date_to"):
+        db.execute(
+            "ALTER TABLE account_manager_campaign_targets ADD COLUMN IF NOT EXISTS "
+            + column + " TEXT NOT NULL DEFAULT ''"
+        )
     # Safe additive migration for existing accounts. Never guess names from email.
     for column in ("last_name", "first_name", "patronymic"):
         db.execute(

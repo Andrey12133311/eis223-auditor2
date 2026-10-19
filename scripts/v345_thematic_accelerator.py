@@ -12,12 +12,16 @@ import time
 from datetime import datetime,timezone
 import v342_thematic_queue as original
 from v381_audit_scheduling import background_audit
+from thematic_period import index_campaign, selection_sql, joined_selection_sql
 
 MAX_CONCURRENT=4
 MAX_PER_BATCH=18
 MAX_PER_CYCLE=36
 RECHECK_SECONDS=90
 INDEX_SECONDS=90
+# The previous thematic path did not run build_checks. Revisit saved originals
+# once after enabling those evidence-based rules, including completed checks.
+ANALYSIS_VERSION=2
 
 def _open(ns):
     c=original.db(ns)
@@ -37,31 +41,32 @@ def _prepare(ns):
                 campaigns=campaigns[index+1:]+campaigns[:index+1]
                 break
         if clock-original.WORKER_STATE.get("index_at",0)>INDEX_SECONDS:
-            rows=c.execute("SELECT reg_number,customer FROM purchases WHERE reg_number GLOB '3??????????' LIMIT 50000").fetchall()
             for camp in campaigns:
-                permitted=set(json.loads(camp["legal_forms"]))
-                queue=[(camp["id"],r["reg_number"],original.now()) for r in rows
-                       if original.customer_form(r["customer"]) in permitted]
-                c.executemany("INSERT OR IGNORE INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?)",queue)
+                index_campaign(c,camp,original.customer_form,original.now())
             c.commit()
             original.WORKER_STATE["index_at"]=clock
         by_campaign=[]
         for camp in campaigns:
             selected=[]
+            scope,scope_args=selection_sql(c,camp)
             # Fast indexed subqueries avoid scanning or re-reading original files
             # that have not changed since the last successful legal evaluation.
             rows=c.execute("""
-             SELECT t.reg,t.status,t.updated_at,t.last_doc_id,t.last_ready_count,
+             SELECT t.reg,t.status,t.updated_at,t.last_doc_id,t.last_ready_count,t.last_analysis_version,
               (SELECT COALESCE(MAX(id),0) FROM docs d WHERE d.reg_number=t.reg) doc_id,
               (SELECT COUNT(*) FROM docs d
                  WHERE d.reg_number=t.reg AND COALESCE(d.local_path,'')!=''
                    AND d.status='checked') ready_count
-             FROM thematic_items t WHERE t.batch_id=?
+             FROM thematic_items t JOIN purchases p ON p.reg_number=t.reg WHERE t.batch_id=?
                AND t.status IN ('queued','waiting_originals','waiting_engine','retry','completed')
                AND (t.status!='completed'
+                    OR t.last_analysis_version<? AND EXISTS(
+                        SELECT 1 FROM docs d WHERE d.reg_number=t.reg
+                         AND COALESCE(d.local_path,'')!='' AND d.status='checked')
                     OR t.last_doc_id<(SELECT COALESCE(MAX(id),0) FROM docs d WHERE d.reg_number=t.reg)
                     OR t.last_ready_count<(SELECT COUNT(*) FROM docs d
                        WHERE d.reg_number=t.reg AND COALESCE(d.local_path,'')!='' AND d.status='checked'))
+               AND """+scope+"""
              ORDER BY CASE WHEN EXISTS(
                  SELECT 1 FROM docs d WHERE d.reg_number=t.reg
                   AND COALESCE(d.local_path,'')!='' AND d.status='checked'
@@ -70,7 +75,7 @@ def _prepare(ns):
                     WHEN t.status='waiting_originals' THEN 1
                     WHEN t.status='retry' THEN 2 ELSE 3 END,
                t.updated_at ASC LIMIT 3000
-            """,(camp["id"],)).fetchall()
+            """,(camp["id"],ANALYSIS_VERSION,*scope_args)).fetchall()
             count=0
             for row in rows:
                 if count>=MAX_PER_BATCH:break
@@ -78,7 +83,8 @@ def _prepare(ns):
                 ready=int(row["ready_count"] or 0)
                 new_evidence=doc_id>int(row["last_doc_id"] or 0) or ready>int(row["last_ready_count"] or 0)
                 state=row["status"]
-                if state=="completed" and not new_evidence:
+                updated_rules=state=="completed" and ready>0 and int(row["last_analysis_version"] or 0)<ANALYSIS_VERSION
+                if state=="completed" and not new_evidence and not updated_rules:
                     continue
                 if state in ("waiting_originals","waiting_engine","retry") and not new_evidence:
                     try:age=clock-datetime.fromisoformat(row["updated_at"]).timestamp()
@@ -87,7 +93,7 @@ def _prepare(ns):
                 selected.append({
                   "batch":camp["id"],"reg":row["reg"],
                   "categories":json.loads(camp["categories"]),
-                  "ready":ready,"doc_id":doc_id})
+                  "ready":ready,"doc_id":doc_id,"analysis_version":ANALYSIS_VERSION})
                 count+=1
             by_campaign.append(selected)
         # A third active campaign must not wait forever behind 18 + 18 jobs
@@ -121,33 +127,63 @@ async def _one(ns,item,sem):
 
 def _persist(ns,results):
     c=_open(ns)
+    saved_events=[]
     try:
+        # Keep the scope/active checks and saved result in one write transaction.
+        # EIS corrections and stop/delete actions may otherwise commit between
+        # the SELECT guards and the first INSERT below.
+        c.execute("BEGIN IMMEDIATE")
         for item,state,findings,detail in results:
             batch,reg=item["batch"],item["reg"]
             # Do not resurrect an already deleted or stopped thematic campaign.
-            if not c.execute("SELECT 1 FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone():
+            campaign=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
+            if not campaign:
+                continue
+            scope,scope_args=selection_sql(c,campaign)
+            # A later EIS metadata correction must not persist a new result
+            # outside the chosen period while a slow original was being read.
+            if not c.execute("SELECT 1 FROM purchases p WHERE p.reg_number=? AND "+scope,
+                             (reg,*scope_args)).fetchone():
+                c.execute("UPDATE thematic_items SET status='outside_period',"
+                          "detail='Дата размещения закупки не входит в выбранный период',updated_at=? "
+                          "WHERE batch_id=? AND reg=?",(original.now(),batch,reg))
                 continue
             if state=="completed":
                 from v333_dedup_ui import collapse,_same_finding
+                from v352_dashboard_truth import collapse_legal_events
                 previous=[dict(r) for r in c.execute(
                     """SELECT title,law,evidence,category,code,document,source_url,law_url
                        FROM thematic_findings WHERE batch_id=? AND reg=?""",
                     (batch,reg))]
+                previous_count=None
                 for f in collapse(findings):
                     if any(_same_finding(old,f,"title") for old in previous):
                         continue
-                    c.execute("""INSERT OR IGNORE INTO thematic_findings
+                    inserted=c.execute("""INSERT OR IGNORE INTO thematic_findings
                       (batch_id,reg,category,title,law,evidence,
                        code,document,source_url,law_url)
                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
                       (batch,reg,f["category"],f["title"],f.get("law"),f.get("evidence"),
                        f.get("code") or "",f.get("document") or "",
                        f.get("source_url") or "",f.get("law_url") or ""))
-                    previous.append(f)
+                    if inserted.rowcount==1:
+                        if previous_count is None:
+                            previous_count=len(collapse_legal_events(previous))
+                        previous.append(f)
+                if previous_count is not None:
+                    gained=len(collapse_legal_events(previous))-previous_count
+                    if gained>0:
+                        saved_events.append((batch,reg,gained,item.get("analysis_version",ANALYSIS_VERSION)))
             c.execute("""UPDATE thematic_items SET status=?,detail=?,updated_at=?,
-              last_doc_id=?,last_ready_count=? WHERE batch_id=? AND reg=?""",
-              (state,detail,original.now(),item["doc_id"],item["ready"],batch,reg))
+              last_doc_id=?,last_ready_count=?,
+              last_analysis_version=CASE WHEN ?='completed' THEN ? ELSE last_analysis_version END
+              WHERE batch_id=? AND reg=?""",
+              (state,detail,original.now(),item["doc_id"],item["ready"],state,
+               item.get("analysis_version",ANALYSIS_VERSION),batch,reg))
         c.commit()
+        for batch,reg,gained,version in saved_events:
+            print(f"THEMATIC_EVIDENCE_SAVED reg={reg} new_unique_findings={gained} "
+                  f"analysis_version={version} batch={batch}",flush=True)
     finally:c.close()
 
 def _request_missing_originals(ns,results=()):
@@ -204,9 +240,12 @@ def _request_missing_originals(ns,results=()):
         # whichever 36 procurements happened to be legally audited this cycle.
         cutoff=datetime.fromtimestamp(clock-1800,timezone.utc).isoformat()
         day_cutoff=datetime.fromtimestamp(clock-86400,timezone.utc).isoformat()
+        scope=joined_selection_sql(conn)
         waiting=conn.execute("""SELECT t.reg,MIN(t.updated_at) first_waiting
           FROM thematic_items t JOIN thematic_batches b ON b.id=t.batch_id
+          JOIN purchases p ON p.reg_number=t.reg
           WHERE b.status='active' AND t.status='waiting_originals'
+            AND """+scope+"""
             AND NOT EXISTS (
               SELECT 1 FROM v301_search_jobs j
               WHERE j.kind='reg' AND j.target=t.reg
@@ -308,6 +347,8 @@ def install(ns):
             c.execute("ALTER TABLE thematic_items ADD COLUMN last_doc_id INTEGER NOT NULL DEFAULT 0")
         if "last_ready_count" not in cols:
             c.execute("ALTER TABLE thematic_items ADD COLUMN last_ready_count INTEGER NOT NULL DEFAULT 0")
+        if "last_analysis_version" not in cols:
+            c.execute("ALTER TABLE thematic_items ADD COLUMN last_analysis_version INTEGER NOT NULL DEFAULT 0")
         c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_status ON thematic_items(batch_id,status,updated_at)")
         # Old completed checks already occurred; initialise their source version
         # once to avoid a pointless full recheck of every historic completed item.
@@ -323,4 +364,5 @@ def install(ns):
     original.WORKER_STATE["interval_seconds"]=20
     # v342 drains ready batches immediately and waits for evidence notifications
     # while idle. The fallback poll still handles external DB writers.
-    print("THEMATIC_FAST_WORKER_READY concurrency=4 per_cycle=36 index_seconds=90",flush=True)
+    print("THEMATIC_FAST_WORKER_READY concurrency=4 per_cycle=36 index_seconds=90 "
+          f"analysis_version={ANALYSIS_VERSION} inclusive_publication_period=True",flush=True)

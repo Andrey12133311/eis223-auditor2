@@ -353,6 +353,13 @@ async def offline_audit(ns,reg,collect_only=False):
 
     extractor=ns.get("extract_text")
     if extractor is None:raise RuntimeError("Existing original-document text extractor unavailable")
+    # The incoming and repeated audit must see the same evidence order.
+    # The legacy DOCX extractor appends every table after all paragraphs,
+    # breaking dated request/reply pairs and dropping otherwise readable
+    # bodies when an unrelated styles/image part is missing.
+    from v314_eis_metadata import document_text
+    def extract_original(path):
+        return document_text(path,extractor)
     docs=[]
     dedup_by_sha={}
     for uid,item in allowed.items():
@@ -370,7 +377,7 @@ async def offline_audit(ns,reg,collect_only=False):
             # Keep the binary original as source evidence but NEVER count
             # the archive itself as a checked legal document.
             members,warnings=await run_file_io(
-                extract_members,path,reg,uid,data_root(),extractor,timeout=160)
+                extract_members,path,reg,uid,data_root(),extract_original,timeout=160)
             docs.append({
                 "name":item["name"],"url":item["url"],"type":"archive",
                 "published":"","meta":{"source":"official_eis_archive",
@@ -405,7 +412,17 @@ async def offline_audit(ns,reg,collect_only=False):
             print(f"V310 ARCHIVE_EXTRACTED reg={reg} uid={uid} members_checked={len(members)} "
                   f"warnings={len(warnings)}",flush=True)
             continue
-        text=await run_file_io(extractor,path,timeout=45)
+        extraction_error=None
+        try:
+            text=await run_file_io(extract_original,path,timeout=45)
+        except Exception as exc:
+            # One unreadable original must not prevent the remaining saved
+            # documents from reaching the legal engine. Cancellation still
+            # propagates; failed text never receives status='checked'.
+            text=""
+            extraction_error="Не удалось извлечь текст оригинала ("+type(exc).__name__+")"
+            print(f"V298 ORIGINAL_TEXT_UNREADABLE reg={reg} uid={uid} "
+                  f"type={type(exc).__name__}",flush=True)
         text=str(text or "")
         valid=len(text.strip())>=3
         docs.append({
@@ -419,7 +436,7 @@ async def offline_audit(ns,reg,collect_only=False):
             "local":str(path),
             "annotated":None,
             "status":"checked" if valid else "downloaded_no_text",
-            "error":None if valid else "Оригинал сохранён; текст не извлечён",
+            "error":None if valid else extraction_error or "Оригинал сохранён; текст не извлечён",
             "final_url":item["url"],
         })
 
@@ -781,9 +798,22 @@ async def offline_audit(ns,reg,collect_only=False):
         from v314_eis_metadata import apply_metadata
         await asyncio.to_thread(apply_metadata,ns,reg,metadata)
     checked=sum(d.get("status")=="checked" for d in docs)
-    print(f"V298 OFFLINE_AUDIT reg={reg} documents={len(docs)} checked={checked} findings={len(findings)} checks={len(checks)} remote_requests=0",flush=True)
+    # A confirmed checklist rule is a violation too. Preserve the existing
+    # `findings` API field, but expose the reconciled legal event count so
+    # a run with checklist violations cannot be misread as zero violations.
+    from v352_dashboard_truth import collapse_legal_events
+    checklist_violations=[{**c,"title":c.get("item") or c.get("title"),
+                           "code":c.get("field_path") or c.get("code")}
+                          for c in checks if c.get("status")=="violation"]
+    confirmed=len(collapse_legal_events([*findings,*checklist_violations]))
+    print(f"V298 OFFLINE_AUDIT reg={reg} documents={len(docs)} checked={checked} "
+          f"findings={len(findings)} checks={len(checks)} "
+          f"checklist_violations={len(checklist_violations)} confirmed_violations={confirmed} "
+          "remote_requests=0",flush=True)
     return {"reg":reg,"documents":len(docs),"checked_documents":checked,
             "findings":len(findings),"checks":len(checks),
+            "checklist_violations":len(checklist_violations),
+            "confirmed_violations":confirmed,
             "source":"official_eis_getDocsIP" if notice is not None else "public_eis_223_browser",
             "remote_requests":0}
 

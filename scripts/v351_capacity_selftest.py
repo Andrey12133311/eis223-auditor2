@@ -97,7 +97,8 @@ async def thematic_legal_source_gate():
          patch.object(general,"stored_docs",return_value=(verified,0)),\
          patch.object(general,"is_official",return_value=True):
         state,result=await theme.independent_review(
-          {"analyze":lambda p,docs:positive},REG,["dates"])
+          {"analyze":lambda p,docs:positive,
+           "build_checks":lambda p,detail,card,docs:[]},REG,["dates"])
         assert state=="completed" and len(result)==1,(state,result)
         assert "разъяснение" in result[0]["title"].lower()
         assert result[0]["document"]=="Оригинал.pdf"
@@ -107,7 +108,8 @@ async def thematic_legal_source_gate():
          patch.object(general,"stored_docs",return_value=(verified,0)),\
          patch.object(general,"is_official",return_value=True):
         state,result=await theme.independent_review(
-          {"analyze":lambda p,docs:positive},REG,["national"])
+          {"analyze":lambda p,docs:positive,
+           "build_checks":lambda p,detail,card,docs:[]},REG,["national"])
         assert state=="completed" and result==[]
 
 def thematic_dedup():
@@ -117,6 +119,8 @@ def thematic_dedup():
         theme.init(ns)
         db=connection(path)
         db.execute("CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,local_path TEXT,status TEXT)")
+        db.execute("CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT)")
+        db.execute("INSERT INTO purchases VALUES(?,?)",(REG,"ООО Тест"))
         db.commit();db.close()
         fast.install(ns)
         batch="a"*24

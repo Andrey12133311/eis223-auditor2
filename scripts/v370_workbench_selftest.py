@@ -88,6 +88,9 @@ def check_real_sqlite_campaign():
             c.execute("CREATE TABLE thematic_batches(id TEXT PRIMARY KEY,categories TEXT,"
                       "created_at TEXT,status TEXT,legal_forms TEXT)")
         ns={"conn":lambda: sqlite3.connect(file)}
+        # Exercise the same additive migration used at application startup.
+        from v342_thematic_queue import init
+        init(ns)
         first="a"*24
         assert _insert_real_batch(ns,first,["docs"],["ООО"])=="active"
         assert _insert_real_batch(ns,first,["docs"],["ООО"])=="active"
