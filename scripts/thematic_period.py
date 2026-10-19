@@ -93,17 +93,27 @@ def index_campaign(connection, batch, customer_form, timestamp):
 
     allowed = set(json.loads(batch["legal_forms"]))
     scope, values = selection_sql(connection, batch)
-    rows = connection.execute(
-        "SELECT p.reg_number,p.customer FROM purchases p "
-        "WHERE p.reg_number GLOB '3??????????' AND " + scope, values)
-    queue = []
-    for row in rows:
-        if customer_form(row["customer"]) in allowed:
-            queue.append((batch["id"], row["reg_number"], timestamp))
-        if len(queue) >= 1000:
-            _insert_items(connection, queue)
-            queue.clear()
-    _insert_items(connection, queue)
+    last_reg = ""
+    while True:
+        # Finish and close each read statement before its first write. A
+        # streaming SELECT kept a WAL snapshot open across INSERT; another
+        # EIS writer could then make the upgrade fail with BUSY_SNAPSHOT.
+        # Keyset pages bound memory without capping the complete selection.
+        cursor = connection.execute(
+            "SELECT p.reg_number,p.customer FROM purchases p "
+            "WHERE p.reg_number GLOB '3??????????' AND p.reg_number>? AND "
+            + scope + " ORDER BY p.reg_number LIMIT 1000", [last_reg, *values])
+        try:
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        if not rows:
+            break
+        # Advance past every fetched purchase, including excluded forms.
+        last_reg = rows[-1]["reg_number"]
+        queue = [(batch["id"], row["reg_number"], timestamp) for row in rows
+                 if customer_form(row["customer"]) in allowed]
+        _insert_items(connection, queue)
     bounds = period_fields(batch)
     if bounds["date_from"] or bounds["date_to"]:
         # Preserve saved evidence if EIS later corrects a publication date;
@@ -117,6 +127,10 @@ def index_campaign(connection, batch, customer_form, timestamp):
 
 
 def _insert_items(connection, queue):
+    # sqlite3.executemany([]) can start a deferred transaction even without
+    # rows. That would pin the next read snapshot before a later page writes.
+    if not queue:
+        return
     connection.executemany(
         "INSERT INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?) "
         "ON CONFLICT(batch_id,reg) DO UPDATE SET status='queued',detail='',"

@@ -113,6 +113,103 @@ class QueuePeriods(unittest.TestCase):
         self.assertEqual(by_batch[end], {before, boundary})
         self.assertEqual(by_batch[all_time], {before, boundary, after, unknown})
 
+    def test_index_closes_read_snapshot_before_an_interleaved_writer(self):
+        # Reproduce a real two-connection race. With the old streaming SELECT,
+        # WAL raised SQLITE_BUSY_SNAPSHOT (517) at INSERT after the 1000th
+        # customer; rollback journal mode blocked the second writer's commit.
+        for journal in ("WAL", "DELETE"):
+            with self.subTest(journal=journal), tempfile.TemporaryDirectory() as folder:
+                path = str(Path(folder) / "index-race.sqlite")
+                reader = sqlite3.connect(path, timeout=0.1)
+                reader.row_factory = sqlite3.Row
+                writer = sqlite3.connect(path, timeout=0.1)
+                try:
+                    reader.execute("PRAGMA journal_mode=" + journal)
+                    reader.executescript("""
+                        CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT,published_at TEXT);
+                        CREATE TABLE thematic_items(batch_id TEXT,reg TEXT,status TEXT DEFAULT 'queued',
+                            detail TEXT DEFAULT '',updated_at TEXT,PRIMARY KEY(batch_id,reg));
+                    """)
+                    regs = [str(32610000000 + i) for i in range(1101)]
+                    reader.executemany("INSERT INTO purchases VALUES(?,?,'2026-10-19')",
+                                       [(reg, "ООО Пример") for reg in regs])
+                    reader.commit()
+                    visited = []
+
+                    def customer_form(name):
+                        visited.append(name)
+                        if len(visited) == 100:
+                            writer.execute("UPDATE purchases SET customer='ООО Уточнено' WHERE reg_number=?",
+                                           (regs[-1],))
+                            writer.commit()
+                        return thematic.customer_form(name)
+
+                    batch = {"id": self.batch, "legal_forms": '["ООО"]',
+                             "date_from": "2026-10-19", "date_to": "2026-10-19"}
+                    period.index_campaign(reader, batch, customer_form, thematic.now())
+                    self.assertEqual(len(visited), len(regs))
+                    self.assertEqual({r[0] for r in reader.execute("SELECT reg FROM thematic_items")}, set(regs))
+                    self.assertEqual(reader.execute("SELECT customer FROM purchases WHERE reg_number=?",
+                                                    (regs[-1],)).fetchone()[0], "ООО Уточнено")
+                    # The helper must not commit the caller's indexing write.
+                    self.assertTrue(reader.in_transaction)
+                    self.assertEqual(writer.execute("SELECT COUNT(*) FROM thematic_items").fetchone()[0], 0)
+                    reader.rollback()
+                    self.assertEqual(writer.execute("SELECT COUNT(*) FROM thematic_items").fetchone()[0], 0)
+                finally:
+                    reader.close()
+                    writer.close()
+
+    def test_empty_form_pages_do_not_pin_a_snapshot_or_stop_later_pages(self):
+        self.campaign()
+        with self.connect() as c:
+            c.execute("PRAGMA journal_mode=WAL")
+            regs = [str(32610000000 + i) for i in range(2501)]
+            c.executemany("INSERT INTO purchases VALUES(?,?,'2026-10-19')",
+                          [(reg, "АО Не выбрано" if i < 2000 else "ООО Выбрано")
+                           for i, reg in enumerate(regs)])
+        reader, writer = self.connect(), self.connect()
+        visited = []
+        try:
+            batch = reader.execute("SELECT * FROM thematic_batches WHERE id=?", (self.batch,)).fetchone()
+
+            def customer_form(name):
+                visited.append(name)
+                if len(visited) == 1100:
+                    # The first empty page must not have started BEGIN through
+                    # executemany([]), otherwise this commit stales page two.
+                    self.assertFalse(reader.in_transaction)
+                    writer.execute("UPDATE purchases SET customer='ООО Исправлено' WHERE reg_number=?",
+                                   (regs[-1],))
+                    writer.commit()
+                return thematic.customer_form(name)
+
+            period.index_campaign(reader, batch, customer_form, thematic.now())
+            self.assertEqual(len(visited), len(regs))
+            self.assertEqual({r[0] for r in reader.execute("SELECT reg FROM thematic_items")}, set(regs[2000:]))
+            reader.rollback()
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_index_preserves_an_existing_caller_transaction(self):
+        self.campaign()
+        reg = self.purchase(1, "2026-10-19")
+        reader = self.connect()
+        try:
+            batch = reader.execute("SELECT * FROM thematic_batches WHERE id=?", (self.batch,)).fetchone()
+            reader.execute("BEGIN IMMEDIATE")
+            reader.execute("UPDATE purchases SET customer='ООО В транзакции' WHERE reg_number=?", (reg,))
+            period.index_campaign(reader, batch, thematic.customer_form, thematic.now())
+            self.assertTrue(reader.in_transaction)
+            self.assertEqual(reader.execute("SELECT COUNT(*) FROM thematic_items").fetchone()[0], 1)
+            reader.rollback()
+            self.assertEqual(reader.execute("SELECT COUNT(*) FROM thematic_items").fetchone()[0], 0)
+            self.assertEqual(reader.execute("SELECT customer FROM purchases WHERE reg_number=?", (reg,)).fetchone()[0],
+                             "ООО Пример")
+        finally:
+            reader.close()
+
     def test_new_arrivals_and_corrected_publication_are_checked_against_saved_bounds(self):
         self.campaign("2026-10-10", "2026-10-10")
         first = self.purchase(1, "2026-10-10")
