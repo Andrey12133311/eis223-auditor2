@@ -152,7 +152,13 @@ def install(ns):
         folder=data_root/"eis223_official_archive_inbox"/reg
         zip_path=folder/(sha+".zip")
         json_path=folder/(sha+".json")
+        from v295_eis_originals import _review_source_version
+        enqueue=ns.get("_v295_enqueue_review")
+        before=await asyncio.to_thread(_review_source_version,reg) if callable(enqueue) else None
         was_new=not zip_path.exists()
+        if not was_new:
+            if zip_path.stat().st_size>MAX_UPLOAD or hashlib.sha256(zip_path.read_bytes()).hexdigest()!=sha:
+                raise HTTPException(409,"Stored SOAP archive fails hash verification; existing evidence was not replaced")
         if was_new: _atomic(zip_path,raw)
         if not json_path.exists():
             record={"source":"official_eis_soap_archive","reg_number":reg,
@@ -173,6 +179,9 @@ def install(ns):
                 # The durable archive is acknowledged; a retry can repair the
                 # card without losing bytes or claiming a completed audit.
                 print(f"V379 SOAP_METADATA_PENDING reg={reg} type={type(exc).__name__}",flush=True)
+        if callable(enqueue):
+            after=await asyncio.to_thread(_review_source_version,reg)
+            if before!=after:enqueue(reg,force=True)
         print(f"V294 EIS_INBOX reg={reg} metadata={len(notices)} links={sum(n['documents_referenced'] for n in notices)} duplicate={not was_new} verified_originals=0",flush=True)
         return JSONResponse({"accepted":True,"reg_number":reg,"metadata_xmls":len(notices),
             "archive_sha256":sha,"metadata_import":metadata_import,

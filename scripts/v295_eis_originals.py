@@ -6,6 +6,9 @@ EIS UID cross-reference, format checks, and persistence on /data.
 """
 from __future__ import annotations
 import asyncio
+from contextlib import contextmanager
+import fcntl
+from itertools import islice
 import hashlib
 import hmac
 import json
@@ -21,9 +24,51 @@ from starlette.middleware.cors import CORSMiddleware
 
 REG = re.compile(r"[0-9]{11,20}$")
 UID = re.compile(r"[0-9A-F]{32}$")
-EXT = frozenset((".docx",".doc",".xlsx",".xls",".pdf",".rtf",".odt",".ods",".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab",".xml"))
+EXT = frozenset((".docx",".doc",".xlsx",".xlsm",".xls",".pdf",".rtf",".odt",".ods",".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab",".xml"))
 MAX_BYTES = 25*1024*1024
 MAX_EXPANDED = 80*1024*1024
+# Per-request limits do not truncate the accumulated evidence of later captures.
+# Fail visibly when the local retention boundary is reached; never report a
+# prefix of an accepted procurement as its complete document manifest.
+MAX_SOURCE_RECEIPTS = 1000
+MAX_KNOWN_DOCUMENTS = 10000
+MAX_ORIGINAL_VERSIONS = 1000
+MAX_VERSION_PROVENANCE = 1000
+MAX_QUARANTINED_ORIGINALS = 20
+MAX_SOURCE_MANIFEST_BYTES = 8*1024*1024
+
+
+def _bounded_paths(folder, pattern, limit):
+    paths=list(islice(folder.glob(pattern),limit+1))
+    if len(paths)>limit:
+        raise HTTPException(409,"Stored EIS evidence exceeds the bounded intake limit; review is incomplete")
+    return sorted(paths)
+
+
+def _merge_source_metadata(primary, secondary):
+    """Keep all provenance when byte-identical source records are collapsed."""
+    if not isinstance(primary.get("meta"),dict):primary["meta"]={}
+    secondary_meta=secondary.get("meta")
+    if not isinstance(secondary_meta,dict):secondary_meta={}
+    alternatives=[]
+    for source in (primary["meta"],secondary_meta):
+        values=source.get("identical_sources")
+        if isinstance(values,list):
+            alternatives.extend(item for item in values if isinstance(item,dict))
+    snapshot={key:value for key,value in secondary.items() if key not in ("text","meta")}
+    snapshot["meta"]={key:value for key,value in secondary_meta.items() if key!="identical_sources"}
+    alternatives.append(snapshot)
+    unique={json.dumps(item,ensure_ascii=False,sort_keys=True,default=str):item for item in alternatives}
+    primary["meta"]["identical_sources"]=list(unique.values())
+
+
+@contextmanager
+def _receipt_lock(folder):
+    folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with (folder/".receipt.lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        try:yield
+        finally:fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
 
 def _rejection_code(error):
     """Expose only fixed format diagnostics in operational logs."""
@@ -46,6 +91,7 @@ def _rejection_code(error):
         "Unsafe compressed original":"original_zip_expansion_limit",
         "Not a DOCX document":"original_not_docx",
         "Not an XLSX document":"original_not_xlsx",
+        "Not an XLSM document":"original_not_xlsm",
         "Not an OpenDocument":"original_not_opendocument",
         "Damaged ZIP":"original_zip_crc",
         "Damaged ZIP original":"original_zip_damaged",
@@ -96,21 +142,24 @@ def allowed_documents(reg):
     folder=root()/"eis223_official_archive_inbox"/reg
     found={}
     # SOAP archives are preferred; browser-origin public EIS metadata is fallback.
-    soap_receipts=sorted(folder.glob("*.json"))[:100] if folder.is_dir() else []
+    soap_receipts=_bounded_paths(folder,"*.json",MAX_SOURCE_RECEIPTS) if folder.is_dir() else []
     for path in soap_receipts:
         try:
             record=json.loads(path.read_text(encoding="utf-8"))
-            if record.get("reg_number")!=reg or record.get("source")!="official_eis_soap_archive":
+            if not isinstance(record,dict) or record.get("reg_number")!=reg or record.get("source")!="official_eis_soap_archive":
                 continue
             for notice in record.get("notices",[]):
-                if notice.get("reg_number")!=reg:continue
+                if not isinstance(notice,dict) or notice.get("reg_number")!=reg:continue
                 for item in notice.get("documents",[]):
+                    if not isinstance(item,dict):continue
                     url=item.get("url","")
                     uid=uid_from_url(url)
                     if not uid or uid in found:continue
                     name=Path(item.get("name") or "").name
                     if not name or len(name)>255 or Path(name).suffix.lower() not in EXT:continue
                     found[uid]={"uid":uid,"name":name,"url":url,"ext":Path(name).suffix.lower()}
+                    if len(found)>MAX_KNOWN_DOCUMENTS:
+                        raise HTTPException(409,"Stored EIS document history exceeds the intake limit; review is incomplete")
         except (OSError,ValueError,TypeError,KeyError):
             continue
     # Additional 223-FZ notices discovered on the PUBLIC EIS domain in a
@@ -118,16 +167,19 @@ def allowed_documents(reg):
     manifest=root()/"eis223_public_browser_intake"/reg/"manifest.json"
     try:
         public=json.loads(manifest.read_text(encoding="utf-8"))
-        if (public.get("reg_number")==reg and
+        if (isinstance(public,dict) and public.get("reg_number")==reg and
                 public.get("source")=="public_eis_223_browser" and
                 isinstance(public.get("documents"),list)):
-            for item in public["documents"][:100]:
+            for item in public["documents"]:
+                if not isinstance(item,dict):continue
                 url=item.get("url","")
                 uid=uid_from_url(url)
                 if not uid or uid in found:continue
                 name=Path(item.get("name") or "").name
                 if not name or len(name)>255 or Path(name).suffix.lower() not in EXT:continue
                 found[uid]={"uid":uid,"name":name,"url":url,"ext":Path(name).suffix.lower()}
+                if len(found)>MAX_KNOWN_DOCUMENTS:
+                    raise HTTPException(409,"Stored EIS document history exceeds the intake limit; review is incomplete")
     except (OSError,ValueError,TypeError,KeyError):
         pass
     return found
@@ -147,6 +199,191 @@ def saved_document(reg,uid):
         return (path,value)
     except (OSError,ValueError,KeyError,TypeError):
         return None
+
+def _manifest_source_evidence(value):
+    """Stable legal/card facts; capture counters and timestamps are not evidence."""
+    keys=("source","reg_number","documents","changes","clarifications","protocols","cancellations",
+          "title","customer","customer_inn","published","submission_start","submission_end","price",
+          "declared_attachment_count")
+    # Schema additions such as changes=[] must not turn an unchanged legacy
+    # capture into a deployment-wide recheck. Absence and empty optional facts
+    # have identical meaning; an undeclared attachment count means known refs.
+    evidence={key:value[key] for key in keys if key in value and value[key] not in (None,"",[])}
+    documents=value.get("documents")
+    if isinstance(documents,list):
+        evidence["declared_attachment_count"]=max(int(value.get("declared_attachment_count") or 0),len(documents))
+    for key in ("documents","changes","clarifications","protocols","cancellations"):
+        if isinstance(evidence.get(key),list):
+            evidence[key]=sorted(evidence[key],key=lambda item:json.dumps(item,sort_keys=True,ensure_ascii=False))
+    return evidence
+
+
+def _soap_source_evidence(reg):
+    """Cheap scheduling identities from authenticated intake receipts.
+
+    This is not authenticity verification: the offline reader rechecks ZIP
+    and XML hashes before any legal use. Never hash/decompress original bytes
+    in enqueue callbacks or request handling merely to decide whether to run.
+    """
+    folder=root()/"eis223_official_archive_inbox"/reg
+    identities=set()
+    for path in _bounded_paths(folder,"*.json",MAX_SOURCE_RECEIPTS):
+        try:
+            receipt=json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(receipt,dict) or receipt.get("source")!="official_eis_soap_archive" or receipt.get("reg_number")!=reg:
+                continue
+            sha=receipt.get("archive_sha256","")
+            if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-f]{64}",sha):continue
+            archive=folder/(sha+".zip")
+            if not archive.is_file() or archive.stat().st_size>15*1024*1024:continue
+            for record in receipt.get("notices",[]):
+                if not isinstance(record,dict) or record.get("reg_number")!=reg:continue
+                digest=record.get("xml_sha256","")
+                if isinstance(digest,str) and re.fullmatch(r"[0-9a-f]{64}",digest):identities.add(digest)
+        except (OSError,ValueError,TypeError):continue
+    return sorted(identities)
+
+
+def _review_source_version(reg):
+    """Schedule by current evidence identity, never by attachment count alone.
+
+    Receipt history is deliberately excluded: preserving an old version must
+    not create extra legal findings or continuously retrigger the same audit.
+    The audit still verifies the original byte hash before using evidence.
+    """
+    sources=[]
+    for uid,item in sorted(allowed_documents(reg).items()):
+        stored=saved_document(reg,uid)
+        receipt=stored[1] if stored else {}
+        identity={key:receipt.get(key) for key in ("sha256","extension","bytes")}
+        sources.append([uid,item,identity])
+    manifest={}
+    path=root()/"eis223_public_browser_intake"/reg/"manifest.json"
+    try:
+        with path.open("rb") as stream:raw=stream.read(MAX_SOURCE_MANIFEST_BYTES+1)
+        if len(raw)>MAX_SOURCE_MANIFEST_BYTES:
+            raise HTTPException(409,"Stored EIS manifest exceeds the safe read limit; review is incomplete")
+        value=json.loads(raw)
+        if isinstance(value,dict) and value.get("reg_number")==reg and value.get("source")=="public_eis_223_browser":
+            manifest=_manifest_source_evidence(value)
+    except (OSError,ValueError,TypeError):pass
+    encoded=json.dumps({"originals":sources,"manifest":manifest,"soap_xml":_soap_source_evidence(reg)},
+                       ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _verified_unique_original_count(reg):
+    """Confirm duplicate-only nonarchive coverage; never infer member coverage."""
+    from v310_archive_scan import ARCHIVE_EXT
+    saved=[];identities=set()
+    for uid,item in allowed_documents(reg).items():
+        if item["ext"] in ARCHIVE_EXT:return None
+        stored=saved_document(reg,uid)
+        if stored is None:return None
+        path,receipt=stored
+        saved.append(stored);identities.add((receipt["sha256"],receipt["extension"]))
+    if len(identities)==len(saved):return None
+    for path,receipt in saved:
+        try:
+            with path.open("rb") as stream:
+                if hashlib.file_digest(stream,"sha256").hexdigest()!=receipt["sha256"]:return None
+        except OSError:return None
+    return len(identities)
+
+
+def _store_original_version(reg,uid,entry,data):
+    """Append provenance before advancing the current receipt, under one UID lock.
+
+    History is evidence retention, not a request to count old bytes as extra
+    findings. The active receipt and saved_document API keep their meaning.
+    """
+    sha=hashlib.sha256(data).hexdigest()
+    folder=root()/"eis223_official_originals"/reg/uid
+    receipt={"reg_number":reg,"uid":uid,"sha256":sha,"bytes":len(data),
+             "extension":entry["ext"],"source_url":entry["url"],"name":entry["name"],
+             "extracted_chars":0,"state":"stored_pending_legal_review"}
+    with _receipt_lock(folder):
+        versions=folder/"versions"
+        existing=_bounded_paths(versions,"*.json",MAX_ORIGINAL_VERSIONS)
+        current=saved_document(reg,uid)
+        pending=[]
+        prior_path=folder/"receipt.json"
+        if prior_path.exists():
+            try:
+                prior=json.loads(prior_path.read_text(encoding="utf-8"))
+                if (not isinstance(prior,dict) or prior.get("reg_number")!=reg or prior.get("uid")!=uid
+                        or prior.get("extension") not in EXT
+                        or not isinstance(prior.get("sha256"),str)
+                        or not re.fullmatch(r"[0-9a-f]{64}",prior["sha256"])
+                        or not isinstance(prior.get("bytes"),int) or not 0<prior["bytes"]<=MAX_BYTES):
+                    raise ValueError("Invalid retained receipt")
+            except (OSError,ValueError,TypeError) as exc:
+                raise HTTPException(409,"Existing original receipt is damaged; upload was not replaced") from exc
+            if current is None:prior={**prior,"retained_file_state":"unavailable_or_unverified"}
+            pending.append(prior)
+        pending.append(receipt)
+        additions={}
+        for item in pending:
+            target=versions/(item["sha256"]+item["extension"]+".json")
+            additions.setdefault(target,[]).append(item)
+        if len(set(existing)|set(additions))>MAX_ORIGINAL_VERSIONS:
+            raise HTTPException(409,"Original version history exceeds the intake limit; upload was not replaced")
+        histories={}
+        for target,observations in additions.items():
+            if target.exists():
+                try:
+                    history=json.loads(target.read_text(encoding="utf-8"))
+                    if (not isinstance(history,dict) or any(history.get(key)!=observations[0].get(key)
+                            for key in ("reg_number","uid","sha256","extension"))):
+                        raise ValueError("Mismatched version receipt")
+                except (OSError,ValueError,TypeError) as exc:
+                    raise HTTPException(409,"Original version provenance is damaged; upload was not replaced") from exc
+            else:history=dict(observations[0])
+            provenance=history.get("provenance",[])
+            if not isinstance(provenance,list):
+                raise HTTPException(409,"Original version provenance is damaged; upload was not replaced")
+            seen={}
+            for item in [*provenance,history,*observations]:
+                if not isinstance(item,dict):
+                    raise HTTPException(409,"Original version provenance is damaged; upload was not replaced")
+                observation={key:value for key,value in item.items() if key!="provenance"}
+                seen[json.dumps(observation,ensure_ascii=False,sort_keys=True)]=observation
+            if len(seen)>MAX_VERSION_PROVENANCE:
+                raise HTTPException(409,"Original provenance history exceeds the intake limit; upload was not replaced")
+            if len(seen)>1:history["provenance"]=list(seen.values())
+            histories[target]=history
+        file=folder/(sha+entry["ext"])
+        repaired=False
+        if file.exists():
+            # Never reuse an existing filename as proof that the expected
+            # bytes survived. Preserve a corrupt target as explicitly
+            # unverified diagnostic data before repairing it from this upload.
+            if file.is_symlink():raise HTTPException(409,"Original target is not a regular stored file")
+            with file.open("rb") as stream:prior_bytes=stream.read(MAX_BYTES+1)
+            if len(prior_bytes)>MAX_BYTES:
+                raise HTTPException(409,"Existing original exceeds the safe repair limit; upload was not replaced")
+            actual=hashlib.sha256(prior_bytes).hexdigest()
+            if actual!=sha:
+                quarantine=folder/"quarantine"
+                retained=_bounded_paths(quarantine,"*.json",MAX_QUARANTINED_ORIGINALS)
+                diagnostic=quarantine/(sha+"-"+actual+entry["ext"]+".json")
+                if diagnostic not in retained and len(retained)>=MAX_QUARANTINED_ORIGINALS:
+                    raise HTTPException(409,"Original quarantine exceeds the safe repair limit; upload was not replaced")
+                save_atomic(quarantine/(actual+entry["ext"]),prior_bytes)
+                save_atomic(diagnostic,json.dumps({"reg_number":reg,"uid":uid,
+                    "expected_sha256":sha,"observed_sha256":actual,"bytes":len(prior_bytes),
+                    "state":"unverified_corrupt_original"},ensure_ascii=False).encode("utf-8"))
+                save_atomic(file,data)
+                repaired=True
+        else:save_atomic(file,data)
+        for target,history in histories.items():
+            encoded=json.dumps(history,ensure_ascii=False).encode("utf-8")
+            if not target.exists() or target.read_bytes()!=encoded:save_atomic(target,encoded)
+        save_atomic(folder/"receipt.json",json.dumps(receipt,ensure_ascii=False).encode("utf-8"))
+    changed=(repaired or current is None or any(current[1].get(key)!=receipt.get(key)
+                                    for key in ("sha256","extension","bytes")))
+    return receipt,changed
+
 
 def assert_format(data,ext):
     if len(data)<8 or len(data)>MAX_BYTES:raise ValueError("Invalid original file size")
@@ -176,7 +413,7 @@ def assert_format(data,ext):
     if ext==".pdf" and not data.startswith(b"%PDF"):raise ValueError("Not a PDF original")
     if ext==".rtf" and not data.startswith(bytes.fromhex("7b5c727466")):raise ValueError("Not an RTF original")
     if ext==".xml" and not data.lstrip().startswith(b"<"):raise ValueError("Not an XML original")
-    if ext in (".docx",".xlsx",".odt",".ods",".zip"):
+    if ext in (".docx",".xlsx",".xlsm",".odt",".ods",".zip"):
         if not is_zip:raise ValueError("Not a ZIP-based Office/archive original")
         try:
             import io
@@ -187,8 +424,21 @@ def assert_format(data,ext):
                 entries=set(z.namelist())
                 if ext==".docx" and "word/document.xml" not in entries:
                     raise ValueError("Not a DOCX document")
-                if ext==".xlsx" and "xl/workbook.xml" not in entries:
-                    raise ValueError("Not an XLSX document")
+                if ext in (".xlsx",".xlsm") and "xl/workbook.xml" not in entries:
+                    raise ValueError("Not an XLSM document" if ext==".xlsm" else "Not an XLSX document")
+                if ext==".xlsm":
+                    # A macro-enabled workbook is read-only evidence. Validate
+                    # its package type; never execute macros or recalculate it.
+                    from eis223_soap_xml import safe_xml
+                    try:
+                        types=safe_xml(z.read("[Content_Types].xml"))
+                        namespace="{http://schemas.openxmlformats.org/package/2006/content-types}"
+                        correct=(types.tag==namespace+"Types" and any(
+                            item.tag==namespace+"Override" and item.get("PartName")=="/xl/workbook.xml"
+                            and item.get("ContentType")=="application/vnd.ms-excel.sheet.macroEnabled.main+xml"
+                            for item in types))
+                    except (KeyError,ValueError):correct=False
+                    if not correct:raise ValueError("Not an XLSM document")
                 if ext in (".odt",".ods") and "mimetype" not in entries:
                     raise ValueError("Not an OpenDocument")
                 if z.testzip() is not None:raise ValueError("Damaged ZIP")
@@ -267,7 +517,7 @@ def install(ns):
         official=allowed_documents(reg)
         connector=ns.get("conn")
         if not official or connector is None:return None
-        query="SELECT id,name,url,local_path,status,text_chars,metadata_json FROM docs WHERE reg_number=? ORDER BY id"
+        query="SELECT * FROM docs WHERE reg_number=? ORDER BY id"
         db=connector()
         try:
             rows=[dict(r) for r in db.execute(query,(reg,)).fetchall()]
@@ -317,9 +567,10 @@ def install(ns):
                 alternatives=list(meta.get("identical_sources") or [])
                 for row in group:
                     if row["id"]==chosen["id"]:continue
-                    alternatives.append({"name":row.get("name") or "",
-                                         "url":row.get("url") or "",
-                                         "sha256":digest})
+                    # A duplicate body can have a distinct title, date, role,
+                    # or previous provenance. Retain the full source row,
+                    # including its metadata, before collapsing its DB row.
+                    alternatives.append({**row,"sha256":digest})
                     db.execute("DELETE FROM docs WHERE id=? AND reg_number=?",
                                (row["id"],reg))
                     removed+=1
@@ -363,13 +614,16 @@ def install(ns):
         if lock is None or (not callable(offline) and process is None):
             update_review(reg,"failed",originals_received=received,reason="Audit pipeline unavailable")
             return
+        source_version=None
         try:
             # Preserve single-writer review while letting manual requests
             # pass queued automatic work. Running work is never interrupted.
             foreground=foreground or review_priorities.get(reg,False)
             async with review_slot(background=not foreground):
                 async with lock:
-                    update_review(reg,"running",originals_received=received)
+                    source_version=await asyncio.to_thread(_review_source_version,reg)
+                    total,received=await asyncio.to_thread(review_counts,reg)
+                    update_review(reg,"running",originals_received=received,source_version=source_version)
                     if callable(offline):
                         result=await asyncio.wait_for(offline(reg),timeout=240)
                     else:
@@ -380,16 +634,38 @@ def install(ns):
                     verified=await asyncio.to_thread(reconcile_document_rows,reg)
                     checked=(int(verified["checked"]) if verified is not None
                              else int(result.get("checked_documents") or 0) if isinstance(result,dict) else 0)
-                    update_review(reg,"completed" if received>=total and checked>=received else "partial",
+                    unique=None
+                    if received>=total and checked<received:
+                        unique=await asyncio.to_thread(_verified_unique_original_count,reg)
+                    complete=received>=total and (checked>=received or (unique is not None and checked>=unique))
+                    update_review(reg,"completed" if complete else "partial",
                                   originals_received=received,checked_documents=checked,
                                   findings=result.get("findings") if isinstance(result,dict) else None,
-                                  deduplicated=bool(verified is not None))
+                                  deduplicated=bool(verified is not None),source_version=source_version)
             notify_evidence(ns)
         except asyncio.CancelledError:
             update_review(reg,"queued",originals_received=received,reason="Interrupted; will resume")
             raise
         except Exception as exc:
-            update_review(reg,"failed",originals_received=received,reason=type(exc).__name__)
+            update_review(reg,"failed",originals_received=received,reason=type(exc).__name__,
+                          source_version=source_version)
+
+    def review_finished(reg,task):
+        # An upload can arrive while the prior job owns the single-writer
+        # lock. Recheck after the task is done so enqueue does not merely
+        # return that old running task and lose the newly arrived evidence.
+        if task.cancelled():return
+        error=task.exception()
+        if error is not None:
+            update_review(reg,"failed",reason=type(error).__name__)
+            return
+        previous=review_state(reg)
+        version=previous.get("source_version")
+        if not version:return
+        try:
+            if _review_source_version(reg)!=version:enqueue_review(reg,force=True)
+        except Exception as exc:
+            update_review(reg,"failed",reason=type(exc).__name__)
 
     def enqueue_review(reg,force=False):
         expected,received=review_counts(reg)
@@ -406,12 +682,15 @@ def install(ns):
             return {**review_state(reg),"originals_expected":expected}
         previous=review_state(reg)
         if (not force and previous.get("status")=="completed"
-            and previous.get("originals_received")==received and received>=expected):
+            and previous.get("originals_received")==received and received>=expected
+            and (not previous.get("source_version") or
+                 previous["source_version"]==_review_source_version(reg))):
             return {**previous,"originals_expected":expected}
         data=update_review(reg,"queued",originals_received=received,
                            originals_expected=expected)
         review_priorities[reg]=foreground
         review_jobs[reg]=asyncio.create_task(review_worker(reg,foreground))
+        review_jobs[reg].add_done_callback(lambda task:review_finished(reg,task))
         return data
 
     # Shared offline recheck entry point for immediate manual searches.
@@ -499,16 +778,13 @@ def install(ns):
                 primary=unique[idx]
                 if not isinstance(primary.get("meta"),dict):primary["meta"]={}
                 if not isinstance(d.get("meta"),dict):d["meta"]={}
-                alternatives=list(primary["meta"].get("identical_sources") or [])
-                alternatives.append({"name":d.get("name") or "",
-                                     "url":d.get("url") or ""})
                 prefer_official=(d["meta"].get("source")=="official_eis_getDocsIP" and
                                  primary["meta"].get("source")!="official_eis_getDocsIP")
                 if prefer_official:
-                    d["meta"]["identical_sources"]=alternatives
+                    _merge_source_metadata(d,primary)
                     unique[idx]=d
                 else:
-                    primary["meta"]["identical_sources"]=alternatives
+                    _merge_source_metadata(primary,d)
             docs[:]=unique
             print(f"V296 ORIGINAL_DEDUP reg={reg} before={original_count} after={len(unique)}",flush=True)
         ns["download_all_documents"]=deduplicated_batch
@@ -579,22 +855,12 @@ def install(ns):
         except ValueError as exc:
             print(f"V295 ORIGINAL_REJECTED reg={reg} code={_rejection_code(exc)} bytes={size}",flush=True)
             raise HTTPException(422,str(exc)) from exc
-        sha=hashlib.sha256(data).hexdigest()
-        folder=root()/"eis223_official_originals"/reg/uid
-        file=folder/(sha+entry["ext"])
-        if not file.exists():await asyncio.to_thread(save_atomic,file,data)
-        # Uploads must acknowledge as soon as the original bytes and SHA256
-        # are durably saved. Re-extracting the same PDF/DOCX here used to block
-        # each EIS upload for up to 45 seconds. Offline audit workers extract
-        # text and verify evidence separately; do not claim analysis on upload.
+        # Persist both the prior and incoming version provenance before the
+        # active pointer advances. Concurrent captures cannot lose a receipt.
+        receipt,changed=await asyncio.to_thread(_store_original_version,reg,uid,entry,data)
         chars=0
-        receipt={"reg_number":reg,"uid":uid,"sha256":sha,"bytes":size,
-            "extension":entry["ext"],"source_url":entry["url"],
-            "extracted_chars":chars,"state":"stored_pending_legal_review"}
-        await asyncio.to_thread(save_atomic,folder/"receipt.json",
-                                json.dumps(receipt,ensure_ascii=False).encode())
         print(f"V295 ORIGINAL_IMPORTED reg={reg} uid={uid} size={size} chars={chars}",flush=True)
-        review=enqueue_review(reg)
+        review=enqueue_review(reg,force=changed)
         return {"accepted":True,"reg_number":reg,"uid":uid,"bytes":size,
             "extracted_chars":chars,"status":receipt["state"],
             "review_status":review["status"],"audited_documents_increment":0}
