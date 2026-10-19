@@ -4,7 +4,13 @@ Run during the image build; tests never call Railway, EIS or a real DB.
 """
 from __future__ import annotations
 from copy import deepcopy
+import hashlib
+import json
+import os
 from pathlib import Path
+import sqlite3
+import tempfile
+from unittest.mock import patch
 from v372_auto_regulation_protocols import (
     evaluate,install,LAW_REG,LAW_PROT,LAW_4,
     _reg_doc,_protocol_doc
@@ -110,16 +116,108 @@ def test_integrated_auto():
     assert entry.index("v348_cross_document_legal.install(vars(entry))")<entry.index(
         "v372_auto_regulation_protocols.install(vars(entry))")<entry.index(
         "v342_thematic_queue.install(vars(entry))")
-    from v332_all_procurements_audit import RULE_REVISION
-    assert "v372" in RULE_REVISION,"Existing saved purchases should be automatically requeued"
     from v342_thematic_queue import independent_review
     assert 'ns.get("analyze")' in __import__("inspect").getsource(independent_review)
+
+
+def test_revision_requeue():
+    """A new legal revision reopens old results once, preserving evidence.
+
+    Keep the fixture here: this Docker gate runs before tests/ is copied.
+    A revision's spelling cannot prove that the actual startup queue works.
+    """
+    import v332_all_procurements_audit as audit
+    with tempfile.TemporaryDirectory(prefix="v372-requeue-") as temporary, patch.dict(
+            os.environ,{"EIS223_DATA_DIR":temporary}):
+        directory=Path(temporary)
+        db_path=directory/"audit.sqlite"
+        legacy,current="32619000101","32619000102"
+        def connect():
+            connection=sqlite3.connect(db_path)
+            connection.row_factory=sqlite3.Row
+            return connection
+        def snapshot(table):
+            connection=connect()
+            try:
+                return [tuple(row) for row in connection.execute("SELECT * FROM "+table+" ORDER BY 1")]
+            finally:connection.close()
+        ns={"conn":connect,"_verified_set235":lambda:[legacy,current]}
+        connection=connect()
+        try:
+            connection.executescript("""
+                CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT,last_seen TEXT,
+                    documents_checked INTEGER,violations INTEGER);
+                CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,name TEXT,url TEXT,
+                    local_path TEXT,status TEXT,metadata_json TEXT);
+                CREATE TABLE v319_manual_inputs(reg TEXT PRIMARY KEY);
+                CREATE TABLE findings(id INTEGER PRIMARY KEY,reg_number TEXT,code TEXT,evidence TEXT);
+                CREATE TABLE checks(id INTEGER PRIMARY KEY,reg_number TEXT,status TEXT,evidence TEXT);
+            """)
+            for reg in (legacy,current):
+                data="<document>Сохранённый оригинал ЕИС</document>".encode("utf-8")
+                digest=hashlib.sha256(data).hexdigest()
+                folder=directory/"eis223_official_originals"/reg/("A"*32)
+                folder.mkdir(parents=True)
+                original=folder/(digest+".xml")
+                original.write_bytes(data)
+                (folder/"receipt.json").write_text(json.dumps({
+                    "reg_number":reg,"uid":"A"*32,"sha256":digest,
+                    "extension":".xml","bytes":len(data)}),encoding="utf-8")
+                manifest=directory/"eis223_public_browser_intake"/reg/"manifest.json"
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text(json.dumps({"reg_number":reg,"source":"public_eis_223_browser",
+                    "documents":[{"name":"Оригинал.xml","url":EIS}]}),encoding="utf-8")
+                connection.execute("INSERT INTO purchases VALUES(?,'ООО Тест','2026-10-19',1,1)",(reg,))
+                connection.execute("INSERT INTO docs(reg_number,name,url,local_path,status,metadata_json) "
+                    "VALUES(?,'Оригинал.xml',?,?,'checked',?)",(reg,EIS,str(original),json.dumps({
+                    "source":"official_eis_original","source_url":EIS,"sha256":digest})))
+                connection.execute("INSERT INTO findings(reg_number,code,evidence) VALUES(?,'prior-rule','Сохранённое доказательство')",(reg,))
+                connection.execute("INSERT INTO checks(reg_number,status,evidence) VALUES(?,'check','Сохранённое замечание')",(reg,))
+            connection.commit()
+        finally:connection.close()
+        retained={table:snapshot(table) for table in ("purchases","docs","findings","checks")}
+        original_files={path:path.read_bytes() for path in directory.rglob("*") if path.is_file() and path!=db_path}
+        audit.initialize(ns)
+        for reg in (legacy,current):
+            assert audit.claim_next(ns)==reg
+            audit.mark(ns,reg,"completed",{"documents_found":1,"documents_read":1,
+                "verified_original_documents":1,"original_expected":1,"original_received":1,
+                "new_findings":1,"new_checks":1})
+        connection=connect()
+        try:
+            # Only the rule version changes: source identity and doc ids are
+            # the exact values recorded by the real completion path above.
+            connection.execute("UPDATE v332_audit_queue SET audit_revision=? WHERE reg=?",
+                               ("selftest-previous-legal-revision",legacy))
+            connection.commit()
+        finally:connection.close()
+        assert audit.initialize(ns)["states"]=={"pending":1,"completed":1},\
+            "Existing saved purchases should be automatically requeued on a new legal revision"
+        queued=snapshot("v332_audit_queue")
+        audit.initialize(ns)
+        assert snapshot("v332_audit_queue")==queued,"Repeated startup must not reset queued work"
+        assert audit.refresh_changed(ns)==0
+        assert audit.claim_next(ns)==legacy,"Only the outdated completed purchase should be claimed"
+        assert audit.claim_next(ns) is None,"A running recheck must not be claimed twice"
+        audit.mark(ns,legacy,"completed")
+        completed=snapshot("v332_audit_queue")
+        assert audit.initialize(ns)["states"]=={"completed":2}
+        assert snapshot("v332_audit_queue")==completed,"Current completed results must remain completed"
+        assert audit.refresh_changed(ns)==0
+        assert audit.claim_next(ns) is None
+        assert audit.progress(ns)["new_evidence_based_findings"]==2,"Requeue must preserve recorded counters"
+        assert {table:snapshot(table) for table in retained}==retained,\
+            "A rule revision must preserve historical findings, checks and document rows"
+        assert {path:path.read_bytes() for path in original_files}==original_files,\
+            "A rule revision must preserve original files and receipts"
+
 
 if __name__=="__main__":
     test_explicit()
     test_protocol_review()
     test_regulation()
     test_integrated_auto()
+    test_revision_requeue()
     print("V372_AUTO_LEGAL_SELFTEST_OK real_protocols=True regulations=True "
           "no_absence_inferred_violation=True receipt_only=True "
           "generic_and_thematic=True automatic_reaudit=True idempotent_install=True "
