@@ -59,6 +59,15 @@ def _same_finding(a,b,field):
     ta=issue_key(a.get(field) or a.get("item") or a.get("code"))
     tb=issue_key(b.get(field) or b.get("item") or b.get("code"))
     if not ta or ta!=tb:return False
+    from v348_cross_document_legal import finding_protocol_number, finding_clarification_number
+    left_code = str(a.get("code") or a.get("field_path") or "")
+    right_code = str(b.get("code") or b.get("field_path") or "")
+    for family, identifier in (("PROTOCOL-", finding_protocol_number),
+                               ("CLARIFICATION-", finding_clarification_number)):
+        if family in left_code and family in right_code:
+            left, right = identifier(a), identifier(b)
+            if left and right and left != right:
+                return False
     # Distinct legal bases, documents, source URLs and real locations cannot
     # be hidden merely because the violation title is shared.
     for attr in ("status","kind","law","legal_basis","document","source_url"):

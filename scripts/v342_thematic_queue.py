@@ -151,18 +151,25 @@ def match_legal_category(f,categories):
  return None
 
 async def independent_review(ns,reg,categories):
- from v332_all_procurements_audit import existing,as_procurement,stored_docs,is_official
+ from v332_all_procurements_audit import existing,as_procurement,collect_saved_evidence,is_official
  purchase,rows=await asyncio.to_thread(existing,ns,reg)
  p=as_procurement(purchase)
  if not business_company(p.get("customer")):return "excluded_company",[]
- docs,unreadable=await stored_docs(ns,reg,rows)
+ source=await collect_saved_evidence(ns,reg,rows)
+ docs,unreadable=source["docs"],source["unreadable"]
+ incomplete=bool(unreadable or source["source_incomplete"])
+ for key,value in source["p"].items():
+    if value and (not p.get(key) or key in ("method","submission_end","submission_start")):
+       p[key]=value
  verified=[d for d in docs if is_official(d) and str(d.get("text") or "").strip()]
  if not verified:
     # A missing original needs the EIS intake; an existing but temporarily
     # unreadable file needs a later extraction attempt, with bounded backoff.
     from pathlib import Path
-    available=await asyncio.to_thread(lambda:any(Path(r["local_path"]).is_file()
-        for r in rows if r.get("local_path"))) if unreadable else False
+    available=bool(source["original_received"])
+    if not available and unreadable:
+       available=await asyncio.to_thread(lambda:any(Path(r["local_path"]).is_file()
+           for r in rows if r.get("local_path")))
     return ("retry" if available else "waiting_originals"),[]
  # Both halves of the general engine can establish violations. Running
  # analyze alone silently omitted the confirmed checklist rules here.
@@ -173,6 +180,7 @@ async def independent_review(ns,reg,categories):
  try:card=json.loads(purchase.get("card_fields_json") or "{}")
  except (ValueError,TypeError):card={}
  if not isinstance(card,dict):card={}
+ card.update(source["card"])
  card.setdefault("status","partial")
  card.setdefault("pages",{})
  detail={"registrationNumber":reg,"purchaseName":p.get("title") or "",
@@ -180,6 +188,7 @@ async def independent_review(ns,reg,categories):
          "publicationDate":p.get("published") or "",
          "submissionStart":p.get("submission_start") or "",
          "submissionEnd":p.get("submission_end") or ""}
+ detail.update(source["detail"])
  findings=await asyncio.to_thread(analyzer,p,verified)
  checks=await asyncio.to_thread(checker,p,detail,card,verified)
  findings=list(findings) if isinstance(findings,(list,tuple)) else []
@@ -227,7 +236,7 @@ async def independent_review(ns,reg,categories):
  # This only changes new presentation/persistence, never deletes historical
  # thematic results. Different dated acts and documentary sources stay distinct.
  from v352_dashboard_truth import collapse_legal_events
- return ("retry" if unreadable else "completed"),collapse_legal_events(selected)
+ return ("retry" if incomplete else "completed"),collapse_legal_events(selected)
 
 def read_db(ns):
  c=db(ns)

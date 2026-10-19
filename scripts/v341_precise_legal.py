@@ -72,7 +72,47 @@ def matches(pattern, text):
     return list(re.finditer(pattern+r"\s*[:：|=–—\-\s]{0,15}(?P<date>"+DATE_TOKEN+r")", text, re.I))[:40]
 
 
+def _document_event_number(doc, code):
+    """A unique, complete identifier in this original can distinguish events.
+
+    The cross-document module imports this module's date grammar. Import its
+    identifier parser only at evaluation time to keep standalone imports safe.
+    A compilation, conflicting title/body or unsupported number stays unknown.
+    """
+    from v348_cross_document_legal import _number_identity, _clarification_identity
+    parser = (_clarification_identity if "CLARIFICATION-" in code else
+              _number_identity if "PROTOCOL-" in code else None)
+    if parser is None:
+        return ""
+    named, bad_title = parser(doc.get("name") or "", title=True)
+    body, bad_body = parser(str(doc.get("text") or "")[:750000])
+    identifiers = named | body
+    return next(iter(identifiers)) if not (bad_title or bad_body) and len(identifiers) == 1 else ""
+
+
+def _dated_event_key(item):
+    """Identical dates are insufficient when originals name different events."""
+    from v348_cross_document_legal import finding_protocol_number, finding_clarification_number
+    code = str(item.get("code") or item.get("field_path") or "")
+    raw_dates = re.findall(DATE_TOKEN, str(item.get("evidence") or ""), re.I)
+    if not raw_dates:
+        raw_dates = re.findall(DATE_TOKEN, str(item.get("match_text") or ""), re.I)
+    dates = tuple(sorted({parsed.isoformat() for value in raw_dates
+                          if (parsed := day(value)) is not None}))
+    number = (finding_clarification_number(item) if "CLARIFICATION-" in code else
+              finding_protocol_number(item) if "PROTOCOL-" in code else "")
+    return code, dates, number
+
+
 def finding(doc, code, title, law, evidence, match, url=LAW32):
+    label = ("запроса" if "CLARIFICATION-" in code else
+             "протокола" if "PROTOCOL-" in code else "")
+    if label:
+        number = _document_event_number(doc, code)
+        # The identifier must survive both SQL persistence and short cards.
+        # Preserve a rejected/unknown identity too: a later reader must not
+        # reconstruct a number from a filename that contradicted the body.
+        evidence = f"Номер {label}: {number or 'не установлен'}. " + evidence
     return {"code": code, "kind": "violation", "title": title,
             "law": law, "law_url": url, "evidence": evidence[:2200],
             "note": "Расчёт по подтверждённым календарным датам без времени. Источник и конкретная норма приведены в выводе.",
@@ -213,10 +253,7 @@ def evaluate(p, docs):
     seen = set()
     result = []
     for item in findings:
-        dates = tuple(re.findall(DATE_TOKEN, item.get("evidence") or "", re.I))
-        if not dates:
-            dates = tuple(re.findall(DATE_TOKEN, item.get("match_text") or "", re.I))
-        key = (item["code"], dates)
+        key = _dated_event_key(item)
         if key in seen:
             continue
         seen.add(key)
@@ -239,7 +276,7 @@ def install(ns):
         # appears with different filenames or in several archive members.
         def event_key(item):
             dates = tuple(re.findall(DATE_TOKEN, item.get("evidence") or "", re.I))
-            return (item.get("code"), dates) if dates else (
+            return _dated_event_key(item) if dates else (
                 item.get("code"), " ".join(str(item.get("match_text") or "").split()))
         known = {event_key(x) for x in existing if x.get("kind") == "violation"}
         for item in extra:
@@ -261,7 +298,8 @@ def install(ns):
                 unique.append(item)
                 continue
             dates = tuple(re.findall(DATE_TOKEN, str(item.get('evidence') or ''), re.I))
-            key = (item.get('code'), dates) if dates and item.get('code') else None
+            code = item.get('code')
+            key = (item.get('status'), *_dated_event_key(item)) if dates and code else None
             if key is not None and key in seen:
                 continue
             if key is not None:

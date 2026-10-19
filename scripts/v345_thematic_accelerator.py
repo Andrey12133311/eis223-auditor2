@@ -13,7 +13,7 @@ from datetime import datetime,timezone
 import v342_thematic_queue as original
 from v381_audit_scheduling import background_audit
 from thematic_period import index_campaign, selection_sql, joined_selection_sql
-from audit_source_version import source_version
+from audit_source_version import original_sources, source_version
 
 MAX_CONCURRENT=4
 MAX_PER_BATCH=18
@@ -22,7 +22,7 @@ RECHECK_SECONDS=90
 INDEX_SECONDS=90
 # Establish a source snapshot once for historical completed reviews. Prior
 # findings remain intact; only newly evidenced legal episodes are appended.
-ANALYSIS_VERSION=3
+ANALYSIS_VERSION=4
 DB_RETRY_DELAYS=(.15,.4)
 MAX_RETRY_SECONDS=1800
 ITEM_TIMEOUT_SECONDS=600
@@ -80,6 +80,7 @@ def _prepare(ns):
     try:
         by_campaign=[]
         versions={}
+        original_readiness={}
         for camp in campaigns:
             selected=[]
             scope,scope_args=selection_sql(c,camp)
@@ -95,12 +96,6 @@ def _prepare(ns):
                    AND d.status IN ('checked','downloaded_no_text')) ready_count
              FROM thematic_items t JOIN purchases p ON p.reg_number=t.reg WHERE t.batch_id=?
                AND t.status IN ('queued','waiting_originals','waiting_engine','retry','completed')
-               AND (t.status!='completed'
-                    OR EXISTS(
-                        SELECT 1 FROM docs d WHERE d.reg_number=t.reg
-                         AND COALESCE(d.local_path,'')!='' AND d.status IN ('checked','downloaded_no_text'))
-                    OR t.last_doc_id<(SELECT COALESCE(MAX(id),0) FROM docs d WHERE d.reg_number=t.reg)
-                    )
                AND """+scope+"""
              ORDER BY CASE WHEN EXISTS(
                  SELECT 1 FROM docs d WHERE d.reg_number=t.reg
@@ -118,13 +113,20 @@ def _prepare(ns):
                 ready=int(row["ready_count"] or 0)
                 reg=row["reg"]
                 if reg not in versions:
-                    versions[reg]=source_version(c,reg)
+                    originals=original_sources(reg)
+                    original_readiness[reg]=any(source["available"] for source in originals)
+                    versions[reg]=source_version(c,reg,originals=originals)
                 version=versions[reg]
+                has_originals=original_readiness[reg]
                 new_evidence=(doc_id>int(row["last_doc_id"] or 0)
                               or ready>int(row["last_ready_count"] or 0)
                               or version!=row["last_source_version"])
                 state=row["status"]
-                updated_rules=state=="completed" and ready>0 and int(row["last_analysis_version"] or 0)<ANALYSIS_VERSION
+                # Completed receipt-only inputs must remain visible to source
+                # change detection even when the incoming docs save was delayed.
+                if state=="completed" and not ready and not has_originals and doc_id<=int(row["last_doc_id"] or 0):
+                    continue
+                updated_rules=state=="completed" and (ready>0 or has_originals) and int(row["last_analysis_version"] or 0)<ANALYSIS_VERSION
                 if state=="completed" and not new_evidence and not updated_rules:
                     continue
                 if state in ("waiting_originals","waiting_engine","retry") and not new_evidence:
@@ -138,6 +140,7 @@ def _prepare(ns):
                   "batch":camp["id"],"reg":row["reg"],
                   "categories":json.loads(camp["categories"]),
                   "ready":ready,"doc_id":doc_id,"analysis_version":ANALYSIS_VERSION,
+                  "originals_ready":has_originals,
                   "source_version":version})
                 count+=1
             by_campaign.append(selected)
@@ -156,7 +159,7 @@ def _prepare(ns):
 
 async def _one(ns,item,sem):
     async with sem:
-        if item["ready"]<1:
+        if item["ready"]<1 and not item.get("originals_ready"):
             return (item,"waiting_originals",[],"Ожидаются доступные оригиналы ЕИС")
         try:
             with background_audit():

@@ -14,7 +14,7 @@ import threading
 from v333_dedup_ui import issue_key, _proof, _different_fact
 from v365_consultant_refs import legal_identity
 from v342_identity import organization_display_name
-from v348_cross_document_legal import finding_clarification_number
+from v348_cross_document_legal import finding_clarification_number, finding_protocol_number
 
 def _normalized_law(row):
     # Equivalent ways to cite the same article/part and Government decree are
@@ -38,10 +38,14 @@ def _common_event(a,b):
     Different dates, money/payment terms or independently established clauses
     cannot be merged solely because a title, law article or detector is shared.
     """
-    if ("CLARIFICATION-" in str(a.get("code") or a.get("field_path") or "")
-            and "CLARIFICATION-" in str(b.get("code") or b.get("field_path") or "")):
-        left_number,right_number=finding_clarification_number(a),finding_clarification_number(b)
-        if left_number and right_number and left_number!=right_number:return False
+    left_code = str(a.get("code") or a.get("field_path") or "")
+    right_code = str(b.get("code") or b.get("field_path") or "")
+    for family, identifier in (("CLARIFICATION-", finding_clarification_number),
+                               ("PROTOCOL-", finding_protocol_number)):
+        if family in left_code and family in right_code:
+            left_number, right_number = identifier(a), identifier(b)
+            if left_number and right_number and left_number != right_number:
+                return False
     ta=issue_key(a.get("title") or a.get("item") or a.get("code"))
     tb=issue_key(b.get("title") or b.get("item") or b.get("code"))
     same_title=bool(ta and ta==tb)

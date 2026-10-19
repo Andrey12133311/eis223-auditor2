@@ -9,6 +9,7 @@ analysis remains eligible for the next pass.
 import hashlib
 import json
 import os
+import re
 import stat
 
 
@@ -57,7 +58,38 @@ def _file_version(path):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns]
 
 
-def source_version(conn, reg) -> str:
+def original_sources(reg):
+    """Describe allowed, locally saved originals without reading their bytes.
+
+    This is scheduling metadata only. A receipt's size/path is enough to wake
+    a reader; that reader must still authenticate the actual SHA256 before
+    using any text. Operational receipt fields do not change this snapshot.
+    """
+    if not re.fullmatch(r"[0-9]{11,20}", str(reg)):
+        return []
+    from v295_eis_originals import allowed_documents, saved_document
+    sources = []
+    for uid, item in sorted(allowed_documents(reg).items()):
+        source = {"uid": uid, "name": item.get("name"),
+                  "url": item.get("url"), "ext": item.get("ext")}
+        saved = saved_document(reg, uid)
+        source["available"] = saved is not None
+        if saved is not None:
+            path, receipt = saved
+            source.update(sha256=receipt.get("sha256"),
+                          extension=receipt.get("extension"),
+                          bytes=receipt.get("bytes"),
+                          file_version=_file_version(path))
+        sources.append(source)
+    return sources
+
+
+def originals_ready(reg):
+    """Whether the local receipt intake can be read before docs are saved."""
+    return any(source["available"] for source in original_sources(reg))
+
+
+def source_version(conn, reg, *, originals=None) -> str:
     """Return a stable SHA256 of DB source fields and file metadata, not bytes.
 
     Older/minimal schemas are supported. Exhaust and close the SQL reader
@@ -80,6 +112,9 @@ def source_version(conn, reg) -> str:
     encoded = sorted(json.dumps(document, ensure_ascii=False, sort_keys=True,
                                 separators=(",", ":"), default=str)
                      for document in documents)
-    payload = json.dumps({"format": 1, "documents": encoded},
-                         ensure_ascii=False, separators=(",", ":"))
+    if originals is None:
+        originals = original_sources(reg)
+    payload = json.dumps({"format": 2, "documents": encoded,
+                          "originals": originals},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

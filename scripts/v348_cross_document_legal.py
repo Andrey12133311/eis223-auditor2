@@ -229,6 +229,11 @@ def protocol_numbers(text):
 
 def finding_protocol_number(item):
     """Read persisted evidence too: custom in-memory fields are not stored."""
+    evidence = str(item.get("evidence") or "")
+    field = re.match(r"Номер протокола: (.+?)\. (?:Вид протокола:|Протокол подписан) ", evidence)
+    if field:
+        identifiers, invalid = _number_identity("Номер протокола: " + field[1])
+        return next(iter(identifiers)) if not invalid and len(identifiers) == 1 else ""
     identifiers=protocol_numbers("\n".join(str(item.get(key) or "")
         for key in ("title","evidence","match_text","document")))
     return next(iter(identifiers)) if len(identifiers)==1 else ""

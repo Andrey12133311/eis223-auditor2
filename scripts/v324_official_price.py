@@ -31,6 +31,10 @@ AMOUNT=re.compile(
     r"(?<!\d)(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,15}|\d{1,3})"
     r"(?:[,.]\d{1,18})?(?!\d)",re.I,
 )
+# Match the whole currency token: the old ``руб(?:\b|\.)`` tail rejected
+# ordinary inflected forms ("рублей", "рубля"), although the label parser
+# already accepted them. Longer words such as "рубашек" are not currency.
+RUBLE_TOKEN=r"руб(?:ль|ля|лей)?\b\.?"
 RUBLE_KOPEKS=re.compile(
     r"руб(?:ль|ля|лей|\.)\s*(\d{1,2})\s*коп(?:ейк[аи]|еек|\.?)",
     re.I
@@ -79,14 +83,14 @@ def _match_amount(part):
     # (4. Recommended form...) is not a monetary field.
     if re.match(r"^\s*[.,]\d",tail):return None
     if tail.strip() and not re.match(
-        r"^\s*(?:₽|руб(?:\b|\.)|RUB\b|Российск\w*\s+рубл\w*|"
-        r"\([^)]{1,220}\)\s*руб|(?:тыс\.?|млн\.?|миллион\w*)\s*руб|"
+        r"^\s*(?:₽|"+RUBLE_TOKEN+r"|RUB\b|Российск\w*\s+рубл\w*|"
+        r"\([^)]{1,220}\)\s*"+RUBLE_TOKEN+r"|(?:тыс\.?|млн\.?|миллион\w*)\s*"+RUBLE_TOKEN+r"|"
         r"[,;]?\s*(?:в\s+том\s+числе\s+НДС|с\s+НДС|без\s+НДС|включая\s+НДС)|"
         r"[|;]*\s*$|\.\s*$)",tail,re.I):
         return None
     if re.match(r"^\s*(?:%|процент|дн(?:я|ей)|рабоч|календарн|стать|пункт)",tail,re.I):
         return None
-    scale=re.match(r"^\s*(тыс\.?|млн\.?|миллион\w*)\s*(?:₽|руб)",tail,re.I)
+    scale=re.match(r"^\s*(тыс\.?|млн\.?|миллион\w*)\s*(?:₽|"+RUBLE_TOKEN+r")",tail,re.I)
     if scale:number*=Decimal(1000 if scale[1].lower().startswith('тыс') else 1000000)
     if number>Decimal('1000000000000000'):return None
     # Written kopeks within the same labeled monetary cell, e.g.
