@@ -67,5 +67,9 @@ RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_audit_funnel
 COPY tests/test_legal_date_label_archive_recall.py tests/test_legal_price_recall.py tests/test_audit_persistence_lock_scope.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_date_label_archive_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_price_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_persistence_lock_scope.py'
 RUN mkdir -p /data/files /data/reports
+COPY tests/test_full_recheck_request.py tests/test_full_recheck_runtime.py tests/test_full_recheck_cohort_contract.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract
+COPY tests/test_audit_rule_counts.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_audit_rule_counts
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

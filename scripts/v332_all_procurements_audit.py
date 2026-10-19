@@ -19,6 +19,7 @@ import re
 import sqlite3
 import time
 import uuid
+import full_recheck_runtime
 from datetime import datetime, timezone
 from contextlib import nullcontext
 from pathlib import Path
@@ -412,7 +413,8 @@ def ordinary_ready(c):
         WHERE q.campaign=? AND q.state='pending' AND q.next_retry_at<=?
         AND eis_business_company(p.customer)=1 AND (q.receipt_ready=1 OR EXISTS(
             SELECT 1 FROM docs d WHERE d.reg_number=q.reg AND COALESCE(d.local_path,'')<>''
-            AND d.status IN ('checked','downloaded_no_text'))) LIMIT 1""",
+            AND d.status IN ('checked','downloaded_no_text')))"""+
+        full_recheck_runtime.available_sql(c,"q.reg")+" LIMIT 1",
         (CAMPAIGN,time.time())).fetchone() is not None
 
 
@@ -424,6 +426,9 @@ def claim_recheck_handoff(c):
     if not raw:return None
     saved=json.loads(raw)
     if saved.get("claim_token"):return None
+    if c.execute("SELECT 1 FROM v332_audit_queue q WHERE q.campaign=? AND q.reg=?"+
+                 full_recheck_runtime.available_sql(c,"q.reg"),(CAMPAIGN,saved["reg"])).fetchone() is None:
+        return None
     if scan_cursor(c,turn)=="pending" and ordinary_ready(c):return None
     values=[saved[key] for key in _RECHECK_IDENTITY]
     row=c.execute("SELECT * FROM v332_audit_queue WHERE campaign=? AND "+_RECHECK_MATCH,
@@ -458,7 +463,8 @@ def claim_recheck_handoff(c):
             last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
             WHERE campaign=? AND """+_RECHECK_MATCH+""" AND next_retry_at<=?
             AND EXISTS(SELECT 1 FROM purchases p WHERE p.reg_number=v332_audit_queue.reg
-                AND eis_business_company(p.customer)=1)""",
+                AND eis_business_company(p.customer)=1)"""+
+            full_recheck_runtime.available_sql(c,"v332_audit_queue.reg"),
             [now(),token,int(receipt_ready),saved["reg"],CAMPAIGN,*values,time.time()]).rowcount
         if changed:
             save_scan_cursor(c,scope,json.dumps({"reg":saved["reg"],"claim_token":token}))
@@ -492,7 +498,8 @@ def claim_next(ns):
             AND q.next_retry_at<=?
             AND EXISTS(SELECT 1 FROM docs d WHERE d.reg_number=q.reg
                 AND COALESCE(d.local_path,'')<>'' AND d.status IN ('checked','downloaded_no_text'))
-            AND eis_business_company(p.customer)=1
+            AND eis_business_company(p.customer)=1"""+
+            full_recheck_runtime.available_sql(c,"q.reg")+"""
             ORDER BY CASE q.reg WHEN '32616233661' THEN 0
              WHEN '32616324151' THEN 1
              WHEN '32616287360' THEN 2 ELSE 3 END,
@@ -505,11 +512,12 @@ def claim_next(ns):
             c.commit()
             scope="general-receipts:"+CAMPAIGN
             after=scan_cursor(c,scope)
-            query="""SELECT q.reg,q.updated_at,q.reservation_token,q.next_retry_at,q.receipt_ready
+            query=("""SELECT q.reg,q.updated_at,q.reservation_token,q.next_retry_at,q.receipt_ready
                 FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
                 WHERE q.campaign=? AND q.state='pending' AND q.next_retry_at<=?
-                  AND q.reg>? AND eis_business_company(p.customer)=1
-                ORDER BY q.reg LIMIT ?"""
+                  AND q.reg>? AND eis_business_company(p.customer)=1"""+
+                full_recheck_runtime.available_sql(c,"q.reg")+"""
+                ORDER BY q.reg LIMIT ?""")
             candidates=c.execute(query,(CAMPAIGN,time.time(),after,RECEIPT_CLAIM_PAGE)).fetchall()
             last=after
             selected=None
@@ -544,7 +552,8 @@ def claim_next(ns):
                     WHERE campaign=? AND reg=? AND state='pending' AND updated_at IS ?
                       AND reservation_token=? AND next_retry_at=? AND next_retry_at<=?
                       AND EXISTS(SELECT 1 FROM purchases p WHERE p.reg_number=?
-                                 AND eis_business_company(p.customer)=1)""",
+                                 AND eis_business_company(p.customer)=1)"""+
+                    full_recheck_runtime.available_sql(c,"v332_audit_queue.reg"),
                     (now(),token,reg,CAMPAIGN,reg,selected["updated_at"],selected["reservation_token"],
                      selected["next_retry_at"],time.time(),reg)).rowcount
                 if changed:
@@ -601,7 +610,8 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
                 AND COALESCE(d.local_path,'')<>'') ready
             FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg
             WHERE q.campaign=? AND q.reg>? AND eis_business_company(p.customer)=1
-            AND q.state IN ('completed','failed','no_readable_documents')
+            AND q.state IN ('completed','failed','no_readable_documents')"""+
+            full_recheck_runtime.available_sql(c,"q.reg")+"""
             ORDER BY q.reg LIMIT ?""",(CAMPAIGN,cursor,SCAN_PAGE_SIZE)).fetchall()
         changed=[]
         inspected=errors=0
@@ -647,7 +657,8 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
                 WHERE campaign=? AND reg=? AND state=? AND updated_at IS ?
                   AND last_semantic_version=? AND last_engine_signature=?
                   AND reservation_token=? AND next_retry_at=? AND retry_count=?
-                  AND last_result_token=?""",
+                  AND last_result_token=?"""+
+                full_recheck_runtime.available_sql(c,"v332_audit_queue.reg"),
                 (now(),int(receipt_ready),CAMPAIGN,row["reg"],row["state"],row["updated_at"],
                  row["last_semantic_version"],row["last_engine_signature"],
                  row["reservation_token"],row["next_retry_at"],row["retry_count"],row["last_result_token"]))
@@ -952,6 +963,8 @@ def is_official(doc):
 
 def require_reservation(c,reg):
     """Fence automatic writers; explicit maintenance keeps its existing API."""
+    full_recheck_runtime.require_request(c,reg)
+    if getattr(reg,"full_recheck_only",False):return
     token=getattr(reg,"reservation_token",None)
     if token:
         from v342_thematic_queue import business_company
@@ -1103,10 +1116,12 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None):
                 WHERE campaign=? AND reg=? AND last_counted_token<>?""",
                 (new_f+confirmed_checks,new_c-confirmed_checks,progress_token,
                  CAMPAIGN,reg,progress_token))
+        full_recheck_runtime.record_receipt(c,reg,progress_token,new_f+confirmed_checks,new_c-confirmed_checks)
         c.commit()
         audit_funnel.current_increment("counts","persisted_confirmed",new_f+confirmed_checks)
         _merge_committed_audit_diagnostics(diagnostic)
         audit_funnel.committed()
+        audit_funnel.committed_general_rules(insert_findings,insert_checks)
         return new_f,new_c
     except:
         if c.in_transaction:c.rollback()
@@ -1291,6 +1306,10 @@ async def _inspect_one(ns,reg):
         })
     audit_funnel.observe("outcomes_general",accepted,checks)
     token=uuid.uuid4().hex
+    await full_recheck_runtime.prepare_receipt(ns,reg,{
+        "documents_found":len(docs)+unreadable,"documents_read":counted,
+        "documents_unreadable":unreadable,"verified_original_documents":verified_count,
+        "original_expected":expected,"original_received":received,"source_incomplete":source_incomplete})
     # Keep the computed evidence and token while a short write lock clears.
     # Retrying the whole inspection would needlessly rerun legal analyzers.
     new_f,new_c=await db_stage(ns,"persist",persist,ns,reg,accepted,checks,token)
@@ -1448,6 +1467,9 @@ def install(ns):
             while True:
                 try:
                     base=await thread_call(initialize,ns)
+                    try:await thread_call(full_recheck_runtime.initialize,ns)
+                    except Exception as exc:
+                        print("FULL_RECHECK_INIT deferred=True type="+type(exc).__name__,flush=True)
                     print("V332 CAMPAIGN_STARTED "+json.dumps(base,ensure_ascii=False),flush=True)
                     runtime["status"]="running"
                     break
@@ -1461,27 +1483,45 @@ def install(ns):
                     await asyncio.sleep(retry_delay(attempts))
             async def worker(worker_id):
                 index=0
+                request_turn=True
+                request_progress=False
                 signals=audit_signals(ns)
                 slot=runtime["workers"][str(worker_id)]
                 reg=None
                 try:
                     while True:
                         version=signals.version("general")
+                        if worker_id==1 and request_turn:
+                            request_turn=False
+                            request_progress=await full_recheck_runtime.run_one(ns,slot)
+                            if request_progress:continue
                         reg=await retry_operation(ns,"claim",lambda:claim_safely(ns),slot)
+                        request_turn=True
                         slot["reg"]=reg
                         if reg is None:
+                            # An empty ordinary turn preserves fairness but
+                            # should not add a 30-second delay to every forced
+                            # item once the ordinary backlog has drained.
+                            if request_progress:
+                                request_progress=False
+                                await asyncio.sleep(.05)
+                                continue
                             slot["phase"]="waiting_for_documents"
                             await signals.wait("general",version,QUEUE_POLL_SECONDS)
                             continue
                         snapshot=None
                         result=None
+                        request_progress=False
                         try:
+                            await full_recheck_runtime.attach_general(ns,reg)
                             started=time.monotonic()
                             async def review():
                                 nonlocal snapshot
                                 # Source/stat reads precede analysis and run
                                 # outside the short claim/result transactions.
                                 snapshot=await file_stage(ns,"source",review_watermark,ns,reg,worker=slot)
+                                await db_stage(ns,"full_request_watermark",full_recheck_runtime.note_snapshot,
+                                               ns,reg,snapshot,worker=slot)
                                 slot["phase"]="inspect"
                                 with background_audit():
                                     return await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
@@ -1507,6 +1547,7 @@ def install(ns):
                                       f"delay_seconds={delay}",flush=True)
                             else:
                                 await db_stage(ns,"save",mark,ns,reg,state,result,worker=slot)
+                            await full_recheck_runtime.finish_result(ns,reg,state,detail)
                             elapsed_ms=round((time.monotonic()-started)*1000,1)
                             index+=1
                             slot["last_success_at"]=now()
@@ -1562,11 +1603,14 @@ def install(ns):
                                     defer_retry,ns,reg,detail,error),slot)
                                 print(f"V332 AUDIT_FAILED reg={reg} worker={worker_id} "
                                       f"retry_after_seconds={delay} error={type(exc).__name__}: {str(exc)[:180]}",flush=True)
+                        await full_recheck_runtime.release(ns,reg)
                         reg=None
                         slot["reg"]=None
                         await asyncio.sleep(.05)
                 finally:
-                    if reg is not None:await release_reservation(ns,reg)
+                    if reg is not None:
+                        try:await full_recheck_runtime.release(ns,reg)
+                        finally:await release_reservation(ns,reg)
                     slot.update(reg=None,phase="stopped")
             async def refresh_queue():
                 signals=audit_signals(ns)
@@ -1600,6 +1644,13 @@ def install(ns):
                         state={"campaign":CAMPAIGN,"progress_error":runtime["last_error"],
                                "runtime":runtime_snapshot(ns)}
                     print("V332 HEARTBEAT "+json.dumps(state,ensure_ascii=False),flush=True)
+                    try:
+                        if (os.environ.get(full_recheck_runtime.REQUEST_ENV,"").strip() and
+                                not full_recheck_runtime.request_id(ns)):
+                            await thread_call(full_recheck_runtime.initialize,ns)
+                        await thread_call(full_recheck_runtime.heartbeat,ns)
+                    except Exception as exc:
+                        print("FULL_RECHECK_HEARTBEAT deferred=True type="+type(exc).__name__,flush=True)
 
             async def supervise(name,factory,slot=None):
                 attempts=0
