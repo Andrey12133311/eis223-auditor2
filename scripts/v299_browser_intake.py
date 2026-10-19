@@ -18,12 +18,14 @@ from fastapi.responses import JSONResponse,PlainTextResponse
 
 from v295_eis_originals import (
     REG,EXT,uid_from_url,root,auth,save_atomic,
-    allowed_documents,saved_document,
+    allowed_documents,saved_document,_manifest_source_evidence,MAX_SOURCE_MANIFEST_BYTES,
 )
 from v342_identity import subject as _valid_subject, valid_inn
 
 MAX_MANIFEST_BYTES=65536
 MAX_DOCS=100
+MAX_STORED_DOCS=10000
+MAX_REFERENCE_HISTORY=1000
 MAX_MANIFESTS=20000
 
 # Amendment history is supplied by the authenticated official-browser caller.
@@ -278,7 +280,41 @@ def _parse_manifest(payload):
 def _manifest_path(reg):
     return root()/"eis223_public_browser_intake"/reg/"manifest.json"
 
-def _save_manifest(value):
+def _merge_document_references(*groups):
+    by_uid={}
+    for group in groups:
+        if not isinstance(group,list):raise ValueError("Invalid stored document references")
+        for item in group:
+            if not isinstance(item,dict):raise ValueError("Invalid stored document reference")
+            uid=uid_from_url(item.get("url",""))
+            name=item.get("name")
+            if (not uid or item.get("uid")!=uid or not isinstance(name,str) or not name
+                    or len(name)>255 or "/" in name or "\\" in name or Path(name).suffix.lower() not in EXT):
+                raise ValueError("Invalid stored document identity")
+            prior=by_uid.get(uid)
+            if prior is not None and Path(prior["name"]).suffix.lower()!=Path(name).suffix.lower():
+                raise ValueError("Conflicting original format for the same UID; previous reference was not replaced")
+            history=[]
+            for reference in ([prior] if prior else [])+[item]:
+                inherited=reference.get("reference_history",[])
+                if not isinstance(inherited,list):raise ValueError("Invalid stored reference history")
+                history.extend(inherited)
+                history.append({key:reference[key] for key in ("uid","name","url","ext") if key in reference})
+            unique={}
+            for reference in history:
+                if (not isinstance(reference,dict) or reference.get("uid")!=uid or
+                        uid_from_url(reference.get("url",""))!=uid):
+                    raise ValueError("Invalid stored reference history identity")
+                unique[json.dumps(reference,ensure_ascii=False,sort_keys=True)]=reference
+            if len(unique)>MAX_REFERENCE_HISTORY:raise ValueError("Document reference history exceeds limit")
+            merged=dict(item)
+            if len(unique)>1:merged["reference_history"]=list(unique.values())
+            by_uid[uid]=merged
+            if len(by_uid)>MAX_STORED_DOCS:raise ValueError("Cumulative document history exceeds limit")
+    return list(by_uid.values())
+
+
+def _save_manifest(value,with_change=False):
     # asyncio.to_thread callers and separate application processes must hold
     # the same per-procurement lock from the first read through replacement.
     reg=value.get("reg_number")
@@ -288,7 +324,17 @@ def _save_manifest(value):
     path.parent.mkdir(parents=True,exist_ok=True)
     with path.with_suffix(".lock").open("a+b") as lock:
         fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
-        try:return _save_manifest_locked(value,path)
+        try:
+            previous=None
+            if with_change and path.is_file():
+                if path.stat().st_size>MAX_SOURCE_MANIFEST_BYTES:
+                    raise AmendmentHistoryConflict("Stored manifest exceeds limit; previous evidence was not replaced")
+                try:previous=json.loads(path.read_text(encoding="utf-8"))
+                except (OSError,ValueError,TypeError) as exc:
+                    raise AmendmentHistoryConflict("Stored manifest is damaged; previous evidence was not replaced") from exc
+            count=_save_manifest_locked(value,path)
+            changed=previous is None or _manifest_source_evidence(previous)!=_manifest_source_evidence(value)
+            return (count,changed) if with_change else count
         finally:fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
 
 
@@ -296,6 +342,7 @@ def _save_manifest_locked(value,path):
     changes=value.get("changes",[])
     if path.is_file():
         try:
+            if path.stat().st_size>MAX_SOURCE_MANIFEST_BYTES:raise ValueError("Stored manifest exceeds limit")
             previous=json.loads(path.read_text(encoding="utf-8"))
             if (not isinstance(previous,dict) or previous.get("source")!=value["source"]
                     or previous.get("reg_number")!=value["reg_number"]):
@@ -305,12 +352,7 @@ def _save_manifest_locked(value,path):
             old_changes=_parse_changes(previous.get("changes",[]),value["reg_number"],
                 previous.get("source_page"),previous.get("landing_page"),previous.get("documents",[]),retained=True)
             changes=_merge_changes(old_changes,changes)
-            old_docs=previous.get("documents",[])
-            by_uid={x["uid"]:x for x in old_docs if isinstance(x,dict) and "uid" in x}
-            for x in value["documents"]:by_uid[x["uid"]]=x
-            if len(by_uid)>MAX_DOCS and changes:
-                raise ValueError("Cannot discard attachments bound to amendment history")
-            value["documents"]=list(by_uid.values())[:MAX_DOCS]
+            value["documents"]=_merge_document_references(previous.get("documents",[]),value["documents"])
             value["declared_attachment_count"]=max(
                 int(previous.get("declared_attachment_count") or 0),
                 value["declared_attachment_count"],len(value["documents"]))
@@ -322,7 +364,10 @@ def _save_manifest_locked(value,path):
             raise AmendmentHistoryConflict("Cannot safely merge existing amendment history: "+str(exc)) from exc
     value["changes"]=changes
     value["received_at"]=datetime.now(timezone.utc).isoformat()
-    save_atomic(path,json.dumps(value,ensure_ascii=False).encode("utf-8"))
+    encoded=json.dumps(value,ensure_ascii=False).encode("utf-8")
+    if len(encoded)>MAX_SOURCE_MANIFEST_BYTES:
+        raise AmendmentHistoryConflict("Stored manifest exceeds limit; previous evidence was not replaced")
+    save_atomic(path,encoded)
     return len(value["documents"])
 
 def _real_customer(value):
@@ -505,10 +550,12 @@ def install(ns):
         except (ValueError,TypeError,UnicodeDecodeError) as exc:
             raise HTTPException(422,str(exc)) from exc
         try:
-            qty=await asyncio.to_thread(_save_manifest,value)
+            qty,changed=await asyncio.to_thread(_save_manifest,value,True)
         except AmendmentHistoryConflict as exc:
             raise HTTPException(409,str(exc)) from exc
         await asyncio.to_thread(_apply_customer,ns,value)
+        enqueue=ns.get("_v295_enqueue_review")
+        if changed and callable(enqueue):enqueue(value["reg_number"],force=True)
         print(f"V299 PUBLIC_MANIFEST reg={value['reg_number']} docs={qty} status=metadata_only",flush=True)
         return {"accepted":True,"reg_number":value["reg_number"],
                 "documents_discovered":qty,"source":"ЕИС",

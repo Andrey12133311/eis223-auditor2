@@ -13,7 +13,8 @@ import time
 from datetime import datetime,timezone
 from pathlib import Path
 from fastapi import HTTPException,Request
-from v295_eis_originals import auth,allowed_documents,saved_document,root,uid_from_url,EXT
+from v295_eis_originals import (auth,allowed_documents,saved_document,root,uid_from_url,EXT,
+                                MAX_KNOWN_DOCUMENTS,MAX_SOURCE_MANIFEST_BYTES)
 from v319_manual_inputs import migrate_legacy_inputs,record_input
 
 REG=re.compile(r"^3[0-9]{10}$")
@@ -183,17 +184,18 @@ def _stored_download_complete(reg):
     if not REG.fullmatch(reg):return False
     path=root()/"eis223_public_browser_intake"/reg/"manifest.json"
     try:
-        snapshot=path.read_text(encoding="utf-8")
+        with path.open("rb") as stream:snapshot=stream.read(MAX_SOURCE_MANIFEST_BYTES+1)
+        if len(snapshot)>MAX_SOURCE_MANIFEST_BYTES:return False
         manifest=json.loads(snapshot)
         if (not isinstance(manifest,dict) or manifest.get("reg_number")!=reg
                 or manifest.get("source")!="public_eis_223_browser"):
             return False
         declared=int(manifest.get("declared_attachment_count") or 0)
         documents=manifest.get("documents")
-        if not isinstance(documents,list):return False
+        if not isinstance(documents,list) or len(documents)>MAX_KNOWN_DOCUMENTS:return False
         refs=allowed_documents(reg)
         browser_refs=set()
-        for item in documents[:100]:
+        for item in documents:
             if not isinstance(item,dict):continue
             uid=uid_from_url(item.get("url",""))
             name=Path(item.get("name") or "").name
@@ -206,8 +208,8 @@ def _stored_download_complete(reg):
         if not 0<declared<=len(browser_refs):return False
         if not all(saved_document(reg,uid) for uid in refs):return False
         # Do not finish against a manifest that changed during receipt checks.
-        return path.read_text(encoding="utf-8")==snapshot
-    except (OSError,ValueError,TypeError,AttributeError):
+        with path.open("rb") as stream:return stream.read(MAX_SOURCE_MANIFEST_BYTES+1)==snapshot
+    except (OSError,ValueError,TypeError,AttributeError,HTTPException):
         return False
 
 def _finish(ns,job_id,status,detail,found,accepted,defer=0,regs=None,more=False):
