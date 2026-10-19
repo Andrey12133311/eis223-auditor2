@@ -127,13 +127,36 @@ def repair_cached(ns):
             verified={r["reg"]:dict(r) for r in db.execute("SELECT * FROM v322_verified_prices")}
         except sqlite3.OperationalError:verified={}
         rows=[dict(r) for r in db.execute("SELECT * FROM purchases")]
-        corrected=0
-        for row in rows:
-            reg=row["reg_number"]
-            if update_price(db,reg,cached_evidence(row,verified.get(reg))):corrected+=1
-        db.commit()
-        return corrected
     finally:db.close()
+    corrected=0
+    for row in rows:
+        reg=row["reg_number"]
+        # Parsing the next purchase must not retain the previous one's writer.
+        evidence=cached_evidence(row,verified.get(reg))
+        db=ns["conn"]();db.row_factory=sqlite3.Row
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            current=db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+            try:
+                source=db.execute("SELECT * FROM v322_verified_prices WHERE reg=?",(reg,)).fetchone()
+                source=dict(source) if source else None
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():raise
+                source=None
+            # A concurrent intake may have corrected metadata or its price
+            # source while evidence was parsed. Leave that purchase untouched;
+            # the next sweep will assess its new snapshot.
+            if current is None or dict(current)!=row or source!=verified.get(reg):
+                db.rollback()
+                continue
+            changed=update_price(db,reg,evidence)
+            db.commit()
+            corrected+=int(changed)
+        except BaseException:
+            db.rollback()
+            raise
+        finally:db.close()
+    return corrected
 
 
 def missing_regs(ns):

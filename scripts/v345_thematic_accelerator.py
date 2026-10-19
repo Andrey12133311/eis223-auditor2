@@ -12,6 +12,7 @@ import time
 from datetime import datetime,timezone
 import v342_thematic_queue as original
 from v381_audit_scheduling import background_audit
+from audit_db_retry import run_db
 from thematic_period import index_campaign, selection_sql, joined_selection_sql
 
 MAX_CONCURRENT=4
@@ -303,7 +304,7 @@ async def faster_tick(ns):
     if original.storage_health()["blocked"]:
         original.WORKER_STATE["last_error"]="Недостаточно места на диске Railway для сохранения проверок"
         return
-    items=await asyncio.to_thread(_prepare,ns)
+    items=await run_db(_prepare,ns,stage="thematic_prepare")
     original.WORKER_STATE["last_batch_size"]=len(items)
     if not items:
         # Missing originals are dispatched even when no legal recheck is due.
@@ -320,7 +321,7 @@ async def faster_tick(ns):
             result=await finished
             # Durable progress is visible immediately, even while another
             # procurement is still extracting a slow PDF or large archive.
-            await asyncio.to_thread(_persist,ns,[result])
+            await run_db(_persist,ns,[result],stage="thematic_persist")
             processed+=1
             completed+=int(result[1]=="completed")
             if first_result_ms is None:first_result_ms=round((time.monotonic()-started)*1000,1)
