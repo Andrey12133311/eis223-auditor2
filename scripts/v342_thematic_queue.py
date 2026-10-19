@@ -166,7 +166,7 @@ async def independent_review(ns,reg,categories):
     # A missing original needs the EIS intake; an existing but temporarily
     # unreadable file needs a later extraction attempt, with bounded backoff.
     from pathlib import Path
-    available=bool(source["original_received"])
+    available=bool(source["original_received"] or source["source_error"])
     if not available and unreadable:
        available=await asyncio.to_thread(lambda:any(Path(r["local_path"]).is_file()
            for r in rows if r.get("local_path")))

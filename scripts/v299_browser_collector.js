@@ -15,7 +15,7 @@
   const MAX_FILES = 20;
   const PAUSE_MS = 2500;
   const NUMBER = /^3[0-9]{10}$/;
-  const EXT = /\.(docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml)$/i;
+  const EXT = /\.(docx|doc|xlsx|xlsm|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml)$/i;
 
   if (location.origin !== SITE) {
     console.log("[ЕИС-5мин] Открой zakupki.gov.ru перед запуском.");
@@ -184,7 +184,7 @@
   // canonical URL from the exact 32-hex UID found in the official HTML.
   const FILE_PATH="/223/filestore/public/1.0/download/fz223/file.html";
   const LEGACY_PATH="/223/purchase/public/download/download.html";
-  const EXT_NAME=/([^\\/:<>?"|*\r\n]{2,180}\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml))(?=$|[\s,'"<>;)]|$)/i;
+  const EXT_NAME=/([^\\/:<>?"|*\r\n]{2,180}\.(?:docx|doc|xlsx|xlsm|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml))(?=$|[\s,'"<>;)]|$)/i;
   // Public 223-FZ EIS supports two verified attachment link schemes.
   // Other URLs, signatures and untrusted domains are never downloaded.
   const EIS_FILE_LINK=/(?:https?:\/\/zakupki\.gov\.ru)?\/223\/(?:filestore\/public\/1\.0\/download\/fz223\/file\.html|purchase\/public\/download\/download\.html)\?[^"'<>\\\s)]{1,420}/gi;
@@ -909,8 +909,14 @@
     const buffer=await r.arrayBuffer();
     if(buffer.byteLength<8||buffer.byteLength>25*1024*1024)
       throw new Error("Недопустимый размер оригинала ЕИС");
-    const extension=sniffFileExtension(buffer,r.headers);
-    return {buffer,extension,downloadName:filenameFromHeader(r.headers)};
+    const downloadName=filenameFromHeader(r.headers);
+    let extension=sniffFileExtension(buffer,r.headers);
+    // ZIP signatures identify an OOXML workbook, not whether it permits
+    // macros. Preserve an explicit official filename; the server validates
+    // the macro-enabled package content type before accepting its bytes.
+    const namedFormat=EXT.test(downloadName)?downloadName:String(item.name||"");
+    if(extension===".xlsx"&&/\.xlsm$/i.test(namedFormat))extension=".xlsm";
+    return {buffer,extension,downloadName};
   }
 
   async function uploadOriginalData(reg,item,buffer){
@@ -931,7 +937,7 @@
     // Actual file signatures take precedence. A mislabeled ZIP cannot be
     // passed off as an audited DOCX/PDF.
     if(headerExt&&headerExt===detected)return fromHeader;
-    let base=declared.replace(/\.(?:docx|doc|xlsx|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml)$/i,"")
+    let base=declared.replace(/\.(?:docx|doc|xlsx|xlsm|xls|pdf|rtf|odt|ods|zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab|xml)$/i,"")
       .replace(/[<>:"|?*\\/]/g," ").replace(/\s+/g," ").trim().slice(0,175);
     if(!base)base="Документ ЕИС "+downloadUid(item).slice(0,10);
     return base+detected;

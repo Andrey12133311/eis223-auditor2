@@ -6,6 +6,8 @@ new legal thresholds are used, and copies of one event must still count once.
 import asyncio
 import copy
 import hashlib
+import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +21,7 @@ import v348_cross_document_legal as cross
 import v333_dedup_ui as dedup
 from v332_all_procurements_audit import persist
 from v352_dashboard_truth import collapse_legal_events, load_counts
+from v353_episode_guard import same_episode
 
 P = {"reg": "32616412317", "method": "Открытый конкурс",
      "published": "2026-10-01", "submission_end": "2026-10-30"}
@@ -110,6 +113,9 @@ class LegalEventCoverage(unittest.TestCase):
                 duplicate = copy.deepcopy(one)
                 duplicate["text"] = duplicate["text"].replace("06.10.2026", "2026-10-06")
                 duplicate["text"] = duplicate["text"].replace("13.10.2026", "2026-10-13")
+                duplicate["url"] = SOURCE + f"{2:032X}"
+                duplicate["meta"]["source_url"] = duplicate["url"]
+                duplicate["meta"]["sha256"] = hashlib.sha256(duplicate["text"].encode()).hexdigest()
                 found, _ = installed([one, duplicate])
                 self.assertEqual(len(found), 1)
 
@@ -119,9 +125,7 @@ class LegalEventCoverage(unittest.TestCase):
             for number in ("1(А)", "1 А", "___"):
                 with self.subTest(family=family, number=number):
                     doc = original(family, number)
-                    code = ("223-4-12-PROTOCOL-PUBLICATION-LATE" if family == "protocol"
-                            else "223-3.2-3-CLARIFICATION-RESPONSE-LATE")
-                    self.assertEqual(precise._document_event_number(doc, code), "")
+                    self.assertEqual(cross.document_event_number(doc,family.upper()), "")
             doc = original(family, "1")
             doc["text"] += f"\nНомер {label}: 2"
             found, _ = installed([doc])
@@ -157,6 +161,63 @@ class LegalEventCoverage(unittest.TestCase):
             self.assertEqual(precise.evaluate(P, [doc])[0], [])
             timely = original(family, "2", 2, "09.10.2026")
             self.assertEqual(precise.evaluate(P, [timely])[0], [])
+
+    def test_submission_deadline_context_does_not_create_a_new_request(self):
+        for number in ("1", "01.10.2026", ""):
+            with self.subTest(number=number):
+                doc = original("clarification", number)
+                first = precise.evaluate(P, [doc])[0][0]
+                changed = precise.evaluate({**P, "submission_end": "2026-10-31"}, [doc])[0][0]
+                saved = copy.deepcopy([first, changed])
+                self.assertIn("окончание подачи 2026-10-30", first["evidence"])
+                self.assertIn("окончание подачи 2026-10-31", changed["evidence"])
+                self.assertTrue(same_episode(first, changed))
+                self.assertEqual(len(dedup.collapse([first, changed])), 1)
+                self.assertEqual(len(collapse_legal_events([first, changed])), 1)
+                self.assertEqual(precise._event_dates(first), precise._event_dates(changed))
+                self.assertEqual([first, changed], saved)
+
+    def test_context_projection_retains_dates_status_and_original_quote(self):
+        first = precise.evaluate(P, [original("clarification", "1")])[0][0]
+        changed_docs = [original("clarification", "1", 2, "14.10.2026"),
+                        original("clarification", "1", 2)]
+        changed_docs[1]["text"] = changed_docs[1]["text"].replace("06.10.2026", "07.10.2026")
+        changed_docs[1]["meta"]["sha256"] = hashlib.sha256(changed_docs[1]["text"].encode()).hexdigest()
+        for doc in changed_docs:
+            with self.subTest(text=doc["text"]):
+                other = precise.evaluate({**P, "submission_end": "2026-10-31"}, [doc])[0][0]
+                self.assertFalse(same_episode(first, other))
+                self.assertEqual(len(collapse_legal_events([first, other])), 2)
+        review = {**first, "status": "check", "item": first["title"], "field_path": first["code"]}
+        self.assertFalse(same_episode(first, review))
+        self.assertEqual(len(dedup.collapse([first, review])), 2)
+        self.assertEqual(len(collapse_legal_events([first, review])), 2)
+        quoted = [{**first, "evidence": first["evidence"] +
+                   f" Условие оригинала: окончание подачи {deadline}."}
+                  for deadline in ("2026-11-01", "2026-11-02")]
+        self.assertFalse(same_episode(*quoted))
+        self.assertEqual(len(collapse_legal_events(quoted)), 2)
+
+    def test_both_clarification_analyzers_keep_persisted_date_aliases(self):
+        request, answer = original("clarification", "1"), original("clarification", "1", 2)
+        request["text"] = request["text"].rsplit("\n", 1)[0]
+        answer["text"] = "Номер запроса: 1\n" + answer["text"].rsplit("\n", 1)[1]
+        for doc in (request, answer):
+            doc["meta"]["sha256"] = hashlib.sha256(doc["text"].encode()).hexdigest()
+        for analyze, docs in ((lambda p, d: precise.evaluate(p, d)[0], [original("clarification", "1")]),
+                              (cross.cross_doc_clarifications, [request, answer])):
+            first = analyze(P, docs)[0]
+            changed = analyze({**P, "submission_end": "2026-10-31"}, docs)[0]
+            with self.subTest(code=first["code"]):
+                self.assertTrue(same_episode(first, changed))
+                self.assertEqual(len(dedup.collapse([first, changed])), 1)
+                self.assertEqual(len(collapse_legal_events([first, changed])), 1)
+                tail = cross.event_evidence_text(changed["evidence"])
+                alias_tail = re.sub(r"(20\d{2})-(\d{2})-(\d{2})",
+                                    lambda m: f"{m[3]}.{m[2]}.{m[1]}", tail)
+                alias = {**changed, "evidence": changed["evidence"][:-len(tail)] + alias_tail}
+                self.assertTrue(same_episode(first, alias))
+                self.assertEqual(len(collapse_legal_events([first, alias])), 1)
 
     def test_general_and_thematic_pipelines_preserve_numbered_events_and_repeat_counts(self):
         import v332_all_procurements_audit as general
@@ -196,7 +257,7 @@ class LegalEventCoverage(unittest.TestCase):
                              ("clarification", "1"), ("clarification", "2")))]
             source = {"docs": originals, "unreadable": 0, "original_expected": 4,
                       "original_received": 4, "source_incomplete": False,
-                      "p": {}, "card": {}, "detail": {}}
+                      "source_error": None, "p": {}, "card": {}, "detail": {}}
             ns = {"conn": connect, "analyze": lambda p, docs: [],
                   "build_checks": lambda p, detail, card, docs: []}
             precise.install(ns)
@@ -254,6 +315,79 @@ class LegalEventCoverage(unittest.TestCase):
             with connect() as db:
                 self.assertEqual(load_counts(db, [P["reg"]]), {P["reg"]: 4})
                 self.assertEqual(db.execute("SELECT violations FROM purchases").fetchone()[0], 4)
+
+
+class ReceiptDeadlineOccurrence(unittest.IsolatedAsyncioTestCase):
+    async def test_semantic_deadline_recheck_persists_one_event_in_both_audits(self):
+        # Reuse the real receipt fixture without inheriting/rerunning its suite.
+        from tests.test_receipt_original_parity import ReceiptOriginalParity, docx_bytes, LATE_REPLY_B
+        import v332_all_procurements_audit as general
+        import v342_thematic_queue as thematic
+        import v345_thematic_accelerator as fast
+        import os
+
+        previous_stdout, previous_health = sys.stdout, thematic.storage_health
+        previous_tick, previous_state = thematic.tick, dict(thematic.WORKER_STATE)
+        previous_requests = fast._request_missing_originals
+        previous_data_dir = os.environ.get("EIS223_DATA_DIR")
+        def assert_restored():
+            self.assertIs(sys.stdout, previous_stdout)
+            self.assertIs(thematic.storage_health, previous_health)
+            self.assertIs(thematic.tick, previous_tick)
+            self.assertEqual(thematic.WORKER_STATE, previous_state)
+            self.assertIs(fast._request_missing_originals, previous_requests)
+            self.assertEqual(os.environ.get("EIS223_DATA_DIR"), previous_data_dir)
+        self.addCleanup(assert_restored)
+        fixture = ReceiptOriginalParity()
+        # The borrowed case has no asyncio runner. Register its cleanup with
+        # this running case so failures are visible and every patch is closed.
+        fixture.addCleanup = self.addCleanup
+        fixture.setUp()
+        reg = fixture.receipt_purchase()
+        general.initialize(fixture.ns)
+        self.assertEqual(general.claim_next(fixture.ns), reg)
+        first = await fixture.finish_general(reg)
+        self.assertEqual(first["new_findings"], 1)
+        self.assertEqual(await fast.faster_tick(fixture.ns), 1)
+        self.assertEqual(len(fixture.themed(reg)[1]), 1)
+        with fixture.connect() as db:
+            original_evidence = db.execute("SELECT evidence FROM findings WHERE reg_number=?", (reg,)).fetchone()[0]
+        self.assertIn("окончание подачи 2026-10-30", original_evidence)
+
+        manifest = fixture.folder / "eis223_public_browser_intake" / reg / "manifest.json"
+        data = json.loads(manifest.read_text())
+        data["submission_end"] = "2026-10-31"
+        manifest.write_text(json.dumps(data))
+        self.assertEqual(general.refresh_changed(fixture.ns), 1)
+        self.assertEqual(general.claim_next(fixture.ns), reg)
+        repeated = await fixture.finish_general(reg)
+        self.assertEqual(repeated["new_findings"], 0)
+        self.assertEqual(await fast.faster_tick(fixture.ns), 1)
+        item, themed = fixture.themed(reg)
+        self.assertEqual((item["status"], len(themed)), ("completed", 1))
+        self.assertEqual(themed[0]["evidence"], original_evidence)
+        current_state, current = await thematic.independent_review(fixture.ns, reg, ["dates"])
+        self.assertEqual((current_state, len(current)), ("completed", 1))
+        self.assertIn("окончание подачи 2026-10-31", current[0]["evidence"])
+        with fixture.connect() as db:
+            saved = db.execute("SELECT evidence FROM findings WHERE reg_number=?", (reg,)).fetchall()
+            self.assertEqual([row[0] for row in saved], [original_evidence])
+            self.assertEqual(load_counts(db, [reg]), {reg: 1})
+            self.assertEqual(db.execute("SELECT violations FROM purchases WHERE reg_number=?", (reg,)).fetchone()[0], 1)
+        self.assertEqual(general.progress(fixture.ns)["new_evidence_based_findings"], 1)
+
+        # A genuinely later request/response in another authenticated original
+        # remains a second occurrence through the same real persistence path.
+        fixture.put_original(reg, docx_bytes(LATE_REPLY_B), "Поздний ответ.docx")
+        self.assertEqual(general.refresh_changed(fixture.ns), 1)
+        self.assertEqual(general.claim_next(fixture.ns), reg)
+        later = await fixture.finish_general(reg)
+        self.assertEqual(later["new_findings"], 1)
+        self.assertEqual(await fast.faster_tick(fixture.ns), 1)
+        self.assertEqual(len(fixture.themed(reg)[1]), 2)
+        with fixture.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM findings WHERE reg_number=?", (reg,)).fetchone()[0], 2)
+            self.assertEqual(load_counts(db, [reg]), {reg: 2})
 
 
 if __name__ == "__main__":

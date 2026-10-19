@@ -128,6 +128,23 @@ class SecurityClauseCoverageTests(unittest.TestCase):
                 self.assertIsNone(verified_price(card,[original(conflicting)]))
                 self.assertIsNone(verified_price(P,[original(PRICE),original(conflicting,uid=2)]))
 
+    def test_complete_vat_notes_are_not_mistaken_for_written_amounts(self):
+        for digits in ("4 000 000","4 000 000,00"):
+            for note in ("с НДС","без НДС"," С НДС ","без\u00a0НДС"):
+                price=f"НМЦД: {digits} ({note}) рублей."
+                with self.subTest(price=price):
+                    self.assertIsNotNone(verified_price(P,[original(price)]))
+                    self.assertEqual(len(inspect(BID,price=price)[0]),1)
+        for note in ("с НДС восемь миллионов","без НДС; восемь миллионов",
+                     "с НДС, сумма не читается","восемь миллионов", "с НД"):
+            price=f"НМЦД: 4 000 000 ({note}) рублей."
+            with self.subTest(price=price):
+                self.assertIsNone(verified_price(P,[original(price)]))
+                self.assertEqual(inspect(BID,price=price)[0],[])
+        truncated="НМЦД: 4 000 000 (с НДС рублей."
+        self.assertIsNone(verified_price(P,[original(truncated)]))
+        self.assertEqual(inspect(BID,price=truncated)[0],[])
+
     def test_complete_currency_tokens(self):
         for token in ("руб.","руб", "рубль", "рубля", "рублей", "RUB", "Rub", "₽"):
             with self.subTest(token=token):

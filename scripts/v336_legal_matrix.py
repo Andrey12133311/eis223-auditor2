@@ -136,6 +136,7 @@ NON_PRICE_ORIGINAL=re.compile(
 WRITTEN_PRICE=re.compile(r"(?P<amount>"+PRICE_AMOUNT.pattern+
     r")\s*\((?P<written>[^)]{1,220})\)\s*"+RUBLE_TOKEN,re.I)
 WRITTEN_PRICE_START=re.compile(r"(?P<amount>"+PRICE_AMOUNT.pattern+r")\s*\(",re.I)
+VAT_PRICE_NOTE=re.compile(r"\s*(?:с|без)\s+НДС\s*",re.I)
 WRITTEN_NUMBERS=dict(zip(
     ("ноль один два три четыре пять шесть семь восемь девять десять одиннадцать "
      "двенадцать тринадцать четырнадцать пятнадцать шестнадцать семнадцать "
@@ -281,7 +282,11 @@ def verified_price(p,docs):
             if (printed.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)!=observed
                     and printed!=Decimal(int(observed))):continue
             match=WRITTEN_PRICE.match(body,opening.start())
-            if match is None or _written_value(match["written"])!=printed:
+            if match is None:return None
+            # A complete VAT note is not an amount written in words. Mixed
+            # or incomplete parentheticals still require readable spelling.
+            if VAT_PRICE_NOTE.fullmatch(match["written"]):continue
+            if _written_value(match["written"])!=printed:
                 return None
         # A maximum contract value is a different price kind; it cannot
         # corroborate the exact NMCD needed by this rule.

@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 ARCHIVE_EXT={".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab"}
-DOC_EXT={".pdf",".docx",".doc",".xlsx",".xls",".odt",".ods",".rtf",".xml",".txt",".csv"}
+DOC_EXT={".pdf",".docx",".doc",".xlsx",".xlsm",".xls",".odt",".ods",".rtf",".xml",".txt",".csv"}
 MAX_MEMBER=12*1024*1024
 MAX_EXPANDED=72*1024*1024
 MAX_MEMBERS=100

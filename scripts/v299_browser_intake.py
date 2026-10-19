@@ -6,6 +6,7 @@ verified-originals pipeline. No metadata alone is counted as audited.
 """
 from __future__ import annotations
 import asyncio
+import fcntl
 import json
 import os
 import re
@@ -17,13 +18,171 @@ from fastapi.responses import JSONResponse,PlainTextResponse
 
 from v295_eis_originals import (
     REG,EXT,uid_from_url,root,auth,save_atomic,
-    allowed_documents,saved_document,
+    allowed_documents,saved_document,_manifest_source_evidence,MAX_SOURCE_MANIFEST_BYTES,
 )
 from v342_identity import subject as _valid_subject, valid_inn
 
 MAX_MANIFEST_BYTES=65536
 MAX_DOCS=100
+MAX_STORED_DOCS=10000
+MAX_REFERENCE_HISTORY=1000
 MAX_MANIFESTS=20000
+
+# Amendment history is supplied by the authenticated official-browser caller.
+# These checks establish provenance/identity, not verification of original bytes.
+MAX_CHANGES=80
+MAX_CHANGE_BYTES=32768
+_NOTICE_PREFIXES=("/epz/order/notice/notice223/", "/223/purchase/public/purchase/info/")
+_CHANGE_TYPES=re.compile(
+    r"(?:amendment|change|changes|revision|внесение изменений|"
+    r"изменени[ея](?: (?:извещения|документации|закупочной документации))?|"
+    r"(?:новая )?редакция(?: (?:извещения|документации))?)",re.I)
+
+
+class AmendmentHistoryConflict(ValueError):
+    """An existing event cannot be replaced without resolving its evidence."""
+
+
+def _change_text(value,label,limit,required=False):
+    if value is None and not required:return ""
+    if (not isinstance(value,str) or len(value)>limit
+            or any(ord(c)<32 and c not in "\n\r\t" for c in value)):
+        raise ValueError("Invalid amendment "+label)
+    if label in ("source page","attachment URL") and any(c.isspace() for c in value):
+        raise ValueError("Invalid amendment "+label)
+    value=value.strip()
+    if required and not value:raise ValueError("Missing amendment "+label)
+    return value
+
+
+def _change_day(value,label,required=False):
+    raw=_change_text(value,label,40,required)
+    if not raw:return ""
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}",raw):
+            return datetime.strptime(raw,"%Y-%m-%d").date().isoformat()
+        if re.fullmatch(r"\d{2}\.\d{2}\.\d{4}",raw):
+            return datetime.strptime(raw,"%d.%m.%Y").date().isoformat()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?",raw):
+            return datetime.fromisoformat(raw.replace("Z","+00:00")).date().isoformat()
+    except ValueError:pass
+    raise ValueError("Invalid amendment "+label)
+
+
+def _notice_identity(url,reg):
+    """Return only unambiguous purchase identifiers from official notice pages."""
+    raw=_change_text(url,"source page",1000,True)
+    try:
+        p=urlsplit(raw)
+        if (p.scheme!="https" or p.hostname!="zakupki.gov.ru" or p.port not in (None,443)
+                or p.username or p.password or p.fragment or "\\" in raw
+                or any(c.isspace() for c in raw)
+                or not any(p.path.startswith(prefix) and re.fullmatch(
+                    r"[a-zA-Z0-9_-]+\.html",p.path[len(prefix):]) for prefix in _NOTICE_PREFIXES)):
+            raise ValueError("Invalid official amendment page")
+        q=parse_qs(p.query,keep_blank_values=True,strict_parsing=True,max_num_fields=20)
+        regs=q.get("regNumber",[])+q.get("purchaseNoticeNumber",[])
+        ids=[(name,v) for name in ("noticeId","noticeInfoId") for v in q.get(name,[])]
+        if (regs and regs!=[reg]) or len(ids)>1 or any(
+                not re.fullmatch(r"[0-9]{1,15}",v) for _,v in ids):
+            raise ValueError("Conflicting amendment purchase identity")
+        if not regs and not ids:raise ValueError("Unbound amendment source page")
+        return bool(regs),set(ids)
+    except (ValueError,TypeError) as exc:
+        raise ValueError("Invalid same-purchase amendment provenance") from exc
+
+
+def _merge_changes(*groups):
+    """Exact duplicates collapse; competing evidence for one event is rejected."""
+    merged=[];seen=set();identities={}
+    for group in groups:
+        for change in group:
+            fingerprint=json.dumps(change,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+            if fingerprint in seen:continue
+            keys=[]
+            if change.get("event_id"):keys.append(("event",change["event_id"]))
+            if change.get("source_url"):keys.append(("attachment",uid_from_url(change["source_url"])))
+            if not keys:
+                # Without a stable event/original ID, same-day history entries
+                # are ambiguous; a filename is not proof of a distinct event.
+                keys.append(("history-day",change["publication_date"]))
+            if any(key in identities and identities[key]!=fingerprint for key in keys):
+                raise AmendmentHistoryConflict("Conflicting amendment history; previous evidence was not replaced")
+            for key in keys:identities[key]=fingerprint
+            seen.add(fingerprint);merged.append(change)
+    if len(merged)>MAX_CHANGES or len(json.dumps(merged,ensure_ascii=False).encode("utf-8"))>MAX_CHANGE_BYTES:
+        raise AmendmentHistoryConflict("Amendment history exceeds limit; previous evidence was not replaced")
+    return merged
+
+
+def _parse_changes(value,reg,source_page,landing_page,documents,retained=False):
+    if value is None:raise ValueError("Expected amendment changes array")
+    if not isinstance(value,list) or len(value)>MAX_CHANGES:
+        raise ValueError("Expected at most 80 amendment events")
+    if not value:return []
+    if not isinstance(documents,list):raise ValueError("Invalid amendment original-file references")
+    bound_uids={uid_from_url(item.get("url") or "") for item in documents
+                if isinstance(item,dict) and item.get("uid")
+                and item.get("uid")==uid_from_url(item.get("url") or "")}
+    out=[]
+    for item in value:
+        if not isinstance(item,dict):raise ValueError("Expected amendment event object")
+        if "reg_number" in item and item["reg_number"]!=reg:
+            raise ValueError("Conflicting amendment registry number")
+        # Persist the original page/landing pair to retain its established
+        # notice identity when a later document-only capture changes pages.
+        # Incoming caller-provided provenance never overrides current context.
+        context={"source_page":source_page,"landing_page":landing_page or ""}
+        if retained and "provenance" in item:
+            context=item["provenance"]
+            if not isinstance(context,dict) or set(context)!={"source_page","landing_page"}:
+                raise ValueError("Invalid retained amendment provenance")
+        _,notice_ids=_notice_identity(context["source_page"],reg)
+        if context["landing_page"]:
+            _,landing_ids=_notice_identity(context["landing_page"],reg)
+            if notice_ids and landing_ids and notice_ids!=landing_ids:
+                raise ValueError("Conflicting amendment notice identity")
+            notice_ids|=landing_ids
+        kind=_change_text(item.get("type"),"type",100,True)
+        if not _CHANGE_TYPES.fullmatch(kind):raise ValueError("Expected explicit amendment event")
+        page=_change_text(item.get("source_page"),"source page",1000,True)
+        has_reg,event_ids=_notice_identity(page,reg)
+        if event_ids and not event_ids.issubset(notice_ids):
+            raise ValueError("Amendment source belongs to a different or unverified notice")
+        if not has_reg and not event_ids:raise ValueError("Unbound amendment source page")
+        source_url=_change_text(item.get("source_url"),"attachment URL",1000)
+        if source_url:
+            uid=uid_from_url(source_url)
+            if not uid or uid not in bound_uids or any(c.isspace() for c in source_url):
+                raise ValueError("Unbound amendment attachment URL")
+            # Do not allow a correct UID to hide a different purchase identity.
+            attachment=urlsplit(source_url)
+            q=parse_qs(attachment.query,keep_blank_values=True,strict_parsing=True,max_num_fields=20)
+            allowed={"uid","download"} if "filestore" in attachment.path else {"id"}
+            if set(q)-allowed or ("download" in q and q["download"] not in (["0"],["1"])):
+                raise ValueError("Invalid amendment attachment URL parameters")
+        publication=_change_day(item.get("publication_date"),"publication date")
+        published_at=_change_day(item.get("published_at"),"publication timestamp")
+        if publication and published_at and publication!=published_at:
+            raise ValueError("Conflicting amendment publication dates")
+        publication=publication or published_at
+        if not publication:raise ValueError("Missing explicit amendment publication date")
+        publication_evidence=_change_text(item.get("publication_evidence"),"publication evidence",1000,True)
+        decision=_change_day(item.get("decision_date"),"decision date")
+        decision_evidence=_change_text(item.get("decision_evidence"),"decision evidence",1000,bool(decision))
+        event_id=_change_text(item.get("event_id"),"event ID",80)
+        if event_id and not re.fullmatch(r"[0-9A-Za-zА-Яа-яЁё][0-9A-Za-zА-Яа-яЁё./_-]{0,79}",event_id):
+            raise ValueError("Invalid amendment event ID")
+        change={"type":kind,"source_page":page,"publication_date":publication,
+                "publication_evidence":publication_evidence,"provenance":context}
+        for key,val in (("source_url",source_url),("event_id",event_id),
+                        ("document_name",_change_text(item.get("document_name"),"document name",255)),
+                        ("decision_date",decision),("decision_evidence",decision_evidence),
+                        ("submission_end",_change_day(item.get("submission_end"),"submission deadline"))):
+            if val:change[key]=val
+        out.append(change)
+    return _merge_changes(out)
+
 
 def _safe_string(value,max_length=255):
     return str(value or "").replace("\x00","").strip()[:max_length]
@@ -110,6 +269,7 @@ def _parse_manifest(payload):
         "submission_end":_safe_string(payload.get("submission_end"),40),
         "price":_safe_string(payload.get("price"),60),
         "documents":out,
+        "changes":_parse_changes(payload.get("changes",[]),reg,source_page,landing_page,out),
         # EIS attachments lacking extensions enter this count immediately.
         # Registration of their original-file URL is deferred until the
         # browser has fetched and validated the actual binary file format.
@@ -120,25 +280,94 @@ def _parse_manifest(payload):
 def _manifest_path(reg):
     return root()/"eis223_public_browser_intake"/reg/"manifest.json"
 
-def _save_manifest(value):
-    path=_manifest_path(value["reg_number"])
+def _merge_document_references(*groups):
+    by_uid={}
+    for group in groups:
+        if not isinstance(group,list):raise ValueError("Invalid stored document references")
+        for item in group:
+            if not isinstance(item,dict):raise ValueError("Invalid stored document reference")
+            uid=uid_from_url(item.get("url",""))
+            name=item.get("name")
+            if (not uid or item.get("uid")!=uid or not isinstance(name,str) or not name
+                    or len(name)>255 or "/" in name or "\\" in name or Path(name).suffix.lower() not in EXT):
+                raise ValueError("Invalid stored document identity")
+            prior=by_uid.get(uid)
+            if prior is not None and Path(prior["name"]).suffix.lower()!=Path(name).suffix.lower():
+                raise ValueError("Conflicting original format for the same UID; previous reference was not replaced")
+            history=[]
+            for reference in ([prior] if prior else [])+[item]:
+                inherited=reference.get("reference_history",[])
+                if not isinstance(inherited,list):raise ValueError("Invalid stored reference history")
+                history.extend(inherited)
+                history.append({key:reference[key] for key in ("uid","name","url","ext") if key in reference})
+            unique={}
+            for reference in history:
+                if (not isinstance(reference,dict) or reference.get("uid")!=uid or
+                        uid_from_url(reference.get("url",""))!=uid):
+                    raise ValueError("Invalid stored reference history identity")
+                unique[json.dumps(reference,ensure_ascii=False,sort_keys=True)]=reference
+            if len(unique)>MAX_REFERENCE_HISTORY:raise ValueError("Document reference history exceeds limit")
+            merged=dict(item)
+            if len(unique)>1:merged["reference_history"]=list(unique.values())
+            by_uid[uid]=merged
+            if len(by_uid)>MAX_STORED_DOCS:raise ValueError("Cumulative document history exceeds limit")
+    return list(by_uid.values())
+
+
+def _save_manifest(value,with_change=False):
+    # asyncio.to_thread callers and separate application processes must hold
+    # the same per-procurement lock from the first read through replacement.
+    reg=value.get("reg_number")
+    if not isinstance(reg,str) or not re.fullmatch(r"3[0-9]{10}",reg):
+        raise ValueError("Invalid manifest registry number")
+    path=_manifest_path(reg)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.with_suffix(".lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        try:
+            previous=None
+            if with_change and path.is_file():
+                if path.stat().st_size>MAX_SOURCE_MANIFEST_BYTES:
+                    raise AmendmentHistoryConflict("Stored manifest exceeds limit; previous evidence was not replaced")
+                try:previous=json.loads(path.read_text(encoding="utf-8"))
+                except (OSError,ValueError,TypeError) as exc:
+                    raise AmendmentHistoryConflict("Stored manifest is damaged; previous evidence was not replaced") from exc
+            count=_save_manifest_locked(value,path)
+            changed=previous is None or _manifest_source_evidence(previous)!=_manifest_source_evidence(value)
+            return (count,changed) if with_change else count
+        finally:fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
+
+
+def _save_manifest_locked(value,path):
+    changes=value.get("changes",[])
     if path.is_file():
         try:
+            if path.stat().st_size>MAX_SOURCE_MANIFEST_BYTES:raise ValueError("Stored manifest exceeds limit")
             previous=json.loads(path.read_text(encoding="utf-8"))
-            if previous.get("source")==value["source"] and previous.get("reg_number")==value["reg_number"]:
-                old_docs=previous.get("documents",[])
-                by_uid={x["uid"]:x for x in old_docs if isinstance(x,dict) and "uid" in x}
-                for x in value["documents"]:by_uid[x["uid"]]=x
-                value["documents"]=list(by_uid.values())[:MAX_DOCS]
-                value["declared_attachment_count"]=max(
-                    int(previous.get("declared_attachment_count") or 0),
-                    value["declared_attachment_count"],len(value["documents"]))
-                for key in ("title","customer","customer_inn","published","submission_start","submission_end","price"):
-                    if not value.get(key):value[key]=previous.get(key,"")
-        except (OSError,ValueError,KeyError,TypeError):
-            pass
+            if (not isinstance(previous,dict) or previous.get("source")!=value["source"]
+                    or previous.get("reg_number")!=value["reg_number"]):
+                raise ValueError("Existing manifest identity is invalid")
+            # Validate old evidence against its own captured source/notice, not
+            # a later revision's page. A doc-only intake cannot erase history.
+            old_changes=_parse_changes(previous.get("changes",[]),value["reg_number"],
+                previous.get("source_page"),previous.get("landing_page"),previous.get("documents",[]),retained=True)
+            changes=_merge_changes(old_changes,changes)
+            value["documents"]=_merge_document_references(previous.get("documents",[]),value["documents"])
+            value["declared_attachment_count"]=max(
+                int(previous.get("declared_attachment_count") or 0),
+                value["declared_attachment_count"],len(value["documents"]))
+            for key in ("title","customer","customer_inn","published","submission_start","submission_end","price"):
+                if not value.get(key):value[key]=previous.get(key,"")
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            # Do not swallow conflicts or damaged prior history and overwrite
+            # the only retained evidence. The API reports a recoverable 409.
+            raise AmendmentHistoryConflict("Cannot safely merge existing amendment history: "+str(exc)) from exc
+    value["changes"]=changes
     value["received_at"]=datetime.now(timezone.utc).isoformat()
-    save_atomic(path,json.dumps(value,ensure_ascii=False).encode("utf-8"))
+    encoded=json.dumps(value,ensure_ascii=False).encode("utf-8")
+    if len(encoded)>MAX_SOURCE_MANIFEST_BYTES:
+        raise AmendmentHistoryConflict("Stored manifest exceeds limit; previous evidence was not replaced")
+    save_atomic(path,encoded)
     return len(value["documents"])
 
 def _real_customer(value):
@@ -320,8 +549,13 @@ def install(ns):
             value=_parse_manifest(json.loads(raw))
         except (ValueError,TypeError,UnicodeDecodeError) as exc:
             raise HTTPException(422,str(exc)) from exc
-        qty=await asyncio.to_thread(_save_manifest,value)
+        try:
+            qty,changed=await asyncio.to_thread(_save_manifest,value,True)
+        except AmendmentHistoryConflict as exc:
+            raise HTTPException(409,str(exc)) from exc
         await asyncio.to_thread(_apply_customer,ns,value)
+        enqueue=ns.get("_v295_enqueue_review")
+        if changed and callable(enqueue):enqueue(value["reg_number"],force=True)
         print(f"V299 PUBLIC_MANIFEST reg={value['reg_number']} docs={qty} status=metadata_only",flush=True)
         return {"accepted":True,"reg_number":value["reg_number"],
                 "documents_discovered":qty,"source":"ЕИС",

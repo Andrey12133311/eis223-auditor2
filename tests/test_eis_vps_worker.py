@@ -26,7 +26,8 @@ ARCHIVE_URL = 'https://int.zakupki.gov.ru/dstore/common/download/compound?docReq
 def zipped(name='purchaseNoticeKESMBO_32616233661_1.xml'):
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w') as archive:
-        archive.writestr(name, '<purchaseNoticeKESMBO/>')
+        # Archive-byte assertions must not depend on the wall-clock ZIP timestamp.
+        archive.writestr(zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0)), '<purchaseNoticeKESMBO/>')
     return out.getvalue()
 
 

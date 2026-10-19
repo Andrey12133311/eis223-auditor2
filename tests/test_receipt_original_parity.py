@@ -4,6 +4,8 @@ The originals and SQLite database are temporary. Existing clarification rules
 establish the test findings; no remote I/O or new legal threshold is involved.
 """
 import asyncio
+import ast
+from copy import deepcopy
 import hashlib
 import io
 import json
@@ -20,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_source_version as sources
 import v298_eis_only as incoming
+import v295_eis_originals as originals
 import v332_all_procurements_audit as general
 import v341_precise_legal as legal
 import v342_thematic_queue as thematic
@@ -350,6 +353,197 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with self.connect() as con, patch.object(sources, "original_sources", side_effect=scan_outside_reader):
             self.assertFalse(con.in_transaction)
             self.assertEqual(sources.source_version(con, reg), before)
+
+    async def test_catalogue_limit_isolated_from_other_workers_and_retains_readable_subset(self):
+        readable = self.purchase(1)
+        blocked = self.receipt_purchase(2)
+        good = self.receipt_purchase(3)
+        for reg in (readable, blocked):
+            self.put_original(reg, docx_bytes(LATE_REPLY_B), "Второй ответ.docx")
+        general.initialize(self.ns)
+        with self.connect() as con:
+            con.execute("UPDATE v332_audit_queue SET original_expected=2,original_received=2 WHERE reg=?", (readable,))
+        real_sleep = asyncio.sleep
+        async def fast_start(seconds, *args, **kwargs):
+            return await real_sleep(0 if seconds == 14 else seconds, *args, **kwargs)
+        self.stack.enter_context(patch.object(general.asyncio, "sleep", side_effect=fast_start))
+        self.stack.enter_context(patch.object(general, "QUEUE_POLL_SECONDS", .02))
+        with patch.object(originals, "MAX_KNOWN_DOCUMENTS", 1):
+            blocked_source = sources.original_sources(blocked)
+            self.assertFalse(any(item["available"] for item in blocked_source))
+            self.assertTrue(blocked_source[0]["scan_error"])
+            general.install(self.ns)
+            await self.ns["app"].startups[0]()
+            worker = self.ns["_v332_campaign_worker"]
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if (self.row(good)["state"] == "completed" and
+                            self.row(readable)["retry_count"] == 1 and
+                            self.row(blocked)["retry_count"] == 1):
+                        break
+                    await real_sleep(.01)
+                self.assertEqual(self.row(good)["state"], "completed", self.output.getvalue())
+                for reg in (readable, blocked):
+                    self.assertEqual((self.row(reg)["state"], self.row(reg)["retry_count"]), ("pending", 1))
+                    self.assertIn("limit", self.row(reg)["error"])
+                self.assertEqual((self.row(readable)["new_findings"], self.row(readable)["original_received"]), (1, 2))
+                self.assertEqual(self.row(blocked)["original_received"], 0)
+                self.assertEqual(general.runtime_snapshot(self.ns)["live_workers"], 4)
+                await fast.faster_tick(self.ns)
+                self.assertEqual((self.themed(good)[0]["status"], len(self.themed(good)[1])), ("completed", 1))
+                self.assertEqual((self.themed(readable)[0]["status"], len(self.themed(readable)[1])), ("retry", 1))
+                self.assertEqual((self.themed(blocked)[0]["status"], self.themed(blocked)[1]), ("retry", []))
+                self.assertEqual(fast._prepare(self.ns), [])
+                self.assertEqual(general.refresh_changed(self.ns), 0)
+            finally:
+                worker.cancel()
+                await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 5)
+        self.assertEqual(general.refresh_changed(self.ns), 2)
+        await fast.faster_tick(self.ns)
+        self.assertEqual((self.themed(readable)[0]["status"], len(self.themed(readable)[1])), ("completed", 2))
+        self.assertEqual((self.themed(blocked)[0]["status"], len(self.themed(blocked)[1])), ("completed", 2))
+
+    async def test_review_manifest_byte_limit_cannot_complete_after_allowlist_succeeds(self):
+        reg = self.purchase()
+        manifest = self.folder / "eis223_public_browser_intake" / reg / "manifest.json"
+        value = json.loads(manifest.read_text())
+        value["diagnostic_padding"] = "x" * 2048
+        manifest.write_text(json.dumps(value))
+        with patch.object(originals, "MAX_SOURCE_MANIFEST_BYTES", 1024):
+            self.assertEqual(len(originals.allowed_documents(reg)), 1)
+            self.assertTrue(sources.original_sources(reg)[0]["scan_error"])
+            general.initialize(self.ns)
+            state, detail = await general.inspect_one(self.ns, reg)
+            self.assertEqual((state, detail["new_findings"]), ("completed", 1))
+            self.assertTrue(detail["source_incomplete"])
+            self.assertNotIn("original_received", detail)
+            self.assertNotIn("original_expected", detail)
+            await fast.faster_tick(self.ns)
+            item, findings = self.themed(reg)
+            self.assertEqual((item["status"], len(findings)), ("retry", 1))
+            self.assertIn("safe read limit", item["detail"])
+            self.assertEqual(fast._prepare(self.ns), [])
+
+    async def test_semantic_manifest_change_reopens_receipt_only_audit_without_multiplying_findings(self):
+        reg = self.receipt_purchase()
+        general.initialize(self.ns)
+        await self.finish_general(reg)
+        await fast.faster_tick(self.ns)
+        before = self.themed(reg)[0]["last_source_version"]
+        manifest = self.folder / "eis223_public_browser_intake" / reg / "manifest.json"
+        value = json.loads(manifest.read_text())
+        value["customer"] = "ООО Тест, уточнённое наименование"
+        manifest.write_text(json.dumps(value))
+        self.assertEqual(general.refresh_changed(self.ns), 1)
+        self.assertEqual(general.claim_next(self.ns), reg)
+        self.assertEqual((await self.finish_general(reg))["new_findings"], 0)
+        self.assertEqual([item["reg"] for item in fast._prepare(self.ns)], [reg])
+        await fast.faster_tick(self.ns)
+        item, findings = self.themed(reg)
+        self.assertNotEqual(item["last_source_version"], before)
+        self.assertEqual((item["status"], len(findings), self.findings(reg)), ("completed", 1, 1))
+        self.assertEqual(fast._prepare(self.ns), [])
+        self.assertEqual(general.refresh_changed(self.ns), 0)
+
+    async def test_identical_hash_merge_keeps_secondary_dates_roles_and_nested_provenance(self):
+        reg = self.purchase()
+        purchase, rows = general.existing(self.ns, reg)
+        docs, _ = await general.stored_docs(self.ns, reg, rows)
+        earlier = deepcopy(docs[0])
+        earlier.update(name="Ранее сохранённое имя.docx", published="2026-10-01")
+        earlier["meta"].update(protocol_type="review", identical_sources=[{
+            "name": "Ещё более раннее имя.docx", "published": "2026-09-30",
+            "meta": {"source": "official_eis_original", "source_url": earlier["url"]}}])
+        current = deepcopy(docs[0])
+        merged = general.merge_docs([current], [earlier])
+        self.assertEqual(len(merged), 1)
+        aliases = merged[0]["meta"]["identical_sources"]
+        retained = next(item for item in aliases if item.get("name") == earlier["name"])
+        self.assertEqual((retained["published"], retained["meta"]["protocol_type"]), ("2026-10-01", "review"))
+        self.assertTrue(any(item.get("published") == "2026-09-30" for item in aliases))
+        self.assertEqual(general.merge_docs(merged, [earlier])[0]["meta"]["identical_sources"], aliases)
+        self.assertEqual(len(legal.evaluate(general.as_procurement(purchase), merged)[0]), 1)
+
+    def test_nested_operational_alias_updates_do_not_change_source_identity(self):
+        reg = self.purchase()
+        with self.connect() as con:
+            row = con.execute("SELECT id,metadata_json FROM docs WHERE reg_number=?", (reg,)).fetchone()
+            meta = json.loads(row["metadata_json"])
+            alias = {"name": "Протокол.docx", "published": "2026-10-01", "error": "old",
+                     "meta": {"source": "official_eis_original", "source_url": URL + "A" * 32,
+                              "received_at": "old", "state": "stored", "protocol_type": "review"}}
+            meta["identical_sources"] = [alias]
+            con.execute("UPDATE docs SET metadata_json=? WHERE id=?", (json.dumps(meta), row["id"]))
+            con.commit()
+            before = sources.source_version(con, reg)
+            alias["error"] = "later warning"
+            alias["meta"].update(received_at="later", state="checked", extraction_ms=123)
+            con.execute("UPDATE docs SET metadata_json=? WHERE id=?", (json.dumps(meta), row["id"]))
+            con.commit()
+            self.assertEqual(sources.source_version(con, reg), before)
+            alias["published"] = "2026-10-02"
+            con.execute("UPDATE docs SET metadata_json=? WHERE id=?", (json.dumps(meta), row["id"]))
+            con.commit()
+            self.assertNotEqual(sources.source_version(con, reg), before)
+
+    async def test_xlsm_is_read_by_actual_extractor_from_stored_row_and_archive(self):
+        import openpyxl
+        import v347_text_cache as cache
+        # Compile only the existing function: importing the app would start
+        # unrelated application initialization against its default DB path.
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        parsed = ast.parse(app_path.read_text())
+        function = next(node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == "extract_text")
+        namespace = {"Path": Path, "openpyxl": openpyxl, "Document": Document}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(app_path), "exec"), namespace)
+        self.ns["extract_text"] = namespace["extract_text"]
+        cache.install(self.ns)
+        workbook = openpyxl.Workbook()
+        workbook.active.append(["Дата поступления запроса разъяснения: 01.10.2026."])
+        workbook.active.append(["Дата публикации ответа в ЕИС: 07.10.2026."])
+        workbook.active.append(["=1+1"])
+        package = io.BytesIO()
+        workbook.save(package)
+        workbook.close()
+        macro_package = io.BytesIO()
+        with zipfile.ZipFile(package) as plain, zipfile.ZipFile(macro_package, "w") as macro:
+            for part in plain.infolist():
+                body = plain.read(part)
+                if part.filename == "[Content_Types].xml":
+                    body = body.replace(b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                                        b"application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+                macro.writestr(part, body)
+            macro.writestr("xl/vbaProject.bin", b"inert synthetic macro payload, never executed")
+        data = macro_package.getvalue()
+        originals.assert_format(data, ".xlsm")
+        standalone, archived = self.receipt_purchase(1), self.receipt_purchase(2)
+        self.originals[standalone] = []
+        path = self.put_original(standalone, data, "Разъяснения.xlsm")
+        meta = {"source": "official_eis_original", "source_url": self.originals[standalone][0]["url"],
+                "sha256": hashlib.sha256(data).hexdigest()}
+        with self.connect() as con:
+            con.execute("INSERT INTO docs(reg_number,name,url,local_path,status,metadata_json) VALUES(?,?,?,?,'checked',?)",
+                        (standalone, "Разъяснения.xlsm", meta["source_url"], str(path), json.dumps(meta)))
+        _, rows = general.existing(self.ns, standalone)
+        docs, unreadable = await general.stored_docs(self.ns, standalone, rows)
+        self.assertEqual((len(docs), unreadable), (1, 0))
+        self.assertNotIn("=1+1", docs[0]["text"])
+        self.assertNotIn("macro payload", docs[0]["text"])
+        self.originals[archived] = []
+        wrapped = io.BytesIO()
+        with zipfile.ZipFile(wrapped, "w") as archive:
+            archive.writestr("Разъяснения.xlsm", data)
+        archive_path = self.put_original(archived, wrapped.getvalue(), "Документы.zip")
+        general.initialize(self.ns)
+        for reg in (standalone, archived):
+            detail = await self.finish_general(reg)
+            self.assertEqual((detail["documents_read"], detail["new_findings"]), (1, 1))
+        await fast.faster_tick(self.ns)
+        for reg in (standalone, archived):
+            self.assertEqual((self.themed(reg)[0]["status"], len(self.themed(reg)[1])), ("completed", 1))
+        self.assertEqual(path.read_bytes(), data)
+        self.assertEqual(archive_path.read_bytes(), wrapped.getvalue())
 
 
 if __name__ == "__main__":

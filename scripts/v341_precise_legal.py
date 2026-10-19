@@ -72,47 +72,21 @@ def matches(pattern, text):
     return list(re.finditer(pattern+r"\s*[:：|=–—\-\s]{0,15}(?P<date>"+DATE_TOKEN+r")", text, re.I))[:40]
 
 
-def _document_event_number(doc, code):
-    """A unique, complete identifier in this original can distinguish events.
-
-    The cross-document module imports this module's date grammar. Import its
-    identifier parser only at evaluation time to keep standalone imports safe.
-    A compilation, conflicting title/body or unsupported number stays unknown.
-    """
-    from v348_cross_document_legal import _number_identity, _clarification_identity
-    parser = (_clarification_identity if "CLARIFICATION-" in code else
-              _number_identity if "PROTOCOL-" in code else None)
-    if parser is None:
-        return ""
-    named, bad_title = parser(doc.get("name") or "", title=True)
-    body, bad_body = parser(str(doc.get("text") or "")[:750000])
-    identifiers = named | body
-    return next(iter(identifiers)) if not (bad_title or bad_body) and len(identifiers) == 1 else ""
+def _event_dates(item):
+    """Normalize event dates without identity labels or applicability context."""
+    from v348_cross_document_legal import event_occurrence_text
+    dates=re.findall(DATE_TOKEN,event_occurrence_text(item),re.I)
+    if not dates:dates=re.findall(DATE_TOKEN,str(item.get("match_text") or ""),re.I)
+    return tuple(sorted({parsed.isoformat() for value in dates
+                         if (parsed:=day(value)) is not None}))
 
 
-def _dated_event_key(item):
-    """Identical dates are insufficient when originals name different events."""
-    from v348_cross_document_legal import finding_protocol_number, finding_clarification_number
-    code = str(item.get("code") or item.get("field_path") or "")
-    raw_dates = re.findall(DATE_TOKEN, str(item.get("evidence") or ""), re.I)
-    if not raw_dates:
-        raw_dates = re.findall(DATE_TOKEN, str(item.get("match_text") or ""), re.I)
-    dates = tuple(sorted({parsed.isoformat() for value in raw_dates
-                          if (parsed := day(value)) is not None}))
-    number = (finding_clarification_number(item) if "CLARIFICATION-" in code else
-              finding_protocol_number(item) if "PROTOCOL-" in code else "")
-    return code, dates, number
-
-
-def finding(doc, code, title, law, evidence, match, url=LAW32):
-    label = ("запроса" if "CLARIFICATION-" in code else
-             "протокола" if "PROTOCOL-" in code else "")
-    if label:
-        number = _document_event_number(doc, code)
-        # The identifier must survive both SQL persistence and short cards.
-        # Preserve a rejected/unknown identity too: a later reader must not
-        # reconstruct a number from a filename that contradicted the body.
-        evidence = f"Номер {label}: {number or 'не установлен'}. " + evidence
+def finding(doc, code, title, law, evidence, match, url=LAW32, event_number=None):
+    family = next((value for value in ("PROTOCOL", "CLARIFICATION") if value + "-" in code), None)
+    if family:
+        from v348_cross_document_legal import document_event_number, event_identity_evidence
+        if event_number is None:event_number = document_event_number(doc, family)
+        evidence = event_identity_evidence(evidence, family, event_number, doc)
     return {"code": code, "kind": "violation", "title": title,
             "law": law, "law_url": url, "evidence": evidence[:2200],
             "note": "Расчёт по подтверждённым календарным датам без времени. Источник и конкретная норма приведены в выводе.",
@@ -130,8 +104,68 @@ def review(doc, code, title, evidence, law, match):
             "note": "Неполная цепочка фактов или применимость исключения. Не включается в подтверждённые нарушения."}
 
 
+def _distinct_numbered_events(left, right):
+    """Only independently established, different event numbers defeat dedup.
+
+    Import lazily: the cross-original analyzers also reuse this module's date
+    grammar. An absent/ambiguous identifier retains the existing date fallback.
+    """
+    from v348_cross_document_legal import (finding_protocol_number,
+                                           finding_clarification_number,
+                                           same_original_identity)
+    if same_original_identity(left, right):return False
+    a = str(left.get("code") or left.get("field_path") or "")
+    b = str(right.get("code") or right.get("field_path") or "")
+    for family, number in (("PROTOCOL-", finding_protocol_number),
+                           ("CLARIFICATION-", finding_clarification_number)):
+        if family in a and family in b:
+            first, second = number(left), number(right)
+            return bool(first and second and first != second)
+    return False
+
+
+def _identified_event(item):
+    from v348_cross_document_legal import finding_protocol_number, finding_clarification_number
+    if not isinstance(item,dict):return False
+    code = str(item.get("code") or item.get("field_path") or "")
+    for family, reader in (("PROTOCOL-", finding_protocol_number),
+                           ("CLARIFICATION-", finding_clarification_number)):
+        if family in code:return bool(reader(item))
+    return False
+
+
+def _deduplicate_events(items, event_key, *, checklist=False):
+    # A generic/ambiguous row must never absorb all independently numbered
+    # events solely because it arrived first. Prefer established IDs in each
+    # date bucket; retain the old fallback when no reliable ID is available.
+    grouped = {}
+    for index, item in enumerate(items):
+        eligible=isinstance(item,dict) and (checklist or item.get("kind")=="violation")
+        value=event_key(item) if eligible else None
+        key=("event",value) if value is not None else ("other",index)
+        grouped.setdefault(key, []).append(item)
+    result = []
+    for peers in grouped.values():
+        selected = []
+        for item in sorted(peers, key=lambda row: not _identified_event(row)):
+            if not any(not _distinct_numbered_events(old, item) for old in selected):
+                selected.append(item)
+        result.extend(selected)
+    return result
+
+
 def evaluate(p, docs):
     findings, checks = [], []
+    from v348_cross_document_legal import ambiguous_original_documents, document_event_number
+    from official_publication_evidence import protocol_publication_verifier
+    official_publication = protocol_publication_verifier(p)
+    ambiguous = ambiguous_original_documents(docs[:650])
+    identities = {}
+    def number(doc, family):
+        key = (id(doc), family)
+        if key not in identities:
+            identities[key] = "" if id(doc) in ambiguous else document_event_number(doc, family)
+        return identities[key]
     competitive = competitive_rule_scope(p) is True
     from v383_msp_scope import resolve
     sme_scope = resolve(p,docs)["value"] is True
@@ -165,7 +199,8 @@ def evaluate(p, docs):
                 findings.append(finding(doc, "223-3.2-3-CLARIFICATION-RESPONSE-LATE",
                     "Разъяснение опубликовано позднее трёх рабочих дней после поступления запроса",
                     "223-ФЗ, ст. 3.2 ч. 3",
-                    f"Запрос получен {received}; крайний день ответа {due}; опубликован {published}; окончание подачи {deadline}. {snippet}", request))
+                    f"Запрос получен {received}; крайний день ответа {due}; опубликован {published}; окончание подачи {deadline}. {snippet}", request,
+                    event_number=number(doc, "CLARIFICATION")))
         # Memo-derived rule: cancellation decision must be published on
         # the same calendar date (223-FZ art. 3.2(6)).
         cancel_decisions, cancel_posts = matches(CANCEL_DECISION,text), matches(CANCEL_POSTED,text)
@@ -211,6 +246,20 @@ def evaluate(p, docs):
                         "https://www.consultant.ru/document/cons_doc_LAW_172683/"))
         # Protocol signing and EIS publication must each be explicitly named.
         signed, published = matches(SIGNED, text), matches(PROTOCOL_PUBLISHED, text)
+        official = {}
+        protocol_conflict = False
+        if competitive and len(signed) == 1 and number(doc, "PROTOCOL"):
+            official = official_publication(doc)
+            official_day = day(official.get("publication_date"))
+            protocol_conflict = (official.get("state") == "conflict" or
+                (official.get("state") == "confirmed" and
+                 any(day(publication["date"]) != official_day for publication in published)))
+            if protocol_conflict:
+                checks.append(review(doc, "v341-protocol-publication-xml-conflict",
+                    "Сверить противоречивые даты публикации протокола в XML ЕИС",
+                    "Подтверждённые версии XML ЕИС или дата в оригинале содержат "
+                    "противоречивые сведения о публикации; дата не используется "
+                    "для установленного нарушения.", "223-ФЗ, ст. 4 ч. 12", signed[0]))
         # Pair multiple protocol events only when each signature/publication
         # has a unique local counterpart; never combine different protocols.
         pairs = []
@@ -238,6 +287,7 @@ def evaluate(p, docs):
                     f"однозначных пар: {len(pairs)}. Остальные события требуют сверки.",
                     "223-ФЗ, ст. 4 ч. 12", anchor))
         for signature, publication in pairs:
+            if protocol_conflict:continue
             start, end = day(signature["date"]), day(publication["date"])
             due = start+timedelta(days=3) if start else None
             working = federal_workday(due) if due else None
@@ -247,18 +297,29 @@ def evaluate(p, docs):
                 findings.append(finding(doc, "223-4-12-PROTOCOL-PUBLICATION-LATE",
                     "Протокол размещён в ЕИС с нарушением срока публикации", "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
                     f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signature[0]}; {publication[0]}",
-                    signature, LAW4))
+                    signature, LAW4, event_number=number(doc, "PROTOCOL")))
+        # Some official protocol originals contain the signature but publish
+        # no EIS posting timestamp in their text. Only the receipt/XML-verified
+        # attachment-specific accessor may supply that missing date.
+        if competitive and len(signed) == 1 and not published and not protocol_conflict and number(doc, "PROTOCOL"):
+            signature = signed[0]
+            if official.get("state") == "confirmed":
+                start, end = day(signature["date"]), day(official.get("publication_date"))
+                due = start + timedelta(days=3) if start else None
+                working = federal_workday(due) if due else None
+                if working is False:due = shifted(due, 1)
+                if start and end and due and working is not None and end > due and 0 <= (end-start).days < 365:
+                    findings.append(finding(doc, "223-4-12-PROTOCOL-PUBLICATION-LATE",
+                        "Протокол размещён в ЕИС с нарушением срока публикации",
+                        "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
+                        f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. "
+                        f"{signature[0]}. {official.get('evidence') or ''}", signature, LAW4,
+                        event_number=number(doc, "PROTOCOL")))
     # Use normalized event dates and a stable legal rule to collapse copies
     # of the same original while retaining distinct dated occurrences.
-    seen = set()
-    result = []
-    for item in findings:
-        key = _dated_event_key(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result, checks[:25]
+    def event_key(item):
+        return item["code"], _event_dates(item)
+    return _deduplicate_events(findings, event_key), checks[:25]
 
 
 def install(ns):
@@ -275,37 +336,24 @@ def install(ns):
         # Deduplicate the same dated legal event even if the EIS original
         # appears with different filenames or in several archive members.
         def event_key(item):
-            dates = tuple(re.findall(DATE_TOKEN, item.get("evidence") or "", re.I))
-            return _dated_event_key(item) if dates else (
+            dates = _event_dates(item)
+            return (item.get("code"), dates) if dates else (
                 item.get("code"), " ".join(str(item.get("match_text") or "").split()))
-        known = {event_key(x) for x in existing if x.get("kind") == "violation"}
-        for item in extra:
-            key = event_key(item)
-            if key not in known:
-                existing.append(item)
-                known.add(key)
-        return existing
+        return _deduplicate_events(existing + extra, event_key)
 
     @wraps(build)
     def enriched_checks(p, detail, card, docs):
         enrich(ns, p, docs, card, detail)
         _, extra = shared_evaluate(p, docs, consume=True)
         combined = list(build(p, detail, card, docs)) + extra
-        seen = set()
-        unique = []
-        for item in combined:
-            if not isinstance(item, dict):
-                unique.append(item)
-                continue
-            dates = tuple(re.findall(DATE_TOKEN, str(item.get('evidence') or ''), re.I))
-            code = item.get('code')
-            key = (item.get('status'), *_dated_event_key(item)) if dates and code else None
-            if key is not None and key in seen:
-                continue
-            if key is not None:
-                seen.add(key)
-            unique.append(item)
-        return unique
+        def event_key(item):
+            dates=_event_dates(item)
+            code=item.get("code") or item.get("field_path")
+            # A review note and a confirmed violation retain their own state.
+            # The common identity guard also applies to legacy checklist rows
+            # whose legal rule is stored only in field_path.
+            return (item.get("status"),code,dates) if dates and code else None
+        return _deduplicate_events(combined,event_key,checklist=True)
 
     enriched_analyze.__v341__ = True
     ns["analyze"], ns["build_checks"] = enriched_analyze, enriched_checks

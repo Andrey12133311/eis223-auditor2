@@ -21,6 +21,11 @@ _SOURCE_FIELDS = (
     "source", "source_url", "uid", "sha256", "archive_sha256", "archive_name",
     "archive_member", "filename", "identical_sources",
 )
+_OPERATIONAL_FIELDS = frozenset((
+    "checked_at", "received_at", "captured_at", "updated_at", "extracted_at",
+    "last_checked_at", "downloaded_at", "error", "state", "extraction_ms",
+    "duration_ms", "annotated",
+))
 
 
 def _rows(conn, query, args=()):
@@ -40,7 +45,20 @@ def _metadata(value):
         return {"unparsed": parsed}
     # Operational timestamps and extraction warnings must not cause endless
     # repeated audits of the same unchanged original.
-    return {key: parsed[key] for key in _SOURCE_FIELDS if key in parsed}
+    result = {key: parsed[key] for key in _SOURCE_FIELDS if key in parsed}
+    if isinstance(result.get("identical_sources"), list):
+        def stable(value):
+            if isinstance(value, dict):
+                return {key: stable(item) for key, item in value.items()
+                        if key not in _OPERATIONAL_FIELDS}
+            if isinstance(value, list):
+                return [stable(item) for item in value]
+            return value
+        aliases = {json.dumps(stable(alias), ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":"), default=str)
+                   for alias in result["identical_sources"]}
+        result["identical_sources"] = [json.loads(alias) for alias in sorted(aliases)]
+    return result
 
 
 def _file_version(path):
@@ -67,9 +85,21 @@ def original_sources(reg):
     """
     if not re.fullmatch(r"[0-9]{11,20}", str(reg)):
         return []
-    from v295_eis_originals import allowed_documents, saved_document
+    from v295_eis_originals import (allowed_documents, saved_document,
+                                    _review_source_version, HTTPException)
+    try:
+        allowed = allowed_documents(reg)
+        # Intake already defines stable manifest/SOAP facts. This hash only
+        # schedules an audit; the legal reader still verifies original bytes.
+        review_version = _review_source_version(reg)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        # One bounded/blocked catalogue must not stop another procurement's
+        # scheduling or initialize(). It is not a received original.
+        return [{"available": False, "scan_error": str(exc.detail)}]
     sources = []
-    for uid, item in sorted(allowed_documents(reg).items()):
+    for uid, item in sorted(allowed.items()):
         source = {"uid": uid, "name": item.get("name"),
                   "url": item.get("url"), "ext": item.get("ext")}
         saved = saved_document(reg, uid)
@@ -81,12 +111,18 @@ def original_sources(reg):
                           bytes=receipt.get("bytes"),
                           file_version=_file_version(path))
         sources.append(source)
+    sources.append({"available": False, "legal_source_version": review_version})
     return sources
 
 
 def originals_ready(reg):
     """Whether the local receipt intake can be read before docs are saved."""
     return any(source["available"] for source in original_sources(reg))
+
+
+def originals_blocked(reg):
+    """An explicit catalogue error needs a durable partial state, not intake."""
+    return any(source.get("scan_error") for source in original_sources(reg))
 
 
 def source_version(conn, reg, *, originals=None) -> str:

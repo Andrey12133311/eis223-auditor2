@@ -81,6 +81,7 @@ def _prepare(ns):
         by_campaign=[]
         versions={}
         original_readiness={}
+        source_errors={}
         for camp in campaigns:
             selected=[]
             scope,scope_args=selection_sql(c,camp)
@@ -115,18 +116,20 @@ def _prepare(ns):
                 if reg not in versions:
                     originals=original_sources(reg)
                     original_readiness[reg]=any(source["available"] for source in originals)
+                    source_errors[reg]=next((source["scan_error"] for source in originals if source.get("scan_error")),None)
                     versions[reg]=source_version(c,reg,originals=originals)
                 version=versions[reg]
                 has_originals=original_readiness[reg]
+                source_error=source_errors[reg]
                 new_evidence=(doc_id>int(row["last_doc_id"] or 0)
                               or ready>int(row["last_ready_count"] or 0)
                               or version!=row["last_source_version"])
                 state=row["status"]
                 # Completed receipt-only inputs must remain visible to source
                 # change detection even when the incoming docs save was delayed.
-                if state=="completed" and not ready and not has_originals and doc_id<=int(row["last_doc_id"] or 0):
+                if state=="completed" and not ready and not has_originals and not source_error and doc_id<=int(row["last_doc_id"] or 0):
                     continue
-                updated_rules=state=="completed" and (ready>0 or has_originals) and int(row["last_analysis_version"] or 0)<ANALYSIS_VERSION
+                updated_rules=state=="completed" and (ready>0 or has_originals or source_error) and int(row["last_analysis_version"] or 0)<ANALYSIS_VERSION
                 if state=="completed" and not new_evidence and not updated_rules:
                     continue
                 if state in ("waiting_originals","waiting_engine","retry") and not new_evidence:
@@ -141,6 +144,7 @@ def _prepare(ns):
                   "categories":json.loads(camp["categories"]),
                   "ready":ready,"doc_id":doc_id,"analysis_version":ANALYSIS_VERSION,
                   "originals_ready":has_originals,
+                  "source_error":source_error,
                   "source_version":version})
                 count+=1
             by_campaign.append(selected)
@@ -159,7 +163,7 @@ def _prepare(ns):
 
 async def _one(ns,item,sem):
     async with sem:
-        if item["ready"]<1 and not item.get("originals_ready"):
+        if item["ready"]<1 and not item.get("originals_ready") and not item.get("source_error"):
             return (item,"waiting_originals",[],"Ожидаются доступные оригиналы ЕИС")
         try:
             with background_audit():
@@ -175,6 +179,7 @@ async def _one(ns,item,sem):
               "retry":"Часть оригиналов временно не удалось прочитать; запланирован повтор",
               "excluded_company":"Форма заказчика не соответствует выборке"
             }.get(state,"Тематическая юридическая проверка")
+            if state=="retry" and item.get("source_error"):description=item["source_error"]
             return item,state,findings,description
         except asyncio.TimeoutError:
             # Extraction threads retain their real physical permits until they
