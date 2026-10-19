@@ -10,7 +10,8 @@ from v333_dedup_ui import issue_key,_different_fact,_proof
 from v352_dashboard_truth import _common_event
 from v341_eis_facts import DATE_TOKEN,parse_day
 from v348_cross_document_legal import (finding_protocol_number, finding_clarification_number,
-                                     same_original_identity, event_evidence_text)
+                                     same_original_identity, event_evidence_text,
+                                     event_occurrence_text)
 
 DATED_RULES=("223-3.2-3-CLARIFICATION-","223-4-12-PROTOCOL-",
              "223-3.2-6-CANCELLATION-","223-4-11-")
@@ -25,6 +26,9 @@ def event_dates(evidence):
 def same_episode(old,new):
     """Only suppress a stored row when both represent the same legal act."""
     if not isinstance(old,dict) or not isinstance(new,dict):return False
+    old_status=old.get("status") or old.get("kind")
+    new_status=new.get("status") or new.get("kind")
+    if old_status and new_status and old_status!=new_status:return False
     left=issue_key(old.get("title") or old.get("item") or old.get("code"))
     right=issue_key(new.get("title") or new.get("item") or new.get("code"))
     # A matching normalized rule code can be used when a legacy title differs,
@@ -48,7 +52,7 @@ def same_episode(old,new):
     la=str(old.get("law") or "").strip().casefold()
     lb=str(new.get("law") or "").strip().casefold()
     if la and lb and la!=lb:return False
-    ea,eb=_proof(event_evidence_text(old.get("evidence"))),_proof(event_evidence_text(new.get("evidence")))
+    ea,eb=_proof(event_occurrence_text(old)),_proof(event_occurrence_text(new))
     if _different_fact(ea,eb):
         # Date spelling (2026-10-01 vs 01.10.2026) is not a new event.
         old_dates,new_dates=event_dates(ea),event_dates(eb)

@@ -9,11 +9,12 @@ from legal_applicability import competitive_rule_scope
 
 import math
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import wraps
 
 from v331_broad_legal import verified
 from v335_price_recovery import money
+from v324_official_price import prices_in_text, AMOUNT as PRICE_AMOUNT, RUBLE_TOKEN
 
 LAW_URL="https://www.consultant.ru/document/cons_doc_LAW_116964/"
 MAX_DOCS=650
@@ -98,14 +99,20 @@ COMPILED=tuple((code,title,law,re.compile(pattern,re.I|re.S))
 NEG=re.compile(r"(?:не\s+требуется|не\s+установлено|не\s+предусмотрено|"
                r"не\s+допускается\s+установлени\w*|запрещается\s+требовать)",
                re.I)
+BID_LABEL=(r"(?:размер\s+)?обеспечени\w*\s+заявк\w*"
+           r"(?:\s+на\s+участие\s+в\s+(?:конкурентн\w*\s+)?закупк\w*)?")
+# A value belongs to this exact requirement field. Do not scan arbitrary
+# characters until a number: that borrowed a neighbouring contract-security
+# amount, while rejecting ordinary DOCX label/value cells on separate lines.
 BID_CLAUSE=re.compile(
- r"(?:размер\s+)?обеспечени\w*\s+заявк\w*"
- r"(?:\s+на\s+участие\s+в\s+закупк\w*)?"
- r"[^\n.;]{0,88}?"
- r"(?P<amount>\d{1,3}(?:[ \u00a0]\d{3})+(?:[,.]\d{1,2})?"
- r"|\d{4,15}(?:[,.]\d{1,2})?"
- r"|\d{1,2}(?:[,.]\d{1,3})?)"
- r"\s*(?P<unit>%|процент(?:а|ов)?|руб(?:лей|ля|\.|\b)|₽)",re.I)
+ BID_LABEL+
+ r"(?P<prefix>[\s:：|=–—]{0,60}"
+ r"(?:(?:устанавливается|установлен[оа]?|составляет|предусмотрен[оа]?|"
+ r"требуется|размером)\s*)?(?:в\s+размере\s*)?[\s:：|=–—]{0,20})"
+ r"(?P<amount>\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[,.]\d{1,2})?"
+ r"|\d{4,15}(?:[,.]\d{1,2})?|\d{1,3}(?:[,.]\d{1,3})?)"
+ r"\s*(?:\((?P<written>[а-яё -]{1,180})\)\s*)?"
+ r"(?P<unit>%|процент(?:а|ов)?|руб(?:ль|лей|ля|\.|\b)|₽)",re.I)
 # Only accept actual money and percentage with units, never paragraph numbering.
 MONEY_CLAUSE=re.compile(
  r"(?:начальн\w*\s*\(\s*максимальн\w*\s*\)\s*цен\w*\s*договора|"
@@ -114,9 +121,86 @@ MONEY_CLAUSE=re.compile(
  r"\s*(?:руб(?:лей|ля|\.|\b)|₽)",re.I)
 CONTRACT_LINE=re.compile(r"обеспечени\w*\s+(?:исполнени\w*\s+)?(?:договора|контракта)",re.I)
 COMPETITIVE=re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)|конкурентн\w*\s+закупк",re.I)
+SECURITY_LABEL=re.compile(BID_LABEL+r"|"+CONTRACT_LINE.pattern,re.I)
+CLAUSE_END=re.compile(r"[!?;]|(?<!\d)\.(?!\d)|(?<=\d)\.(?!\d)")
+GENERIC_SECURITY=re.compile(
+    r"\b(?:если|например|образец|пример|допустим|предположим)\b|"
+    r"\bв\s+случае\b|\bпри\s+(?:проведении|осуществлении|условии)\b|"
+    r"\b(?:закон|положение)\w*\s+(?:предусматривает|устанавливает)\b|"
+    r"\b(?:не\s+допускается|запрещается)\s+(?:требовать|устанавливать)\b",re.I)
+LOT_LABEL=re.compile(r"\bлот(?:а|у|ом)?\s*(?:№|N(?:o)?\.?|:)?\s*(\d+)\b",re.I)
+NON_NOTICE_KIND={"protocol","final_protocol","contract","clarification","clarification_request"}
+NON_PRICE_ORIGINAL=re.compile(
+    r"положени\w*\s+о\s+закупк|договор\s+заключен|итоговый\s+протокол|"
+    r"протокол\s+итог|\b(?:образец|пример|шаблон)\b",re.I)
+WRITTEN_PRICE=re.compile(r"(?P<amount>"+PRICE_AMOUNT.pattern+
+    r")\s*\((?P<written>[^)]{1,220})\)\s*"+RUBLE_TOKEN,re.I)
+WRITTEN_PRICE_START=re.compile(r"(?P<amount>"+PRICE_AMOUNT.pattern+r")\s*\(",re.I)
+VAT_PRICE_NOTE=re.compile(r"\s*(?:с|без)\s+НДС\s*",re.I)
+WRITTEN_NUMBERS=dict(zip(
+    ("ноль один два три четыре пять шесть семь восемь девять десять одиннадцать "
+     "двенадцать тринадцать четырнадцать пятнадцать шестнадцать семнадцать "
+     "восемнадцать девятнадцать двадцать тридцать сорок пятьдесят шестьдесят "
+     "семьдесят восемьдесят девяносто сто двести триста четыреста пятьсот "
+     "шестьсот семьсот восемьсот девятьсот").split(),
+    list(range(20))+list(range(20,100,10))+list(range(100,1000,100))))
+WRITTEN_NUMBERS.update({"одна":1,"одно":1,"две":2})
+WRITTEN_SCALES={word:scale for words,scale in (
+    ("тысяча тысячи тысяч",1000),("миллион миллиона миллионов",1000000),
+    ("миллиард миллиарда миллиардов",1000000000)) for word in words.split()}
+
+
+def _written_value(text):
+    """Only an unambiguous integer spelling may qualify a new parenthesis.
+
+    Unsupported decimal/case forms remain unqualified instead of silently
+    discarding a potentially contradictory amount written in words.
+    """
+    words=str(text or "").casefold().split()
+    if words==["ноль"]:return Decimal(0)
+    total=group=0
+    previous_scale=1000000000000
+    rank=4
+    for word in words:
+        if word in WRITTEN_SCALES:
+            scale=WRITTEN_SCALES[word]
+            if scale>=previous_scale:return None
+            total+=(group or 1)*scale
+            group=0
+            rank=4
+            previous_scale=scale
+            continue
+        value=WRITTEN_NUMBERS.get(word)
+        if not value:return None
+        next_rank=3 if value>=100 else 2 if value>=10 else 1
+        if next_rank>=rank:return None
+        group+=value
+        rank=0 if 10<=value<20 else next_rank
+    return Decimal(total+group) if words else None
+
+
+def _bid_context(body,match):
+    """Keep negatives/examples attached to this field, not adjacent subjects.
+
+    A line break may be a table-cell boundary, so it does not on its own
+    terminate the value. A following security label always starts a new field.
+    """
+    left=max(0,match.start()-180)
+    boundaries=list(CLAUSE_END.finditer(body,left,match.start()))
+    if boundaries:left=boundaries[-1].end()
+    previous=list(SECURITY_LABEL.finditer(body,left,match.start()))
+    if previous:
+        # The words before this label describe a separate security subject.
+        left=match.start()
+    right=min(len(body),match.end()+160)
+    following=SECURITY_LABEL.search(body,match.end(),right)
+    if following:right=following.start()
+    boundary=CLAUSE_END.search(body,match.end(),right)
+    if boundary:right=boundary.end()
+    return body[left:right]
 
 def _decimal(raw):
-    s=str(raw or "").replace("\xa0","").replace(" ","").replace("%","").replace(",",".")
+    s=str(raw or "").replace("\xa0","").replace("\u202f","").replace(" ","").replace("%","").replace(",",".")
     try:
         x=Decimal(s)
         return x if x.is_finite() and x>=0 else None
@@ -162,20 +246,53 @@ def deeper_checks(p,docs):
     return checks
 
 def verified_price(p,docs):
-    """Use only a price backed by the same hash-verified original being audited.
+    """Use the same explicit monetary parser as official price recovery.
 
     The DB price by itself is NOT sufficient proof to establish a bid-security
-    violation; title/card values may be stale or not source-attributed.
+    violation. Conflicting revisions or lot prices remain unknown even when
+    one of them happens to equal the DB/card price.
     """
     expected=money(p.get("price_num"))
     if not expected or expected[1]<=0:return None
     expected_value=Decimal(str(expected[1]))
+    records=[]
+    lots=set()
     for d in docs[:MAX_DOCS]:
         if not isinstance(d,dict) or not verified(d):continue
-        for match in MONEY_CLAUSE.finditer(str(d.get("text") or "")[:MAX_TEXT]):
-            observed=_decimal(match.group("amount"))
-            if observed is not None and observed==expected_value:
-                return (observed,d,match)
+        if (str(d.get("type") or "").casefold() in NON_NOTICE_KIND or
+                NON_PRICE_ORIGINAL.search(str(d.get("name") or ""))):continue
+        body=str(d.get("text") or "")[:MAX_TEXT].replace("\u202f"," ")
+        lots.update(LOT_LABEL.findall(body))
+        if len(lots)>1:return None
+        # prices_in_text already rejects dates, percentages, unit/winner
+        # prices, conditional statutory thresholds and unrelated table cells.
+        values=prices_in_text(body)
+        if not values:continue
+        amounts={Decimal(value[0]) for value in values}
+        if len(amounts)!=1:return None
+        observed=next(iter(amounts))
+        if observed!=expected_value:return None
+        # Inspect the original, not its capped evidence excerpt. Recovery
+        # accepts numeric fields with a spelling; a legal finding must not
+        # choose the digits when that spelling conflicts or cannot be read.
+        # The integer alternative covers a separately printed kopek suffix.
+        for opening in WRITTEN_PRICE_START.finditer(body):
+            printed=_decimal(opening["amount"])
+            if printed is None or printed>Decimal("1000000000000000"):continue
+            if (printed.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)!=observed
+                    and printed!=Decimal(int(observed))):continue
+            match=WRITTEN_PRICE.match(body,opening.start())
+            if match is None:return None
+            # A complete VAT note is not an amount written in words. Mixed
+            # or incomplete parentheticals still require readable spelling.
+            if VAT_PRICE_NOTE.fullmatch(match["written"]):continue
+            if _written_value(match["written"])!=printed:
+                return None
+        # A maximum contract value is a different price kind; it cannot
+        # corroborate the exact NMCD needed by this rule.
+        if any(re.search(r"максимальн\w*\s+значени\w*\s+цен",value[2],re.I)
+               for value in values):continue
+        records.append((observed,d,None))
     # The authenticated EIS card has its own verified browser-source
     # provenance. Only the explicit NMCD price kind can confirm this value,
     # not a maximum/subject-cost field from an unrelated lot.
@@ -185,8 +302,9 @@ def verified_price(p,docs):
         card_value=money(official.get("price"))
         if (card_value and card_value[1]==expected[1] and
             _official_source(official.get("source"),str(p.get("reg") or ""))):
+            if records:return records[0]
             return (expected_value,{"name":"Карточка ЕИС — подтверждённая НМЦД"},None)
-    return None
+    return records[0] if records else None
 
 def security_findings(p,docs):
     """Very narrow checks under parts 25–27 of article 3.2.
@@ -204,16 +322,16 @@ def security_findings(p,docs):
     sme_only=sme_classification["value"] is True
     for doc in docs[:MAX_DOCS]:
         if not isinstance(doc,dict) or not verified(doc):continue
-        body=str(doc.get("text") or "")[:MAX_TEXT].replace("\xa0"," ")
+        if NON_PRICE_ORIGINAL.search(str(doc.get("name") or "")):continue
+        body=str(doc.get("text") or "")[:MAX_TEXT].replace("\xa0"," ").replace("\u202f"," ")
         if not re.search(r"обеспечени\w*\s+заявк",body,re.I):continue
         for match in list(BID_CLAUSE.finditer(body))[:8]:
-            segment=body[max(0,match.start()-95):min(len(body),match.end()+125)]
-            if CONTRACT_LINE.search(segment[:95]) and not re.search(
-                    r"обеспечени\w*\s+заявк",match.group(0),re.I):continue
-            if NEG.search(segment):continue
+            segment=_bid_context(body,match)
+            if NEG.search(segment) or GENERIC_SECURITY.search(segment):continue
             unit=(match.group("unit") or "").strip().lower()
             amount=_decimal(match.group("amount"))
             if amount is None or not unit or amount<=0:continue
+            if match.group("written") and _written_value(match["written"])!=amount:continue
             # Non-monetary shorthand and accidental narrative percentages do
             # not pass; require explicit units.
             if unit.startswith("руб") or unit=="₽":

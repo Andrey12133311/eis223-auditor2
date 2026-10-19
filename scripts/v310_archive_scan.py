@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 ARCHIVE_EXT={".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab"}
-DOC_EXT={".pdf",".docx",".doc",".xlsx",".xls",".odt",".ods",".rtf",".xml",".txt",".csv"}
+DOC_EXT={".pdf",".docx",".doc",".xlsx",".xlsm",".xls",".odt",".ods",".rtf",".xml",".txt",".csv"}
 MAX_MEMBER=12*1024*1024
 MAX_EXPANDED=72*1024*1024
 MAX_MEMBERS=100
@@ -169,7 +169,20 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
                 folder=root/sha[:2]
                 folder.mkdir(parents=True,exist_ok=True,mode=0o700)
                 temp_file=folder/(sha+extension)
-                if not temp_file.exists():
+                # The filename is only a cache key, not proof of its bytes.
+                # Restore damaged/replaced entries from the verified archive
+                # before extracting text with that archive member's SHA256.
+                # Do not follow a cached symlink or read unbounded extra data.
+                reusable=False
+                try:
+                    if not temp_file.is_symlink():
+                        with temp_file.open("rb") as cached:
+                            previous=cached.read(len(data)+1)
+                        reusable=(len(previous)==len(data) and
+                                  hashlib.sha256(previous).hexdigest()==sha)
+                except OSError:
+                    pass
+                if not reusable:
                     handle,tmp=tempfile.mkstemp(dir=folder,prefix=".extract-")
                     try:
                         with os.fdopen(handle,"wb") as dest:dest.write(data)

@@ -56,16 +56,32 @@ def _different_fact(a,b):
 
 
 def _same_finding(a,b,field):
+    a_status=a.get("status") or a.get("kind")
+    b_status=b.get("status") or b.get("kind")
+    if a_status and b_status and a_status!=b_status:return False
     ta=issue_key(a.get(field) or a.get("item") or a.get("code"))
     tb=issue_key(b.get(field) or b.get("item") or b.get("code"))
     if not ta or ta!=tb:return False
+    from v348_cross_document_legal import (finding_protocol_number, finding_clarification_number,
+                                           same_original_identity, event_occurrence_text)
+    left_code = str(a.get("code") or a.get("field_path") or "")
+    right_code = str(b.get("code") or b.get("field_path") or "")
+    same_origin=False
+    for family, identifier in (("PROTOCOL-", finding_protocol_number),
+                               ("CLARIFICATION-", finding_clarification_number)):
+        if family in left_code and family in right_code:
+            same_origin=same_original_identity(a,b)
+            left, right = identifier(a), identifier(b)
+            if left and right and left != right and not same_origin:
+                return False
     # Distinct legal bases, documents, source URLs and real locations cannot
     # be hidden merely because the violation title is shared.
     for attr in ("status","kind","law","legal_basis","document","source_url"):
+        if same_origin and attr in ("document","source_url"):continue
         x=str(a.get(attr) or "").strip().casefold()
         y=str(b.get(attr) or "").strip().casefold()
         if x and y and x!=y:return False
-    ea=_proof(a.get("evidence"));eb=_proof(b.get("evidence"))
+    ea=_proof(event_occurrence_text(a));eb=_proof(event_occurrence_text(b))
     if not ea or not eb:return ea==eb and bool(str(a.get("code") or a.get("field_path") or "").strip()) and bool(str(b.get("code") or b.get("field_path") or "").strip())
     if _different_fact(ea,eb):return False
     if ea==eb:return True

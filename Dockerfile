@@ -50,6 +50,8 @@ COPY tests/test_v383_msp_scope.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v383_msp_scope.py'
 COPY tests/test_amendment_evidence_recall.py tests/test_amendment_history_intake.py tests/test_legal_event_recall.py tests/test_official_publication_evidence.py tests/test_scoped_legal_recheck.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_amendment_evidence_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_amendment_history_intake.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_event_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_official_publication_evidence.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_scoped_legal_recheck.py'
+COPY tests/test_legal_event_coverage.py tests/test_legal_security_clause_coverage.py tests/test_receipt_original_parity.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_event_coverage.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_security_clause_coverage.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_receipt_original_parity.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

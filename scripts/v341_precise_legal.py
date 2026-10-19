@@ -72,6 +72,15 @@ def matches(pattern, text):
     return list(re.finditer(pattern+r"\s*[:：|=–—\-\s]{0,15}(?P<date>"+DATE_TOKEN+r")", text, re.I))[:40]
 
 
+def _event_dates(item):
+    """Normalize event dates without identity labels or applicability context."""
+    from v348_cross_document_legal import event_occurrence_text
+    dates=re.findall(DATE_TOKEN,event_occurrence_text(item),re.I)
+    if not dates:dates=re.findall(DATE_TOKEN,str(item.get("match_text") or ""),re.I)
+    return tuple(sorted({parsed.isoformat() for value in dates
+                         if (parsed:=day(value)) is not None}))
+
+
 def finding(doc, code, title, law, evidence, match, url=LAW32, event_number=None):
     family = next((value for value in ("PROTOCOL", "CLARIFICATION") if value + "-" in code), None)
     if family:
@@ -105,7 +114,8 @@ def _distinct_numbered_events(left, right):
                                            finding_clarification_number,
                                            same_original_identity)
     if same_original_identity(left, right):return False
-    a, b = str(left.get("code") or ""), str(right.get("code") or "")
+    a = str(left.get("code") or left.get("field_path") or "")
+    b = str(right.get("code") or right.get("field_path") or "")
     for family, number in (("PROTOCOL-", finding_protocol_number),
                            ("CLARIFICATION-", finding_clarification_number)):
         if family in a and family in b:
@@ -116,20 +126,23 @@ def _distinct_numbered_events(left, right):
 
 def _identified_event(item):
     from v348_cross_document_legal import finding_protocol_number, finding_clarification_number
-    code = str(item.get("code") or "")
+    if not isinstance(item,dict):return False
+    code = str(item.get("code") or item.get("field_path") or "")
     for family, reader in (("PROTOCOL-", finding_protocol_number),
                            ("CLARIFICATION-", finding_clarification_number)):
         if family in code:return bool(reader(item))
     return False
 
 
-def _deduplicate_events(items, event_key):
+def _deduplicate_events(items, event_key, *, checklist=False):
     # A generic/ambiguous row must never absorb all independently numbered
     # events solely because it arrived first. Prefer established IDs in each
     # date bucket; retain the old fallback when no reliable ID is available.
     grouped = {}
     for index, item in enumerate(items):
-        key = ("event", event_key(item)) if item.get("kind") == "violation" else ("other", index)
+        eligible=isinstance(item,dict) and (checklist or item.get("kind")=="violation")
+        value=event_key(item) if eligible else None
+        key=("event",value) if value is not None else ("other",index)
         grouped.setdefault(key, []).append(item)
     result = []
     for peers in grouped.values():
@@ -143,8 +156,7 @@ def _deduplicate_events(items, event_key):
 
 def evaluate(p, docs):
     findings, checks = [], []
-    from v348_cross_document_legal import (ambiguous_original_documents, document_event_number,
-                                          event_evidence_text)
+    from v348_cross_document_legal import ambiguous_original_documents, document_event_number
     from official_publication_evidence import protocol_publication_verifier
     official_publication = protocol_publication_verifier(p)
     ambiguous = ambiguous_original_documents(docs[:650])
@@ -306,10 +318,7 @@ def evaluate(p, docs):
     # Use normalized event dates and a stable legal rule to collapse copies
     # of the same original while retaining distinct dated occurrences.
     def event_key(item):
-        dates = tuple(re.findall(DATE_TOKEN, event_evidence_text(item.get("evidence")), re.I))
-        if not dates:
-            dates = tuple(re.findall(DATE_TOKEN, item.get("match_text") or "", re.I))
-        return item["code"], dates
+        return item["code"], _event_dates(item)
     return _deduplicate_events(findings, event_key), checks[:25]
 
 
@@ -327,8 +336,7 @@ def install(ns):
         # Deduplicate the same dated legal event even if the EIS original
         # appears with different filenames or in several archive members.
         def event_key(item):
-            from v348_cross_document_legal import event_evidence_text
-            dates = tuple(re.findall(DATE_TOKEN, event_evidence_text(item.get("evidence")), re.I))
+            dates = _event_dates(item)
             return (item.get("code"), dates) if dates else (
                 item.get("code"), " ".join(str(item.get("match_text") or "").split()))
         return _deduplicate_events(existing + extra, event_key)
@@ -338,20 +346,14 @@ def install(ns):
         enrich(ns, p, docs, card, detail)
         _, extra = shared_evaluate(p, docs, consume=True)
         combined = list(build(p, detail, card, docs)) + extra
-        seen = set()
-        unique = []
-        for item in combined:
-            if not isinstance(item, dict):
-                unique.append(item)
-                continue
-            dates = tuple(re.findall(DATE_TOKEN, str(item.get('evidence') or ''), re.I))
-            key = (item.get('code'), dates) if dates and item.get('code') else None
-            if key is not None and key in seen:
-                continue
-            if key is not None:
-                seen.add(key)
-            unique.append(item)
-        return unique
+        def event_key(item):
+            dates=_event_dates(item)
+            code=item.get("code") or item.get("field_path")
+            # A review note and a confirmed violation retain their own state.
+            # The common identity guard also applies to legacy checklist rows
+            # whose legal rule is stored only in field_path.
+            return (item.get("status"),code,dates) if dates and code else None
+        return _deduplicate_events(combined,event_key,checklist=True)
 
     enriched_analyze.__v341__ = True
     ns["analyze"], ns["build_checks"] = enriched_analyze, enriched_checks

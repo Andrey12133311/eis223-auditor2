@@ -21,19 +21,20 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from audit_source_version import source_version
-from v295_eis_originals import allowed_documents, saved_document, root, uid_from_url
+from audit_source_version import originals_blocked, originals_ready, source_version
+from v295_eis_originals import (allowed_documents, saved_document, root, uid_from_url,
+                               _merge_source_metadata, _review_source_version, HTTPException)
 from v298_eis_only import offline_audit
 from v314_eis_metadata import document_text
 from v381_audit_scheduling import (audit_signals, background_audit,
                                    ordered_map, run_file_io)
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
-RULE_REVISION="2026-10-19-v380-v372-original-collection-retry"
+RULE_REVISION="2026-10-19-v386-legal-source-coverage"
 DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
-FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xls",
+FILE_EXT={".pdf",".doc",".docx",".odt",".rtf",".xlsx",".xlsm",".xls",
           ".ods",".xml",".txt",".csv"}
 MAX_BYTES=25*1024*1024
 MAX_DOC_ROWS=900
@@ -41,6 +42,7 @@ MAX_DOC_ROWS=900
 # with one slot reserved for foreground/manual checks.
 FILE_BATCH_SIZE=12
 GENERAL_WORKERS=4
+RECEIPT_CLAIM_PAGE=64
 RETRY_BASE_SECONDS=1.0
 RETRY_MAX_SECONDS=30.0
 DB_STAGE_RETRY_SECONDS=30.0
@@ -279,6 +281,33 @@ def claim_next(ns):
             q.reg LIMIT 1""",(CAMPAIGN,time.time())).fetchone()
         if not row:
             c.commit()
+            # A receipt can precede its docs rows. Inspect a bounded page of
+            # this campaign's pending companies after releasing the writer;
+            # a rotating cursor prevents missing originals at the front from
+            # permanently hiding a received original further down the queue.
+            query="""SELECT q.reg FROM v332_audit_queue q
+                JOIN purchases p ON p.reg_number=q.reg
+                WHERE q.campaign=? AND q.state='pending' AND q.next_retry_at<=?
+                  AND q.reg>? AND eis_business_company(p.customer)=1
+                ORDER BY q.reg LIMIT ?"""
+            after=ns.get("_v332_receipt_claim_after","")
+            candidates=c.execute(query,(CAMPAIGN,time.time(),after,RECEIPT_CLAIM_PAGE)).fetchall()
+            if not candidates and after:
+                candidates=c.execute(query,(CAMPAIGN,time.time(),"",RECEIPT_CLAIM_PAGE)).fetchall()
+            for candidate in candidates:
+                reg=str(candidate[0])
+                ns["_v332_receipt_claim_after"]=reg
+                if not originals_ready(reg) and not originals_blocked(reg):continue
+                c.execute("BEGIN IMMEDIATE")
+                changed=c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,next_retry_at=0,
+                    last_doc_id=COALESCE((SELECT MAX(d.id) FROM docs d WHERE d.reg_number=?),0)
+                    WHERE campaign=? AND reg=? AND state='pending' AND next_retry_at<=?
+                      AND EXISTS(SELECT 1 FROM purchases p WHERE p.reg_number=?
+                                 AND eis_business_company(p.customer)=1)""",
+                    (now(),reg,CAMPAIGN,reg,time.time(),reg)).rowcount
+                c.commit()
+                if changed==1:return reg
+            if len(candidates)<RECEIPT_CLAIM_PAGE:ns["_v332_receipt_claim_after"]=""
             return None
         reg=str(row[0])
         c.execute("""UPDATE v332_audit_queue SET state='running',updated_at=?,next_retry_at=0,
@@ -316,8 +345,9 @@ def refresh_changed(ns):
         changed=[]
         for row in rows:
             retry=row["state"]=="failed" and locked_error(row["error"])
-            if not row["ready"] and not retry:continue
-            current=source_version(c,row["reg"]) if row["ready"] else ""
+            ready=bool(row["ready"]) or originals_ready(row["reg"]) or originals_blocked(row["reg"])
+            if not ready and not retry:continue
+            current=source_version(c,row["reg"]) if ready else ""
             if row["state"]=="pending":
                 # A changed original bypasses a scheduled extraction retry;
                 # unchanged failed/partial text waits for the bounded delay.
@@ -604,7 +634,11 @@ def merge_docs(official,other):
             # stored_docs also contains receipt-authenticated originals. An
             # older unverified row with identical bytes cannot hide that proof.
             # Replace in place so the order of distinct hashes stays stable.
-            if is_official(d) and not is_official(out[index]):out[index]=d
+            if is_official(d) and not is_official(out[index]):
+                _merge_source_metadata(d,out[index])
+                out[index]=d
+            elif d is not out[index]:
+                _merge_source_metadata(out[index],d)
             continue
         hashes[digest]=len(out)
         out.append(d)
@@ -709,6 +743,73 @@ def persist(ns,reg,findings,checks,progress_token=None):
         raise
     finally:c.close()
 
+async def collect_saved_evidence(ns,reg,rows):
+    """Collect the same receipt-authenticated local inputs for both audits.
+
+    Incoming originals can precede their docs rows. One persisted archive
+    member also cannot establish that every other member has been read, so
+    received archives are expanded through the existing bounded collector.
+    No database evidence rows are replaced and no network download is made.
+    """
+    source_error=None
+    try:
+        allowed=await asyncio.to_thread(allowed_documents,reg)
+        await asyncio.to_thread(_review_source_version,reg)
+    except HTTPException as exc:
+        if exc.status_code!=409:raise
+        allowed={}
+        source_error=str(exc.detail)
+    expected=len(allowed) if not source_error else None
+    received_uids=await asyncio.to_thread(
+        lambda:{uid for uid in allowed if saved_document(reg,uid) is not None})
+    received=len(received_uids) if not source_error else None
+    other,unreadable=await stored_docs(ns,reg,rows)
+    represented={uid_from_url((d.get("meta") or {}).get("source_url") or "")
+                 for d in other if (d.get("meta") or {}).get("source")==
+                 "official_eis_original"}
+    official=[]
+    result={}
+    source_incomplete=bool(source_error)
+    if received_uids-represented:
+        try:
+            # Pull from REAL, locally saved and receipt-validated originals;
+            # it processes every received archive member too.
+            result=await asyncio.wait_for(
+                offline_audit(ns,reg,collect_only=True),timeout=280)
+            official=result.get("docs") or []
+        except Exception as exc:
+            # The readable stored subset can still yield proven findings,
+            # but a failed collection has not examined every received original.
+            source_incomplete=True
+            result={}
+            print(f"V332 OFFICIAL_SOURCE_ERROR reg={reg} "
+                  f"type={type(exc).__name__}",flush=True)
+    # The collector skips bytes that fail their receipt hash. One other
+    # readable original must not turn that missing input into a full audit.
+    # Check before deduplication so identical persisted copies retain all
+    # authenticated UIDs. Fresh collector aliases were hash-checked there.
+    seen_uids={uid_from_url((d.get("meta") or {}).get("source_url") or "")
+               for d in [*official,*other] if (d.get("meta") or {}).get("source") in
+               ("official_eis_original","official_eis_archive","official_eis_archive_member")}
+    for d in official:
+        for alias in (d.get("meta") or {}).get("identical_sources") or []:
+            if isinstance(alias,dict):seen_uids.add(uid_from_url(alias.get("url") or ""))
+    source_incomplete=source_incomplete or bool(received_uids-seen_uids)
+    docs=merge_docs(official,other)
+    # Collection may return an unreadable original instead of raising. Inspect
+    # the deduplicated result so a readable copy can satisfy the same evidence;
+    # an expanded archive container is not itself an unreadable legal document.
+    source_incomplete=source_incomplete or any(
+        d.get("status") in ("downloaded_no_text","archive_unreadable") or
+        bool((d.get("meta") or {}).get("archive_warnings")) for d in docs)
+    return {"docs":docs,"unreadable":unreadable,
+            "original_expected":expected,"original_received":received,
+            "source_incomplete":source_incomplete,
+            "source_error":source_error,
+            "p":result.get("p") or {},"card":result.get("card") or {},
+            "detail":result.get("detail") or {}}
+
+
 async def inspect_one(ns,reg):
     old,rows=await db_stage(ns,"existing",existing,ns,reg)
     purchase=as_procurement(old)
@@ -718,42 +819,15 @@ async def inspect_one(ns,reg):
             "publicationDate":purchase["published"],
             "submissionStart":purchase["submission_start"],
             "submissionEnd":purchase["submission_end"]}
-    allowed=await asyncio.to_thread(allowed_documents,reg)
-    expected=len(allowed)
-    received_uids=await asyncio.to_thread(
-        lambda:{uid for uid in allowed if saved_document(reg,uid) is not None})
-    received=len(received_uids)
-    other,unreadable=await stored_docs(ns,reg,rows)
-    represented={uid_from_url((d.get("meta") or {}).get("source_url") or "")
-                 for d in other if (d.get("meta") or {}).get("source") in
-                 ("official_eis_original","official_eis_archive_member")}
-    official=[]
-    source_incomplete=False
-    if received_uids-represented:
-        try:
-            # Pull from REAL, locally saved and receipt-validated originals;
-            # it processes every received archive member too.
-            result=await asyncio.wait_for(
-                offline_audit(ns,reg,collect_only=True),timeout=280)
-            official=result.get("docs") or []
-            official_p=result.get("p") or {}
-            for key,value in official_p.items():
-                if value and (not purchase.get(key) or key in ("method","submission_end","submission_start")):
-                    purchase[key]=value
-            card=result.get("card") or card
-            detail=result.get("detail") or detail
-        except Exception as exc:
-            # The readable stored subset can still yield proven findings,
-            # but a failed collection has not examined every received original.
-            source_incomplete=True
-            print(f"V332 OFFICIAL_SOURCE_ERROR reg={reg} "
-                  f"type={type(exc).__name__}",flush=True)
-    docs=merge_docs(official,other)
-    # Collection may return an unreadable original instead of raising. Inspect
-    # the deduplicated result so a readable copy can satisfy the same evidence;
-    # an expanded archive container is not itself an unreadable legal document.
-    source_incomplete=source_incomplete or any(
-        d.get("status") in ("downloaded_no_text","archive_unreadable") for d in docs)
+    source=await collect_saved_evidence(ns,reg,rows)
+    docs,unreadable=source["docs"],source["unreadable"]
+    expected,received=source["original_expected"],source["original_received"]
+    source_incomplete=source["source_incomplete"]
+    for key,value in source["p"].items():
+        if value and (not purchase.get(key) or key in ("method","submission_end","submission_start")):
+            purchase[key]=value
+    card=source["card"] or card
+    detail=source["detail"] or detail
     # Repair persisted identity before legal comparison. This also covers
     # purchases whose originals were imported before the metadata parser.
     from v314_eis_metadata import from_documents,apply_metadata
@@ -775,9 +849,9 @@ async def inspect_one(ns,reg):
         return ("no_readable_documents",{
             "documents_found":len(docs)+unreadable,"documents_read":0,
             "documents_unreadable":unreadable,"verified_original_documents":0,
-            "original_expected":expected,"original_received":received,
+            **({"original_expected":expected,"original_received":received} if expected is not None else {}),
             "source_incomplete":source_incomplete,
-            "error":"Нет пригодного текста в доступных документах; нарушения не оценивались"})
+            "error":source["source_error"] or "Нет пригодного текста в доступных документах; нарушения не оценивались"})
     analyzer=ns.get("analyze")
     checker=ns.get("build_checks")
     if not callable(analyzer) or not callable(checker):
@@ -823,11 +897,11 @@ async def inspect_one(ns,reg):
         "documents_found":len(docs)+unreadable,
         "documents_read":counted,"documents_unreadable":unreadable,
         "verified_original_documents":verified_count,
-        "original_expected":expected,"original_received":received,
+        **({"original_expected":expected,"original_received":received} if expected is not None else {}),
         "new_findings":new_f,"new_checks":new_c,
         "source_incomplete":source_incomplete,
         "result_token":token,
-        "error":None
+        "error":source["source_error"]
     })
 
 def retry_delay(attempt):
@@ -1017,7 +1091,7 @@ def install(ns):
                             incomplete=(state=="no_readable_documents" or
                                         int(detail.get("documents_unreadable") or 0)>0 or source_incomplete)
                             if incomplete:
-                                reason=("Не завершено чтение полученных оригиналов ЕИС; назначен повтор" if source_incomplete else
+                                reason=((detail.get("error") or "Не завершено чтение полученных оригиналов ЕИС; назначен повтор") if source_incomplete else
                                     "Не все доступные оригиналы удалось прочитать; назначен повтор" if
                                         state=="completed" else
                                         "Текст доступных оригиналов пока не прочитан; назначен повтор")
@@ -1033,7 +1107,7 @@ def install(ns):
                                 if not incomplete:runtime["last_completed_at"]=slot["last_success_at"]
                                 print(f"V332 AUDITED reg={reg} worker={worker_id} docs={detail['documents_read']}/"
                                       f"{detail['documents_found']} verified={detail['verified_original_documents']} "
-                                      f"originals={detail['original_received']}/{detail['original_expected']} "
+                                      f"originals={detail.get('original_received','?')}/{detail.get('original_expected','?')} "
                                       f"new_findings={detail['new_findings']} new_checks={detail['new_checks']} "
                                       f"elapsed_ms={elapsed_ms} partial={incomplete}",flush=True)
                             elif index<=4 or index%20==0:

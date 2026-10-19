@@ -18,7 +18,7 @@ from v342_identity import organization_display_name
 from v348_cross_document_legal import (finding_clarification_number,
                                      finding_protocol_number, finding_original_identity,
                                      same_original_identity, event_evidence_text,
-                                     finding_binary_identity)
+                                     finding_binary_identity, event_occurrence_text)
 
 def _normalized_law(row):
     # Equivalent ways to cite the same article/part and Government decree are
@@ -51,6 +51,9 @@ def _common_event(a,b):
     Different dates, money/payment terms or independently established clauses
     cannot be merged solely because a title, law article or detector is shared.
     """
+    a_status=a.get("status") or a.get("kind")
+    b_status=b.get("status") or b.get("kind")
+    if a_status and b_status and a_status!=b_status:return False
     a_code=str(a.get("code") or a.get("field_path") or "")
     b_code=str(b.get("code") or b.get("field_path") or "")
     for family,number in (("CLARIFICATION-",finding_clarification_number),
@@ -63,7 +66,7 @@ def _common_event(a,b):
     same_title=bool(ta and ta==tb)
     la,lb=_normalized_law(a),_normalized_law(b)
     if la and lb and la!=lb:return False
-    pa,pb=_normalized_proof(a.get("evidence")),_normalized_proof(b.get("evidence"))
+    pa,pb=_normalized_proof(event_occurrence_text(a)),_normalized_proof(event_occurrence_text(b))
     if not pa or not pb:
         return (same_title and pa==pb and bool(pa) and
                 a.get("document")==b.get("document") and

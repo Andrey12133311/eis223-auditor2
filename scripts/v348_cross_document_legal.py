@@ -13,6 +13,7 @@ from datetime import date,timedelta
 from v331_broad_legal import verified
 from legal_applicability import competitive_rule_scope
 from v295_eis_originals import uid_from_url
+from v341_eis_facts import DATE_TOKEN
 from v341_precise_legal import (matches,REQUEST,ANSWER,SIGNED,PROTOCOL_PUBLISHED,
                                  shifted,day,COMPETITIVE,LAW32,LAW4,federal_workday)
 
@@ -373,6 +374,31 @@ def event_evidence_text(value):
     if separator and first.startswith("Идентичность оригинала ЕИС: ") and first.endswith("."):
         text = rest
     return text
+
+
+_CLARIFICATION_CONTEXT={
+    "223-3.2-3-CLARIFICATION-RESPONSE-LATE":re.compile(
+        r"\A\s*(?P<event>Запрос\s+получен\s+"+DATE_TOKEN+
+        r";\s+крайний\s+день\s+ответа\s+"+DATE_TOKEN+
+        r";\s+опубликован\s+"+DATE_TOKEN+
+        r");\s+окончание\s+подачи\s+"+DATE_TOKEN+r"(?=\.)",re.I),
+    "223-3.2-3-CLARIFICATION-CROSS-DOC-LATE":re.compile(
+        r"(?P<event>крайний\s+день\s+ответа\s+"+DATE_TOKEN+
+        r");\s+окончание\s+подачи\s+заявок\s+"+DATE_TOKEN+
+        r"(?=\.\s+Даты\s+учитываются\s+по\s+дням,\s+без\s+времени\.?\s*\Z)",re.I),
+}
+
+
+def event_occurrence_text(item):
+    """Compare the documented event independently of its applicability context.
+
+    Only our exact generated clarification explanation has a removable
+    submission deadline. The original quote, request/publication dates, event
+    numbers and source links remain intact; saved evidence is never changed.
+    """
+    text=event_evidence_text(item.get("evidence"))
+    pattern=_CLARIFICATION_CONTEXT.get(str(item.get("code") or item.get("field_path") or ""))
+    return pattern.sub(lambda match:match["event"],text,count=1) if pattern else text
 
 
 def _local_identity_number(item, family):
