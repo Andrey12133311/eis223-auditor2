@@ -211,8 +211,30 @@ async def independent_review(ns,reg,categories):
  from v352_dashboard_truth import collapse_legal_events
  return "completed",collapse_legal_events(selected)
 
-def overview(ns,batch):
+def read_db(ns):
  c=db(ns)
+ try:
+  c.execute("PRAGMA busy_timeout=1000")
+  c.execute("PRAGMA query_only=ON")
+  return c
+ except Exception:
+  c.close()
+  raise
+
+def saved_read(operation,*args):
+ """Bound contention on saved views; never turn a failed read into no results."""
+ from audit_db_retry import is_busy
+ import time
+ for attempt in range(3):
+  try:return operation(*args)
+  except sqlite3.OperationalError as exc:
+   if not is_busy(exc):raise
+   if attempt==2:
+    raise HTTPException(503,"Сохранённая проверка временно недоступна: база занята. Повторите открытие через несколько секунд.",headers={"Retry-After":"2"}) from exc
+   time.sleep(.15*(attempt+1))
+
+def overview(ns,batch):
+ c=read_db(ns)
  try:
   b=c.execute("SELECT * FROM thematic_batches WHERE id=?",(batch,)).fetchone()
   if not b:raise HTTPException(404,"Очередь не найдена")
@@ -242,7 +264,7 @@ def overview(ns,batch):
   items=[{"reg":r["reg"],"status":r["status"],"detail":r["detail"],"updated_at":r["updated_at"]} for r in c.execute("SELECT reg,status,detail,updated_at FROM thematic_items WHERE batch_id=? ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'retry' THEN 1 WHEN 'waiting_originals' THEN 2 ELSE 3 END,updated_at DESC LIMIT 200",(batch,)).fetchall()]
   try:
    from v301_search_jobs import _bridge
-   bridge=_bridge(ns)
+   bridge=_bridge({**ns,"conn":lambda:read_db(ns)})
   except Exception:
    bridge={"active":False,"queued":None}
   # Browser discovery sends its heartbeat to v299; the v301 heartbeat only tracks manual jobs.
@@ -414,7 +436,8 @@ a:hover{text-decoration:underline}
 <button type="button" id="thematic-period-clear">За всё время</button></div>
 <p id="thematic-period-hint">Закупки отбираются по дате размещения в ЕИС, включая обе даты. Можно указать только одну дату. Без дат — за всё время.</p></fieldset>
 <p id="thematic-start-error" role="alert" aria-live="polite" hidden></p>
-<p><button type="button" id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="out">Выберите категории</div></main><script>
+<p><button type="button" id="start">Начать проверку</button></p><h2>Сохранённые тематические проверки</h2><div id="history"></div><h2>Очередь и нарушения</h2><div id="thematic-load-status" role="status" aria-live="polite"></div><div id="out">Выберите категории</div></main><script>
+(()=>{
 const categories=__CATEGORIES__,legalForms=__LEGAL_FORMS__;const formsBox=document.querySelector("#forms");for(const [id,title] of Object.entries(legalForms)){const label=document.createElement("label"),check=document.createElement("input");check.type="checkbox";check.value=id;check.checked=true;label.append(check,document.createTextNode(" "+id+" — "+title));formsBox.append(label)}const box=document.querySelector('#cats');
 for(const [id,title] of Object.entries(categories)){let l=document.createElement('label'),i=document.createElement('input');i.type='checkbox';i.value=id;l.append(i,document.createTextNode(' '+title));box.append(l)}
 function thematicPeriod(check){
@@ -445,12 +468,56 @@ document.querySelector('#start').onclick=async()=>{
   const r=await fetch('/api/thematic/start',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({categories:cats,legal_forms:forms,date_from,date_to})});
   const j=await r.json().catch(()=>({}));
   if(!r.ok)throw Error(typeof j.detail==='string'?j.detail:'Не удалось запустить проверку. Попробуйте ещё раз.');
-  location.hash=j.id;refresh();history();
+  openSaved(j.id);loadHistory();
  }catch(error){showStartError(error instanceof TypeError?'Не удалось соединиться с сервером. Повторите запуск проверки.':error.message)}
  finally{button.disabled=false;button.textContent='Начать проверку'}
 };
-async function history(){const r=await fetch('/api/thematic/history');if(!r.ok)return;const j=await r.json(),box=document.querySelector('#history');box.replaceChildren();for(const b of j.batches||[]){const p=document.createElement('p'),a=document.createElement('a');a.href='#'+b.id;a.textContent=new Date(b.created_at).toLocaleString('ru-RU')+' — закупок: '+b.purchases+'; нарушений: '+b.violations+'; '+(b.status==='active'?'в работе':'остановлена');a.onclick=(ev)=>{ev.preventDefault();location.hash=b.id;refresh()};p.append(a);const period=document.createElement('span');period.className='thematic-saved-period';period.textContent='Дата размещения в ЕИС: '+thematicPeriod(b);p.append(period);const del=document.createElement('button');del.textContent='Удалить очередь';del.style.cssText='margin-left:12px;background:#a52a2a;padding:7px 10px';del.onclick=async()=>{if(!confirm('Удалить эту тематическую очередь и все её сохранённые результаты? Это действие нельзя отменить.'))return;const resp=await fetch('/api/thematic/'+encodeURIComponent(b.id),{method:'DELETE'});if(!resp.ok){alert('Не удалось удалить очередь');return}if(location.hash==='#'+b.id){window.history.replaceState(null,'',location.pathname);document.querySelector('#out').textContent='Выберите очередь из истории'}await history()};p.append(del);box.append(p)}if(!(j.batches||[]).length)box.textContent='История пока пуста'}async function refresh(){if(!location.hash)return;let r=await fetch('/api/thematic/'+encodeURIComponent(location.hash.slice(1)));let j=await r.json();const out=document.querySelector('#out');out.replaceChildren();if(!r.ok){out.textContent=j.detail||'Ошибка получения очереди';return}const names={queued:'В очереди',submitted:'Передано на проверку',completed:'Проверено',waiting_originals:'Ожидаются оригиналы ЕИС',waiting_engine:'Ожидается обработчик',retry:'Повторная попытка',outside_period:'Вне выбранного периода'};const heading=document.createElement('p');heading.textContent='Статус: '+(j.status==='active'?'Работает':'Остановлена');out.append(heading);const period=document.createElement('p');period.className='thematic-saved-period';period.textContent='Дата размещения в ЕИС: '+thematicPeriod(j);out.append(period);const bridge=document.createElement('p');bridge.textContent='Проверка сохранённых оригиналов: '+(j.worker?.active?'серверный обработчик работает':'серверный обработчик недоступен')+'. Загрузка новых документов ЕИС: '+(j.bridge?.active?'подключена':'не подключена')+'; ожидают загрузки: '+(j.bridge?.queued??'неизвестно');out.append(bridge);if(j.storage?.blocked){const warning=document.createElement('p');warning.style.cssText='font-weight:600;color:#9a3412';warning.textContent='Недостаточно места в хранилище Railway (свободно '+j.storage.free_mb+' МБ). Новые запросы и результаты не смогут сохраняться, пока место не освободится. Сохранённые оригиналы не удаляются.';out.append(warning)}for(const [key,num] of Object.entries(j.counts||{})){const line=document.createElement('p');line.textContent=(names[key]||key)+': '+num;out.append(line)}const stop=document.createElement('button');stop.textContent='Остановить проверку';stop.disabled=j.status!=='active';stop.onclick=async()=>{if(!confirm('Остановить тематическую проверку?'))return;await fetch('/api/thematic/'+encodeURIComponent(j.id)+'/stop',{method:'POST'});refresh()};out.append(stop);const qh=document.createElement('h3');qh.textContent='Закупки в тематической проверке';out.append(qh);const table=document.createElement('table');table.style.cssText='width:100%;border-collapse:collapse';for(const p of j.items||[]){const tr=document.createElement('tr');for(const value of [p.reg,names[p.status]||p.status,p.detail||'']){const td=document.createElement('td');td.style.cssText='border-bottom:1px solid #ddd;padding:7px';td.textContent=value;tr.append(td)}const a=document.createElement('a');a.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(p.reg);a.textContent='Карточка проверки';const td=document.createElement('td');td.append(a);tr.append(td);table.append(tr)}out.append(table);const h=document.createElement('h3');h.textContent='Подтверждённые нарушения по выбранным категориям';out.append(h);const findings=j.confirmed_matching_findings||[];if(!findings.length){const p=document.createElement('p');p.textContent='Подтверждённых нарушений пока нет';out.append(p)}for(const f of findings){const item=document.createElement('article');item.style.cssText='border-left:4px solid #b91c1c;background:#fff5f5;margin:12px 0;padding:12px';const strong=document.createElement('strong');const cardUrl='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(f.reg);const registration=document.createElement('a');registration.className='thematic-registration';registration.href=cardUrl;registration.textContent='Номер закупки ЕИС: '+f.reg;item.append(registration);strong.textContent=f.title;item.append(strong);const detail=document.createElement('p');detail.textContent=f.evidence||'';item.append(detail);if(f.law){const law=document.createElement('p');law.textContent='Правовое основание: '+f.law;item.append(law)}if(f.consultant_url){const norm=document.createElement('a');norm.href=f.consultant_url;norm.target='_blank';norm.rel='noopener noreferrer';norm.textContent='КонсультантПлюс · '+(f.consultant_citation||'Текст нормы');item.append(norm)}const card=document.createElement('a');card.href=cardUrl;card.textContent='Карточка проверки и служебная записка';item.append(card);out.append(item)}}
-window.addEventListener('hashchange',refresh);setInterval(()=>{refresh();history()},12000);history();refresh();</script></html>""".replace("__CATEGORIES__",json.dumps(CATEGORIES,ensure_ascii=False)).replace("__LEGAL_FORMS__",json.dumps(LEGAL_FORMS,ensure_ascii=False))
+let historyLoading=false;
+async function loadHistory(){
+ if(historyLoading)return;historyLoading=true;
+ try{const j=await savedJSON('/api/thematic/history');const box=document.querySelector('#history');box.replaceChildren();for(const b of j.batches||[]){const p=document.createElement('p'),a=document.createElement('a');a.href='#'+b.id;a.textContent=new Date(b.created_at).toLocaleString('ru-RU')+' — закупок: '+b.purchases+'; нарушений: '+b.violations+'; '+(b.status==='active'?'в работе':'остановлена');a.onclick=(ev)=>{ev.preventDefault();openSaved(b.id)};p.append(a);const period=document.createElement('span');period.className='thematic-saved-period';period.textContent='Дата размещения в ЕИС: '+thematicPeriod(b);p.append(period);const del=document.createElement('button');del.textContent='Удалить очередь';del.style.cssText='margin-left:12px;background:#a52a2a;padding:7px 10px';del.onclick=async()=>{if(!confirm('Удалить эту тематическую очередь и все её сохранённые результаты? Это действие нельзя отменить.'))return;const resp=await fetch('/api/thematic/'+encodeURIComponent(b.id),{method:'DELETE'});if(!resp.ok){alert('Не удалось удалить очередь');return}if(location.hash==='#'+b.id){window.history.replaceState(null,'',location.pathname);document.querySelector('#out').textContent='Выберите очередь из истории'}await loadHistory()};p.append(del);box.append(p)}if(!(j.batches||[]).length)box.textContent='История пока пуста'
+ }catch(error){const box=document.querySelector('#history');if(!box.children.length){box.textContent=error.message;const retry=document.createElement('button');retry.type='button';retry.textContent='Повторить загрузку';retry.onclick=loadHistory;box.append(retry)}}
+ finally{historyLoading=false}
+}
+async function savedJSON(url,signal){
+ const controller=new AbortController();
+ const cancel=()=>controller.abort();signal?.addEventListener('abort',cancel,{once:true});
+ const timer=setTimeout(cancel,15000);
+ try{
+  const r=await fetch(url,{credentials:'same-origin',signal:controller.signal,headers:{'Accept':'application/json'}});
+  const j=await r.json().catch(()=>null);
+  if(!r.ok||!j)throw Error(r.status===401?'Войдите в личный кабинет повторно.':typeof j?.detail==='string'?j.detail:'Не удалось загрузить сохранённую проверку. Повторите открытие.');
+  return j;
+ }catch(error){if(error.name==='AbortError')throw Error('Сервер не ответил вовремя. Повторите открытие проверки.');throw error}
+ finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel)}
+}
+let pending=null,shownBatch='';
+function openSaved(id){
+ if(location.hash.slice(1)!==id){location.hash=id}
+ refresh();
+ document.querySelector('#out').scrollIntoView?.({behavior:'smooth',block:'start'});
+}
+async function refresh(){
+ const batch=location.hash.slice(1),out=document.querySelector('#out'),status=document.querySelector('#thematic-load-status');
+ if(!batch){pending?.controller.abort();pending=null;shownBatch='';out.textContent='Выберите очередь из истории';status.textContent='';return}
+ if(pending?.batch===batch)return;
+ pending?.controller.abort();
+ const request={batch,controller:new AbortController()};pending=request;
+ if(shownBatch!==batch){out.replaceChildren();out.textContent='Загрузка сохранённой проверки…'}
+ status.replaceChildren();status.textContent='Загрузка…';
+ try{
+ const j=await savedJSON('/api/thematic/'+encodeURIComponent(batch),request.controller.signal);
+ if(pending!==request||location.hash.slice(1)!==batch)return;
+ out.replaceChildren();shownBatch=batch;status.textContent='';
+ const names={queued:'В очереди',submitted:'Передано на проверку',completed:'Проверено',waiting_originals:'Ожидаются оригиналы ЕИС',waiting_engine:'Ожидается обработчик',retry:'Повторная попытка',outside_period:'Вне выбранного периода'};const heading=document.createElement('p');heading.textContent='Статус: '+(j.status==='active'?'Работает':'Остановлена');out.append(heading);const period=document.createElement('p');period.className='thematic-saved-period';period.textContent='Дата размещения в ЕИС: '+thematicPeriod(j);out.append(period);const bridge=document.createElement('p');bridge.textContent='Проверка сохранённых оригиналов: '+(j.worker?.active?'серверный обработчик работает':'серверный обработчик недоступен')+'. Загрузка новых документов ЕИС: '+(j.bridge?.active?'подключена':'не подключена')+'; ожидают загрузки: '+(j.bridge?.queued??'неизвестно');out.append(bridge);if(j.storage?.blocked){const warning=document.createElement('p');warning.style.cssText='font-weight:600;color:#9a3412';warning.textContent='Недостаточно места в хранилище Railway (свободно '+j.storage.free_mb+' МБ). Новые запросы и результаты не смогут сохраняться, пока место не освободится. Сохранённые оригиналы не удаляются.';out.append(warning)}for(const [key,num] of Object.entries(j.counts||{})){const line=document.createElement('p');line.textContent=(names[key]||key)+': '+num;out.append(line)}const stop=document.createElement('button');stop.textContent='Остановить проверку';stop.disabled=j.status!=='active';stop.onclick=async()=>{if(!confirm('Остановить тематическую проверку?'))return;await fetch('/api/thematic/'+encodeURIComponent(j.id)+'/stop',{method:'POST'});refresh()};out.append(stop);const qh=document.createElement('h3');qh.textContent='Закупки в тематической проверке';out.append(qh);const table=document.createElement('table');table.style.cssText='width:100%;border-collapse:collapse';for(const p of j.items||[]){const tr=document.createElement('tr');for(const value of [p.reg,names[p.status]||p.status,p.detail||'']){const td=document.createElement('td');td.style.cssText='border-bottom:1px solid #ddd;padding:7px';td.textContent=value;tr.append(td)}const a=document.createElement('a');a.href='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(p.reg);a.textContent='Карточка проверки';const td=document.createElement('td');td.append(a);tr.append(td);table.append(tr)}out.append(table);const h=document.createElement('h3');h.textContent='Подтверждённые нарушения по выбранным категориям';out.append(h);const findings=j.confirmed_matching_findings||[];if(!findings.length){const p=document.createElement('p');p.textContent='Подтверждённых нарушений пока нет';out.append(p)}for(const f of findings){const item=document.createElement('article');item.style.cssText='border-left:4px solid #b91c1c;background:#fff5f5;margin:12px 0;padding:12px';const strong=document.createElement('strong');const cardUrl='/thematic/card/'+encodeURIComponent(j.id)+'/'+encodeURIComponent(f.reg);const registration=document.createElement('a');registration.className='thematic-registration';registration.href=cardUrl;registration.textContent='Номер закупки ЕИС: '+f.reg;item.append(registration);strong.textContent=f.title;item.append(strong);const detail=document.createElement('p');detail.textContent=f.evidence||'';item.append(detail);if(f.law){const law=document.createElement('p');law.textContent='Правовое основание: '+f.law;item.append(law)}if(f.consultant_url){const norm=document.createElement('a');norm.href=f.consultant_url;norm.target='_blank';norm.rel='noopener noreferrer';norm.textContent='КонсультантПлюс · '+(f.consultant_citation||'Текст нормы');item.append(norm)}const card=document.createElement('a');card.href=cardUrl;card.textContent='Карточка проверки и служебная записка';item.append(card);out.append(item)}
+ }catch(error){
+  if(pending!==request||location.hash.slice(1)!==batch)return;
+  if(shownBatch!==batch)out.textContent='Не удалось открыть сохранённую проверку.';
+  status.textContent=error.message;const retry=document.createElement('button');retry.type='button';retry.textContent='Повторить открытие';retry.onclick=()=>refresh();status.append(retry);
+ }finally{if(pending===request)pending=null}
+}
+window.addEventListener('hashchange',()=>refresh());setInterval(()=>{if(!document.hidden){refresh();loadHistory()}},12000);loadHistory();refresh();
+})();</script></html>""".replace("__CATEGORIES__",json.dumps(CATEGORIES,ensure_ascii=False)).replace("__LEGAL_FORMS__",json.dumps(LEGAL_FORMS,ensure_ascii=False))
 DASHBOARD_CLEANUP = r'''<script id="thematic-dashboard-cleanup">
 (function(){
  const t=document.querySelector('table');
@@ -562,7 +629,7 @@ def install(ns):
  def thematic_history(request:Request):
   # FastAPI runs this whole sync handler in its bounded worker pool, including
   # PostgreSQL ownership lookup as well as the potentially large evidence scan.
-  return thematic_history_records(ns,ownership.linked_ids(request))
+  return saved_read(thematic_history_records,ns,ownership.linked_ids(request))
  @app.get("/api/thematic/unassigned")
  def unassigned_history(request:Request):
   # Administrator-assisted migration for real older checks with no recorded
@@ -639,7 +706,7 @@ def install(ns):
  def status(batch:str,request:Request):
   if not re.fullmatch("[0-9a-f]{24}",batch):raise HTTPException(400,"Некорректный номер")
   ownership.require_owned(request,batch)
-  return overview(ns,batch)
+  return saved_read(overview,ns,batch)
  class ThemeNav(BaseHTTPMiddleware):
   async def dispatch(self,request,call_next):
    response=await call_next(request)
