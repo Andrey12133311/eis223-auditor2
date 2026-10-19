@@ -282,9 +282,8 @@ def render_thematic_panel(reg,thematic,account_review=False):
         from scripts.account_memo_requisites_ui_v1 import render_memo_requisites_editor
         result.append(render_memo_requisites_editor(reg))
     if rows:
-        result.append('<p><a class="action" href="/thematic/card/'+esc(batch)+'/'+
-          esc(reg)+'?print=1" target="_blank" rel="noopener noreferrer">'+
-          'Проект служебной записки · печать / PDF</a></p>')
+        result.append('<p><a class="action" href="/api/v304/thematic-memo/'+esc(batch)+'/'+
+          esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>')
         result.append('<p class="meta">Проект формируется по сохранённым тематическим нарушениям; '+
           'перед подписанием необходима юридическая сверка с оригиналами ЕИС.</p>')
     else:

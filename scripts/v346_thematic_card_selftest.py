@@ -74,7 +74,9 @@ def run():
         assert '/thematic#'+BATCH in page
         assert 'Общая карточка проверки' not in page
         assert '>Все закупки</a>' not in page
-        assert '/thematic/card/'+BATCH+'/'+REG+'?print=1' in page
+        assert '/api/v304/thematic-memo/'+BATCH+'/'+REG+'.odt' in page
+        assert '/thematic/card/'+BATCH+'/'+REG+'?print=1' not in page
+        assert 'Сформировать служебную записку ODT' in page
         assert 'Извещение подтверждает факт &lt;незаконный&gt;' in page
         assert 'Извещение подтверждает факт <незаконный>' not in page
         assert '/api/v304/memo/'+REG+'.odt' not in page

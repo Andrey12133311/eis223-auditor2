@@ -17,15 +17,16 @@ from xml.etree import ElementTree as ET
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from v304_official_memo_odt import _render_odt
 from v321_memo_layout import (OO,TX,ST,FO,DR,STYLE_NAME,EXECUTOR_STYLE,
-                              EXECUTOR_FRAME_STYLE,_odf_string)
+                              EXECUTOR_FRAME_STYLE,TB,XL,_odf_string,_leading_tabs)
 from memo_fixture import memo_template
 
 SOURCE_NAME='Государственное автономное учреждение "центр ИТ РАН"'
 PURCHASE={"reg_number":"32615969056","title":"Поставка оборудования","method":"Аукцион"}
 
 
-def memo(count=1,repeats=1,fields=None,word_styles=False):
-    findings=[{"title":"Нарушение срока размещения протокола № "+str(i+1),
+def memo(count=1,repeats=1,fields=None,word_styles=False,table_signature=False,
+         source_geometry=False,findings=None):
+    findings=findings or [{"title":"Нарушение срока размещения протокола № "+str(i+1),
                "law":"223-ФЗ, ст. 4 ч. 12","document":"Протокол № "+str(i+1)+".pdf",
                "evidence":"Протокол подписан 01.10.2026, размещен 15.10.2026. "*repeats}
               for i in range(count)]
@@ -35,6 +36,36 @@ def memo(count=1,repeats=1,fields=None,word_styles=False):
     paragraphs=list(root.iter('{'+TX+'}p'))
     # Vary substantive body length, not the removed technical source excerpt.
     paragraphs[21].text=' '.join('Правовая оценка по 223-ФЗ учитывает установленные обстоятельства закупки.' for _ in range(repeats))
+    styles=root.find('{'+OO+'}automatic-styles')
+    if source_geometry:
+        for name in ('SourceIntro','SourceBody'):
+            style=ET.SubElement(styles,'{'+ST+'}style',{
+                '{'+ST+'}name':name,'{'+ST+'}family':'paragraph','{'+ST+'}parent-style-name':'Standard'})
+            properties=ET.SubElement(style,'{'+ST+'}paragraph-properties',{
+                '{'+FO+'}text-align':'justify','{'+FO+'}text-indent':'0cm',
+                '{'+FO+'}margin-left':'0cm','{'+FO+'}margin-right':'0cm',
+                '{'+FO+'}margin-top':'0cm','{'+FO+'}margin-bottom':'0cm'})
+            tabs=ET.SubElement(properties,'{'+ST+'}tab-stops')
+            ET.SubElement(tabs,'{'+ST+'}tab-stop',{'{'+ST+'}position':'1.251cm','{'+ST+'}type':'left'})
+        for index,p in enumerate(paragraphs[20:30],20):
+            p.set('{'+TX+'}style-name','SourceIntro' if index==20 else 'SourceBody')
+            value=p.text;p.text=''
+            span=ET.SubElement(p,'{'+TX+'}span')
+            ET.SubElement(span,'{'+TX+'}tab').tail=value
+    if table_signature:
+        body=root.find('.//{'+OO+'}text')
+        place=list(body).index(paragraphs[32])
+        table=ET.Element('{'+TB+'}table',{'{'+TB+'}name':'SignatureTable','{'+TB+'}style-name':'SourceSignatureTable'})
+        style=ET.SubElement(styles,'{'+ST+'}style',{'{'+ST+'}name':'SourceSignatureTable','{'+ST+'}family':'table'})
+        ET.SubElement(style,'{'+ST+'}table-properties',{'{'+ST+'}width':'17cm','{'+TB+'}align':'margins'})
+        column=ET.SubElement(styles,'{'+ST+'}style',{'{'+ST+'}name':'SignatureColumn','{'+ST+'}family':'table-column'})
+        ET.SubElement(column,'{'+ST+'}table-column-properties',{'{'+ST+'}column-width':'8.5cm'})
+        for _ in range(2):ET.SubElement(table,'{'+TB+'}table-column',{'{'+TB+'}style-name':'SignatureColumn'})
+        row=ET.SubElement(table,'{'+TB+'}table-row')
+        for paragraph in paragraphs[32:34]:
+            body.remove(paragraph)
+            ET.SubElement(row,'{'+TB+'}table-cell',{'{'+OO+'}value-type':'string'}).append(paragraph)
+        body.insert(place,table)
     if word_styles:
         for node in root.iter():
             for key in ('{'+ST+'}name','{'+TX+'}style-name'):
@@ -87,11 +118,60 @@ class MemoLayoutTests(unittest.TestCase):
         self.assertEqual(frame.get("{"+ST+"}horizontal-rel"),"page-content")
         self.assertEqual(frame.get("{"+ST+"}flow-with-text"),"false")
         paragraph=styles[STYLE_NAME].find("{"+ST+"}paragraph-properties")
-        for key,expected in (("text-align","justify"),("text-indent","1.25cm"),
-                             ("margin-left","0cm"),("margin-right","0cm"),
-                             ("margin-top","0cm"),("margin-bottom","0.11cm"),
-                             ("line-height","120%")):
-            self.assertEqual(paragraph.get("{"+FO+"}"+key),expected)
+        self.assertEqual(paragraph.get('{'+FO+'}text-align'),'justify')
+        # A template using Standard keeps its inherited layout; the formatter
+        # must not add the former 1.25cm/.11cm/120% paragraph overrides.
+        for key in ('text-indent','margin-left','margin-right','margin-top','margin-bottom','line-height'):
+            self.assertNotIn('{'+FO+'}'+key,paragraph.attrib)
+
+    def test_real_table_topology_and_leading_tab_geometry_are_preserved(self):
+        with zipfile.ZipFile(io.BytesIO(memo(table_signature=True,source_geometry=True))) as z:
+            root=ET.fromstring(z.read('content.xml'))
+        body=root.find('.//{'+OO+'}text')
+        parents={child:parent for parent in body.iter() for child in parent}
+        table=next(body.iter('{'+TB+'}table'))
+        self.assertEqual(len(list(table.iter('{'+TB+'}table-cell'))),2)
+        self.assertIn('Заместитель начальника Управления',_odf_string(table))
+        self.assertIn('И. И. Подписант',_odf_string(table))
+        frame=next(table.iter('{'+DR+'}frame'))
+        self.assertEqual(parents[frame].text,'И. И. Подписант')
+        self.assertEqual(parents[parents[frame]].tag,'{'+TB+'}table-cell')
+        self.assertEqual([_odf_string(p) for p in frame.iter('{'+TX+'}p')],
+                         ['А. Б. Исполнитель','+7 (000) 123-45-67'])
+        self.assertIs(list(body)[-2],table)
+        self.assertEqual(list(body)[-1].get('{'+TX+'}style-name'),'EIS223MemoExecutorReserve')
+        styles={s.get('{'+ST+'}name'):s for s in root.findall('.//{'+ST+'}style')}
+        signature=styles[table.get('{'+TB+'}style-name')].find('{'+ST+'}table-properties')
+        self.assertEqual(signature.get('{'+ST+'}width'),'17cm')
+        self.assertEqual(signature.get('{'+FO+'}keep-with-next'),'always')
+        for par in body.iter('{'+TX+'}p'):
+            name=par.get('{'+TX+'}style-name','')
+            if name.startswith(STYLE_NAME):
+                self.assertEqual(_leading_tabs(par),1)
+                properties=styles[name].find('{'+ST+'}paragraph-properties')
+                for key in ('text-indent','margin-left','margin-right','margin-top','margin-bottom'):
+                    self.assertEqual(properties.get('{'+FO+'}'+key),'0cm')
+                self.assertNotIn('{'+FO+'}line-height',properties.attrib)
+                self.assertEqual(properties.find('{'+ST+'}tab-stops/{'+ST+'}tab-stop').get('{'+ST+'}position'),'1.251cm')
+
+    def test_six_findings_each_keep_their_law_and_clickable_article_after_format(self):
+        from v365_consultant_refs import ARTICLES,LAW_223
+        articles=('2','3','3.2','3.3','3.4','4')
+        findings=[{'title':'Фиксация '+str(i),'document':'Источник '+str(i)+'.pdf',
+                   'law':'223-ФЗ, ст. '+article+' ч. 1','evidence':'ТЕХНИЧЕСКАЯ_ЦИТАТА_'+str(i)}
+                  for i,article in enumerate(articles,1)]
+        with zipfile.ZipFile(io.BytesIO(memo(findings=findings,table_signature=True,source_geometry=True))) as z:
+            root=ET.fromstring(z.read('content.xml'))
+        paras=list(root.iter('{'+TX+'}p'))
+        for finding,article in zip(findings,articles):
+            paragraph=next(p for p in paras if finding['document'] in _odf_string(p))
+            self.assertIn(finding['law'],_odf_string(paragraph).replace('\u00a0',' '))
+            self.assertIn('1. КонсультантПлюс:',_odf_string(paragraph).replace('\u00a0',' '))
+            self.assertTrue(any(a.get('{'+XL+'}href','').startswith(LAW_223+ARTICLES[article]+'/')
+                                for a in paragraph.iter('{'+TX+'}a')))
+        legal=next(p for p in paras if 'Правовое основание выявленного нарушения' in _odf_string(p))
+        self.assertTrue(list(legal.iter('{'+TX+'}a')))
+        self.assertNotIn('ТЕХНИЧЕСКАЯ_ЦИТАТА',_odf_string(root))
 
     def test_technical_evidence_dump_removed_but_each_violation_preserved(self):
         with zipfile.ZipFile(io.BytesIO(memo(count=4))) as archive:
@@ -130,8 +210,8 @@ class MemoLayoutTests(unittest.TestCase):
         fields={'executor':'Ш'*199,'phone':'W'*199}
         with tempfile.TemporaryDirectory(prefix='eis-memo-boundary-') as tmp:
             path=Path(tmp)/'boundary.odt'
-            path.write_bytes(memo(1,5,fields,word_styles=True))
-            result=subprocess.run(['soffice','--headless','--convert-to','pdf',
+            path.write_bytes(memo(1,5,fields,word_styles=True,table_signature=True,source_geometry=True))
+            result=subprocess.run(['soffice','-env:UserInstallation='+(Path(tmp)/'profile').as_uri(),'--headless','--convert-to','pdf',
                                    '--outdir',tmp,str(path)],capture_output=True,text=True,timeout=40)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             with fitz.open(path.with_suffix('.pdf')) as pdf:
@@ -162,11 +242,11 @@ class MemoLayoutTests(unittest.TestCase):
             sources=[]
             for count,repeats in cases:
                 path=directory/f"memo-{count}-{repeats}.odt"
-                path.write_bytes(memo(count,repeats,word_styles=True));sources.append(path)
+                path.write_bytes(memo(count,repeats,word_styles=True,table_signature=True,source_geometry=True));sources.append(path)
             # Match production: one document per isolated conversion. Writer's
             # multi-document batch export can retain stale floating-object layout.
             for path in sources:
-                result=subprocess.run(["soffice","--headless","--convert-to","pdf","--outdir",tmp,
+                result=subprocess.run(["soffice","-env:UserInstallation="+(directory/(path.stem+'-profile')).as_uri(),"--headless","--convert-to","pdf","--outdir",tmp,
                                        str(path)],capture_output=True,text=True,timeout=40,
                                        env={**os.environ,"XDG_CACHE_HOME":tmp})
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
