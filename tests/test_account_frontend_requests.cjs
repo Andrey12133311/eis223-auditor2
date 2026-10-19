@@ -505,6 +505,74 @@ async function testThematicFindingContextAndNoDuplicate() {
   assert.equal(button(first).disabled,true);
   assert.equal(button(second).disabled,false,'another batch context must not inherit stale local state');
 }
+async function testMspRecheckButtonScopeAndSingleMutation() {
+  const batch = 'a'.repeat(24), otherKey = 'b'.repeat(64), held = deferred();
+  const eligible = {...findingFixture(), code: '223-SME-BID-SECURITY-OVER-TWO-PERCENT', effective_status: 'confirmed'};
+  const unrelated = {...findingFixture(), finding_key: otherKey, code: '223-4-12', effective_status: 'confirmed'};
+  const ui = harness(embedded('v382_finding_review_ui.py', 'SCRIPT ='), 'control,load,send,recheckMsp', async call => {
+    if (call.method === 'POST') { await held.promise; return {effective_status: 'superseded'}; }
+    return {findings: [eligible, unrelated], manager_assigned: true};
+  });
+  let reloads = 0; ui.context.location.reload = () => { reloads++; };
+  const thematic = ui.api.control(reviewReg, reviewKey, batch);
+  const general = ui.api.control(reviewReg, reviewKey);
+  const other = ui.api.control(reviewReg, otherKey, batch);
+  ui.context.document.querySelectorAll = () => [thematic, general, other];
+  await Promise.all([ui.api.load(reviewReg, false, batch), ui.api.load(reviewReg)]);
+  const recheck = box => flatten(box).find(x => x.tagName === 'BUTTON' && x.textContent === 'Перепроверить признак МСП');
+  assert.ok(recheck(thematic));
+  assert.equal(recheck(general), undefined, 'general findings never offer targeted thematic recheck');
+  assert.equal(recheck(other), undefined, 'other legal codes never offer the SME-only action');
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 0, 'loading a card never triggers reassessment');
+  await ui.api.recheckMsp(reviewReg, reviewKey, '');
+  await ui.api.recheckMsp(reviewReg, otherKey, batch);
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 0);
+  const click = recheck(thematic).onclick, pending = click();
+  await click();
+  const writes = ui.calls.filter(x => x.method === 'POST');
+  assert.equal(writes.length, 1, 'rapid repeat clicks cannot duplicate the recheck');
+  assert.equal(writes[0].url, `/me/thematic/${batch}/${reviewReg}/findings/${reviewKey}/msp-recheck`);
+  assert.equal(writes[0].options.credentials, 'same-origin');
+  assert.equal(writes[0].options.cache, 'no-store');
+  assert.ok(flatten(thematic).some(x => x.tagName === 'BUTTON' && x.textContent === 'Перепроверяем МСП…' && x.disabled));
+  held.resolve(); await pending;
+  assert.equal(reloads, 1, 'successful recheck reloads canonical counts and evidence state');
+}
+async function testMspInvalidatedSubmissionAndRecheckFailureRetry() {
+  const batch = 'a'.repeat(24);
+  let row = {...findingFixture(), code: '223-SME-BID-SECURITY-OVER-TWO-PERCENT',
+    effective_status: 'superseded', reassessment: {reason: 'Предел 2% неприменим. Исходное доказательство сохранено.'}};
+  let fail = true, reloads = 0;
+  const ui = harness(embedded('v382_finding_review_ui.py', 'SCRIPT ='), 'control,load,send,recheckMsp', async call => {
+    if (call.method === 'POST') return fail ? {httpStatus: 503, body: {detail: 'Источник временно недоступен'}} : {effective_status: 'confirmed'};
+    return {findings: [row], manager_assigned: true};
+  });
+  ui.context.location.reload = () => { reloads++; };
+  const box = ui.api.control(reviewReg, reviewKey, batch);
+  ui.context.document.querySelectorAll = () => [box];
+  const button = text => flatten(box).find(x => x.tagName === 'BUTTON' && x.textContent.includes(text));
+  const words = () => flatten(box).map(x => x.textContent).join(' ');
+  for (const effective_status of ['superseded', 'requires_review']) {
+    row = {...row, effective_status}; await ui.api.load(reviewReg, false, batch);
+    assert.ok(button('руководителю').disabled, effective_status + ' cannot be submitted');
+    await ui.api.send(reviewReg, reviewKey, batch);
+  }
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 0);
+  row = {...row, submission: {status: 'approved'}, review: {decision: 'approved', comment: 'Проверено ранее'}};
+  await ui.api.load(reviewReg, false, batch);
+  assert.match(words(), /Согласовано руководителем/);
+  assert.match(words(), /Проверено ранее/);
+  assert.ok(!button('Перепроверить признак').disabled, 'an old approval does not prevent safe reassessment');
+  await button('Перепроверить признак').onclick();
+  assert.equal(reloads, 0, 'failed reassessment stays on the card');
+  assert.match(words(), /Источник временно недоступен/);
+  assert.match(words(), /Согласовано руководителем/);
+  assert.ok(!button('Перепроверить признак').disabled, 'failed request is retryable');
+  assert.ok(button('руководителю').disabled);
+  fail = false; await button('Перепроверить признак').onclick();
+  assert.equal(reloads, 1);
+  assert.equal(ui.calls.filter(x => x.method === 'POST').length, 2);
+}
 async function testManagerFindingQueueAndVersionedDecisions() {
   let row = {...findingFixture(), submission: {status: 'submitted', version: 7}}, rejected = false;
   const ui = harness(embedded('v368_manager_ui.py', 'SCRIPT='), 'loadFindings,loadFindingQueue', async call => {
@@ -600,9 +668,11 @@ async function testManagerSelfAttachAndRefresh() {
     testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
     testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue,
     testFindingSubmissionLifecycleAndNoDuplicate, testFindingMissingManagerStaleAndErrors,
-    testFindingMutationOutranksInFlightRead, testThematicFindingContextAndNoDuplicate, testManagerFindingQueueAndVersionedDecisions,
+    testFindingMutationOutranksInFlightRead, testThematicFindingContextAndNoDuplicate,
+    testMspRecheckButtonScopeAndSingleMutation, testMspInvalidatedSubmissionAndRecheckFailureRetry,
+    testManagerFindingQueueAndVersionedDecisions,
     testAdminTeamSaveCancelRetryAndInactive, testManagerSelfAttachAndRefresh]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 19 scenarios passed');
+  console.log('Account frontend request/race regressions: 21 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

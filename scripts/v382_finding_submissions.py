@@ -62,6 +62,8 @@ def submit_finding(reg: str, finding_key: str, request: Request, batch: str = ""
         item = next((x for x in _items(request, reg, batch) if x['finding_key'] == finding_key), None)
         if item is None:
             raise HTTPException(409, 'Доказательство изменилось; обновите карточку')
+        if item.get('effective_status', 'confirmed') != 'confirmed':
+            raise HTTPException(409, 'Вывод пересмотрен или требует проверки и не может быть направлен как подтверждённое нарушение')
         saved = db.execute('SELECT status FROM account_finding_submissions WHERE user_id=%s AND reg_number=%s AND finding_key=%s', (user, reg, finding_key)).fetchone()
         review = db.execute('SELECT decision FROM account_manager_finding_reviews WHERE user_id=%s AND reg_number=%s AND finding_key=%s', (user, reg, finding_key)).fetchone()
         if saved:
@@ -83,7 +85,7 @@ def manager_submissions(request: Request, response: Response):
     predicate = '' if role == 'admin' else ' AND t.manager_id=%s'
     with connect() as db:
         rows = db.execute('''SELECT s.user_id,s.reg_number,s.finding_key,s.title,u.email,
-                                   s.status,s.submitted_at,COALESCE(r.comment,''),s.version
+                                   s.status,s.submitted_at,COALESCE(r.comment,''),s.version,s.source_batch
                             FROM account_finding_submissions s
                             JOIN account_users u ON u.id=s.user_id
                             JOIN account_manager_teams t ON t.user_id=s.user_id
@@ -92,5 +94,22 @@ def manager_submissions(request: Request, response: Response):
                             WHERE u.status='approved' AND u.role='user' ''' + predicate + '''
                             ORDER BY (s.status='submitted') DESC,s.submitted_at DESC LIMIT 250''',
                           () if role == 'admin' else (actor,)).fetchall()
-    return [dict(user_id=str(r[0]), reg_number=r[1], finding_key=r[2], title=r[3],
-                 employee=r[4], status=r[5], submitted_at=r[6].isoformat(), comment=r[7], version=r[8]) for r in rows]
+        result=[]
+        loaded={}
+        for r in rows:
+            item=dict(user_id=str(r[0]), reg_number=r[1], finding_key=r[2], title=r[3],
+                employee=r[4], status=r[5], submitted_at=r[6].isoformat(), comment=r[7], version=r[8])
+            if r[9]:
+                context=(str(r[0]),r[9],r[1])
+                if context not in loaded:
+                    try:
+                        require_batch_owner(db,r[0],r[9])
+                        loaded[context]=thematic_items(_db_state(request),r[9],r[1])
+                    except HTTPException as exc:
+                        if exc.status_code not in (404,409,422):raise
+                        loaded[context]=[]
+                source=next((x for x in loaded[context] if x['finding_key']==r[2]),None)
+                item.update(source_batch=r[9],effective_status=(source or {}).get('effective_status','unavailable'),
+                            reassessment=(source or {}).get('reassessment'))
+            result.append(item)
+    return result

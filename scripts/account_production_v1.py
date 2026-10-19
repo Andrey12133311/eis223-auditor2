@@ -305,6 +305,8 @@ def install(app):
     app.include_router(manager_evidence)
     from scripts.v382_finding_submissions import router as finding_submissions
     app.include_router(finding_submissions)
+    from scripts.v385_msp_reassessment import router as msp_reassessment
+    app.include_router(msp_reassessment)
     app.include_router(manager_quality)
     app.include_router(account_cases)
     app.include_router(manager_case_notes)

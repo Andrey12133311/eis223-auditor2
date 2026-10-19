@@ -227,11 +227,29 @@ def staff_campaign_violations(request:Request,response:Response):
         con.execute("PRAGMA query_only=ON")
         ids=[r[0] for r in rows]
         placeholders=",".join("?" for _ in ids)
-        data=[dict(r) for r in con.execute(
-            """SELECT batch_id,reg,category,title,law,evidence,code,
-                      document,source_url,law_url FROM thematic_findings
-               WHERE batch_id IN ("""+placeholders+""")
-               ORDER BY rowid DESC LIMIT 1200""",ids)]
+        recent=[dict(row) for row in con.execute(
+            "SELECT rowid AS source_rowid,batch_id,reg,category,title,law,evidence,code,"
+            "document,source_url,law_url FROM thematic_findings WHERE batch_id IN ("+
+            placeholders+") ORDER BY rowid DESC LIMIT 1200",ids)]
+        selected={row[0]:json.loads(row[1]) for row in con.execute(
+            "SELECT id,categories FROM thematic_batches WHERE id IN ("+placeholders+")",ids)}
+        from scripts.v384_thematic_findings import canonical_item
+        from scripts.v385_msp_reassessment import apply_reassessments
+        contexts={}
+        for item in recent:
+            if item["category"] in selected.get(item["batch_id"],[]):
+                contexts.setdefault((item["batch_id"],item["reg"]),[]).append(item)
+        canonical=[]
+        for (batch,reg),raw in contexts.items():
+            limited=[{**canonical_item(reg,item),"source_rowid":item["source_rowid"]}
+                     for item in collapse_legal_events(raw)]
+            canonical.extend({**item,"batch_id":batch,"reg":reg} for item in
+                apply_reassessments(con,batch,reg,limited,same_incident=True))
+        canonical.sort(key=lambda item:item["source_rowid"],reverse=True)
+        revised=[item for item in canonical if item["effective_status"]!="confirmed"]
+        # Overlay per batch BEFORE cross-batch deduplication; one correction
+        # must not hide a different campaign's still-active incident.
+        data=[item for item in canonical if item["effective_status"]=="confirmed"]
     except sqlite3.Error as exc:
         raise HTTPException(503,"Результаты тематической проверки ЕИС временно недоступны") from exc
     finally:con.close()
@@ -300,8 +318,9 @@ def staff_campaign_violations(request:Request,response:Response):
             finding["review_comment"]=data.get("comment","")
     return {
         "findings":visible,
+        "reassessed_findings":revised,
         "count":len(prepared[:500]),
-        "truncated":len(data)>=1200 or len(prepared)>500,
+        "truncated":len(recent)>=1200 or len(prepared)>500,
         "scope":"Подтверждённые анализатором нарушения по тематическим проверкам сотрудника",
         "note":"Результаты с одинаковыми обстоятельствами объединены; предложения без достаточных доказательств требуют проверки."
     }

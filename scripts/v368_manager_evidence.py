@@ -182,6 +182,8 @@ def finding_decision(user_id:str,reg_number:str,finding_key:str,
         row=next((item for item in items if item["finding_key"]==finding_key),None)
         if not row:
             raise HTTPException(409,"Доказательство изменилось; обновите карточку")
+        if data.decision=="approved" and row.get("effective_status", "confirmed") != "confirmed":
+            raise HTTPException(409,"Вывод пересмотрен или требует проверки; новое согласование как подтверждённого нарушения недоступно")
         if data.decision=="approved" and row["warnings"]:
             raise HTTPException(409,
                 "Нельзя подтвердить нарушение без полноценного правового основания и доказательств")

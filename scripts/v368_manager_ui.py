@@ -504,6 +504,7 @@ function renderFindingQueue(items){
    tag("p","mgr-muted",(item.employee||"Сотрудник")+" · Закупка № "+item.reg_number+
     " · Направлено: "+fmt(item.submitted_at)));
   if(item.comment)entry.append(tag("p","mgr-quality","Комментарий руководителя: "+item.comment));
+  if(item.reassessment)entry.append(tag("p","mgr-warning",item.reassessment.reason));
   entry.append(action(item.status==="submitted"?"Рассмотреть нарушение":"Открыть решение","mgr-outline",async()=>{
    show("findings");await openFindings(item.user_id,item.reg_number);
    $("mgr-finding-"+item.finding_key)?.scrollIntoView({behavior:"smooth",block:"center"});
@@ -543,14 +544,16 @@ async function loadFindings(){
   api("/manager/cases/"+encodeURIComponent(employee)+"/"+encodeURIComponent(reg)+"/notes").catch(()=>[])]);
  if(sequence!==findingSequence)return;
  const root=$("mgr-finding-items");root.replaceChildren();
- $("mgr-finding-note").textContent="Найдено подтверждённых анализатором эпизодов: "+data.findings.length+". Решения руководителя сохраняются отдельно.";
+ const confirmed=data.findings.filter(x=>!x.effective_status||x.effective_status==='confirmed').length;
+ $("mgr-finding-note").textContent="Подтверждённых анализатором эпизодов: "+confirmed+"; пересмотренных / требуют проверки: "+(data.findings.length-confirmed)+". Решения руководителя сохраняются отдельно.";
  await Promise.all([renderProposals(employee,reg,sequence),renderDiscussion(employee,reg,sequence)]);
  if(sequence!==findingSequence)return;
  if(!data.findings.length){root.append(tag("p","mgr-muted","Для этой закупки подтверждённых нарушений пока нет."));return}
  for(const item of data.findings){
   const card=tag("article","mgr-entry");card.id="mgr-finding-"+item.finding_key;
   if(item.submission)card.append(status(item.submission.status));
-  card.append(tag("span","mgr-chip","Карточка нарушения"),tag("h3","",item.title),
+  const invalidated=item.effective_status&&item.effective_status!=='confirmed';
+  card.append(tag("span","mgr-chip",invalidated?"Пересмотренный вывод":"Карточка нарушения"),tag("h3","",item.title),
    tag("div","mgr-muted","Норма: "+(item.law||"требует уточнения")));
   const correlated=personalNotes.filter(n=>!n.finding_key||n.finding_key===item.finding_key);
  for(const note of correlated.slice(0,8)){
@@ -581,7 +584,7 @@ async function loadFindings(){
   const finalDecision=["approved","rejected","returned"].includes(item.submission?.status||item.review?.decision);
   for(const [decision,label,css] of [["approved","Согласовать","mgr-primary"],["rejected","Отказать","mgr-danger"]]){
    const button=action(label,css,async()=>{
-    if(deciding||finalDecision||sequence!==findingSequence)return;
+    if(deciding||finalDecision||(decision==='approved'&&invalidated)||sequence!==findingSequence)return;
     if(decision==="approved"&&item.warnings?.length)return toast("Для утверждения сначала устраните замечания к доказательствам");
     const comment=prompt(decision==="approved"?"Комментарий к согласованию (по желанию)":"Причина отказа (не менее 5 символов)");
     if(comment===null)return;
@@ -595,8 +598,8 @@ async function loadFindings(){
     }catch(e){
      if(e.status===409)await Promise.all([loadFindingQueue(true),sequence===findingSequence?loadFindings():Promise.resolve()]);
      throw e;
-    }finally{deciding=false;decisionButtons.forEach(b=>b.disabled=false)}
-   });button.disabled=finalDecision;decisionButtons.push(button);buttons.append(button);
+    }finally{deciding=false;decisionButtons.forEach(b=>b.disabled=finalDecision||(b.dataset.decision==='approved'&&invalidated))}
+   });button.dataset.decision=decision;button.disabled=finalDecision||(decision==='approved'&&invalidated);decisionButtons.push(button);buttons.append(button);
   }
   card.append(buttons);root.append(card);
  }

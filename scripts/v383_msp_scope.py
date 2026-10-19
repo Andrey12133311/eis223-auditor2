@@ -10,11 +10,18 @@ from v331_broad_legal import verified
 from v314_eis_metadata import table_pairs
 
 SME = r'(?:субъект\w*\s+(?:мал\w*\s+и\s+средн\w*\s+предпринимательств\w*|мсп)|мсп|смсп|сумсп)'
-EXCLUSIVE = re.compile(r'(?:только|исключительно)\s+(?:для\s+)?'+SME, re.I)
+EXCLUSIVE = re.compile(r'(?:только|исключительно)\s+(?:(?:для|среди)\s+)?'+SME, re.I)
 CONDITIONAL = re.compile(r'\b(?:если|в\s+случае|при\s+проведении|при\s+осуществлении|в\s+соответствии\s+с|согласно)\b', re.I)
 NEGATIVE = re.compile(r'(?:не\s+огранич\w*\s+(?:участи\w*\s+)?'+SME+r'|не\s+(?:является|относится).{0,65}(?:только|исключительно)\s+'+SME+r')', re.I)
 LABEL = re.compile(r'участник\w*\s+(?:настоящ\w*\s+)?закупк\w*\s+могут\s+быть\s+только\s+'+SME, re.I)
-DECLARATION = re.compile(r'(?:участник\w*\s+(?:настоящ\w*\s+)?(?:закупк\w*|аукцион\w*|конкурс\w*)\s+(?:могут\s+быть|являются)|(?:настоящ\w*|данн\w*|эта)\s+(?:закупк\w*|аукцион\w*|конкурс\w*).{0,45}(?:проводится|проводятся))',re.I)
+SUBCONTRACT = re.compile(r'субподряд|соисполн|субисполн|квот|годов\w*\s+объ[её]м', re.I)
+DECLARATION = re.compile(
+    r'(?:участник\w*\s+(?:настоящ\w*|данн\w*)\s+(?:закупк\w*|аукцион\w*|конкурс\w*)'
+    r'\s+(?:могут\s+быть|являются)\s+' + EXCLUSIVE.pattern + r'|'
+    r'(?:настоящ\w*|данн\w*|эта)\s+(?:закупк\w*|аукцион\w*|конкурс\w*)'
+    r'(?:\s+в\s+электронной\s+форме)?\s+(?:проводится|проводятся)'
+    r'(?:\s+в\s+электронной\s+форме)?\s+(?:только|исключительно)\s+(?:для|среди)\s+' + SME + r')', re.I)
+
 SME_TYPES = {'purchaseNoticeKESMBO','purchaseNoticeAESMBO','purchaseNoticeZPESMBO','purchaseNoticeZKESMBO'}
 
 
@@ -39,7 +46,7 @@ def resolve(p, docs=()):
     if xml.get('source')=='official_eis_getDocsIP' and xml.get('xml_type') in SME_TYPES and xml.get('xml_sha256'):
         add(True,'official_eis_getDocsIP',xml['xml_type'],**{k:v for k,v in xml.items() if k not in ('source','evidence','value')})
     method=' '.join(str(p.get('method') or '').split())
-    if EXCLUSIVE.search(method) and not CONDITIONAL.search(method) and not re.search(r'\bне\b',method,re.I):
+    if EXCLUSIVE.search(method) and not SUBCONTRACT.search(method) and not CONDITIONAL.search(method) and not re.search(r'\bне\b',method,re.I):
         add(True,'official_eis_method',method)
     for doc in list(docs)[:650]:
         if not isinstance(doc,dict) or not verified(doc):continue
@@ -56,12 +63,13 @@ def resolve(p, docs=()):
         for label,value,*rest in pairs:
             if not re.fullmatch(r'\s*(?:участники\s+(?:настоящей\s+)?закупки|категория\s+участников)\s*',label,re.I):continue
             value=' '.join(value.split())
+            if SUBCONTRACT.search(value):continue
             meta=doc.get('meta') or {}
             extra=dict(document=doc.get('name'),source_url=meta.get('source_url'),sha256=meta.get('sha256'))
             if EXCLUSIVE.search(value) and re.search(r'\(\s*нет\s*\)\s*$',value,re.I):
                 add(False,'official_eis_document',label+': '+value,**extra)
             elif NEGATIVE.search(value):add(False,'official_eis_document',label+': '+value,**extra)
-            elif EXCLUSIVE.search(value) and not CONDITIONAL.search(value) and not re.search(r'\bне\b',value,re.I):
+            elif EXCLUSIVE.match(value) and not CONDITIONAL.search(value) and not re.search(r'\bне\b',value,re.I):
                 add(True,'official_eis_document',label+': '+value,**extra)
         # Sentence/line boundaries prevent unrelated distant clauses from
         # turning a conditional legal quotation into a tender declaration.
@@ -70,7 +78,7 @@ def resolve(p, docs=()):
             if not re.search(SME,line,re.I) or len(line)>2000:continue
             meta=doc.get('meta') or {}
             extra=dict(document=doc.get('name'),source_url=meta.get('source_url'),sha256=meta.get('sha256'))
-            if CONDITIONAL.search(line):continue
+            if CONDITIONAL.search(line) or SUBCONTRACT.search(line):continue
             label=LABEL.search(line)
             if label:
                 suffix=re.sub(r'\([^)]*\)', '', line[label.end():]).strip(' :|–—-').lower()

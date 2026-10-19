@@ -188,6 +188,8 @@ def _read_thematic_purchase(ns,batch,reg):
     findings=thematic_items(ns,batch,reg)
     documented=[]
     for finding in findings:
+        if finding.get("effective_status") != "confirmed":
+            continue
         title=str(finding.get("title") or "").strip()
         evidence=str(finding.get("evidence") or "").strip()
         if not title or not evidence or re.search(

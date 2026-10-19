@@ -61,6 +61,21 @@ class MspScopeTests(unittest.TestCase):
         self.assertIsNone(resolve(self.purchase(),self.docs(text))['value'])
         text='Участники закупки | Только субъекты малого и среднего предпринимательства (нет)'
         self.assertFalse(resolve(self.purchase(),self.docs(text))['value'])
+    def test_current_procurement_subcontract_clause_is_not_exclusive(self):
+        for text in [
+            'Настоящая закупка проводится с привлечением субподрядчиков только субъектов малого и среднего предпринимательства.',
+            'Категория участников | Привлекаются субподрядчики только МСП',
+            'Участники закупки | Предусматривается квота: только МСП',
+            'Закон предусматривает, что участниками закупки являются только субъекты малого и среднего предпринимательства.',
+        ]:
+            self.assertIsNone(resolve(self.purchase(),self.docs(text))['value'],text)
+            self.assertFalse(security_findings(self.purchase(),self.docs(text))[0])
+    def test_direct_current_procurement_among_sme(self):
+        for text in [
+            'Настоящая закупка проводится только среди субъектов малого и среднего предпринимательства.',
+            'Данный аукцион в электронной форме проводится исключительно для субъектов МСП.',
+        ]:
+            self.assertTrue(resolve(self.purchase(),self.docs(text))['value'],text)
     def test_method_negation(self):
         p=self.purchase();p['method']='Аукцион не только для субъектов малого и среднего предпринимательства'
         self.assertIsNone(resolve(p)['value'])
