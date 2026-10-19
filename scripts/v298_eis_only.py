@@ -104,6 +104,9 @@ def official_xml_documents(reg):
                     try:record,data=parse_document(xml,name)
                     except ValueError:continue
                     if record["reg_number"]==reg:
+                        # Legal timing adapters need the full verified chain,
+                        # not publication dates copied from receipt metadata.
+                        record["archive_sha256"]=sha
                         records[digest]=(record,data)
         except (OSError,ValueError,KeyError,TypeError,AttributeError,zipfile.BadZipFile,
                 RuntimeError,NotImplementedError):
@@ -443,6 +446,12 @@ async def offline_audit(ns,reg,collect_only=False):
     # Original URLs without downloaded content are deliberately NOT retried.
     # Show incomplete intake as waiting, never as an audited original.
     if not docs:raise ValueError("No readable original files have been uploaded from EIS")
+
+    # Preserve protocol publication facts from the exact verified SOAP XML.
+    # Keep legacy `published` blank: a general notice/archive timestamp must
+    # never silently activate unrelated old metadata-based legal rules.
+    from official_publication_evidence import annotate_protocol_publications
+    await asyncio.to_thread(annotate_protocol_publications,reg,docs)
 
     # Public EIS manifests from older collectors may contain only a status
     # instead of the subject and no buyer. Read explicit buyer fields from

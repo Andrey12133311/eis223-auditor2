@@ -10,11 +10,15 @@ from datetime import datetime
 import hashlib
 import json
 import re
+import sqlite3
 import threading
 from v333_dedup_ui import issue_key, _proof, _different_fact
 from v365_consultant_refs import legal_identity
 from v342_identity import organization_display_name
-from v348_cross_document_legal import finding_clarification_number
+from v348_cross_document_legal import (finding_clarification_number,
+                                     finding_protocol_number, finding_original_identity,
+                                     same_original_identity, event_evidence_text,
+                                     finding_binary_identity)
 
 def _normalized_law(row):
     # Equivalent ways to cite the same article/part and Government decree are
@@ -23,7 +27,9 @@ def _normalized_law(row):
 
 _DATE = re.compile(r"(?<!\d)(\d{2})\.(\d{2})\.(20\d{2})(?!\d)")
 def _normalized_proof(text):
-    proof=_proof(text)
+    # Identity/provenance controls grouping above; different receipt spellings
+    # are not part of the underlying legal date chain or quotation.
+    proof=_proof(event_evidence_text(text))
     def iso(match):
         try:return datetime.strptime(match.group(0),"%d.%m.%Y").strftime("%Y-%m-%d")
         except ValueError:return match.group(0)
@@ -32,16 +38,26 @@ def _normalized_proof(text):
 def _dates(text):
     return frozenset(re.findall(r"(?<!\d)20\d{2}-\d{2}-\d{2}(?!\d)",text))
 
+def _numbered_identity(row):
+    code=str(row.get("code") or row.get("field_path") or "")
+    return {family:number for family,reader in
+            (("CLARIFICATION-",finding_clarification_number),
+             ("PROTOCOL-",finding_protocol_number))
+            if family in code and (number:=reader(row))}
+
 def _common_event(a,b):
     """One incident: same legal basis and demonstrably matching factual episode.
 
     Different dates, money/payment terms or independently established clauses
     cannot be merged solely because a title, law article or detector is shared.
     """
-    if ("CLARIFICATION-" in str(a.get("code") or a.get("field_path") or "")
-            and "CLARIFICATION-" in str(b.get("code") or b.get("field_path") or "")):
-        left_number,right_number=finding_clarification_number(a),finding_clarification_number(b)
-        if left_number and right_number and left_number!=right_number:return False
+    a_code=str(a.get("code") or a.get("field_path") or "")
+    b_code=str(b.get("code") or b.get("field_path") or "")
+    for family,number in (("CLARIFICATION-",finding_clarification_number),
+                          ("PROTOCOL-",finding_protocol_number)):
+        if family in a_code and family in b_code:
+            left_number,right_number=number(a),number(b)
+            if left_number and right_number and left_number!=right_number and not same_original_identity(a,b):return False
     ta=issue_key(a.get("title") or a.get("item") or a.get("code"))
     tb=issue_key(b.get("title") or b.get("item") or b.get("code"))
     same_title=bool(ta and ta==tb)
@@ -104,6 +120,9 @@ def collapse_legal_events(rows):
         title=issue_key(row["title"])
         if not title:continue
         norm=_normalized_law(row)
+        identity=_numbered_identity(row)
+        origin=finding_original_identity(row)
+        binary=finding_binary_identity(row)
         keys=["title:"+title]
         if norm:keys.append("law:"+norm)
         eligible=[]
@@ -113,18 +132,26 @@ def collapse_legal_events(rows):
                 idx=id(cluster)
                 if idx not in visited:
                     eligible.append(cluster);visited.add(idx)
-        matched=next((c for c in eligible if _common_event(c["best"],row)),None)
+        matched=next((c for c in eligible
+                      if ((origin and origin in c["origins"]) or (binary and binary in c["binaries"]) or
+                          not any(family in c["identities"] and c["identities"][family]!=number
+                                  for family,number in identity.items()))
+                      and _common_event(c["best"],row)),None)
         src={"document":str(row.get("document") or ""),
              "url":str(row.get("source_url") or "")}
         if matched is None:
             matched={"best":row,"sources":[src] if any(src.values()) else [],
-                     "raw_count":1}
+                     "raw_count":1,"identities":dict(identity),"origins":{origin} if origin else set(),
+                     "binaries":{binary} if binary else set()}
             clusters.append(matched)
         else:
             matched["raw_count"]+=1
             if any(src.values()) and src not in matched["sources"]:
                 matched["sources"].append(src)
             matched["best"]=_choose(matched["best"],row)
+            for family,number in identity.items():matched["identities"].setdefault(family,number)
+            if origin:matched["origins"].add(origin)
+            if binary:matched["binaries"].add(binary)
         for key in keys:
             if all(x is not matched for x in by_key[key]):
                 by_key[key].append(matched)
@@ -174,6 +201,9 @@ def load_counts(conn,regs):
     """Exact full-filter counts without repeatedly reconciling old evidence."""
     regs=list(dict.fromkeys(str(x) for x in regs))
     counts={}
+    # Checklist rows need their rule identity too: without it the numbered
+    # protocol/request guard is lost on the dashboard. Preserve read support
+    # for legacy/minimal schemas that predate field_path.
     for offset in range(0,len(regs),350):
         batch=regs[offset:offset+350]
         if not batch:continue
@@ -184,10 +214,14 @@ def load_counts(conn,regs):
             "FROM findings WHERE kind='violation' AND reg_number IN ("+marks+")",
             batch):
             d=dict(row);grouped[d.pop("reg_number")].append(d)
-        for row in conn.execute(
-            "SELECT reg_number,item AS title,law,evidence,document,source_url "
-            "FROM checks WHERE status='violation' AND reg_number IN ("+marks+")",
-            batch):
+        check_sql=("SELECT reg_number,item AS title,law,evidence,document,source_url,{code} "
+                   "FROM checks WHERE status='violation' AND reg_number IN ("+marks+")")
+        try:
+            check_rows=conn.execute(check_sql.format(code="field_path AS code"),batch)
+        except sqlite3.OperationalError as exc:
+            if str(exc).casefold()!="no such column: field_path":raise
+            check_rows=conn.execute(check_sql.format(code="NULL AS code"),batch)
+        for row in check_rows:
             d=dict(row);grouped[d.pop("reg_number")].append(d)
         counts.update((reg,_saved_event_count(reg,grouped.get(reg,())))
                       for reg in batch)

@@ -48,6 +48,8 @@ COPY tests/test_general_company_claim.py tests/test_general_thematic_parity.py t
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_company_claim.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_thematic_parity.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_db_stage_retry.py'
 COPY tests/test_v383_msp_scope.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v383_msp_scope.py'
+COPY tests/test_amendment_evidence_recall.py tests/test_amendment_history_intake.py tests/test_legal_event_recall.py tests/test_official_publication_evidence.py tests/test_scoped_legal_recheck.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_amendment_evidence_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_amendment_history_intake.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_event_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_official_publication_evidence.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_scoped_legal_recheck.py'
 RUN mkdir -p /data/files /data/reports
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]

@@ -19,17 +19,29 @@ from v295_eis_originals import root,uid_from_url
 LAW="223-ФЗ, статья 4, часть 11"
 LAW_URL="https://www.consultant.ru/document/cons_doc_LAW_116964/441d00be62e3224cdc0514cffaf2a26b5b40a1c7/"
 REG=re.compile(r"^[0-9]{11,20}$")
-DATE_RX=r"(?P<day>(?:[0-3]?\d[.][01]?\d[.]20\d{2})|(?:20\d{2}-[01]\d-[0-3]\d))"
+MONTHS={"января":1,"февраля":2,"марта":3,"апреля":4,"мая":5,"июня":6,
+        "июля":7,"августа":8,"сентября":9,"октября":10,"ноября":11,"декабря":12}
+DATE_RX=(r"(?P<day>(?:[0-3]?\d[.][01]?\d[.]20\d{2})|(?:20\d{2}-[01]\d-[0-3]\d)|"
+         r"(?:[«\"]?[0-3]?\d[»\"]?\s+(?:"+"|".join(MONTHS)+r")\s+20\d{2}))")
+SEPARATOR=r"\s*[:：|=№–—\-\s]{0,20}"
 DECISION=re.compile(
     r"(?:дата\s+(?:принятия\s+)?решения\s+о\s+внесении\s+изменени\w*|"
     r"решени\w*\s+о\s+внесении\s+изменени\w*\s+(?:от|принят\w*)|"
     r"(?:изменени\w*|редакци\w*)\s+документаци\w*\s+(?:от|утвержден\w*\s*))"
-    r"\s*[:№–—\-]*\s*"+DATE_RX,re.I)
+    +SEPARATOR+DATE_RX,re.I)
+# Real originals often identify the act first, with the amendment subject
+# after its date. The date must belong to that act, not a nearby notice,
+# file name, draft, or a quoted hypothetical deadline.
+DECISION_ACT=re.compile(
+    r"\b(?:решение|приказ|распоряжение)\s*(?:№\s*[0-9А-ЯA-Zа-яa-z./_-]{1,40}\s*)?"
+    r"от\s+"+DATE_RX+r"\s*(?:г(?:ода|\.)?\s*)?(?:№\s*[0-9А-ЯA-Zа-яa-z./_-]{1,40}\s*)?"
+    r"[«\"“]?\s*о\s+внесении\s+изменени\w*\s+в\s+(?:извещени\w*|документаци\w*)",re.I)
 PUBLISHED=re.compile(
     r"(?:дата\s+(?:и\s+время\s+)?(?:публикации|размещения)\s+"
-    r"(?:изменени\w*|новой\s+редакци\w*)\s+(?:в\s+)?ЕИС|"
-    r"(?:изменени\w*|редакци\w*)\s+(?:размещен\w*|опубликован\w*)\s+(?:в\s+)?ЕИС)"
-    r"\s*[:№–—\-]*\s*"+DATE_RX,re.I)
+    r"(?:изменени\w*|новой\s+редакци\w*)(?:\s+(?:в\s+)?(?:извещени\w*|документаци\w*))?\s+(?:в\s+)?ЕИС|"
+    r"дата\s+(?:и\s+время\s+)?(?:публикации|размещения)\s+в\s+ЕИС\s+изменени\w*|"
+    r"(?:изменени\w*|редакци\w*)\s+(?:размещ[её]н\w*|опубликован\w*)\s+(?:в\s+)?ЕИС)"
+    +SEPARATOR+DATE_RX,re.I)
 # Separate clues: a document dated Aug 10 is NOT proof of formal adoption;
 # a publication date of a general notice is NOT an amendment's publication.
 DOC_DATE=re.compile(
@@ -48,6 +60,8 @@ def day(value):
         if raw[:10].count("-")==2:return date.fromisoformat(raw[:10])
         m=re.search(r"\b([0-3]?\d)[.]([01]?\d)[.](20\d{2})\b",raw)
         if m:return date(int(m.group(3)),int(m.group(2)),int(m.group(1)))
+        m=re.search(r"[«\"]?([0-3]?\d)[»\"]?\s+("+"|".join(MONTHS)+r")\s+(20\d{2})",raw,re.I)
+        if m:return date(int(m[3]),MONTHS[m[2].casefold()],int(m[1]))
     except (ValueError,OverflowError):return None
     return None
 
@@ -73,8 +87,13 @@ def document_evidence(docs):
     for d in docs:
         if not verified(d):continue
         text=str(d.get("text") or "")[:650000].replace("\xa0"," ")
-        decisions=list(DECISION.finditer(text))
+        if re.search(r"\b(?:проект|образец|пример|шаблон)\b",str(d.get("name") or ""),re.I):continue
+        decisions=sorted([*DECISION.finditer(text),*DECISION_ACT.finditer(text)],key=lambda m:m.start())
+        decisions=[m for m in decisions if not re.search(
+            r"(?:проект|образец|пример|например|шаблон)\s*[:：,–—-]?\s*$",
+            text[max(0,m.start()-35):m.start()],re.I)]
         publications=list(PUBLISHED.finditer(text))
+        used=set()
         for index,m in enumerate(decisions):
             decision=day(m.group("day"))
             if decision is None:continue
@@ -83,15 +102,30 @@ def document_evidence(docs):
             candidates=[x for x in publications if m.end()<=x.start()<stop
                         and x.start()-m.end()<=650]
             pub=candidates[0] if len(candidates)==1 else None
+            # EIS tables can put the publication row above the decision row.
+            # Only an otherwise unique pair may be read in reverse order.
+            if (pub is None and len(decisions)==len(publications)==1
+                    and 0<=m.start()-publications[0].end()<=650):
+                pub=publications[0]
             if pub:
-                fragment=text[max(0,m.start()-100):pub.end()]
-                identities=set(re.findall(r"\bизменени[еяй]\s*№\s*([0-9A-Za-zА-Яа-я][0-9A-Za-zА-Яа-я./_-]{0,79})",fragment,re.I))
+                fragment=text[max(0,min(m.start(),pub.start())-100):max(m.end(),pub.end())]
+                identities={value.rstrip('.').casefold() for value in re.findall(
+                    r"\b(?:изменени[еяй]|редакци[яиюй]|верси[яиюй])\s*№\s*"
+                    r"([0-9A-Za-zА-Яа-я][0-9A-Za-zА-Яа-я./_-]{0,79})",fragment,re.I)}
                 if len(identities)>1:pub=None
+            if pub:used.add(pub.start())
             publication=day(pub.group("day")) if pub else None
             out.append({"decision_date":decision,"publication_date":publication,
                         "document":d.get("name"),"source":(d.get("meta") or {}).get("source_url"),
                         "decision_evidence":" ".join(text[max(0,m.start()-90):m.end()+110].split())[:360],
                         "publication_evidence":" ".join(pub.group(0).split())[:270] if pub else "",
+                        "kind":"document_explicit"})
+            if len(out)>=40:return out
+        for pub in publications:
+            if pub.start() in used:continue
+            out.append({"decision_date":None,"publication_date":day(pub.group("day")),
+                        "document":d.get("name"),"source":(d.get("meta") or {}).get("source_url"),
+                        "decision_evidence":"","publication_evidence":pub.group(0)[:270],
                         "kind":"document_explicit"})
             if len(out)>=40:return out
     return out
@@ -109,24 +143,58 @@ def manifest_changes(reg):
     except (OSError,ValueError,TypeError):return []
     changes=manifest.get("changes")
     if not isinstance(changes,list):return []
+    documents=manifest.get("documents") or []
+    if not isinstance(documents,list):documents=[]
+    attachment_uids={uid_from_url(item.get("url") or "") for item in documents
+                     if isinstance(item,dict)}
     result=[]
     for ch in changes[:80]:
         if not isinstance(ch,dict):continue
         source=ch.get("source_page") or ch.get("source_url")
         if not official_url(source):continue
-        if not re.search(r"(?:изменени\w*|редакци\w*|change|amend)",str(ch.get("type") or ""),re.I):
+        if not re.search(r"(?:изменени\w*|редакци\w*|change|amend|revision)",str(ch.get("type") or ""),re.I):
             continue
         published=day(ch.get("publication_date") or ch.get("published_at"))
         if published is None:continue
         decision=day(ch.get("decision_date"))
         deadline=day(ch.get("submission_end"))
+        attachment=ch.get("source_url") or ""
+        attachment_uid=uid_from_url(attachment)
+        # A history page and its linked original have different roles. Keep
+        # the official page as publication evidence, and the explicitly
+        # registered attachment UID for cross-original decision matching.
+        if not attachment_uid or attachment_uid not in attachment_uids:attachment=""
         result.append({"decision_date":decision,"publication_date":published,
                        "submission_end":deadline,
                        "document":str(ch.get("document_name") or "Изменения документации ЕИС")[:240],
-                       "source":source,"decision_evidence":str(ch.get("decision_evidence") or "")[:380],
+                       "source":source,"attachment_source":attachment,
+                       "decision_evidence":str(ch.get("decision_evidence") or "")[:380],
                        "publication_evidence":str(ch.get("publication_evidence") or "")[:380],
                        "kind":"eis_history"})
     return result
+
+def finding_event_key(finding):
+    """Use the legal trigger/placement dates, never dates quoted in excerpts.
+
+    A history row and its original may spell the same date differently. Extra
+    dates in quoted source text must not create an extra violation. Without
+    established independent event identity, same-day copies stay one finding.
+    """
+    labels={
+        "223-4-11-AMENDMENT-PUBLICATION-DELAY":
+            (r"Решение об изменении",r"публикация изменений в ЕИС"),
+        "223-4-11-CHANGE-AFTER-BID-DEADLINE":
+            (r"Размещение изменений",r"окончание подачи заявок по проверенной редакции"),
+    }.get(finding.get("code"))
+    if not labels:return None
+    evidence=str(finding.get("evidence") or "")
+    dates=[]
+    for label in labels:
+        match=re.search(label+r"\s*:\s*"+DATE_RX,evidence,re.I)
+        value=day(match.group("day")) if match else None
+        if not value:return None
+        dates.append(value.isoformat())
+    return (finding["code"],tuple(dates))
 
 def evaluation(p,docs):
     reg=str(p.get("reg") or "")
@@ -151,13 +219,13 @@ def evaluation(p,docs):
         decided=event.get("decision_date")
         published=event.get("publication_date")
         matched=[event]
-        if published and not decided:
+        if published and not decided and event.get("kind")!="document_explicit":
             # Document decision date can be matched only when the same real
             # amendment is identifiable in the source text/date and history.
             # A shared filename is not identity: different revisions commonly
             # have the same filename. Join only a single date from the exact
             # verified EIS attachment, never a first matching candidate.
-            uid=uid_from_url(event.get("source") or "")
+            uid=uid_from_url(event.get("attachment_source") or event.get("source") or "")
             candidates=[proof for proof in proofs if uid and
                         uid_from_url(proof.get("source") or "")==uid and
                         proof.get("decision_date") and
@@ -183,23 +251,29 @@ def evaluation(p,docs):
                     workday=federal_workday(due)
                     if workday is not False:break
             if workday is not None and published>due and 0<delta<=365:
+                decision_proof=next((item for item in matched if item.get("decision_evidence")),event)
                 detail=(f"Решение об изменении: {decided.isoformat()}; "
                         f"публикация изменений в ЕИС: {published.isoformat()}; "
                         f"крайний день размещения: {due.isoformat()}; прошло {delta} календарных дней. "
                         f"Источник: {event.get('publication_evidence') or event.get('source')}; "
-                        f"решение: {event.get('decision_evidence') or 'подтверждённые данные ЕИС'}.")
+                        f"решение: {decision_proof.get('decision_evidence') or 'подтверждённые данные ЕИС'}. "
+                        f"Источник решения: {decision_proof.get('source') or event.get('source')}.")
                 findings.append({
                     "code":"223-4-11-AMENDMENT-PUBLICATION-DELAY",
                     "kind":"violation",
                     "title":"Изменения документации опубликованы позднее трёх дней после решения",
                     "law":LAW,"law_url":LAW_URL,"evidence":detail[:1500],
                     "note":"Срок рассчитан по календарным датам без учёта времени; исключения и действующая редакция проверяются отдельно.",
-                    "document":event.get("document"),"source_url":event.get("source"),
+                    "document":decision_proof.get("document") or event.get("document"),"source_url":event.get("source"),
                     "location":"История изменений ЕИС / дата решения о внесении изменений",
-                    "match_text":event.get("decision_evidence") or event.get("publication_evidence") or detail[:180]
+                    "match_text":decision_proof.get("decision_evidence") or event.get("publication_evidence") or detail[:180]
                 })
             elif delta<0:
                 reviews.append({"reason":"Дата публикации предшествует дате решения","event":event})
+            elif workday is None:
+                reviews.append({"reason":"Не подтверждён производственный календарь для крайнего дня размещения","event":event})
+            elif delta>365:
+                reviews.append({"reason":"Большой интервал между решением и публикацией требует сверки редакции и дат","event":event})
         elif published or decided:
             reviews.append({"reason":"Для ч. 11 ст. 4 не установлены обе даты решения и публикации изменений","event":event})
     # The minimum extension depends on the procurement regulation for THIS
@@ -251,8 +325,7 @@ def evaluation(p,docs):
     for f in findings:
         # A single amendment may appear in both EIS history and its original.
         # Keep distinct dated legal events; do not count copies as violations.
-        dates=tuple(re.findall(DATE_RX,f.get("evidence") or ""))
-        key=(f["code"],dates) if dates else (f["code"],f.get("source_url"),f.get("match_text"))
+        key=finding_event_key(f) or (f["code"],f.get("source_url"),f.get("match_text"))
         unique.setdefault(key,f)
     return list(unique.values()),reviews[:15]
 
@@ -288,10 +361,9 @@ def install(ns):
         if str(p.get("reg"))=="32616233661" or new:
             print(f"V330 ART4_11 reg={p.get('reg')} proved={len(new)}",flush=True)
         for item in new:
-            if not any(x.get("kind")=="violation" and x.get("code")==item.get("code")
-                       and tuple(re.findall(DATE_RX,x.get("evidence") or ""))
-                       and tuple(re.findall(DATE_RX,x.get("evidence") or ""))==tuple(re.findall(DATE_RX,item.get("evidence") or ""))
-                       for x in old):
+            key=finding_event_key(item)
+            if not any(x.get("kind")=="violation" and key is not None
+                       and finding_event_key(x)==key for x in old):
                 old.append(item)
         return old
     wrapped_analyze.__art4_11_v330__=True

@@ -8,6 +8,7 @@ ambiguous or missing event evidence is not turned into a violation.
 from __future__ import annotations
 from functools import wraps
 import re
+import json
 from datetime import date,timedelta
 from v331_broad_legal import verified
 from legal_applicability import competitive_rule_scope
@@ -47,6 +48,8 @@ def _clarification_identity(text,title=False):
 
 
 def finding_clarification_number(item):
+    local = _local_identity_number(item, "CLARIFICATION")
+    if local is not None:return local
     # Evidence begins with a machine-authored explicit identifier. Parse this
     # field separately: quoted document names and URLs are not event labels.
     evidence=str(item.get("evidence") or "")
@@ -229,9 +232,160 @@ def protocol_numbers(text):
 
 def finding_protocol_number(item):
     """Read persisted evidence too: custom in-memory fields are not stored."""
+    local = _local_identity_number(item, "PROTOCOL")
+    if local is not None:return local
     identifiers=protocol_numbers("\n".join(str(item.get(key) or "")
         for key in ("title","evidence","match_text","document")))
     return next(iter(identifiers)) if len(identifiers)==1 else ""
+
+
+def document_event_number(doc, family):
+    """Require a complete, unambiguous identity across the entire original."""
+    number, invalid = _document_event_identity(doc, family)
+    return "" if invalid else number
+
+
+def _document_event_identity(doc, family):
+    parser = _number_identity if family == "PROTOCOL" else _clarification_identity
+    title, title_invalid = parser(doc.get("name") or "", title=True)
+    body, body_invalid = parser(doc.get("text") or "")
+    numbers = title | body
+    invalid = title_invalid or body_invalid or len(numbers) > 1
+    return (next(iter(numbers)) if len(numbers) == 1 and not invalid else ""), invalid
+
+
+def ambiguous_original_documents(docs):
+    """Copies or contradictory representations of one original are not new acts.
+
+    Archive members have their own receipt-relative path. Exact copies remain
+    harmless, while a changed name/body/hash cannot establish independent IDs
+    for the same receipt or identical binary.
+    """
+    groups = {}
+    for doc in docs:
+        if not isinstance(doc, dict) or not verified(doc):continue
+        meta = doc.get("meta") or {}
+        uid = uid_from_url(meta.get("source_url") or "")
+        identity = _document_original_identity(doc)
+        member = identity[1] if identity else "unresolved:" + str(doc.get("name") or "")
+        fingerprint = (str(doc.get("text") or ""), meta.get("sha256"))
+        identities = {family:_document_event_identity(doc, family) for family in ("PROTOCOL", "CLARIFICATION")}
+        for key in (("receipt", uid, member), ("binary", meta.get("sha256"))):
+            groups.setdefault(key, []).append((id(doc), fingerprint, identities))
+    ambiguous = set()
+    for representations in groups.values():
+        conflict = len({fingerprint for _, fingerprint, _ in representations}) > 1
+        for family in ("PROTOCOL", "CLARIFICATION"):
+            states = [identities[family] for _, _, identities in representations]
+            numbers = {number for number, _ in states if number}
+            conflict = conflict or len(numbers) > 1 or (bool(numbers) and any(invalid for _, invalid in states))
+        if conflict:
+            ambiguous.update(identity for identity, _, _ in representations)
+    return ambiguous
+
+
+def _identity_prefix(family):
+    return "Идентификатор " + ("протокола" if family == "PROTOCOL" else "запроса") + " по оригиналу: "
+
+
+def event_identity_evidence(evidence, family, number, doc=None):
+    # Persist even the unresolved state: a later UI/persistence pass must not
+    # recover an invalid filename identifier after the full original is gone.
+    provenance = ""
+    if doc is not None:
+        identity = _document_original_identity(doc)
+        if identity:
+            digest = str((doc.get("meta") or {}).get("sha256") or "")
+            if re.fullmatch(r"[0-9a-f]{64}", digest):identity = (*identity, digest)
+            provenance = "Идентичность оригинала ЕИС: " + json.dumps(identity, ensure_ascii=False) + ".\n"
+    return _identity_prefix(family) + (number or "не установлен") + ".\n" + provenance + evidence
+
+
+def finding_original_identity(item):
+    """Stable identity survives storage; distinct archive members stay separate."""
+    lines = str(item.get("evidence") or "").split("\n", 2)
+    prefix = "Идентичность оригинала ЕИС: "
+    if len(lines) < 2 or not lines[1].startswith(prefix) or not lines[1].endswith("."):
+        # Historical archive findings used the persisted display convention
+        # "archive.ext / member". Recover that member, never the parent UID
+        # alone, before comparing a legacy finding with a new audit.
+        if any(lines[0].startswith(_identity_prefix(family)) for family in ("PROTOCOL", "CLARIFICATION")):
+            return None
+        uid = uid_from_url(item.get("source_url") or "")
+        name = str(item.get("document") or "")
+        if not uid or not name:return None
+        member = _legacy_archive_member(name)
+        if " / " in name and member is None:return None
+        return uid, member or ""
+    if not any(lines[0].startswith(_identity_prefix(family)) for family in ("PROTOCOL", "CLARIFICATION")):
+        return None
+    try:identity = json.loads(lines[1][len(prefix):-1])
+    except (ValueError, TypeError):return None
+    if (not isinstance(identity, list) or len(identity) not in (2, 3)
+            or not isinstance(identity[0], str) or not re.fullmatch(r"[0-9A-F]{32}", identity[0])
+            or not isinstance(identity[1], str)
+            or (len(identity) == 3 and (not isinstance(identity[2], str)
+                                       or not re.fullmatch(r"[0-9a-f]{64}", identity[2])))):
+        return None
+    return tuple(identity[:2])
+
+
+def finding_binary_identity(item):
+    if finding_original_identity(item) is None:return ""
+    lines = str(item.get("evidence") or "").split("\n", 2)
+    prefix = "Идентичность оригинала ЕИС: "
+    if len(lines) < 2 or not lines[1].startswith(prefix):return ""
+    try:identity = json.loads(lines[1][len(prefix):-1])
+    except (ValueError, TypeError):return ""
+    return identity[2] if isinstance(identity, list) and len(identity) == 3 else ""
+
+
+def _legacy_archive_member(name):
+    match = re.match(r"^.+\.(?:zip|rar|7z|tar|gz|tgz|bz2|xz|tbz2|txz|cab) / (.+)$", str(name or ""), re.I)
+    return match[1] if match else None
+
+
+def _document_original_identity(doc):
+    meta = doc.get("meta") or {}
+    uid = uid_from_url(meta.get("source_url") or "")
+    if not uid:return None
+    if meta.get("source") == "official_eis_archive_member":
+        member = str(meta.get("archive_member") or "") or _legacy_archive_member(doc.get("name"))
+        return (uid, member) if member else None
+    return uid, ""
+
+
+def same_original_identity(left, right):
+    identity = finding_original_identity(left)
+    if identity and identity == finding_original_identity(right):return True
+    digest = finding_binary_identity(left)
+    return bool(digest and digest == finding_binary_identity(right))
+
+
+def event_evidence_text(value):
+    """Identity labels are not occurrence dates or part of the quoted proof."""
+    text = str(value or "")
+    first, separator, rest = text.partition("\n")
+    if separator and first.endswith(".") and any(first.startswith(_identity_prefix(family))
+                                                  for family in ("PROTOCOL", "CLARIFICATION")):
+        text = rest
+    first, separator, rest = text.partition("\n")
+    if separator and first.startswith("Идентичность оригинала ЕИС: ") and first.endswith("."):
+        text = rest
+    return text
+
+
+def _local_identity_number(item, family):
+    evidence = str(item.get("evidence") or "")
+    prefix = _identity_prefix(family)
+    if not evidence.startswith(prefix):return None
+    line = evidence.split("\n", 1)[0]
+    if not line.endswith("."):return ""
+    value = line[len(prefix):-1]
+    parser = _number_identity if family == "PROTOCOL" else _clarification_identity
+    label = "Номер протокола: " if family == "PROTOCOL" else "Номер запроса: "
+    numbers, invalid = parser(label + value)
+    return next(iter(numbers)) if not invalid and len(numbers) == 1 else ""
 
 def _protocol_kind(name,matched):
     """Don't pair the final protocol with a different interim protocol."""
@@ -247,6 +401,8 @@ def cross_doc_protocols(p,docs):
     numbers, duplicate events and multiple versions are never guessed."""
     if competitive_rule_scope(p) is not True:
         return []
+    from official_publication_evidence import protocol_publication_verifier
+    official_publication = protocol_publication_verifier(p)
     signed,published=[],[]
     ambiguous_numbers=set()
     for index,doc in enumerate(docs):
@@ -297,6 +453,15 @@ def cross_doc_protocols(p,docs):
         si,sdoc,signature,start,skind,_=signatures[0]
         pi,pdoc,publication,end,pkind,_=publications[0]
         if si==pi or skind!=pkind or not 0<=(end-start).days<365:continue
+        # A split-original detector must not reinstate a date rejected by the
+        # within-original detector. Verify the exact two receipts, never a
+        # notice timestamp or an unrelated protocol attachment.
+        official = [official_publication(doc) for doc in (sdoc,pdoc)]
+        if any(evidence.get("state") == "conflict" or
+               (evidence.get("state") == "confirmed" and
+                day(evidence.get("publication_date")) != end)
+               for evidence in official):
+            continue
         due=start+timedelta(days=3)
         working=federal_workday(due)
         if working is None:continue
