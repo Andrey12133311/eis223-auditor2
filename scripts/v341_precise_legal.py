@@ -93,14 +93,8 @@ def review(doc, code, title, evidence, law, match):
 def evaluate(p, docs):
     findings, checks = [], []
     competitive = competitive_rule_scope(p) is True
-    sme_proof = (p.get("fact_evidence") or {}).get("sme_only") or {}
-    if not sme_proof:
-        sme_proof = document_facts(docs).get("sme_only") or {}
-    if isinstance(sme_proof.get("value"),bool) and sme_proof.get("source") in (
-            "official_eis_card", "official_eis_document"):
-        sme_scope = sme_proof["value"]
-    else:
-        sme_scope = bool(SME_EXCLUSIVE.search(str(p.get("method") or "")))
+    from v383_msp_scope import resolve
+    sme_scope = resolve(p,docs)["value"] is True
     for doc in docs[:650]:
         if not verified(doc):
             continue

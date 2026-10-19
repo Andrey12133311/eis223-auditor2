@@ -329,6 +329,9 @@ def as_procurement(row):
     try:
         card=json.loads(row.get("card_fields_json") or "{}")
         ev=(card.get("price_evidence") or {}) if isinstance(card,dict) else {}
+        if isinstance(card,dict):
+            out["card_fields_json"]=card
+            out["fact_evidence"]=card.get("fact_evidence") or {}
         from v311_verified_customer import _official_source
         from v335_price_recovery import money
         verified=money(ev.get("price"))
