@@ -46,6 +46,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_extraction_throughput.py'
           python -m unittest discover -s tests -p 'test_general_original_collection_retry.py'
+          python scripts/v372_automatic_legal_selftest.py
           python -m unittest discover -s tests -p 'test_legal_event_coverage.py'
           python -m unittest discover -s tests -p 'test_legal_security_clause_coverage.py'
           python -m unittest discover -s tests -p 'test_receipt_original_parity.py'
