@@ -48,11 +48,12 @@ def business_company(name):
 COMPETITIVE=re.compile(r"конкурс|аукцион|запрос\\s+(?:котировок|предложений)|торги",re.I)
 NONCOMPETITIVE=re.compile(r"единственн(?:ого|ый|ому)\\s+(?:поставщик|подрядчик|исполнитель)|прямая\\s+закупка|неконкурентн",re.I)
 def competitive_kind(method):
- value=str(method or "").strip()
- if not value:return {"classification":"unknown","reason":"Способ закупки не указан в подтверждённых данных"}
- if NONCOMPETITIVE.search(value):return {"classification":"noncompetitive","reason":"В способе закупки явно указана неконкурентная процедура"}
- if COMPETITIVE.search(value):return {"classification":"competitive","reason":"Указан конкурентный способ закупки; правовую применимость следует сверить с положением о закупке"}
+ from legal_applicability import competitive_scope
+ state=competitive_scope({"method":method})
+ if state is False:return {"classification":"noncompetitive","reason":"В способе закупки явно указана неконкурентная процедура"}
+ if state is True:return {"classification":"competitive","reason":"Указан конкурентный способ закупки; применимость сверяется с положением о закупке"}
  return {"classification":"unknown","reason":"Недостаточно сведений для достоверной квалификации"}
+
 def db(ns):
  c=ns["conn"]();c.row_factory=sqlite3.Row;return c
 def init(ns):

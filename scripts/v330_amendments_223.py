@@ -5,6 +5,7 @@ comparisons ignore clock hours (user requirement). A newly published revision
 does not prove when its adoption decision was made. No guessed dates/counts.
 """
 from __future__ import annotations
+from legal_applicability import competitive_scope
 
 import json
 import re
@@ -72,12 +73,20 @@ def document_evidence(docs):
     for d in docs:
         if not verified(d):continue
         text=str(d.get("text") or "")[:650000].replace("\xa0"," ")
-        for m in DECISION.finditer(text):
+        decisions=list(DECISION.finditer(text))
+        publications=list(PUBLISHED.finditer(text))
+        for index,m in enumerate(decisions):
             decision=day(m.group("day"))
             if decision is None:continue
-            # Pair only within the same local amendment section/document.
-            snippet=text[max(0,m.start()-220):min(len(text),m.end()+480)]
-            pub=PUBLISHED.search(snippet)
+            # Never borrow a previous/next amendment's publication timestamp.
+            stop=decisions[index+1].start() if index+1<len(decisions) else len(text)
+            candidates=[x for x in publications if m.end()<=x.start()<stop
+                        and x.start()-m.end()<=650]
+            pub=candidates[0] if len(candidates)==1 else None
+            if pub:
+                fragment=text[max(0,m.start()-100):pub.end()]
+                identities=set(re.findall(r"\bизменени[еяй]\s*№\s*([0-9A-Za-zА-Яа-я][0-9A-Za-zА-Яа-я./_-]{0,79})",fragment,re.I))
+                if len(identities)>1:pub=None
             publication=day(pub.group("day")) if pub else None
             out.append({"decision_date":decision,"publication_date":publication,
                         "document":d.get("name"),"source":(d.get("meta") or {}).get("source_url"),
@@ -127,6 +136,15 @@ def evaluation(p,docs):
     findings=[]
     reviews=[]
     pairs=set()
+    scope=competitive_scope(p)
+    purchase_day=day(p.get("published") or p.get("published_at"))
+    def scope_reason(event):
+        if scope is not True:
+            return "Не подтверждена применимость нормы о конкурентной закупке"
+        dates=[purchase_day,event.get("decision_date"),event.get("publication_date")]
+        if any(value and value<date(2019,1,1) for value in dates):
+            return "Для исторической закупки требуется редакция закона и положения на дату извещения с учётом переходных правил"
+        return None
     # Publication timestamp MUST be from explicit amendment history or a
     # document stating "changes published in EIS" (not file date/mtime).
     for event in [*events,*proofs]:
@@ -136,16 +154,25 @@ def evaluation(p,docs):
         if published and not decided:
             # Document decision date can be matched only when the same real
             # amendment is identifiable in the source text/date and history.
-            for proof in proofs:
-                if proof["decision_date"] and (
-                    proof.get("document")==event.get("document")
-                    or proof.get("source")==event.get("source")):
-                    decided=proof["decision_date"]
-                    matched.append(proof)
-                    break
+            # A shared filename is not identity: different revisions commonly
+            # have the same filename. Join only a single date from the exact
+            # verified EIS attachment, never a first matching candidate.
+            uid=uid_from_url(event.get("source") or "")
+            candidates=[proof for proof in proofs if uid and
+                        uid_from_url(proof.get("source") or "")==uid and
+                        proof.get("decision_date") and
+                        (not proof.get("publication_date") or proof["publication_date"]==published)]
+            dates={proof["decision_date"] for proof in candidates}
+            if len(dates)==1:
+                decided=next(iter(dates))
+                matched.extend(candidates)
         key=(str(decided),str(published),event.get("source"))
         if key in pairs:continue
         pairs.add(key)
+        reason=scope_reason({**event,"decision_date":decided})
+        if reason:
+            reviews.append({"reason":reason,"event":event})
+            continue
         if decided and published:
             delta=(published-decided).days
             due=decided+timedelta(days=3)
@@ -178,9 +205,12 @@ def evaluation(p,docs):
     # The minimum extension depends on the procurement regulation for THIS
     # procurement method, not on a universal 7-day or 15-day guess.
     for event in events:
+        if scope_reason(event):continue
         published=event.get("publication_date")
         if not published:continue
-        # A current card deadline can belong to an earlier or later revision.\n        # Only the deadline attached to this specific EIS change is admissible.\n        deadline=event.get("submission_end")
+        # A current card deadline can belong to an earlier or later revision.
+        # Only the deadline attached to this specific EIS change is admissible.
+        deadline=event.get("submission_end")
         if not deadline:
             reviews.append({"reason":"Не подтверждён срок подачи заявок именно после данного изменения", "event":event})
             continue

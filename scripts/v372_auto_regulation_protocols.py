@@ -11,6 +11,7 @@ has no stated grounds. Mere absence of searched words or uncertainty about
 the customer's regulation produces a "Требует проверки" item, not a violation.
 """
 from __future__ import annotations
+from legal_applicability import competitive_rule_scope
 from datetime import date
 from functools import wraps
 import re
@@ -87,11 +88,8 @@ def _protocol_doc(doc):
                  re.match(r"\s*протокол\s",heading,re.I)))
 
 def _competitive(p, doc):
-    method=str(p.get("method") or p.get("purchase_method") or "")
-    return bool(COMPETITIVE.search(method) or
-        re.search(r"конкурентн\w*\s+закупк\w*",method,re.I) or
-        (not method and re.search(r"(?:конкурс|аукцион|запрос\s+котировок|запрос\s+предложени\w*)",
-                                  str(doc.get("name") or ""),re.I)))
+    # Protocol titles and generic document text cannot establish legal scope.
+    return competitive_rule_scope(p) is True
 
 def _fragment(body,start,end,limit=570):
     return " ".join(body[max(0,start-170):min(len(body),end+350)].split())[:limit]

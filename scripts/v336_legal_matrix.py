@@ -5,6 +5,7 @@ can yield an automatic violation. All discretionary issues remain review items.
 No remote calls or deletions, and no automatic claim of universal legality.
 """
 from __future__ import annotations
+from legal_applicability import competitive_rule_scope
 
 import math
 import re
@@ -195,7 +196,7 @@ def security_findings(p,docs):
     """
     finding=[]
     checks=[]
-    if not COMPETITIVE.search(str(p.get("method") or "")):
+    if competitive_rule_scope(p) is not True:
         return finding,checks
     verified_nmcd=verified_price(p,docs)
     from v324_fas_practice import _sme_scope

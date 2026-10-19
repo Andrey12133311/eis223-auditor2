@@ -1,15 +1,16 @@
 """Supplemental explicit EIS clarification timestamps spanning different originals.
 
-A positive violation requires exactly one verified request and one verified
-publication in distinct EIS originals, an applicable competitive purchase,
-and an independently known submission deadline. Multiple/missing events are
-NOT turned into violations.
+A positive violation requires a uniquely paired verified request and publication
+in distinct EIS originals, an applicable competitive purchase, and an independently
+known submission deadline. Explicit request identifiers support separate episodes;
+ambiguous or missing event evidence is not turned into a violation.
 """
 from __future__ import annotations
 from functools import wraps
 import re
 from datetime import date,timedelta
 from v331_broad_legal import verified
+from legal_applicability import competitive_rule_scope
 from v295_eis_originals import uid_from_url
 from v341_precise_legal import (matches,REQUEST,ANSWER,SIGNED,PROTOCOL_PUBLISHED,
                                  shifted,day,COMPETITIVE,LAW32,LAW4,federal_workday)
@@ -17,52 +18,118 @@ from v341_precise_legal import (matches,REQUEST,ANSWER,SIGNED,PROTOCOL_PUBLISHED
 EVENT_DOC=re.compile(r"разъяснен|запрос",re.I)
 EXCLUDE=re.compile(r"образец|пример|шаблон|проект|инструкци",re.I)
 
+# Only explicit request labels establish identity. Neither a purchase number,
+# an answer's own number nor a numeric/date-shaped filename identifies a request.
+_CLARIFICATION_LABEL = (r"(?:запрос[а-я]*(?:\s+(?:на\s+)?разъяснени[а-я]*)?)")
+_CLARIFICATION_PREFIX = (r"\b"+_CLARIFICATION_LABEL+r"\s*(?:№|N(?:o|º)?\.?)\s*|"
+    r"\b(?:номер|идентификатор|ID)\s+запроса(?:\s*[:：|=]\s*|\s+)")
+_CLARIFICATION_NUMBER_LABEL = re.compile(_CLARIFICATION_PREFIX,re.I)
+_CLARIFICATION_UNSUPPORTED_LABEL = re.compile(
+    r"\bзапрос[а-я]*[^\n.;:№]{0,120}?(?:№|\bN(?:o|º)?\.?)\s*",re.I)
+
+
+def _clarification_identity(text,title=False):
+    """Use the same complete-token safety checks as protocol identifiers.
+
+    Translate only explicit request labels; other labels stay untouched. This
+    keeps identifier syntax consistent without altering protocol behavior.
+    """
+    text=str(text or "")
+    recognized=list(_CLARIFICATION_NUMBER_LABEL.finditer(text))
+    starts={match.start() for match in recognized}
+    unsupported=any(match.start() not in starts
+        for match in _CLARIFICATION_UNSUPPORTED_LABEL.finditer(text))
+    translated=_CLARIFICATION_NUMBER_LABEL.sub("Протокол № ",text)
+    identifiers,invalid=_number_identity(translated,title=title)
+    # Protocol numbers mentioned incidentally are not request identities.
+    if PROTOCOL_NUMBER.search(text):invalid=True
+    return identifiers,invalid or unsupported
+
+
+def finding_clarification_number(item):
+    # Evidence begins with a machine-authored explicit identifier. Parse this
+    # field separately: quoted document names and URLs are not event labels.
+    evidence=str(item.get("evidence") or "")
+    field=re.match(r"Номер запроса: (.+?)\. Запрос получен ",evidence)
+    if field:
+        numbers,invalid=_clarification_identity("Номер запроса: "+field[1])
+        return next(iter(numbers)) if not invalid and len(numbers)==1 else ""
+    identifiers=set()
+    for key in ("title","match_text","document"):
+        numbers,invalid=_clarification_identity(item.get(key) or "")
+        if invalid:return ""
+        identifiers.update(numbers)
+    return next(iter(identifiers)) if len(identifiers)==1 else ""
+
+
 def cross_doc_clarifications(p,docs):
-    if not COMPETITIVE.search(str(p.get("method") or "")):
+    if competitive_rule_scope(p) is not True:
         return []
     deadline=day(p.get("submission_end") or p.get("deadline"))
     if not deadline:return []
     requests,answers=[],[]
-    for index,doc in enumerate(docs):
+    ambiguous_numbers=set()
+    originals={}
+    conflicting_originals=set()
+    for doc in docs:
         if not isinstance(doc,dict) or not verified(doc):continue
+        source=(doc.get("meta") or {}).get("source_url") or doc.get("url") or ""
+        uid=uid_from_url(source)
+        fingerprint=(str(doc.get("name") or ""),str(doc.get("text") or ""),
+                     (doc.get("meta") or {}).get("sha256"))
+        if uid in originals:
+            if originals[uid][0]!=fingerprint:conflicting_originals.add(uid)
+        else:originals[uid]=(fingerprint,doc)
+    for uid,(_,doc) in originals.items():
         title=str(doc.get("name") or "")
         if not EVENT_DOC.search(title) or EXCLUDE.search(title):continue
         body=str(doc.get("text") or "")[:750000].replace("\xa0"," ")
-        for m in matches(REQUEST,body):
-            at=day(m["date"])
-            if at:
-                requests.append((index,doc,m,at))
-        for m in matches(ANSWER,body):
-            at=day(m["date"])
-            if at:
-                answers.append((index,doc,m,at))
-    # One event of each kind in distinct originals is the only automatically
-    # defensible cross-document pairing. Do not guess which reply belongs to
-    # which request when multiple protocol versions exist.
-    if len(requests)!=1 or len(answers)!=1:
-        return []
-    qi,qdoc,request,received=requests[0]
-    ai,adoc,response,published=answers[0]
-    if qi==ai or received>published:return []
-    latest=shifted(deadline,-3)
-    due=shifted(received,3)
-    if latest is None or due is None or received>latest or published<=due:
-        return []
-    if (published-received).days>90:return []
-    original=qdoc.get("meta") or {}
-    reply=adoc.get("meta") or {}
-    request_source=original.get("source_url") or qdoc.get("url") or ""
-    reply_source=reply.get("source_url") or adoc.get("url") or ""
-    if not request_source or not reply_source:return []
-    # Both documents must be independently verified; one unverified request
-    # alongside a verified answer cannot establish an offence.
-    return [{
+        title_numbers,title_invalid=_clarification_identity(title,title=True)
+        body_numbers,body_invalid=_clarification_identity(body)
+        identifiers=title_numbers|body_numbers
+        invalid=(title_invalid or body_invalid or len(identifiers)>1
+                 or uid in conflicting_originals)
+        if invalid:ambiguous_numbers.update(identifiers)
+        number=None if invalid else next(iter(identifiers),"")
+        for pattern,events in ((REQUEST,requests),(ANSWER,answers)):
+            for m in matches(pattern,body):
+                at=day(m["date"])
+                if at:events.append((uid,doc,m,at,number))
+    groups={}
+    # An unidentified competing event makes even an explicitly numbered pair
+    # unsafe: it may be a different version of that same request or answer.
+    unknown=any(event[4] in (None,"") for event in requests+answers)
+    for side,events in enumerate((requests,answers)):
+        for event in events:
+            number=event[4]
+            if number:groups.setdefault(number,[[],[]])[side].append(event)
+    if len(requests)==len(answers)==1 and requests[0][4]==answers[0][4]=="":
+        groups[""]=[requests,answers]
+    findings=[]
+    for number,(qs,ans) in groups.items():
+        if number and (unknown or number in ambiguous_numbers):continue
+        if len(qs)!=1 or len(ans)!=1:continue
+        qi,qdoc,request,received,_=qs[0]
+        ai,adoc,response,published,_=ans[0]
+        if qi==ai or received>published:continue
+        latest=shifted(deadline,-3)
+        due=shifted(received,3)
+        if latest is None or due is None or received>latest or published<=due:
+            continue
+        if (published-received).days>90:continue
+        original=qdoc.get("meta") or {}
+        reply=adoc.get("meta") or {}
+        request_source=original.get("source_url") or qdoc.get("url") or ""
+        reply_source=reply.get("source_url") or adoc.get("url") or ""
+        if not request_source or not reply_source:continue
+        findings.append({
       "code":"223-3.2-3-CLARIFICATION-CROSS-DOC-LATE",
       "kind":"violation",
       "title":"Срок публикации разъяснения превышает три рабочих дня (разные оригиналы ЕИС)",
       "law":"223-ФЗ, ст. 3.2 ч. 3",
       "law_url":LAW32,
       "evidence":(
+          ("Номер запроса: "+number+". " if number else "")+
           "Запрос получен "+received.isoformat()+" по оригиналу ЕИС «"+
           str(qdoc.get("name") or "")+"» ("+request_source+"); "
           "разъяснение опубликовано "+published.isoformat()+
@@ -75,8 +142,11 @@ def cross_doc_clarifications(p,docs):
       "source_url":reply_source,
       "location":"ЕИС: подтверждённые запрос и публикация",
       "match_text":response.group(0)[:500],
-      "note":"Соответствие подтверждено при единственных датах запроса и публикации в доступных оригиналах."
-    }]
+      "note":("В обоих оригиналах совпадает явный номер запроса. " if number else
+              "Установлена единственная ненумерованная пара. ")+
+             "Неоднозначные идентификаторы и версии не объединяются автоматически."
+        })
+    return findings
 
 PROTOCOL_DOC=re.compile(r"протокол",re.I)
 PROTOCOL_KINDS=(
@@ -175,7 +245,7 @@ def cross_doc_protocols(p,docs):
     Explicit numbers allow independent episodes in the same purchase. A
     missing number retains the legacy single-pair fallback only; conflicting
     numbers, duplicate events and multiple versions are never guessed."""
-    if not COMPETITIVE.search(str(p.get("method") or "")):
+    if competitive_rule_scope(p) is not True:
         return []
     signed,published=[],[]
     ambiguous_numbers=set()
@@ -292,6 +362,9 @@ def install(ns):
                 and not(same_rule=="PROTOCOL" and finding_protocol_number(x)
                         and finding_protocol_number(issue)
                         and finding_protocol_number(x)!=finding_protocol_number(issue))
+                and not(same_rule=="CLARIFICATION" and finding_clarification_number(x)
+                        and finding_clarification_number(issue)
+                        and finding_clarification_number(x)!=finding_clarification_number(issue))
                 for x in base)
             if not duplicate:base.append(issue)
         return base

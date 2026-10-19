@@ -34,14 +34,14 @@ def test_law():
         "Дата принятия решения о внесении изменений: 10.08.2026. "
         "Дата публикации изменений в ЕИС: 02.09.2026. "
         "Срок подачи заявок был продлен.")
-    confirmed,review=evaluation({"reg":REG},[original(sample)])
+    confirmed,review=evaluation({"reg":REG,"method":"Конкурс"},[original(sample)])
     assert len(confirmed)==1 and "23 календарных" in confirmed[0]["evidence"],(confirmed,review)
     assert confirmed[0]["code"]=="223-4-11-AMENDMENT-PUBLICATION-DELAY"
-    assert evaluation({"reg":REG},[original(sample.replace(
+    assert evaluation({"reg":REG,"method":"Конкурс"},[original(sample.replace(
         "Дата публикации изменений в ЕИС","Дата неизвестна"))])[0]==[]
     untrusted=original(sample)
     untrusted["meta"]["source"]="external_directory"
-    assert evaluation({"reg":REG},[untrusted])[0]==[]
+    assert evaluation({"reg":REG,"method":"Конкурс"},[untrusted])[0]==[]
     flags=category_checks({"reg":REG},[original(
         "Условие технического задания: поставка эквивалента не допускается.")])
     assert any(c["field_path"]=="single_brand" and c["status"]=="check" for c in flags)

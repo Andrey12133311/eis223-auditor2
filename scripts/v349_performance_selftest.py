@@ -11,9 +11,11 @@ REG="32615969056"
 URL="https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="+"A"*32
 
 def doc(name,body,trusted=True):
+    import hashlib
+    source=URL[:-32]+hashlib.md5(name.encode()).hexdigest().upper()
     return {"name":name,"text":body,"status":"checked",
-      "url":URL,"meta":{"source":"official_eis_original" if trusted else "unverified",
-        "sha256":"a"*64,"source_url":URL}}
+      "url":source,"meta":{"source":"official_eis_original" if trusted else "unverified",
+        "sha256":"a"*64,"source_url":source}}
 
 def run():
     purchase={"reg":REG,"method":"Аукцион в электронной форме","submission_end":"2026-10-30"}
@@ -24,7 +26,8 @@ def run():
     assert found[0]["kind"]=="violation" and found[0]["law"]=="223-ФЗ, ст. 3.2 ч. 3"
     assert "2026-10-01" in found[0]["evidence"] and "2026-10-12" in found[0]["evidence"]
     assert not cross.cross_doc_clarifications(purchase,[request,doc(response["name"],response["text"],False)])
-    assert not cross.cross_doc_clarifications(purchase,[request,response,response])
+    assert len(cross.cross_doc_clarifications(purchase,[request,response,response]))==1
+    assert not cross.cross_doc_clarifications(purchase,[request,response,doc("Разъяснения 2.pdf",response["text"])])
     assert not cross.cross_doc_clarifications(purchase,[request,doc(response["name"],"Дата размещения разъяснения в ЕИС: 05.10.2026")])
     assert not cross.cross_doc_clarifications({**purchase,"method":"Закупка у единственного поставщика"},[request,response])
     assert not cross.cross_doc_clarifications({**purchase,"submission_end":""},[request,response])
