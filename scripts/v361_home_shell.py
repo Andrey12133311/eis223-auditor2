@@ -48,11 +48,6 @@ body:has(> .eis223-workspace)>main{
  line-height:1.2;color:#1b4568!important;font-weight:780!important;
  letter-spacing:-.025em!important;margin:0 0 4px!important}
 .eis361-heading p{margin:0;color:#6a7c8a;font-size:12px;line-height:1.5}
-.eis361-right{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-.eis361-source{
- border:1px solid #d1e2ef;border-radius:8px;background:#f1f7fc;
- color:#2b668e;font-size:11px;font-weight:720;padding:8px 11px;white-space:nowrap}
-.eis361-not-official{color:#738593;font-size:11px;white-space:nowrap}
 body:has(> .eis223-workspace) .stats{
  display:grid!important;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));
  gap:11px!important;margin:0 0 17px!important}
@@ -135,7 +130,6 @@ body:has(> .eis223-workspace) :is(.violation,.risk-red,.status-violation){
 body:has(> .eis223-workspace) :is(.ok,.status-ok){color:var(--eis-success)}
 @media(max-width:880px){
  .eis361-heading{align-items:flex-start;padding:15px!important}
- .eis361-right{width:100%;padding-left:55px}
  body:has(> .eis223-workspace) .stats{grid-template-columns:repeat(2,minmax(0,1fr))!important}
 }
 @media(max-width:620px){
@@ -147,9 +141,6 @@ body:has(> .eis223-workspace) :is(.ok,.status-ok){color:var(--eis-success)}
  .eis361-heading-icon svg{width:19px;height:19px}
  .eis361-heading h2{font-size:19px!important}
  .eis361-heading p{font-size:11px}
- .eis361-right{padding-left:0}
- .eis361-not-official{white-space:normal}
- .eis361-source{font-size:10px}
  body:has(> .eis223-workspace) .stats{gap:8px!important}
  body:has(> .eis223-workspace) .stat{min-height:81px!important;padding:12px 13px!important}
  body:has(> .eis223-workspace) .stat b{font-size:24px!important}
@@ -184,9 +175,7 @@ SCRIPT = r"""
    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">'+
    '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span>'+
    '<div><h2>Реестр закупок по 223-ФЗ</h2>'+
-   '<p>Проверка документов и подтверждённые нарушения</p></div></div>'+
-   '<div class="eis361-right"><span class="eis361-source">Источник: ЕИС</span>'+
-   '<span class="eis361-not-official">Независимый аналитический сервис</span></div>';
+   '<p>Проверка документов и подтверждённые нарушения</p></div></div>';
   main.insertBefore(heading,main.firstChild);
  }
  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",prepare,{once:true});
