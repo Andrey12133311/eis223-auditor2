@@ -46,6 +46,8 @@ COPY tests/test_audit_db_retry.py tests/test_price_recovery_lock_scope.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_db_retry.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_price_recovery_lock_scope.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_reconciliation_lock_scope.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v372_document_coverage.py'
 COPY tests/test_thematic_persist_lock_scope.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_persist_lock_scope.py'
+COPY tests/test_thematic_index_lock_scope.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_index_lock_scope.py'
 COPY tests/test_general_company_claim.py tests/test_general_thematic_parity.py tests/test_general_db_stage_retry.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_company_claim.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_thematic_parity.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_general_db_stage_retry.py'
 COPY tests/test_v383_msp_scope.py tests/

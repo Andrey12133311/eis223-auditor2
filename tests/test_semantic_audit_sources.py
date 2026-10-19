@@ -86,12 +86,14 @@ class SemanticSources(unittest.TestCase):
         path.write_text(json.dumps(payload))
         return path, payload
 
-    def soap(self, publication="2026-10-12T12:00:00+03:00", version=1, compression=zipfile.ZIP_STORED):
+    def soap(self, publication="2026-10-12T12:00:00+03:00", version=1, compression=zipfile.ZIP_STORED,
+             repeats=1, padding=0, filename=None):
         kind = "purchaseProtocol"
-        name = f"{kind}_{REG}_{version}.xml"
+        name = filename or f"{kind}_{REG}_{version}.xml"
         raw = (f'<{kind} xmlns="{eis223_soap_xml.PURCHASE_NS}"><{kind}Data>'
                f'<purchaseInfo><purchaseNoticeNumber>{REG}</purchaseNoticeNumber></purchaseInfo>'
                f'<guid>protocol-1</guid><version>{version}</version><publicationDateTime>{publication}</publicationDateTime>'
+               f'<padding>{"A"*padding}</padding>'
                f'<attachments><document><fileName>Протокол.pdf</fileName><url>{escape(URL)}</url>'
                f'</document></attachments></{kind}Data></{kind}>').encode()
         record, _ = eis223_soap_xml.parse_document(raw, name)
@@ -104,7 +106,7 @@ class SemanticSources(unittest.TestCase):
         path=folder/(digest+".zip");path.write_bytes(blob)
         receipt=folder/(digest+".json")
         receipt.write_text(json.dumps({"source":"official_eis_soap_archive","reg_number":REG,
-            "archive_sha256":digest,"notices":[record]}))
+            "archive_sha256":digest,"notices":[record]*repeats}))
         return path, receipt
 
     def test_current_original_change_without_doc_reconciliation(self):
@@ -236,6 +238,14 @@ class SemanticSources(unittest.TestCase):
         self.db.execute("UPDATE docs SET metadata_json=?",(json.dumps(value),))
         self.assertEqual(before,self.version())
 
+    def test_snapshot_diagnostic_is_bounded_and_does_not_include_details(self):
+        error=source.SemanticSnapshotError("byte_budget", "/private/path")
+        self.assertEqual(error.diagnostic_code,"source_snapshot_byte_budget")
+        self.assertEqual(source.SemanticSnapshotError("bad reason\n/private").diagnostic_code,
+                         "source_snapshot_unknown")
+        self.assertEqual(source.SemanticSnapshotError("x"*49).diagnostic_code,
+                         "source_snapshot_unknown")
+
     def test_budget_exhaustion_and_read_failure_are_explicit(self):
         with patch.object(source,"SEMANTIC_MAX_BYTES",2):
             with self.assertRaisesRegex(source.SemanticSnapshotError,"byte_budget"):self.version()
@@ -307,6 +317,68 @@ class SemanticSources(unittest.TestCase):
         self.assertIsNone(source._PROTECTED_SOURCE)
         self.assertLessEqual(len(source._HASH_CACHE),3)
         self.assertLessEqual(len(source._JSON_CACHE),3)
+
+    def test_rewritten_receipt_retires_only_obsolete_physical_key_and_still_resumes(self):
+        for index in range(2,4):
+            uid=f"{index:032X}"
+            originals._store_original_version(REG,uid,{**self.entry,'uid':uid,'url':URL.replace(UID,uid)},
+                                              b'%PDF-1.7\n'+bytes([index])*8192)
+        receipt=self.path.parent/'receipt.json'
+        with patch.object(source,'SEMANTIC_CACHE_ENTRIES',3), patch.object(source,'SEMANTIC_MAX_BYTES',11000):
+            with self.assertRaisesRegex(source.SemanticSnapshotError,'byte_budget'):self.version()
+            old_keys={key for key in source._JSON_CACHE if key[0]==str(receipt)}
+            self.assertEqual(len(old_keys),1)
+            value=json.loads(receipt.read_text());value['checked_at']='operational rewrite'
+            receipt.write_text(json.dumps(value))
+            for _ in range(5):
+                try:completed=self.version();break
+                except source.SemanticSnapshotError as exc:self.assertEqual(exc.reason,'byte_budget')
+            else:self.fail('Current source fits cache but obsolete receipt prevents completion')
+            current_keys={key for key in source._JSON_CACHE if key[0]==str(receipt)}
+            self.assertEqual(len(current_keys),1)
+            self.assertFalse(old_keys & current_keys)
+            self.assertLessEqual(len(source._JSON_CACHE),3)
+        source.clear_semantic_cache()
+        self.assertEqual(completed,self.version())
+
+    def test_stale_cache_writer_cannot_evict_or_reinsert_over_current_identity(self):
+        old_info=self.path.stat();old=(str(self.path),source._physical_identity(old_info),self.receipt['sha256'])
+        self.path.write_bytes(b'changed content')
+        current=(str(self.path),source._physical_identity(self.path.stat()),self.receipt['sha256'])
+        value=(hashlib.sha256(self.path.read_bytes()).hexdigest(),self.path.stat().st_size,None)
+        source._cache_set(source._HASH_CACHE,current,value)
+        with self.assertRaisesRegex(source.SemanticSnapshotError,'concurrent_file_change'):
+            source._cache_set(source._HASH_CACHE,old,('stale',old_info.st_size,None))
+        self.assertEqual(dict(source._HASH_CACHE),{current:value})
+
+    def test_cache_retirement_keeps_current_receipt_views_and_distinct_physical_paths(self):
+        path,_=self.soap()
+        identity=source._physical_identity(path.stat())
+        first=(str(path),identity,path.stem,'receipt-view-one')
+        second=(str(path),identity,path.stem,'receipt-view-two')
+        source._cache_set(source._XML_CACHE,first,([],2))
+        source._cache_set(source._XML_CACHE,second,([],2))
+        self.assertEqual(set(source._XML_CACHE),{first,second})
+        copy=path.with_name('different-physical-path.zip');copy.write_bytes(path.read_bytes())
+        third=(str(copy),source._physical_identity(copy.stat()),path.stem,'receipt-view-one')
+        source._cache_set(source._XML_CACHE,third,([],2))
+        self.assertEqual(set(source._XML_CACHE),{first,second,third})
+        path.write_bytes(b'changed')
+        current=(str(path),source._physical_identity(path.stat()),path.stem,'receipt-view-one')
+        source._cache_set(source._XML_CACHE,current,([],2))
+        self.assertEqual(set(source._XML_CACHE),{current,third})
+
+    def test_single_file_limits_remain_explicit_and_do_not_create_partial_hash_trust(self):
+        self.store(self.blob+bytes(10000))
+        with patch.object(source,'SEMANTIC_MAX_BYTES',5000):
+            for _ in range(3):
+                with self.assertRaisesRegex(source.SemanticSnapshotError,'byte_budget'):self.version()
+                self.assertEqual(len(source._HASH_CACHE),0)
+        # Default accepted original size is smaller than the unchanged pass cap.
+        self.assertLess(25*1024*1024,source.SEMANTIC_MAX_BYTES)
+        with self.path.open('wb') as stream:stream.truncate(25*1024*1024+1)
+        with self.assertRaisesRegex(source.SemanticSnapshotError,'file_size'):self.version()
+        self.assertEqual(len(source._HASH_CACHE),0)
 
     def test_non_budget_failure_releases_partial_progress_protection(self):
         self.store(self.blob+bytes(10000))
@@ -385,6 +457,138 @@ class SemanticSources(unittest.TestCase):
         corrupt=self.version();self.assertNotEqual(before,corrupt)
         path.write_bytes(raw);os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns))
         self.assertEqual(before,self.version())
+
+    def test_repeated_xml_references_reuse_only_verified_member_with_default_budgets(self):
+        path,receipt=self.soap(compression=zipfile.ZIP_DEFLATED,repeats=100,padding=3*1024*1024)
+        with zipfile.ZipFile(path) as archive:
+            self.assertGreater(archive.infolist()[0].file_size*100,source.SEMANTIC_MAX_BYTES)
+        with patch.object(eis223_soap_xml,'parse_document',wraps=eis223_soap_xml.parse_document) as parse:
+            repeated=self.version()
+        parse.assert_called_once()
+        self.assertEqual(len(source._XML_CACHE),1)
+        value=json.loads(receipt.read_text());value['notices']=value['notices'][:1]
+        receipt.write_text(json.dumps(value));source.clear_semantic_cache()
+        self.assertEqual(repeated,self.version())
+
+    def test_repeated_xml_reference_with_conflicting_hash_is_not_silently_skipped(self):
+        _,receipt=self.soap(repeats=2)
+        value=json.loads(receipt.read_text());value['notices'][1]['xml_sha256']='f'*64
+        for reverse in (False,True):
+            if reverse:value['notices'].reverse()
+            receipt.write_text(json.dumps(value));source.clear_semantic_cache()
+            with self.assertRaisesRegex(source.SemanticSnapshotError,'xml_receipt_hash_mismatch'):
+                self.version()
+            self.assertEqual(len(source._XML_CACHE),0)
+
+    def test_repeated_reference_cannot_promote_malformed_authenticated_xml(self):
+        folder=self.root/'eis223_official_archive_inbox'/REG;folder.mkdir(parents=True)
+        name=f'purchaseProtocol_{REG}_malformed.xml';raw=b'<broken>'
+        stream=io.BytesIO()
+        with zipfile.ZipFile(stream,'w') as archive:archive.writestr(name,raw)
+        blob=stream.getvalue();digest=hashlib.sha256(blob).hexdigest()
+        (folder/(digest+'.zip')).write_bytes(blob)
+        (folder/(digest+'.json')).write_text(json.dumps({
+            'source':'official_eis_soap_archive','reg_number':REG,'archive_sha256':digest,
+            'notices':[{'reg_number':REG,'xml_filename':name,'xml_sha256':hashlib.sha256(raw).hexdigest()}]*100}))
+        with self.assertRaisesRegex(source.SemanticSnapshotError,'xml_unreadable'):
+            self.version()
+        self.assertEqual(len(source._XML_CACHE),0)
+
+    def test_same_member_name_in_distinct_archives_preserves_changed_bytes_and_provenance(self):
+        self.soap(version=1,repeats=3,filename=f'purchaseProtocol_{REG}_same.xml')
+        self.soap(version=2,repeats=3,filename=f'purchaseProtocol_{REG}_same.xml')
+        with patch.object(eis223_soap_xml,'parse_document',wraps=eis223_soap_xml.parse_document) as parse:
+            value=self.version()
+        self.assertEqual(parse.call_count,2)
+        self.assertEqual(len(source._XML_CACHE),2)
+        records,invalid=source._semantic_xml(source._SemanticIO(),self.root,REG)
+        self.assertEqual(len(records),2)
+        self.assertEqual(len({record['xml_sha256'] for record in records}),2)
+        self.assertEqual({record['xml_filename'] for record in records},{f'purchaseProtocol_{REG}_same.xml'})
+        self.assertEqual(invalid,[])
+        source.clear_semantic_cache()
+        self.assertEqual(value,self.version())
+
+    def test_corrupt_archive_prefix_resumes_without_promoting_any_xml_facts(self):
+        for version in range(1,4):
+            path,_=self.soap(version=version)
+            path.write_bytes(bytes([64+version])*4000)
+        attempts=0
+        with patch.object(source,"SEMANTIC_MAX_BYTES",7000), \
+             patch.object(eis223_soap_xml,"parse_document",side_effect=AssertionError("Corrupt XML must not parse")):
+            for _ in range(5):
+                try:completed=self.version();break
+                except source.SemanticSnapshotError as exc:
+                    self.assertEqual(exc.reason,"byte_budget");attempts+=1
+            else:self.fail("Stable corrupt archive prefix never completed")
+        self.assertEqual(attempts,2)
+        self.assertEqual(len(source._XML_CACHE),0)
+        corrupt=[value for key,value in source._HASH_CACHE.items() if key[0].endswith('.zip')]
+        self.assertEqual(len(corrupt),3)
+        self.assertTrue(all(value[2] is None for value in corrupt))
+        records,invalid=source._semantic_xml(source._SemanticIO(),self.root,REG)
+        self.assertEqual(records,[])
+        self.assertEqual(len(invalid),3)
+        self.assertTrue(all(value['state']=='corrupt' for value in invalid))
+        source.clear_semantic_cache()
+        self.assertEqual(completed,self.version())
+
+    def test_corrupt_archive_cache_invalidates_after_same_path_repair_with_restored_mtime(self):
+        path,_=self.soap();raw=path.read_bytes()
+        path.write_bytes(b'x'*len(raw));before_stat=path.stat()
+        corrupt=self.version()
+        self.assertEqual(len(source._XML_CACHE),0)
+        self.assertTrue(any(key[0]==str(path) for key in source._HASH_CACHE))
+        path.write_bytes(raw)
+        os.utime(path,ns=(before_stat.st_atime_ns,before_stat.st_mtime_ns))
+        with patch.object(eis223_soap_xml,'parse_document',wraps=eis223_soap_xml.parse_document) as parse:
+            repaired=self.version()
+        self.assertNotEqual(repaired,corrupt)
+        parse.assert_called_once()
+        self.assertEqual(len(source._XML_CACHE),1)
+        source.clear_semantic_cache()
+        self.assertEqual(repaired,self.version())
+
+    def test_matching_digest_only_cache_cannot_skip_xml_authentication(self):
+        path,_=self.soap()
+        expected=path.stem
+        reader=source._SemanticIO()
+        reader.read(path,15*1024*1024,retain=False,expected=expected)
+        self.assertEqual(len(source._XML_CACHE),0)
+        with patch.object(eis223_soap_xml,'parse_document',wraps=eis223_soap_xml.parse_document) as parse:
+            self.version()
+        parse.assert_called_once()
+        self.assertEqual(len(source._XML_CACHE),1)
+
+    def test_corrupt_archive_cache_rejects_racing_change_before_reuse(self):
+        path,_=self.soap();raw=path.read_bytes();path.write_bytes(b'x'*len(raw))
+        self.version()
+        original=source._cache_get
+        changed=False
+        def racing(cache,key):
+            nonlocal changed
+            value=original(cache,key)
+            if cache is source._HASH_CACHE and key[0]==str(path) and value is not None:
+                path.write_bytes(raw);changed=True
+            return value
+        with patch.object(source,'_cache_get',side_effect=racing):
+            with self.assertRaisesRegex(source.SemanticSnapshotError,'concurrent_file_change'):
+                self.version()
+        self.assertTrue(changed)
+        self.assertEqual(len(source._XML_CACHE),0)
+        self.assertEqual(len(self.version()),64)
+
+    def test_untrusted_archive_receipt_does_not_prime_or_reuse_digest_cache(self):
+        path,receipt=self.soap();value=json.loads(receipt.read_text())
+        value['source']='private_untrusted_archive';receipt.write_text(json.dumps(value))
+        path.write_bytes(b'x'*4096)
+        self.version()
+        self.assertFalse(any(key[0]==str(path) for key in source._HASH_CACHE))
+        self.assertEqual(len(source._XML_CACHE),0)
+        value['source']='official_eis_soap_archive';receipt.write_text(json.dumps(value))
+        self.version()
+        self.assertTrue(any(key[0]==str(path) for key in source._HASH_CACHE))
+        self.assertEqual(len(source._XML_CACHE),0)
 
     def test_malformed_current_receipt_is_not_a_stable_snapshot(self):
         (self.path.parent/"receipt.json").write_text("broken")

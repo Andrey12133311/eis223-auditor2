@@ -166,6 +166,12 @@ class SemanticSnapshotError(RuntimeError):
         self.detail = str(detail)
         super().__init__(reason + (": " + self.detail if detail else ""))
 
+    @property
+    def diagnostic_code(self):
+        # Emit only the bounded machine reason, never source paths/metadata.
+        reason = self.reason if isinstance(self.reason, str) and re.fullmatch(r"[a-z_]{1,48}", self.reason) else "unknown"
+        return "source_snapshot_" + reason
+
 
 SEMANTIC_MAX_ROWS = 10000
 SEMANTIC_MAX_FILES = 12000
@@ -220,6 +226,19 @@ def _cache_source(key):
 
 def _cache_set(cache, key, value):
     with _CACHE_LOCK:
+        # A rewritten path no longer needs protected entries for its obsolete
+        # physical versions. Verify under the same lock so a late old reader
+        # cannot evict a newer writer's current observation. The scan is bounded
+        # by the existing entry cap; distinct paths/receipt views stay separate.
+        try:
+            current = os.stat(key[0], follow_symlinks=False)
+        except OSError as exc:
+            raise SemanticSnapshotError("file_unreadable", exc.errno) from exc
+        if not stat.S_ISREG(current.st_mode) or _physical_identity(current) != key[1]:
+            raise SemanticSnapshotError("concurrent_file_change")
+        for candidate in list(cache):
+            if candidate[0] == key[0] and candidate[1] != key[1]:
+                del cache[candidate]
         cache[key] = value
         cache.move_to_end(key)
         limit = (SEMANTIC_XML_CACHE_BYTES if cache is _XML_CACHE else
@@ -398,9 +417,12 @@ class _SemanticIO:
                 if before.st_size > limit:
                     raise SemanticSnapshotError("file_size", path.name)
                 shared_key = (str(path.absolute()), _physical_identity(before), expected)
-                if not retain and expected:
+                if expected:
                     cached = _cache_get(_HASH_CACHE, shared_key)
-                    if cached is not None:
+                    # A corrupt digest is enough only for an explicit invalid
+                    # source marker. Matching archives still need their bytes
+                    # for receipt/member authentication unless XML is cached.
+                    if cached is not None and (not retain or cached[0] != expected):
                         if _physical_identity(before) != _physical_identity(path.stat(follow_symlinks=False)):
                             raise SemanticSnapshotError("concurrent_file_change", path.name)
                         return cached
@@ -429,8 +451,10 @@ class _SemanticIO:
             raise SemanticSnapshotError("file_unreadable", exc.errno) from exc
         result = (digest.hexdigest(), size, b"".join(chunks) if retain else None)
         self.cache[key] = result
-        if not retain and expected:
-            _cache_set(_HASH_CACHE, shared_key, result)
+        if expected and (not retain or result[0] != expected):
+            # Only fixed-size verified observations survive bounded passes.
+            # Never retain raw ZIP contents or promote corrupt bytes to facts.
+            _cache_set(_HASH_CACHE, shared_key, (result[0], result[1], None))
         return result
 
     def json(self, path, *, optional=False):
@@ -503,7 +527,7 @@ def _semantic_xml(io, root, reg):
             cache_key = None
         except OSError as exc:
             raise SemanticSnapshotError("file_unreadable", exc.errno) from exc
-        result = io.read(archive_path, 15 * 1024 * 1024, optional=True)
+        result = io.read(archive_path, 15 * 1024 * 1024, optional=True, expected=expected)
         if result is None or result[0] != expected:
             invalid.append({"archive": expected, "state": "missing" if result is None else "corrupt",
                             "actual": result[0] if result else None})
@@ -519,20 +543,31 @@ def _semantic_xml(io, root, reg):
                 notices = receipt.get("notices", [])
                 if not isinstance(notices, list) or len(notices) > 100:
                     raise SemanticSnapshotError("archive_record_limit")
+                verified_members = {}
                 for entry in notices:
                     if not isinstance(entry, dict) or entry.get("reg_number") != reg:
                         continue
                     member = names.get(entry.get("xml_filename"))
                     if member is None or member.flag_bits & 1 or member.file_size > 15 * 1024 * 1024:
                         raise SemanticSnapshotError("xml_member_unavailable")
+                    # Repeated receipt references may name the same physical
+                    # member. Reuse only within this authenticated ZIP, and
+                    # still compare every reference's expected XML digest.
+                    identity = (member.header_offset, member.filename, member.CRC, member.file_size)
+                    if identity in verified_members:
+                        if verified_members[identity] != entry.get("xml_sha256"):
+                            raise SemanticSnapshotError("xml_receipt_hash_mismatch")
+                        continue
                     io.charge(member.file_size)
                     with archive.open(member) as stream:
                         raw = stream.read(15 * 1024 * 1024 + 1)
                     if len(raw) > 15 * 1024 * 1024:
                         raise SemanticSnapshotError("xml_member_size")
-                    if hashlib.sha256(raw).hexdigest() != entry.get("xml_sha256"):
+                    actual = hashlib.sha256(raw).hexdigest()
+                    if actual != entry.get("xml_sha256"):
                         raise SemanticSnapshotError("xml_receipt_hash_mismatch")
                     record, _ = parse_document(raw, member.filename)
+                    verified_members[identity] = actual
                     if record["reg_number"] == reg:
                         # XML identity survives repacking/replaying the same SOAP reply.
                         archive_records.append(record)

@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime,timezone
 import v342_thematic_queue as original
 from v381_audit_scheduling import background_audit, run_file_io
-from thematic_period import index_campaign, selection_sql, joined_selection_sql
+from thematic_period import index_campaign, selection_sql, joined_selection_sql, contains, period_fields
 from audit_source_version import source_version, semantic_source_version, SemanticSnapshotError
 from legal_audit_revision import engine_signature
 from v332_all_procurements_audit import (ensure_scan_cursors, scan_cursor,
@@ -74,28 +74,62 @@ async def _retry_file(operation,*args):
 
 
 def _index_batch(ns,batch):
-    """Bound automatic indexing too, including across service restarts."""
+    """Page raw purchases before filtering, without retaining SQLite's writer.
+
+    LIMIT after a publication predicate only bounded matching output: sparse
+    periods scanned the whole cohort under BEGIN IMMEDIATE. Materialize one
+    raw keyset page, release its reader, and do all classification outside SQL.
+    The writer validates the campaign, cursor and exact page source rows before
+    admitting it; a stale page stays due and is retried on the next sweep.
+    """
+    scope="thematic-index:"+batch
+    c=_open(ns)
+    try:
+        campaign=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
+        if not campaign:return False
+        campaign=dict(campaign)
+        cursor=scan_cursor(c,scope)
+        columns={row[1] for row in c.execute("PRAGMA table_info(purchases)")}
+        publication="published_at" if "published_at" in columns else "NULL AS published_at"
+        select="SELECT reg_number,customer,"+publication+" FROM purchases "
+        rows=[dict(row) for row in c.execute(select+
+            "WHERE reg_number>? "
+            "ORDER BY reg_number LIMIT ?",(cursor,SCAN_PAGE_SIZE)).fetchall()]
+    finally:c.close()
+    allowed=set(json.loads(campaign["legal_forms"]))
+    bounds=period_fields(campaign)
+    queue=[row["reg_number"] for row in rows
+           if len(row["reg_number"])==11 and row["reg_number"].startswith("3")
+           and contains(row["published_at"],**bounds)
+           and original.customer_form(row["customer"]) in allowed]
     c=_open(ns)
     try:
         c.execute("BEGIN IMMEDIATE")
-        campaign=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
-        if campaign:
-            scope="thematic-index:"+batch
-            cursor=scan_cursor(c,scope)
-            period,args=selection_sql(c,campaign)
-            rows=c.execute("SELECT p.reg_number,p.customer FROM purchases p "
-                "WHERE p.reg_number GLOB '3??????????' AND p.reg_number>? AND "+period+
-                " ORDER BY p.reg_number LIMIT ?",(cursor,*args,SCAN_PAGE_SIZE)).fetchall()
-            allowed=set(json.loads(campaign["legal_forms"]))
-            for row in rows:
-                if original.customer_form(row["customer"]) not in allowed:continue
-                c.execute("INSERT INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?) "
-                    "ON CONFLICT(batch_id,reg) DO UPDATE SET status='queued',detail='',"
-                    "updated_at=excluded.updated_at,reservation_token='' WHERE thematic_items.status='outside_period'",
-                    (batch,row["reg_number"],original.now()))
-            save_scan_cursor(c,scope,rows[-1]["reg_number"] if len(rows)==SCAN_PAGE_SIZE else "")
-            save_scan_cursor(c,"thematic-index-at:"+batch,str(time.time()))
+        current=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
+        if (not current or _campaign_identity(current)!=_campaign_identity(campaign)
+                or scan_cursor(c,scope)!=cursor):
+            c.rollback()
+            return False
+        # One bounded DB-only reread, not one query per purchase. Publication
+        # and customer changes invalidate the precomputed page, so stale scope
+        # never creates membership or skips a newly eligible source row.
+        current_rows=[dict(row) for row in c.execute(select+
+            "WHERE reg_number IN ("+",".join("?" for _ in rows)+") ORDER BY reg_number",
+            [row["reg_number"] for row in rows]).fetchall()] if rows else []
+        if current_rows!=rows:
+            c.rollback()
+            return False
+        for reg in queue:
+            c.execute("INSERT INTO thematic_items(batch_id,reg,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(batch_id,reg) DO UPDATE SET status='queued',detail='',"
+                "updated_at=excluded.updated_at,reservation_token='' WHERE thematic_items.status='outside_period'",
+                (batch,reg,original.now()))
+        # Advance past excluded rows too; wrap discovers inserts behind the
+        # cursor and revisits corrected metadata without deleting saved work.
+        save_scan_cursor(c,scope,rows[-1]["reg_number"] if len(rows)==SCAN_PAGE_SIZE else "")
+        save_scan_cursor(c,"thematic-index-at:"+batch,str(time.time()))
         c.commit()
+        return True
     except BaseException:
         c.rollback()
         raise
@@ -200,7 +234,8 @@ def _prepare(ns):
                         version=versions[row["reg"]]
                     except (SemanticSnapshotError,OSError) as exc:
                         errors+=1
-                        print(f"THEMATIC_SNAPSHOT_RETRY batch={camp['id']} reg={row['reg']} type={type(exc).__name__}",flush=True)
+                        print(f"THEMATIC_SNAPSHOT_RETRY batch={camp['id']} reg={row['reg']} type={type(exc).__name__} "
+                              f"reason={exc.diagnostic_code if isinstance(exc,SemanticSnapshotError) else 'source_snapshot_io_error'}",flush=True)
                         continue
                 if state=="completed" and version==row["last_semantic_version"] and engine==row["last_engine_signature"]:
                     continue
@@ -366,7 +401,7 @@ async def _one(ns,item,sem,pending=None):
         except Exception as exc:
             audit_funnel.observe("gate","analysis_failed")
             for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
-            return item,"retry",[],type(exc).__name__
+            return item,"retry",[],exc.diagnostic_code if isinstance(exc,SemanticSnapshotError) else type(exc).__name__
 
 
 def _pending_results(ns):
