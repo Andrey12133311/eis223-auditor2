@@ -753,7 +753,7 @@ def render_manager(role):
 <meta name="color-scheme" content="light"><title>Кабинет руководителя — ЕИС Аудитор</title>
 __STYLE__</head><body>
 <header class="mgr-top"><div class="mgr-brand"><div class="mgr-logo">223</div>
-<div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя · независимая аналитическая система</small>
+<div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя</small>
 <small id="mgr-my-name">ФИО: загрузка…</small></div></div>
 <div class="mgr-actions"><a href="/account/profile">Моё ФИО</a>
 <a href="/">← Главная страница</a></div></header>

@@ -29,7 +29,6 @@ _STYLE = """
  color:#fff;font-size:14px;font-weight:850;letter-spacing:-.04em}
 .eis223-brand-copy{display:flex;flex-direction:column;gap:1px}
 .eis223-brand-name{font-size:18px;font-weight:780;letter-spacing:-.03em;line-height:1.15}
-.eis223-brand-sub{font-size:10px;color:#c6dfed;letter-spacing:.025em}
 .eis223-auth-user{display:flex;flex-direction:column;justify-content:center;gap:2px;
  min-width:175px;max-width:min(35vw,360px);color:#fff!important;
  padding:6px 12px;border:1px solid #ffffff45;border-radius:9px;background:#ffffff11}
@@ -185,7 +184,6 @@ _STYLE = """
  .eis223-brand{width:100%;margin-bottom:4px}
  .eis223-brand-icon{height:36px;width:36px}
  .eis223-brand-name{font-size:16px}
- .eis223-brand-sub{font-size:10px}
  .eis223-auth-user{width:100%;max-width:none;min-height:40px}
  .eis223-menu button{flex:1}
  .eis223-personal{padding:16px 11px}
@@ -212,7 +210,7 @@ def site_header(role="user"):
     return (_STYLE + workspace_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
 <div class="eis223-workspace" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
-<span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span><span class="eis223-brand-sub">Независимая аналитическая система</span></span></span>
+<span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span></span></span>
 <span class="eis223-auth-user" aria-label="Авторизованный пользователь"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></span>
 <button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет <span id="eis223-unread" class="eis223-notification-dot" hidden aria-label="Новые уведомления"></span></button>
 ''' + admin + director + '''

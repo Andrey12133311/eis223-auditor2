@@ -241,7 +241,7 @@ SCRIPT='''<script id="v302-modern-js">
     node.innerHTML=[
       '<div class="v302-header"><span class="v302-emblem">223</span>',
       '<span class="v302-title"><strong>Контроль закупок по 223-ФЗ</strong>',
-      '<small>Независимый аналитический сервис · ЕИС · документальная проверка нарушений</small></span>',
+      '<small>ЕИС · документальная проверка нарушений</small></span>',
       '<span id="v302-connect" class="v302-connect">Проверка подключения ЕИС…</span></div>',
       '<div class="v302-grid">',
       '<form id="v302-reg-form" class="v302-box"><label for="v302-reg">По номеру закупки ЕИС</label>',

@@ -42,7 +42,6 @@ def run():
     assert "get('/me/memo-archive')" in html
     assert "eis223-new-batch" not in html
     assert "eis223-hero" not in html
-    assert "Независимая аналитическая система" in html
     assert "#174c76" in html
     assert "<span class=\"eis223-brand-icon\"" in html
 
@@ -52,8 +51,6 @@ def run():
     assert "#174c76" not in source or "var(--eis-blue)" in source
     assert "eis361-hero" in source  # safe removal of any stale banner
     assert "insertBefore(hero" not in source
-    assert "Независимый аналитический сервис" in source
-    assert "Источник: ЕИС" in source
     assert ".stats" in source and "table th" in source and ".filters" in source
 
     for page in (HOME, THEMATIC, MEMOS):
@@ -65,7 +62,7 @@ def run():
         assert 'id="eis223-signin-style"' in login
         assert 'id="login-password"' in login
         assert "fetch('/auth/me'" not in login
-    print("V364_EIS_DESIGN_SELFTEST_OK reference=EIS-inspired not_official=True "
+    print("V364_EIS_DESIGN_SELFTEST_OK reference=EIS-inspired "
           "real_account_metrics=True three_sections=True no_hero=True "
           "login_form=True no_data_mutation=True", flush=True)
 
