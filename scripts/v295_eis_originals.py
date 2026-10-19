@@ -267,24 +267,45 @@ def install(ns):
         official=allowed_documents(reg)
         connector=ns.get("conn")
         if not official or connector is None:return None
+        query="SELECT id,name,url,local_path,status,text_chars,metadata_json FROM docs WHERE reg_number=? ORDER BY id"
+        db=connector()
+        try:
+            rows=[dict(r) for r in db.execute(query,(reg,)).fetchall()]
+        finally:
+            db.close()
+        # Hashing dozens of large originals must not own SQLite's sole writer.
+        # Revalidate the row snapshot and file identities before any deletion.
+        groups={}
+        identities={}
+        for row in rows:
+            local=row.get("local_path")
+            if row.get("status")!="checked" or not local:continue
+            try:
+                file=Path(local)
+                before=file.stat()
+                if not file.is_file() or before.st_size>MAX_BYTES:continue
+                with file.open("rb") as content:
+                    digest=hashlib.file_digest(content,"sha256").hexdigest()
+                after=file.stat()
+                identity=lambda st:(st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns)
+                if identity(before)!=identity(after):continue
+                identities[local]=identity(after)
+            except OSError:
+                continue
+            groups.setdefault(digest,[]).append(row)
         db=connector()
         try:
             db.execute("BEGIN IMMEDIATE")
-            rows=[dict(r) for r in db.execute(
-                "SELECT id,name,url,local_path,status,text_chars,metadata_json FROM docs WHERE reg_number=?",
-                (reg,)).fetchall()]
-            groups={}
-            for row in rows:
-                local=row.get("local_path")
-                if row.get("status")!="checked" or not local:continue
-                try:
-                    file=Path(local)
-                    if not file.is_file() or file.stat().st_size>MAX_BYTES:continue
-                    with file.open("rb") as content:
-                        digest=hashlib.file_digest(content,"sha256").hexdigest()
-                except OSError:
-                    continue
-                groups.setdefault(digest,[]).append(row)
+            current=[dict(r) for r in db.execute(query,(reg,)).fetchall()]
+            if current!=rows:
+                db.rollback()
+                return None
+            for local,expected in identities.items():
+                try:unchanged=identity(Path(local).stat())==expected
+                except OSError:unchanged=False
+                if not unchanged:
+                    db.rollback()
+                    return None
             removed=0
             for digest,group in groups.items():
                 if len(group)<2:continue
