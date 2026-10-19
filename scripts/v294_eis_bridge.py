@@ -2,10 +2,11 @@
 from __future__ import annotations
 import asyncio, hashlib, hmac, io, json, os, re, tempfile, zipfile
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from eis223_soap_xml import parse_document
+from eis223_soap_xml import parse_document, quarantine_document, UnsupportedXmlType
 
 MAX_UPLOAD = 15*1024*1024
 MAX_UNCOMPRESSED = 50*1024*1024
@@ -57,7 +58,7 @@ def parse_notices(data):
         if not 1<=len(items)<=100: raise ValueError("Invalid ZIP entry count")
         if sum(m.file_size for m in items)>MAX_UNCOMPRESSED:
             raise ValueError("Archive decompression size limit")
-        notices=[];names=set()
+        notices=[];names=set();unsupported=[]
         for m in items:
             fn=m.filename
             if m.flag_bits&1 or m.file_size>MAX_XML:
@@ -69,10 +70,23 @@ def parse_notices(data):
             try: xml=archive.read(m)
             except (zipfile.BadZipFile,RuntimeError,NotImplementedError) as exc:
                 raise ValueError("Unreadable ZIP member") from exc
-            notice,_data=parse_document(xml,fn)
-            notices.append(notice)
-        if len({n["reg_number"] for n in notices})!=1:
+            try:
+                notice,_data=parse_document(xml,fn)
+                notices.append(notice)
+            except UnsupportedXmlType as exc:
+                # A supported sibling can still be checked. Keep unknown
+                # bytes only after independently binding their envelope to
+                # that same procurement; no unknown facts/URLs are imported.
+                unsupported.append((len(notices),xml,fn,exc))
+                notices.append(None)
+        supported=[notice for notice in notices if notice is not None]
+        if not supported:
+            raise unsupported[0][3]
+        if len({n["reg_number"] for n in supported})!=1:
             raise ValueError("Mixed registry numbers in archive")
+        reg=supported[0]["reg_number"]
+        for index,xml,filename,_error in unsupported:
+            notices[index]=quarantine_document(xml,filename,reg)
         # Match the existing binary-original intake contract exactly. Retain
         # unsupported metadata in the immutable archive, but expose blockers
         # so a worker cannot call a truncated manifest a completed download.
@@ -92,6 +106,38 @@ def parse_notices(data):
                                                +len(notice["unresolved_attachments"]))
         return notices
     finally: archive.close()
+
+def soap_metadata_incomplete(reg):
+    """Keep both audits partial while saved SOAP metadata is unsupported.
+
+    Revalidate the saved bytes rather than trusting a receipt's completeness
+    counters. This read-only check runs outside every audit write transaction;
+    it never exposes unknown facts or adds an expected-original placeholder.
+    """
+    if not isinstance(reg,str) or not REG.fullmatch(reg):return True
+    data_root=Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
+    folder=data_root/"eis223_official_archive_inbox"/reg
+    try:
+        paths=list(islice(folder.glob("*.json"),251))
+        if len(paths)>250:return True
+        for path in paths:
+            if path.stat().st_size>MAX_UPLOAD:return True
+            record=json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record,dict):return True
+            if record.get("source")!="official_eis_soap_archive" or record.get("reg_number")!=reg:
+                continue
+            sha=record.get("archive_sha256","")
+            if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-f]{64}",sha):return True
+            archive=folder/(sha+".zip")
+            if not archive.is_file() or archive.stat().st_size>MAX_UPLOAD:return True
+            raw=archive.read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=sha:return True
+            parsed=parse_notices(raw)
+            if any(item["reg_number"]!=reg or item["xml_family"]=="unsupported" for item in parsed):
+                return True
+        return False
+    except (OSError,ValueError,TypeError,KeyError):
+        return True
 
 def _authorize(request):
     expected=os.environ.get("EIS223_UPLOAD_TOKEN","").strip()
@@ -148,6 +194,7 @@ def install(ns):
             raise HTTPException(422,str(exc)) from exc
         sha=hashlib.sha256(raw).hexdigest()
         reg=notices[0]["reg_number"]
+        unsupported_xmls=sum(n["xml_family"]=="unsupported" for n in notices)
         data_root=Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
         folder=data_root/"eis223_official_archive_inbox"/reg
         zip_path=folder/(sha+".zip")
@@ -167,7 +214,9 @@ def install(ns):
                "total_attachment_count":sum(n["total_attachment_count"] for n in notices),
                "unresolved_attachment_count":sum(n["unresolved_attachment_count"] for n in notices),
                "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
-               "audited_documents_increment":0,"status":"metadata_only"}
+               "unsupported_xml_count":unsupported_xmls,
+               "audited_documents_increment":0,
+               "status":"metadata_partial" if unsupported_xmls else "metadata_only"}
             _atomic(json_path,json.dumps(record,ensure_ascii=False).encode("utf-8"))
         metadata_import="pending"
         import_metadata=ns.get("_v379_import_soap_metadata")
@@ -183,6 +232,8 @@ def install(ns):
             after=await asyncio.to_thread(_review_source_version,reg)
             if before!=after:enqueue(reg,force=True)
         print(f"V294 EIS_INBOX reg={reg} metadata={len(notices)} links={sum(n['documents_referenced'] for n in notices)} duplicate={not was_new} verified_originals=0",flush=True)
+        if unsupported_xmls:
+            print(f"V294 EIS_INBOX_PARTIAL reg={reg} unsupported_xmls={unsupported_xmls}",flush=True)
         return JSONResponse({"accepted":True,"reg_number":reg,"metadata_xmls":len(notices),
             "archive_sha256":sha,"metadata_import":metadata_import,
             "document_links":sum(n["documents_referenced"] for n in notices),
@@ -190,7 +241,9 @@ def install(ns):
             "protocol_xmls":sum(n["xml_family"]=="protocol" for n in notices),
             "unresolved_attachment_count":sum(len(n["unresolved_attachments"]) for n in notices),
             "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
-            "already_received":not was_new,"status":"metadata_only",
+            "unsupported_xml_count":unsupported_xmls,
+            "already_received":not was_new,
+            "status":"metadata_partial" if unsupported_xmls else "metadata_only",
             "original_files_verified":0,"audited_documents_increment":0},headers=_cors(origin))
 
     @app.get("/api/v294/eis223/upload",response_class=HTMLResponse)

@@ -139,7 +139,7 @@ _TELEMETRY_ERROR_CODES = frozenset((
     "manifest_missing_documents", "invalid_manifest_uid", "download_cancelled", "untrusted_eis_url",
     "site_redirect_refused", "unexpected_site_url", "invalid_discovery_page", "invalid_inn_job",
     "invalid_registry_number", "invalid_job", "invalid_jobs_response", "no_original_references",
-    "unsupported_or_unresolved_attachment", "archive_not_received",
+    "unsupported_or_unresolved_attachment", "unsupported_xml_type", "archive_not_received",
 ))
 
 
@@ -195,7 +195,8 @@ def _report_telemetry(result, kind="reg"):
     for key in ("download_complete", "metadata_received", "metadata_stored", "page_complete", "search_complete"):
         if type(result.get(key)) is bool:
             output[key] = result[key]
-    for key in ("originals_expected", "originals_received", "unresolved_attachment_count", "candidate_count", "pending_candidates"):
+    for key in ("originals_expected", "originals_received", "unresolved_attachment_count", "unsupported_xml_count",
+                "candidate_count", "pending_candidates"):
         if type(result.get(key)) is int and 0 <= result[key] <= 1000000:
             output[key] = result[key]
     return output
@@ -507,12 +508,15 @@ def evidence(reg, hashes=None):
             continue
     if hashes and len(snapshots) != len(set(hashes)):
         return {"metadata_received": False, "expected": 0, "received": 0,
-                "unresolved": 0, "complete": False, "reason": "archive_not_received"}
+                "unresolved": 0, "unsupported_xml_count": 0,
+                "complete": False, "reason": "archive_not_received"}
     known = allowed_documents(reg)
     refs = {}
     unresolved = 0
     all_guids = set()
     previous = set()
+    unsupported_xmls = {record["xml_sha256"] for record in records
+                        if record.get("xml_family") == "unsupported"}
     for record in records:
         documents = record.get("documents", [])
         unresolved += len(record.get("unresolved_attachments", []))
@@ -575,9 +579,11 @@ def evidence(reg, hashes=None):
     except OSError:
         stable = False
     return {"metadata_received": bool(records) and stable, "expected": len(refs)+unresolved,
-            "received": received, "unresolved": unresolved,
-            "complete": bool(records) and bool(refs) and not unresolved and received == len(refs) and stable,
-            "reason": "unsupported_or_unresolved_attachment" if unresolved else
+            "received": received, "unresolved": unresolved, "unsupported_xml_count": len(unsupported_xmls),
+            "complete": bool(records) and bool(refs) and not unresolved and not unsupported_xmls
+                        and received == len(refs) and stable,
+            "reason": "unsupported_xml_type" if unsupported_xmls else
+                      "unsupported_or_unresolved_attachment" if unresolved else
                       "no_original_references" if records and not refs else ""}
 
 
@@ -630,10 +636,13 @@ def report(ns, identifier, data):
         row = db.execute("SELECT * FROM v301_search_jobs WHERE id=?", (identifier,)).fetchone()
         _assert_lease(row, identity, token, reg)
         metadata_only = row["parent_id"] == "v341-card-facts"
-        complete = (metadata_only and status != "error" and proof["metadata_received"] and metadata_stored) or (
-            status in ("completed", "partial") and not metadata_only and proof["complete"])
+        complete = not proof.get("unsupported_xml_count") and (
+            (metadata_only and status != "error" and proof["metadata_received"] and metadata_stored) or (
+                status in ("completed", "partial") and not metadata_only and proof["complete"]))
         attempt = row["attempts"]
         error_code = safe_text(data.get("error_code"), 80)
+        if proof.get("unsupported_xml_count"):
+            error_code = "unsupported_xml_type"
         real_progress = proof["received"] > row["accepted"]
         if real_progress:
             attempt = 0
@@ -654,6 +663,9 @@ def report(ns, identifier, data):
         if complete:
             detail = ("Официальные XML ЕИС получены; сведения карточки обновлены" if metadata_only else
                       "Все учтённые оригиналы ЕИС сохранены; переданы на проверку на сервере")
+        elif proof.get("unsupported_xml_count"):
+            detail = (f"XML ЕИС сохранены; неподдерживаемых XML-документов: {proof['unsupported_xml_count']}. "
+                      "Они ещё не проанализированы")
         elif proof.get("unresolved"):
             detail = "Оригиналы ЕИС загружены не полностью: есть неподдерживаемые или неразрешённые ссылки"
         elif proof.get("metadata_received"):
@@ -665,7 +677,8 @@ def report(ns, identifier, data):
                   "download_complete": complete, "audit_complete": False,
                   "metadata_received": proof["metadata_received"], "metadata_stored": metadata_stored,
                   "originals_expected": proof["expected"], "originals_received": proof["received"],
-                  "unresolved_attachment_count": proof["unresolved"], "detail": detail}
+                  "unresolved_attachment_count": proof["unresolved"],
+                  "unsupported_xml_count": proof.get("unsupported_xml_count", 0), "detail": detail}
         db.execute("""UPDATE v301_search_jobs SET status=?,detail=?,found=?,accepted=?,
           not_before=?,lease_until=0,lease_owner='server-retry',lease_token='',updated_at=?,attempts=? WHERE id=?""",
           (state, detail, int(proof["metadata_received"]), max(row["accepted"], proof["received"]),

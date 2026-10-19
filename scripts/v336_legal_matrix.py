@@ -249,12 +249,13 @@ def verified_price(p,docs):
     """Use the same explicit monetary parser as official price recovery.
 
     The DB price by itself is NOT sufficient proof to establish a bid-security
-    violation. Conflicting revisions or lot prices remain unknown even when
-    one of them happens to equal the DB/card price.
+    violation. A missing cached price must not discard an otherwise unanimous
+    explicit NMCD in verified originals. Conflicting revisions or lot prices
+    remain unknown even when one happens to equal the DB/card price.
     """
     expected=money(p.get("price_num"))
-    if not expected or expected[1]<=0:return None
-    expected_value=Decimal(str(expected[1]))
+    if expected and expected[1]<=0:return None
+    expected_value=Decimal(str(expected[1])) if expected else None
     records=[]
     lots=set()
     for d in docs[:MAX_DOCS]:
@@ -271,7 +272,9 @@ def verified_price(p,docs):
         amounts={Decimal(value[0]) for value in values}
         if len(amounts)!=1:return None
         observed=next(iter(amounts))
-        if observed!=expected_value:return None
+        if observed<=0:return None
+        if expected_value is not None and observed!=expected_value:return None
+        if records and observed!=records[0][0]:return None
         # Inspect the original, not its capped evidence excerpt. Recovery
         # accepts numeric fields with a spelling; a legal finding must not
         # choose the digits when that spelling conflicts or cannot be read.
@@ -300,10 +303,13 @@ def verified_price(p,docs):
     if isinstance(official,dict) and official.get("kind")=="nmcd":
         from v311_verified_customer import _official_source
         card_value=money(official.get("price"))
-        if (card_value and card_value[1]==expected[1] and
-            _official_source(official.get("source"),str(p.get("reg") or ""))):
+        if _official_source(official.get("source"),str(p.get("reg") or "")):
+            if not card_value or card_value[1]<=0:return None
+            confirmed_value=Decimal(str(card_value[1]))
+            if expected_value is not None and confirmed_value!=expected_value:return None
+            if records and confirmed_value!=records[0][0]:return None
             if records:return records[0]
-            return (expected_value,{"name":"Карточка ЕИС — подтверждённая НМЦД"},None)
+            return (confirmed_value,{"name":"Карточка ЕИС — подтверждённая НМЦД"},None)
     return records[0] if records else None
 
 def security_findings(p,docs):
@@ -325,7 +331,10 @@ def security_findings(p,docs):
         if NON_PRICE_ORIGINAL.search(str(doc.get("name") or "")):continue
         body=str(doc.get("text") or "")[:MAX_TEXT].replace("\xa0"," ").replace("\u202f"," ")
         if not re.search(r"обеспечени\w*\s+заявк",body,re.I):continue
-        for match in list(BID_CLAUSE.finditer(body))[:8]:
+        # Examples/negative clauses at the beginning of a document do not
+        # consume the actual requirement's chance to be examined. Text and
+        # document limits remain bounded; findings are still deduplicated.
+        for match in BID_CLAUSE.finditer(body):
             segment=_bid_context(body,match)
             if NEG.search(segment) or GENERIC_SECURITY.search(segment):continue
             unit=(match.group("unit") or "").strip().lower()

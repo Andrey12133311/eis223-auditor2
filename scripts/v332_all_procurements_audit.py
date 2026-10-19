@@ -30,7 +30,7 @@ from v381_audit_scheduling import (audit_signals, background_audit,
                                    ordered_map, run_file_io)
 
 CAMPAIGN="2026-10-15-main-1253-identity-and-legal-v342"
-RULE_REVISION="2026-10-19-v386-legal-source-coverage"
+RULE_REVISION="2026-10-19-v387-legal-recall-persistence"
 DASHBOARD_MAX=1253
 REG=re.compile(r"^[0-9]{11,20}$")
 HEX=re.compile(r"^[0-9a-f]{64}$")
@@ -651,71 +651,92 @@ def is_official(doc):
             and HEX.fullmatch(str(m.get("sha256") or "")) is not None
             and bool(uid_from_url(m.get("source_url") or "")))
 
+def _audit_result_snapshot(c,reg):
+    """Materialize and close all readers before documentary comparisons."""
+    findings=[dict(row) for row in c.execute("""SELECT id,code,title,law,evidence,document,source_url
+        FROM findings WHERE reg_number=? AND kind='violation' ORDER BY id""",(reg,)).fetchall()]
+    checks=[dict(row) for row in c.execute("""SELECT id,field_path,item,status,law,evidence,document,source_url
+        FROM checks WHERE reg_number=? ORDER BY id""",(reg,)).fetchall()]
+    return findings,checks
+
+
+def _plan_audit_results(reg,findings,checks,snapshot):
+    """Do legal episode matching with no SQLite read/write transaction held."""
+    from v353_episode_guard import distinct_new
+    saved_findings,saved_checks=snapshot
+    previous=[{key:row[key] for key in ("code","title","law","evidence","document","source_url")}
+              for row in saved_findings]
+    previous.extend({"code":row["field_path"],"title":row["item"],
+                     **{key:row[key] for key in ("law","evidence","document","source_url")}}
+                    for row in saved_checks if row["status"]=="violation")
+    # Preserve the checklist's existing key, including rows inserted earlier
+    # in this same result. NULL field/item values do not equal an empty string.
+    checklist_keys={(row["field_path"],row["item"],row["document"] or "") for row in saved_checks}
+    new_findings,new_checks=[],[]
+    confirmed_checks=0
+    for f in findings:
+        if not isinstance(f,dict) or f.get("kind")!="violation":continue
+        code=str(f.get("code") or "")[:100]
+        title=str(f.get("title") or "")[:500]
+        if not code or not title:continue
+        if not distinct_new(f,previous):continue
+        new_findings.append((reg,code,"violation",title,
+            f.get("law"),f.get("law_url"),str(f.get("evidence") or "")[:3000],
+            str(f.get("note") or "")[:3000],f.get("document"),f.get("source_url"),
+            f.get("location"),f.get("match_text")))
+        previous.append({**f,"code":code,"title":title})
+    for ck in checks:
+        if not isinstance(ck,dict):continue
+        status=ck.get("status")
+        if status not in ("ok","check","violation","risk"):continue
+        scope=str(ck.get("scope") or "")[:200]
+        item=str(ck.get("item") or "")[:450]
+        path=str(ck.get("field_path") or "")[:170]
+        document=str(ck.get("document") or "")[:255]
+        if status=="violation":
+            found=not distinct_new({**ck,"title":item},previous)
+        else:
+            found=(path,item,document) in checklist_keys
+        if found:continue
+        new_checks.append((reg,scope,item,status,str(ck.get("evidence") or "")[:2200],
+            ck.get("source"),ck.get("source_url"),ck.get("document"),path,
+            str(ck.get("note") or "")[:3000],ck.get("law"),
+            ck.get("law_url"),ck.get("location")))
+        checklist_keys.add((path,item,ck.get("document") or ""))
+        if status=="violation":
+            confirmed_checks+=1
+            previous.append({**ck,"title":item,"code":path})
+    return new_findings,new_checks,confirmed_checks
+
+
 def persist(ns,reg,findings,checks,progress_token=None):
-    """Append only unseen findings/checks; never delete previous legal results."""
+    """Append unseen results atomically without holding the writer for regex work."""
     c=connect(ns)
     try:
-        c.execute("BEGIN IMMEDIATE")
-        from v353_episode_guard import distinct_new
-        # Read both legal tables once. The UI and persistence use documentary
-        # episode identity, never just a shared rule code / title.
-        previous=[dict(row) for row in c.execute("""
-            SELECT code,title,law,evidence,document,source_url
-              FROM findings WHERE reg_number=? AND kind='violation'
-            UNION ALL
-            SELECT field_path AS code,item AS title,law,evidence,document,source_url
-              FROM checks WHERE reg_number=? AND status='violation'
-            """,(reg,reg)).fetchall()]
-        new_f=new_c=confirmed_checks=0
-        for f in findings:
-            if not isinstance(f,dict) or f.get("kind")!="violation":continue
-            code=str(f.get("code") or "")[:100]
-            title=str(f.get("title") or "")[:500]
-            if not code or not title:continue
-            if not distinct_new(f,previous):continue
-            c.execute("""INSERT INTO findings
+        for attempt in range(4):
+            snapshot=_audit_result_snapshot(c,reg)
+            insert_findings,insert_checks,confirmed_checks=_plan_audit_results(reg,findings,checks,snapshot)
+            c.execute("BEGIN IMMEDIATE")
+            # Another analyzer may have committed this same procurement while
+            # matching episodes. Rebase outside the writer before inserting;
+            # otherwise two correct independent reviews could create duplicates.
+            if _audit_result_snapshot(c,reg)!=snapshot:
+                c.rollback()
+                continue
+            break
+        else:
+            raise sqlite3.OperationalError("database is locked: audit results changed during save")
+        new_f,new_c=len(insert_findings),len(insert_checks)
+        if insert_findings:
+            c.executemany("""INSERT INTO findings
                 (reg_number,code,kind,title,law,law_url,evidence,note,
                  document,source_url,location,match_text)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(
-                    reg,code,"violation",title,
-                    f.get("law"),f.get("law_url"),str(f.get("evidence") or "")[:3000],
-                    str(f.get("note") or "")[:3000],f.get("document"),f.get("source_url"),
-                    f.get("location"),f.get("match_text")))
-            new_f+=1
-            previous.append({**f,"code":code,"title":title})
-        for ck in checks:
-            if not isinstance(ck,dict):continue
-            status=ck.get("status")
-            if status not in ("ok","check","violation","risk"):continue
-            scope=str(ck.get("scope") or "")[:200]
-            item=str(ck.get("item") or "")[:450]
-            path=str(ck.get("field_path") or "")[:170]
-            document=str(ck.get("document") or "")[:255]
-            # Same type of legal check in the same original should not
-            # repeatedly inflate the checklist on each redeploy.
-            if status=="violation":
-                # A confirmed checklist violation can be a separately dated
-                # act despite sharing its title with an earlier checklist row.
-                # It must not reproduce a finding already stored for this act.
-                found=not distinct_new({**ck,"title":item},previous)
-            else:
-                found=c.execute("""SELECT 1 FROM checks
-                    WHERE reg_number=? AND field_path=? AND item=?
-                      AND COALESCE(document,'')=?
-                    LIMIT 1""",(reg,path,item,document)).fetchone()
-            if found:continue
-            c.execute("""INSERT INTO checks
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",insert_findings)
+        if insert_checks:
+            c.executemany("""INSERT INTO checks
                 (reg_number,scope,item,status,evidence,source,source_url,
                  document,field_path,note,law,law_url,location)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
-                    reg,scope,item,status,str(ck.get("evidence") or "")[:2200],
-                    ck.get("source"),ck.get("source_url"),ck.get("document"),path,
-                    str(ck.get("note") or "")[:3000],ck.get("law"),
-                    ck.get("law_url"),ck.get("location")))
-            new_c+=1
-            if status=="violation":
-                confirmed_checks+=1
-                previous.append({**ck,"title":item,"code":path})
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",insert_checks)
         if new_f or new_c:
             counts=c.execute("""SELECT
               (SELECT COUNT(*) FROM findings WHERE reg_number=? AND kind='violation')
@@ -770,6 +791,14 @@ async def collect_saved_evidence(ns,reg,rows):
     official=[]
     result={}
     source_incomplete=bool(source_error)
+    from v294_eis_bridge import soap_metadata_incomplete
+    try:
+        metadata_incomplete=await run_file_io(soap_metadata_incomplete,reg,timeout=30)
+    except asyncio.TimeoutError:
+        metadata_incomplete=True
+    if metadata_incomplete:
+        source_incomplete=True
+        source_error=source_error or "Часть официальных XML ЕИС ещё не поддерживается или не подтверждена"
     if received_uids-represented:
         try:
             # Pull from REAL, locally saved and receipt-validated originals;

@@ -75,16 +75,22 @@ def cross_doc_clarifications(p,docs):
     ambiguous_numbers=set()
     originals={}
     conflicting_originals=set()
+    unresolved_archives=set()
     for doc in docs:
         if not isinstance(doc,dict) or not verified(doc):continue
-        source=(doc.get("meta") or {}).get("source_url") or doc.get("url") or ""
-        uid=uid_from_url(source)
+        identity=_document_original_identity(doc)
+        if identity is None:
+            # A missing member path cannot masquerade as another independent
+            # original in the same verified archive.
+            uid=uid_from_url((doc.get("meta") or {}).get("source_url") or "")
+            if uid:unresolved_archives.add(uid)
+            continue
         fingerprint=(str(doc.get("name") or ""),str(doc.get("text") or ""),
                      (doc.get("meta") or {}).get("sha256"))
-        if uid in originals:
-            if originals[uid][0]!=fingerprint:conflicting_originals.add(uid)
-        else:originals[uid]=(fingerprint,doc)
-    for uid,(_,doc) in originals.items():
+        if identity in originals:
+            if originals[identity][0]!=fingerprint:conflicting_originals.add(identity)
+        else:originals[identity]=(fingerprint,doc)
+    for identity,(_,doc) in originals.items():
         title=str(doc.get("name") or "")
         if not EVENT_DOC.search(title) or EXCLUDE.search(title):continue
         body=str(doc.get("text") or "")[:750000].replace("\xa0"," ")
@@ -92,13 +98,13 @@ def cross_doc_clarifications(p,docs):
         body_numbers,body_invalid=_clarification_identity(body)
         identifiers=title_numbers|body_numbers
         invalid=(title_invalid or body_invalid or len(identifiers)>1
-                 or uid in conflicting_originals)
+                 or identity in conflicting_originals or identity[0] in unresolved_archives)
         if invalid:ambiguous_numbers.update(identifiers)
         number=None if invalid else next(iter(identifiers),"")
         for pattern,events in ((REQUEST,requests),(ANSWER,answers)):
             for m in matches(pattern,body):
                 at=day(m["date"])
-                if at:events.append((uid,doc,m,at,number))
+                if at:events.append((identity,doc,m,at,number))
     groups={}
     # An unidentified competing event makes even an explicitly numbered pair
     # unsafe: it may be a different version of that same request or answer.
@@ -132,7 +138,7 @@ def cross_doc_clarifications(p,docs):
       "title":"Срок публикации разъяснения превышает три рабочих дня (разные оригиналы ЕИС)",
       "law":"223-ФЗ, ст. 3.2 ч. 3",
       "law_url":LAW32,
-      "evidence":(
+      "evidence":_cross_original_evidence((
           ("Номер запроса: "+number+". " if number else "")+
           "Запрос получен "+received.isoformat()+" по оригиналу ЕИС «"+
           str(qdoc.get("name") or "")+"» ("+request_source+"); "
@@ -141,7 +147,7 @@ def cross_doc_clarifications(p,docs):
           "крайний день ответа "+due.isoformat()+
           "; окончание подачи заявок "+deadline.isoformat()+
           ". Даты учитываются по дням, без времени."
-      )[:2500],
+      )[:2500], "CLARIFICATION", number, adoc),
       "document":str(adoc.get("name") or ""),
       "source_url":reply_source,
       "location":"ЕИС: подтверждённые запрос и публикация",
@@ -300,6 +306,15 @@ def event_identity_evidence(evidence, family, number, doc=None):
             if re.fullmatch(r"[0-9a-f]{64}", digest):identity = (*identity, digest)
             provenance = "Идентичность оригинала ЕИС: " + json.dumps(identity, ensure_ascii=False) + ".\n"
     return _identity_prefix(family) + (number or "не установлен") + ".\n" + provenance + evidence
+
+
+def _cross_original_evidence(evidence, family, number, doc):
+    # Split dates in one ZIP need the member's identity in stored evidence;
+    # its parent receipt URL alone would collapse separate numbered acts.
+    # Preserve the established format for ordinary cross-original findings.
+    if (doc.get("meta") or {}).get("source") == "official_eis_archive_member":
+        return event_identity_evidence(evidence, family, number, doc)
+    return evidence
 
 
 def finding_original_identity(item):
@@ -495,9 +510,13 @@ def cross_doc_protocols(p,docs):
         if due is None or end<=due:continue
         before=(sdoc.get("meta") or {}).get("source_url") or sdoc.get("url") or ""
         after=(pdoc.get("meta") or {}).get("source_url") or pdoc.get("url") or ""
-        # Compare canonical receipt identities, not URL spelling: another
-        # query parameter or EIS hostname does not create a second original.
-        if not before or not after or uid_from_url(before)==uid_from_url(after):continue
+        # A receipt authenticates the ZIP, while the verified member path
+        # identifies its individual original. URL aliases and copies of the
+        # same member are still one source and cannot form a split pair.
+        before_identity=_document_original_identity(sdoc)
+        after_identity=_document_original_identity(pdoc)
+        if (not before or not after or not before_identity or not after_identity
+                or before_identity==after_identity):continue
         findings.append({
         "code":"223-4-12-PROTOCOL-CROSS-DOC-LATE",
         "kind":"violation",
@@ -505,7 +524,7 @@ def cross_doc_protocols(p,docs):
                 "размещён в ЕИС с нарушением срока публикации",
         "law":"223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
         "law_url":LAW4,
-        "evidence":(
+        "evidence":_cross_original_evidence((
             ("Номер протокола: "+number+". " if number else "")+
             "Вид протокола: "+kind+". "
             "Подписание "+start.isoformat()+" по оригиналу ЕИС «"+
@@ -514,7 +533,7 @@ def cross_doc_protocols(p,docs):
             str(pdoc.get("name") or "")+"» ("+after+"); "
             "крайний день "+due.isoformat()+
             ". Даты проверены по календарным дням, без времени."
-        )[:2500],
+        )[:2500], "PROTOCOL", number, pdoc),
         "document":str(pdoc.get("name") or ""),
         "source_url":after,
         "location":"Раздельные подтверждённые оригиналы протокола в ЕИС",

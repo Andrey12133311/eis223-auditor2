@@ -37,6 +37,13 @@ PROTOCOL_TYPES = frozenset("purchaseProtocol" + suffix for suffix in (
 ))
 
 
+class UnsupportedXmlType(ValueError):
+    """A well-formed official root whose facts this parser does not support."""
+
+    def __init__(self, kind):
+        super().__init__("Unsupported official EIS XML type: " + kind[:80])
+
+
 def local_name(element):
     return element.tag.rsplit("}", 1)[-1]
 
@@ -65,13 +72,8 @@ def safe_xml(raw):
         raise ValueError("Malformed XML") from exc
 
 
-def parse_document(raw, filename):
-    root = safe_xml(raw)
-    kind = local_name(root)
-    if root.tag != "{" + PURCHASE_NS + "}" + kind:
-        raise ValueError("Not an EIS 223-FZ purchase XML namespace")
-    if kind not in NOTICE_TYPES | PROTOCOL_TYPES:
-        raise ValueError("Unsupported official EIS XML type: " + kind[:80])
+def _document_envelope(root, kind, filename):
+    """Validate the transport location and filename without interpreting facts."""
     match = re.fullmatch(
         re.escape(kind) + r"_([0-9]{11,20})(?:-[0-9]{2})?_[A-Za-z0-9_-]{1,160}[.]xml",
         filename,
@@ -101,14 +103,10 @@ def parse_document(raw, filename):
                 positions.extend(item)
     if not any(data is candidate for candidate in positions):
         raise ValueError("Official XML data is outside the transport envelope")
-    family = "notice" if kind in NOTICE_TYPES else "protocol"
-    if family == "notice":
-        reg = field(data, "registrationNumber")
-    else:
-        reg = field(direct(data, "purchaseInfo"), "purchaseNoticeNumber")
-    if not REG.fullmatch(reg) or reg != match[1]:
-        raise ValueError("Registry number and ZIP filename differ")
+    return match[1], data
 
+
+def _attachment_references(data, kind):
     docs = []
     seen = set()
     unresolved = []
@@ -151,6 +149,76 @@ def parse_document(raw, filename):
             seen.add(url)
             docs.append({"name": name, "url": url, "guid": document_guid,
                          "xml_type": kind, "published": field(data, "publicationDateTime")})
+    return docs, unresolved, previous
+
+
+def quarantine_document(raw, filename, expected_reg):
+    """Retain an unsupported sibling without creating any legal facts or links.
+
+    Only the already documented notice/protocol identity envelopes are allowed.
+    This does not extend the supported types: parse_document still rejects this
+    member when legal readers later revalidate the immutable archive.
+    """
+    root = safe_xml(raw)
+    kind = local_name(root)
+    if root.tag != "{" + PURCHASE_NS + "}" + kind:
+        raise ValueError("Not an EIS 223-FZ purchase XML namespace")
+    if kind in NOTICE_TYPES | PROTOCOL_TYPES:
+        raise ValueError("Expected an unsupported official XML type")
+    filename_reg, data = _document_envelope(root, kind, filename)
+    if not REG.fullmatch(expected_reg) or filename_reg != expected_reg:
+        raise ValueError("Mixed registry numbers in archive")
+
+    def unique_child(parent, name):
+        nodes = [node for node in parent if local_name(node) == name]
+        if len(nodes) > 1:
+            raise ValueError("Missing or ambiguous official XML data")
+        if nodes and nodes[0].tag not in (name, "{" + PURCHASE_NS + "}" + name):
+            raise ValueError("Foreign official XML data namespace")
+        return nodes[0] if nodes else None
+
+    own = unique_child(data, "registrationNumber")
+    purchase = unique_child(data, "purchaseInfo")
+    parent_reg = unique_child(purchase, "purchaseNoticeNumber") if purchase is not None else None
+    own_number = (own.text or "").strip() if own is not None else ""
+    purchase_number = (parent_reg.text or "").strip() if parent_reg is not None else ""
+    # A protocol may have a document-specific suffix, but it must name the
+    # same procurement explicitly. A filename by itself never proves identity.
+    if purchase_number:
+        valid = purchase_number == expected_reg and (
+            own is None or re.fullmatch(re.escape(expected_reg) + r"(?:-[0-9]{2})?", own_number))
+    else:
+        valid = parent_reg is None and own_number == expected_reg
+    if not valid:
+        raise ValueError("Registry number and ZIP filename differ")
+    # Keep the existing external URL and attachment size validation even
+    # though quarantined members never add downloadable references.
+    _attachment_references(data, kind)
+    return {
+        "reg_number": expected_reg, "xml_filename": filename,
+        "xml_sha256": hashlib.sha256(raw).hexdigest(), "xml_type": kind,
+        "xml_family": "unsupported", "status": "unsupported_xml",
+        "reason": "unsupported_xml_type", "documents_referenced": 0,
+        "documents": [], "unresolved_attachments": [], "previous_document_guids": [],
+    }
+
+
+def parse_document(raw, filename):
+    root = safe_xml(raw)
+    kind = local_name(root)
+    if root.tag != "{" + PURCHASE_NS + "}" + kind:
+        raise ValueError("Not an EIS 223-FZ purchase XML namespace")
+    if kind not in NOTICE_TYPES | PROTOCOL_TYPES:
+        raise UnsupportedXmlType(kind)
+    filename_reg, data = _document_envelope(root, kind, filename)
+    family = "notice" if kind in NOTICE_TYPES else "protocol"
+    if family == "notice":
+        reg = field(data, "registrationNumber")
+    else:
+        reg = field(direct(data, "purchaseInfo"), "purchaseNoticeNumber")
+    if not REG.fullmatch(reg) or reg != filename_reg:
+        raise ValueError("Registry number and ZIP filename differ")
+    docs, unresolved, previous = _attachment_references(data, kind)
     version = field(data, "version")
     record = {
         "reg_number": reg, "xml_filename": filename,
