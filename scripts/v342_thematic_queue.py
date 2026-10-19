@@ -1,6 +1,7 @@
 """Isolated, evidence-only thematic queue over EIS procurements.
 No fabricated findings; reuses verified-original legal engine and filters results.
 """
+import audit_funnel
 import asyncio,json,re,secrets,sqlite3,time
 from datetime import datetime,timezone
 from fastapi import HTTPException,Request
@@ -154,7 +155,9 @@ async def independent_review(ns,reg,categories):
  from v332_all_procurements_audit import existing,as_procurement,collect_saved_evidence,is_official
  purchase,rows=await asyncio.to_thread(existing,ns,reg)
  p=as_procurement(purchase)
- if not business_company(p.get("customer")):return "excluded_company",[]
+ if not business_company(p.get("customer")):
+    audit_funnel.observe("gate","company_excluded")
+    return "excluded_company",[]
  source=await collect_saved_evidence(ns,reg,rows)
  docs,unreadable=source["docs"],source["unreadable"]
  incomplete=bool(unreadable or source["source_incomplete"])
@@ -162,7 +165,10 @@ async def independent_review(ns,reg,categories):
     if value and (not p.get(key) or key in ("method","submission_end","submission_start")):
        p[key]=value
  verified=[d for d in docs if is_official(d) and str(d.get("text") or "").strip()]
+ audit_funnel.observe("documents_thematic",docs,unreadable,verified)
+ audit_funnel.observe("incomplete",incomplete)
  if not verified:
+    audit_funnel.observe("gate","no_verified_documents")
     # A missing original needs the EIS intake; an existing but temporarily
     # unreadable file needs a later extraction attempt, with bounded backoff.
     from pathlib import Path
@@ -190,11 +196,16 @@ async def independent_review(ns,reg,categories):
          "submissionEnd":p.get("submission_end") or ""}
  detail.update(source["detail"])
  findings=await asyncio.to_thread(analyzer,p,verified)
+ audit_funnel.observe("analyzer_results",findings)
  checks=await asyncio.to_thread(checker,p,detail,card,verified)
+ audit_funnel.observe("checklist_results",checks)
+ audit_funnel.observe("thematic_reviews",checks)
  findings=list(findings) if isinstance(findings,(list,tuple)) else []
  for item in checks if isinstance(checks,(list,tuple)) else []:
     if not isinstance(item,dict) or item.get("status")!="violation":continue
-    if not str(item.get("evidence") or "").strip():continue
+    if not str(item.get("evidence") or "").strip():
+       audit_funnel.observe("gate","missing_evidence")
+       continue
     findings.append({**item,"kind":"violation",
                      "title":item.get("item") or item.get("title") or "",
                      "code":item.get("field_path") or item.get("code") or ""})
@@ -213,16 +224,25 @@ async def independent_review(ns,reg,categories):
  urls.discard("")
  selected=[]
  for f in findings if isinstance(findings,list) else []:
-    if not isinstance(f,dict) or f.get("kind")!="violation":continue
-    if not str(f.get("law") or "").strip():continue
-    if not str(f.get("evidence") or "").strip():continue
+    if not isinstance(f,dict) or f.get("kind")!="violation":
+       audit_funnel.observe("gate","non_violation")
+       continue
+    if not str(f.get("law") or "").strip():
+       audit_funnel.observe("gate","missing_law")
+       continue
+    if not str(f.get("evidence") or "").strip():
+       audit_funnel.observe("gate","missing_evidence")
+       continue
     # Provenance requirements are exactly as strict as the main engine:
     # neither a plausible title nor a local unverified file is enough.
     if not ((f.get("document") and norm_name(f["document"]) in names) or
             (f.get("source_url") and str(f["source_url"]).strip() in urls)):
+       audit_funnel.observe("gate","source_unverified")
        continue
     category=match_legal_category(f,categories)
-    if category is None:continue
+    if category is None:
+       audit_funnel.observe("gate","category_unselected")
+       continue
     selected.append({
       "title":str(f.get("title") or "")[:500],
       "law":str(f.get("law") or "")[:500],
@@ -236,6 +256,7 @@ async def independent_review(ns,reg,categories):
  # This only changes new presentation/persistence, never deletes historical
  # thematic results. Different dated acts and documentary sources stay distinct.
  from v352_dashboard_truth import collapse_legal_events
+ audit_funnel.observe("selected_before_collapse",selected)
  return ("retry" if incomplete else "completed"),collapse_legal_events(selected)
 
 def read_db(ns):

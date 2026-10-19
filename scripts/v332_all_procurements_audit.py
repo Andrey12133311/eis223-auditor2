@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import audit_funnel
 import hashlib
 import json
 import os
@@ -850,6 +851,7 @@ def check_reservation(ns,reg):
     finally:c.close()
 
 
+@audit_funnel.trace_sync("general",registration="reg")
 def persist(ns,reg,findings,checks,progress_token=None):
     """Append only under the caller's exact general or intake reservation."""
     guard=ns.get("_v295_persist_guard")
@@ -868,7 +870,7 @@ def _audit_result_snapshot(c,reg):
     return findings,checks
 
 
-def _plan_audit_results(reg,findings,checks,snapshot):
+def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
     """Do legal episode matching with no SQLite read/write transaction held."""
     from v353_episode_guard import distinct_new
     saved_findings,saved_checks=snapshot
@@ -886,8 +888,12 @@ def _plan_audit_results(reg,findings,checks,snapshot):
         if not isinstance(f,dict) or f.get("kind")!="violation":continue
         code=str(f.get("code") or "")[:100]
         title=str(f.get("title") or "")[:500]
-        if not code or not title:continue
-        if not distinct_new(f,previous):continue
+        if not code or not title:
+            audit_funnel.increment(diagnostic,"reasons","invalid_record")
+            continue
+        if not distinct_new(f,previous):
+            audit_funnel.increment(diagnostic,"reasons","duplicate")
+            continue
         new_findings.append((reg,code,"violation",title,
             f.get("law"),f.get("law_url"),str(f.get("evidence") or "")[:3000],
             str(f.get("note") or "")[:3000],f.get("document"),f.get("source_url"),
@@ -905,25 +911,40 @@ def _plan_audit_results(reg,findings,checks,snapshot):
             found=not distinct_new({**ck,"title":item},previous)
         else:
             found=(path,item,document) in checklist_keys
-        if found:continue
+        if found:
+            audit_funnel.increment(diagnostic,"reasons","duplicate")
+            continue
         new_checks.append((reg,scope,item,status,str(ck.get("evidence") or "")[:2200],
             ck.get("source"),ck.get("source_url"),ck.get("document"),path,
             str(ck.get("note") or "")[:3000],ck.get("law"),
             ck.get("law_url"),ck.get("location")))
         checklist_keys.add((path,item,ck.get("document") or ""))
+        if status in ("check","risk"):audit_funnel.increment(diagnostic,"counts","persisted_review")
+        elif status=="ok":audit_funnel.increment(diagnostic,"counts","persisted_ok")
         if status=="violation":
             confirmed_checks+=1
             previous.append({**ck,"title":item,"code":path})
     return new_findings,new_checks,confirmed_checks
 
 
+@audit_funnel.safe
+def _merge_committed_audit_diagnostics(diagnostic):
+    if diagnostic is None:return
+    for group in ("counts","reasons"):
+        for key,value in diagnostic[group].items():
+            audit_funnel.current_increment(group,key,value)
+
+
 def _persist_reserved(ns,reg,findings,checks,progress_token=None):
     """Append unseen results atomically without holding the writer for regex work."""
     c=connect(ns)
     try:
+        audit_funnel.observe("persist_input",findings,checks)
         for attempt in range(4):
             snapshot=_audit_result_snapshot(c,reg)
-            insert_findings,insert_checks,confirmed_checks=_plan_audit_results(reg,findings,checks,snapshot)
+            # Discard diagnostic counts along with any stale outside-writer plan.
+            diagnostic=audit_funnel.new("general",reg)
+            insert_findings,insert_checks,confirmed_checks=_plan_audit_results(reg,findings,checks,snapshot,diagnostic)
             c.execute("BEGIN IMMEDIATE")
             require_reservation(c,reg)
             # Another analyzer may have committed this same procurement while
@@ -967,6 +988,9 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None):
                 (new_f+confirmed_checks,new_c-confirmed_checks,progress_token,
                  CAMPAIGN,reg,progress_token))
         c.commit()
+        audit_funnel.current_increment("counts","persisted_confirmed",new_f+confirmed_checks)
+        _merge_committed_audit_diagnostics(diagnostic)
+        audit_funnel.committed()
         return new_f,new_c
     except:
         if c.in_transaction:c.rollback()
@@ -1048,6 +1072,7 @@ async def collect_saved_evidence(ns,reg,rows):
             "detail":result.get("detail") or {}}
 
 
+@audit_funnel.trace("general",registration="reg")
 async def inspect_one(ns,reg):
     from audit_write_guard import background_write_guard
     intake_guard=ns.get("_v295_persist_guard")
@@ -1093,7 +1118,10 @@ async def _inspect_one(ns,reg):
     readable=[d for d in docs if d.get("status")=="checked" and str(d.get("text") or "").strip()]
     counted=len(readable)
     verified_count=sum(is_official(d) for d in readable)
+    audit_funnel.observe("documents_general",docs,unreadable,verified_count,counted)
+    audit_funnel.observe("incomplete",source_incomplete)
     if not readable:
+        audit_funnel.observe("gate","no_readable_documents")
         return ("no_readable_documents",{
             "documents_found":len(docs)+unreadable,"documents_read":0,
             "documents_unreadable":unreadable,"verified_original_documents":0,
@@ -1108,14 +1136,18 @@ async def _inspect_one(ns,reg):
     # cancellation must settle those writes before another worker takes reg.
     await db_stage(ns,"reservation",check_reservation,ns,reg)
     findings=await thread_call(analyzer,purchase,docs)
+    audit_funnel.observe("analyzer_results",findings)
     await db_stage(ns,"reservation",check_reservation,ns,reg)
     checks=await thread_call(checker,purchase,detail,card,docs)
+    audit_funnel.observe("checklist_results",checks)
     verified_sources={d.get("name") for d in readable if is_official(d)}
     verified_urls={str((d.get("meta") or {}).get("source_url"))
                    for d in readable if is_official(d)}
     accepted=[]
     for f in findings:
-        if not isinstance(f,dict) or f.get("kind")!="violation":continue
+        if not isinstance(f,dict) or f.get("kind")!="violation":
+            audit_funnel.observe("gate","non_violation")
+            continue
         name=f.get("document")
         url=f.get("source_url")
         confirmed=bool((name and name in verified_sources) or (url and url in verified_urls))
@@ -1128,7 +1160,9 @@ async def _inspect_one(ns,reg):
                                and e.get("publication_date")
                                for e in manifest_changes(reg)))
         if confirmed:accepted.append(f)
-        else:checks.append({
+        else:
+            audit_funnel.observe("gate","source_unverified")
+            checks.append({
             "scope":"Предварительный юридический анализ",
             "item":f.get("title") or "Проверить правовое основание",
             "status":"check",
@@ -1139,6 +1173,7 @@ async def _inspect_one(ns,reg):
             "location":f.get("location") or "",
             "note":"Документ не подтверждён квитанцией ЕИС; в число установленных нарушений не включено"
         })
+    audit_funnel.observe("outcomes_general",accepted,checks)
     token=uuid.uuid4().hex
     # Keep the computed evidence and token while a short write lock clears.
     # Retrying the whole inspection would needlessly rerun legal analyzers.
