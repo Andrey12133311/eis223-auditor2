@@ -122,16 +122,28 @@ function fillEntries(id,items,kind){
 }
 function counter(id,val){$(id).textContent=Number(val??0).toLocaleString("ru-RU")}
 function meta(id,value){$(id).textContent=value||"Не указано"}
+function legalStatus(audit){
+ const state=audit.state;
+ if(['pending','queued'].includes(state))return 'Юридическая проверка в очереди';
+ if(['running','processing'].includes(state))return 'Идёт юридическая проверка';
+ if(['failed','error'].includes(state))return 'Ошибка юридической проверки';
+ if(state==='no_readable_documents')return 'Не удалось прочитать документы для юридической проверки';
+ if(state==='completed')return Number(audit.documents_read)>0?
+  'Юридическая проверка завершена':'Юридическая проверка не завершена: нет проверенных документов';
+ return 'Юридическая проверка ещё не завершена';
+}
 function render(data){
  const p=data.purchase||{},audit=data.audit||{};
  meta("case-title",p.title||"Закупка № "+REG);meta("case-customer",p.customer);
  meta("case-inn",p.customer_inn);meta("case-method",p.method);meta("case-price",p.price);
- meta("case-audit",audit.state==="completed"?"Завершена юридическая проверка":
-  audit.state==="unknown"?"Проверка ещё не завершена":audit.state);
+ meta("case-audit",legalStatus(audit));
  counter("case-violations",data.findings_count);counter("case-duplicates",data.duplicates_grouped);
  counter("case-docs",audit.documents_read);counter("case-questions",
   (data.comparisons||[]).length+(data.review_items||[]).length);
- $("case-note").textContent=data.note||"";
+ const previous=['pending','queued','running','processing','failed','error'].includes(audit.state)&&
+  (Number(audit.documents_read)>0||Number(data.findings_count)>0||(data.review_items||[]).length>0);
+ $("case-note").textContent=(previous?
+  'Показаны сохранённые результаты предыдущей проверки. Новая проверка ещё не завершена. ':'')+(data.note||'');
  const src=sourceLink(p.url,"Открыть карточку ЕИС ↗");
  if(src)$("case-source").append(src);
  fillEntries("case-finding-entries",data.findings||[],"findings");

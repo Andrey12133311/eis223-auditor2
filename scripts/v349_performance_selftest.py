@@ -1,7 +1,7 @@
 """Regression tests for legal-event evidence, OCR reuse and atomic audit claiming."""
 from pathlib import Path
 from unittest.mock import patch
-import tempfile,sqlite3
+import tempfile,sqlite3,hashlib,json
 import v347_text_cache as cached
 import v348_cross_document_legal as cross
 import v341_precise_legal as legal
@@ -80,13 +80,25 @@ def run():
         assert c.execute("SELECT COUNT(*) FROM v332_audit_queue WHERE state='running'").fetchone()[0]==1
         assert c.execute("SELECT state FROM v332_audit_queue WHERE reg=?",(waiting,)).fetchone()[0]=="pending"
         c.close()
-        audit.mark(main_ns,ready,"completed")
-        assert audit.refresh_changed(main_ns)==0
+        with patch("v295_eis_originals.root",return_value=root):
+            watermark=audit.review_watermark(main_ns,ready)
+        audit.mark(main_ns,ready,"completed",watermark)
+        with patch("v295_eis_originals.root",return_value=root):
+            assert audit.refresh_changed(main_ns)==0
         c=connection()
         c.execute("INSERT INTO docs VALUES(2,?,'checked','/data/eis/second.pdf')",(ready,))
         c.execute("INSERT INTO docs VALUES(3,?,'checked','/data/eis/new.pdf')",(waiting,))
         c.commit();c.close()
-        assert audit.refresh_changed(main_ns)==1
+        # A real receipt-verified source revision, not a new fake local row,
+        # invalidates the completed legal watermark.
+        body=b"Additional official evidence";digest=hashlib.sha256(body).hexdigest()
+        folder=root/"eis223_official_originals"/ready/("B"*32)
+        folder.mkdir(parents=True)
+        (folder/(digest+".xml")).write_bytes(body)
+        (folder/"receipt.json").write_text(json.dumps({"reg_number":ready,"uid":"B"*32,
+            "extension":".xml","sha256":digest,"bytes":len(body)}))
+        with patch("v295_eis_originals.root",return_value=root):
+            assert audit.refresh_changed(main_ns)==1
         assert audit.claim_next(main_ns)==ready
         assert audit.claim_next(main_ns)==waiting
         assert audit.claim_next(main_ns) is None

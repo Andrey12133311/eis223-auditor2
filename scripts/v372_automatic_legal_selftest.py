@@ -179,27 +179,31 @@ def test_revision_requeue():
         original_files={path:path.read_bytes() for path in directory.rglob("*") if path.is_file() and path!=db_path}
         audit.initialize(ns)
         for reg in (legacy,current):
-            assert audit.claim_next(ns)==reg
-            audit.mark(ns,reg,"completed",{"documents_found":1,"documents_read":1,
+            claim=audit.claim_next(ns)
+            assert claim==reg
+            watermark=audit.review_watermark(ns,claim)
+            audit.mark(ns,claim,"completed",{**watermark,"documents_found":1,"documents_read":1,
                 "verified_original_documents":1,"original_expected":1,"original_received":1,
                 "new_findings":1,"new_checks":1})
         connection=connect()
         try:
             # Only the rule version changes: source identity and doc ids are
             # the exact values recorded by the real completion path above.
-            connection.execute("UPDATE v332_audit_queue SET audit_revision=? WHERE reg=?",
-                               ("selftest-previous-legal-revision",legacy))
+            connection.execute("UPDATE v332_audit_queue SET audit_revision=?,last_engine_signature=? WHERE reg=?",
+                               ("selftest-previous-legal-revision","selftest-previous-engine",legacy))
             connection.commit()
         finally:connection.close()
-        assert audit.initialize(ns)["states"]=={"pending":1,"completed":1},\
-            "Existing saved purchases should be automatically requeued on a new legal revision"
+        assert audit.initialize(ns)["states"]=={"completed":2}, "Startup defers catch-up to bounded sweeps"
+        assert audit.refresh_changed(ns)==1, "A bounded sweep must admit the stale legal engine"
+        assert audit.progress(ns)["states"]=={"pending":1,"completed":1}
         queued=snapshot("v332_audit_queue")
         audit.initialize(ns)
         assert snapshot("v332_audit_queue")==queued,"Repeated startup must not reset queued work"
         assert audit.refresh_changed(ns)==0
-        assert audit.claim_next(ns)==legacy,"Only the outdated completed purchase should be claimed"
+        claim=audit.claim_next(ns)
+        assert claim==legacy,"Only the outdated completed purchase should be claimed"
         assert audit.claim_next(ns) is None,"A running recheck must not be claimed twice"
-        audit.mark(ns,legacy,"completed")
+        audit.mark(ns,claim,"completed",audit.review_watermark(ns,claim))
         completed=snapshot("v332_audit_queue")
         assert audit.initialize(ns)["states"]=={"completed":2}
         assert snapshot("v332_audit_queue")==completed,"Current completed results must remain completed"

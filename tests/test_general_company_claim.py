@@ -55,7 +55,8 @@ class GeneralCompanyClaim(unittest.TestCase):
         regs = [self.add(i, name) for i, name in enumerate(names, 1)]
         self.assertTrue(all(business_company(name) for name in names))
         self.assertCountEqual(audit.dashboard_regs(self.ns), regs)
-        self.assertEqual(audit.add_new_verified(self.ns), len(regs))
+        self.assertEqual(audit.add_new_verified(self.ns), audit.MAX_RECHECK_ADMISSIONS)
+        self.assertEqual(audit.add_new_verified(self.ns), len(regs) - audit.MAX_RECHECK_ADMISSIONS)
         self.assertCountEqual([audit.claim_next(self.ns) for _ in regs], regs)
         self.assertIsNone(audit.claim_next(self.ns))
 

@@ -242,6 +242,7 @@ async function loadProgress(){
    body.append(make('strong','Закупка № '+x.reg_number),
     make('small',x.stage+' · оригиналов проверено: '+x.documents_checked+
        ' · фактических нарушений: '+x.violations));
+   if(x.previous_results_note)body.append(make('small',x.previous_results_note));
    const tool=make('div');tool.className='staff-tools';
    tool.append(createAction('Открыть',async()=>{
      section('case');el('staff-reg').value=x.reg_number;await loadCase()
@@ -672,13 +673,6 @@ el("staff-save-pref").onclick=async()=>{
  }catch(e){msg(e.message)}
 };
 el("staff-case-load").onclick=loadCase;
-el("staff-recheck").onclick=async()=>{
- const reg=currentCaseReg;
- if(!regOK(reg))return msg('Выберите номер своей закупки');
- try{const result=await api('/me/workbench/'+reg+'/recheck','POST');
-  msg('Повторная загрузка оригиналов ЕИС: '+result.status+'. История сохранена')}
- catch(e){msg(e.message)}
-};
 async function loadVersions(reg,isCurrent=()=>reg===currentCaseReg){
  try{
   const result=await api('/me/workbench/'+reg+'/versions');
@@ -887,8 +881,8 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <div class="action-row">
 <a id="staff-case-link" href="#">Электронное дело и оригиналы ЕИС</a>
 <a id="staff-case-download" href="#">Выгрузить материалы ZIP</a>
-<button class="outline" id="staff-recheck" type="button">Перепроверить оригиналы ЕИС</button>
 <a href="/account/memos">Архив служебных записок</a></div>
+<p class="notice" id="staff-automatic-review-note">Юридическая проверка обновляется автоматически при получении новых подтверждённых материалов или обновлении правил. Сохранённые документы и результаты остаются доступны.</p>
 <fieldset><legend>Персональные настройки</legend>
 <label class="check-options"><input id="staff-priority" type="checkbox"> Приоритетная закупка</label>
 <button class="outline" type="button" id="staff-save-pref">Сохранить приоритет</button></fieldset>

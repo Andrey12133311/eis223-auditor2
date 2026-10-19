@@ -393,6 +393,21 @@ async function get(url){
  pendingRequests.set(url,task);
  try{return await task}finally{pendingRequests.delete(url)}
 }
+function legalStatus(item){
+ const state=item.legal_review_state;
+ if(['pending','queued'].includes(state))return 'Юридическая проверка в очереди';
+ if(['running','processing'].includes(state))return 'Идёт юридическая проверка';
+ if(['failed','error'].includes(state))return 'Ошибка юридической проверки';
+ if(state==='no_readable_documents')return 'Не удалось прочитать документы для юридической проверки';
+ if(state==='completed')return Number(item.legal_review_documents)>0?
+  'Юридическая проверка завершена':'Юридическая проверка не завершена: нет проверенных документов';
+ return 'Юридическая проверка ещё не завершена';
+}
+function retainedResults(item){
+ return ['pending','queued','running','processing','failed','error'].includes(item.legal_review_state)&&
+  (Number(item.documents_checked)>0||Number(item.violations)>0)?
+  'Показаны сохранённые результаты предыдущей проверки. Новая проверка ещё не завершена.':'';
+}
 async function refresh(){
 try{
 const [sumResponse,manualResponse,batchResponse,memoResponse]=await Promise.allSettled([
@@ -427,8 +442,8 @@ if(!purchases.length){
  pl.append(li);
 }
 const statusLabels={queued:'Ожидает загрузки',leased:'Получение данных ЕИС',
- done:'Загрузка завершена',partial:'Частично загружено',deferred:'Ожидает источника',
- error:'Ошибка источника',unknown:'Проверяется статус'};
+ done:'Загрузка завершена',completed:'Загрузка завершена',partial:'Частично загружено',deferred:'Ожидает источника',
+ error:'Ошибка источника',failed:'Ошибка источника',unknown:'Статус загрузки уточняется'};
 for(const item of purchases.slice(0,8)){
  const li=document.createElement('li'),body=document.createElement('div');
  body.className='eis223-check-desc';
@@ -440,7 +455,11 @@ for(const item of purchases.slice(0,8)){
  const found=Math.max(0,Number(item.violations||0));
  meta.textContent=when+(statusLabels[item.job_status]||'Задание ЕИС')+
  ' · Документов: '+checked+' · Нарушений: '+found;
- body.append(num,meta);li.append(body);
+ const legal=document.createElement('small');legal.textContent=legalStatus(item);
+ body.append(num,meta,legal);
+ const previous=retainedResults(item);
+ if(previous){const note=document.createElement('small');note.textContent=previous;body.append(note)}
+ li.append(body);
  const open=document.createElement('a');open.href=item.card_available?
  '/check-new/'+encodeURIComponent(item.reg_number):'/account/home';
  open.textContent=item.card_available?'Карточка':'Подробности';li.append(open);
