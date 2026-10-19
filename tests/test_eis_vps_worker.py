@@ -67,6 +67,8 @@ class FakeTransport:
             jobs = [job for job in self.jobs if job.get('kind') != 'inn' or capable][:limit]
             self.jobs = [job for job in self.jobs if job not in jobs]
             return {'jobs': jobs}
+        if path == '/api/eis-worker/discovered':
+            return {'accepted': True}
         if '/recheck/' in path:
             return {'status': 'queued'}
         return {}
@@ -157,6 +159,316 @@ class WorkerTests(unittest.TestCase):
     def tearDown(self):
         self.state.db.close()
         self.temp.cleanup()
+
+    def test_rejected_original_does_not_block_following_files_and_bad_cache_is_evicted(self):
+        self.http = MultiOriginalTransport(3)
+        self.worker.http = self.http
+        first_uid = self.http.documents[0]['uid']
+        original_upload = self.http.upload
+        def reject_first(path, data, content_type):
+            if path.endswith('/' + first_uid):
+                raise w.WorkerError('site_http_422')
+            return original_upload(path, data, content_type)
+        with patch.object(self.http, 'upload', side_effect=reject_first), contextlib.redirect_stdout(io.StringIO()):
+            report = self.worker.process(self.job)
+        self.assertEqual(report['status'], 'partial')
+        self.assertEqual(report['originals_uploaded'], 2)
+        self.assertEqual(report['originals_failed'], 1)
+        self.assertNotIn(first_uid, self.http.receipts)
+        self.assertEqual(len(self.http.receipts), 2)
+        rejected_key = w.cache_key(REG, first_uid, self.http.documents[0]['url'])
+        self.assertIsNone(self.state.cached(rejected_key))
+        self.assertFalse((self.state.root / (rejected_key + '.part')).exists())
+        self.assertEqual(self.state.db.execute("SELECT COUNT(*) FROM deliveries WHERE kind='original'").fetchone()[0], 2)
+        self.http.calls.clear()
+        report = self.worker.process(self.job)
+        self.assertEqual(report['status'], 'completed')
+        downloads = [c[1] for c in self.http.calls if c[0] == 'download']
+        self.assertIn(self.http.documents[0]['url'], downloads)
+        for item in self.http.documents[1:]:
+            self.assertNotIn(item['url'], downloads)
+
+    def test_rejected_archive_allows_other_archives_but_never_claims_complete(self):
+        rejected_url = ARCHIVE_URL + '-rejected'
+        bad_archive = zipped('rejected.xml')
+        accepted_archive = zipped()
+        original_upload = self.http.upload
+        original_download = self.http.download
+        def download(url, limit, *, cancel=None):
+            if url == rejected_url:
+                self.http.calls.append(('download', url))
+                return bad_archive
+            return original_download(url, limit, cancel=cancel)
+        def upload(path, data, content_type):
+            if '/archive' in path and data == bad_archive:
+                raise w.WorkerError('site_http_422')
+            return original_upload(path, data, content_type)
+        with patch.object(self.http, 'soap', return_value=[rejected_url, ARCHIVE_URL]), \
+                patch.object(self.http, 'download', side_effect=download), \
+                patch.object(self.http, 'upload', side_effect=upload), contextlib.redirect_stdout(io.StringIO()):
+            report = self.worker.process(self.job)
+        self.assertEqual(report['status'], 'error')
+        self.assertEqual(report['archives_rejected'], 1)
+        self.assertEqual(report['archives_uploaded'], 1)
+        self.assertEqual(report['originals_uploaded'], 1)
+        self.assertEqual(report['archive_sha256s'], [hashlib.sha256(accepted_archive).hexdigest()])
+        self.assertIsNone(self.state.cached(w.cache_key(REG, 'archive', rejected_url)))
+        self.assertFalse(any('/recheck/' in c[1] for c in self.http.calls if c[0] == 'site'))
+        original_site = self.http.site
+        def failed_manifest(path, data=None, method=None):
+            if '/manifest/' in path:
+                raise w.WorkerError('site_connection_error')
+            return original_site(path, data, method)
+        with patch.object(self.http, 'soap', return_value=[rejected_url, ARCHIVE_URL]), \
+                patch.object(self.http, 'download', side_effect=download), \
+                patch.object(self.http, 'upload', side_effect=upload), \
+                patch.object(self.http, 'site', side_effect=failed_manifest), contextlib.redirect_stdout(io.StringIO()):
+            later_failure = self.worker.process(self.job)
+        self.assertEqual(later_failure['archives_rejected'], 1)
+        self.assertEqual(later_failure['archives_uploaded'], 1)
+        self.assertEqual(later_failure['status'], 'error')
+        self.assertEqual(later_failure['error_code'], 'site_connection_error')
+
+    def test_scoped_discovery_backpressure_keeps_queue_draining(self):
+        original_site = self.http.site
+        def site(path, data=None, method=None):
+            if path.endswith('/discovered'):
+                raise w.WorkerError('site_discovery_backpressure', 60)
+            return original_site(path, data, method)
+        self.http.jobs = [self.job]
+        with patch.object(self.http, 'site', side_effect=site), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        self.assertIn(('soap', REG), self.http.calls)
+        self.assertTrue(self.http.received)
+        self.assertIsNotNone(self.state.pending_discovery())
+        self.assertEqual(self.state.discovery_cursor(), 0)
+        self.assertEqual(float(self.state.get('backoff_until', '0')), 0)
+        self.assertEqual(float(self.state.get('site_backoff_until', '0')), 0)
+        self.assertEqual(len([c for c in self.http.calls if c[0] == 'request']), 1)
+        self.assertTrue(any(c[0] == 'site' and c[1].endswith('/report') for c in self.http.calls))
+
+    def test_backpressure_scope_only_applies_to_exact_site_discovery_endpoint(self):
+        transport = w.Transport.__new__(w.Transport)
+        transport.config = {'site_url': 'https://example.test', 'eis_token': TOKEN,
+                            'site_token': 'site-secret', 'timeout_seconds': 10}
+        transport.site_opener = Mock()
+        transport.eis_opener = Mock()
+        scoped = {'retry-after': '60', 'x-eis223-retry-scope': 'discovery'}
+        for status in (429, 503):
+            for url, eis, expected in [('https://example.test/api/eis-worker/discovered', False, 'site_discovery_backpressure'),
+                                       ('https://example.test/api/eis-worker/heartbeat', False, 'site_http_' + str(status)),
+                                       (w.SEARCH_URL, True, 'eis_http_' + str(status))]:
+                opener = transport.eis_opener if eis else transport.site_opener
+                opener.open.side_effect = urllib.error.HTTPError(url, status, 'busy', scoped, None)
+                with self.subTest(url=url, status=status), self.assertRaises(w.WorkerError) as error:
+                    transport.request(url, 'POST', b'{}', eis=eis)
+                self.assertEqual(error.exception.code, expected)
+                self.assertEqual(error.exception.retry_after, 60 if expected == 'site_discovery_backpressure' else
+                                 1200 if status == 429 else 300)
+
+    def test_general_search_rotates_fifty_record_pages_and_survives_restart(self):
+        html = ''.join(f'<a href="/epz/order/notice/notice223/common-info.html?regNumber={32616233000+i}">Notice</a>' for i in range(125))
+        self.http.search_html = html.encode()
+        observed = []
+        for index in range(19):
+            # Simulate the scheduler's ready capable claim finding no INN.
+            self.state.set('inn_opportunity_pending', '0')
+            with patch.object(w.time, 'time', return_value=1000 + index * 60), contextlib.redirect_stdout(io.StringIO()):
+                self.worker.discover()
+            payload = [c[2] for c in self.http.calls if c[0] == 'site' and c[1].endswith('/discovered')][-1]
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(payload['source_url']).query)
+            observed.append(int(query['pageNumber'][0]))
+            self.assertEqual(query['recordsPerPage'], ['_50'])
+            self.assertEqual(len(payload['reg_numbers']), 100)
+            self.assertEqual(len(set(payload['reg_numbers'])), 100)
+            if index == 2:
+                reopened = w.State(self.temp.name)
+                self.assertEqual(reopened.discovery_cursor(), 3)
+                reopened.db.close()
+        self.assertEqual(observed, [1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, 1, 8, 1, 9, 1, 10, 1])
+
+    def test_discovery_delivery_is_durable_without_refetch_or_source_cooldown_extension(self):
+        original_site = self.http.site
+        attempts = []
+
+        def fail_delivery(path, data=None, method=None):
+            if path.endswith('/discovered'):
+                attempts.append(data)
+                raise w.WorkerError('site_connection_error', 120)
+            return original_site(path, data, method)
+
+        with patch.object(self.http, 'site', side_effect=fail_delivery), \
+                patch.object(w.time, 'time', return_value=1000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.discover()
+        self.assertIsNotNone(self.state.pending_discovery())
+        self.assertEqual(self.state.discovery_cursor(), 0)
+        self.assertEqual(float(self.state.get('search_not_before')), 1060)
+        self.assertEqual(len([c for c in self.http.calls if c[0] == 'request']), 1)
+        restarted = w.State(self.temp.name)
+        try:
+            other = w.Worker({'search_interval_seconds': 30}, restarted, self.http)
+            restarted.set('backoff_until', 5000)
+            restarted.set('search_not_before', 5000)
+            with patch.object(w.time, 'time', return_value=1120), contextlib.redirect_stdout(io.StringIO()):
+                other.cycle()
+            delivery = [c[2] for c in self.http.calls if c[0] == 'site' and c[1].endswith('/discovered')]
+            self.assertEqual(delivery, attempts)
+            self.assertIsNone(restarted.pending_discovery())
+            self.assertEqual(restarted.discovery_cursor(), 1)
+            self.assertEqual(len([c for c in self.http.calls if c[0] == 'request']), 1)
+            self.assertEqual(float(restarted.get('search_not_before')), 5000)
+        finally:
+            restarted.db.close()
+
+    def test_cursor_waits_for_explicit_acceptance_and_empty_deep_page_resets(self):
+        original_site = self.http.site
+        def unaccepted(path, data=None, method=None):
+            if path.endswith('/discovered'):
+                return {'accepted': False}
+            return original_site(path, data, method)
+        with patch.object(self.http, 'site', side_effect=unaccepted), \
+                patch.object(w.time, 'time', return_value=1000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.discover()
+        self.assertEqual(self.state.discovery_cursor(), 0)
+        self.assertIsNotNone(self.state.pending_discovery())
+        with patch.object(w.time, 'time', return_value=1300), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.retry_discovery()
+        self.assertEqual(self.state.discovery_cursor(), 1)
+        self.http.search_html = '<p>По вашему запросу ничего не найдено</p>'.encode()
+        self.state.set('inn_opportunity_pending', '0')
+        with patch.object(w.time, 'time', return_value=1360), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.discover()
+        self.assertEqual(self.state.discovery_cursor(), 0)
+        self.assertEqual(self.worker.discovery_status, 'ok')
+        payload = [c[2] for c in self.http.calls if c[0] == 'site' and c[1].endswith('/discovered')][-1]
+        self.assertEqual(payload['reg_numbers'], [])
+
+    def test_redirect_to_first_page_cannot_advance_deep_page(self):
+        self.state.set('discovery_cursor', 1)
+        original_request = self.http.request
+        def redirected(url, **kwargs):
+            data = original_request(url, **kwargs)
+            self.http.last_response_url = w.SEARCH_URL
+            return data
+        with patch.object(self.http, 'request', side_effect=redirected), \
+                patch.object(w.time, 'time', return_value=1000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.discover()
+        self.assertEqual(self.state.discovery_cursor(), 1)
+        self.assertIsNone(self.state.pending_discovery())
+        self.assertEqual(self.worker.discovery_error, 'eis_discovery_page_mismatch')
+        self.assertFalse(any(c[0] == 'site' and c[1].endswith('/discovered') for c in self.http.calls))
+
+    def test_shared_sixty_second_slots_alternate_under_continuous_inn_demand(self):
+        for cycle in range(4):
+            self.http.jobs.append({**self.inn_job(), 'id': 'inn-' + str(cycle)})
+            with patch.object(w.time, 'time', return_value=1000 + cycle * 60), contextlib.redirect_stdout(io.StringIO()):
+                self.worker.cycle()
+        requests = [urllib.parse.parse_qs(urllib.parse.urlsplit(c[1]).query)
+                    for c in self.http.calls if c[0] == 'request']
+        self.assertEqual([r.get('customerInn') for r in requests], [[INN], None, [INN], None])
+        self.assertEqual([r['recordsPerPage'][0] for r in requests], ['_20', '_50', '_20', '_50'])
+        self.assertEqual([r['pageNumber'][0] for r in requests if 'customerInn' not in r], ['1', '2'])
+
+    def test_general_discovery_precedes_long_documents_and_never_overlaps_downloads(self):
+        self.http = MultiOriginalTransport(4)
+        self.worker.http = self.http
+        self.http.jobs = [self.job]
+        now = [1800000000]
+        original_upload = self.http.upload
+        original_request = self.http.request
+        def upload(path, data, content_type):
+            result = original_upload(path, data, content_type)
+            if '/original/' in path:
+                now[0] += 61
+            return result
+        def request(url, **kwargs):
+            self.assertEqual(self.http.active_downloads, 0)
+            return original_request(url, **kwargs)
+        with patch.object(self.http, 'upload', side_effect=upload), \
+                patch.object(self.http, 'request', side_effect=request), \
+                patch.object(w.time, 'time', side_effect=lambda: now[0]), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.cycle()
+        calls = self.http.calls
+        first_search = next(i for i, c in enumerate(calls) if c[0] == 'request')
+        first_soap = next(i for i, c in enumerate(calls) if c[0] == 'soap')
+        self.assertLess(first_search, first_soap)
+        self.assertEqual(len([c for c in calls if c[0] == 'request']), 2)
+        self.assertEqual(self.http.max_active_downloads, 1)
+
+    def test_long_registry_backlog_cannot_starve_queued_inn_search(self):
+        self.http = MultiOriginalTransport(4)
+        self.worker.http = self.http
+        now = [1800000000]
+        original_soap = self.http.soap
+        original_upload = self.http.upload
+        def soap(reg):
+            self.http.receipts.clear()
+            return original_soap(reg)
+        def upload(path, data, content_type):
+            result = original_upload(path, data, content_type)
+            if '/original/' in path:
+                now[0] += 61
+            return result
+        with patch.object(self.http, 'soap', side_effect=soap), \
+                patch.object(self.http, 'upload', side_effect=upload), \
+                patch.object(w.time, 'time', side_effect=lambda: now[0]), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.discover()
+            now[0] += 1
+            self.http.jobs = [self.inn_job()] + [{**self.job, 'id': 'reg-' + str(i),
+                                               'reg_number': str(32616233000 + i)} for i in range(8)]
+            for _ in range(3):
+                self.worker.cycle()
+        public_requests = [urllib.parse.parse_qs(urllib.parse.urlsplit(c[1]).query)
+                           for c in self.http.calls if c[0] == 'request']
+        self.assertTrue(any(query.get('customerInn') == [INN] for query in public_requests))
+        self.assertFalse(any(job.get('kind') == 'inn' for job in self.http.jobs))
+        self.assertTrue(any('customerInn' not in query for query in public_requests))
+        self.assertLess(len(public_requests), 10)
+
+    def test_reserved_inn_opportunity_survives_restart(self):
+        with patch.object(w.time, 'time', return_value=1800000000), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.discover()
+        restarted = w.State(self.temp.name)
+        try:
+            other = w.Worker({'search_interval_seconds': 60}, restarted, self.http)
+            self.http.calls.clear()
+            self.http.jobs = [self.inn_job()]
+            with patch.object(w.time, 'time', return_value=1800000060), contextlib.redirect_stdout(io.StringIO()):
+                other.discover()  # Cannot steal the reserved next slot.
+                self.assertEqual(self.http.calls, [])
+                other.cycle()
+            requests = [c[1] for c in self.http.calls if c[0] == 'request']
+            self.assertEqual(requests, [w.inn_search_url(INN, 1)])
+        finally:
+            restarted.db.close()
+
+    def test_new_search_interval_never_shortens_stored_cooldown_or_remote_pause(self):
+        with patch.object(w.time, 'time', return_value=1000):
+            self.state.take_search_slot(300)
+        faster = w.Worker({'search_interval_seconds': 30}, self.state, self.http)
+        with patch.object(w.time, 'time', return_value=1060), contextlib.redirect_stdout(io.StringIO()):
+            faster.discover()
+        self.assertEqual(self.http.calls, [])
+        self.http.fail_discovery = True
+        with patch.object(w.time, 'time', return_value=1300), contextlib.redirect_stdout(io.StringIO()):
+            faster.discover()
+        self.assertEqual(float(self.state.get('search_not_before')), 2500)
+        self.http.fail_discovery = False
+        self.http.calls.clear()
+        with patch.object(w.time, 'time', return_value=1360), contextlib.redirect_stdout(io.StringIO()):
+            w.Worker({'search_interval_seconds': 30}, self.state, self.http).discover()
+        self.assertEqual(self.http.calls, [])
+
+    def test_search_config_defaults_and_bounds(self):
+        p = Path(self.temp.name) / 'search-config.json'
+        base = {'eis_token': TOKEN, 'site_token': 'site-secret', 'site_url': 'https://example.test'}
+        for value, expected in [(None, 60), (1, 30), (30, 30), (300, 300), (7200, 3600)]:
+            config = dict(base)
+            if value is not None:
+                config['search_interval_seconds'] = value
+            p.write_text(json.dumps(config))
+            p.chmod(0o600)
+            self.assertEqual(w.load_config(p)['search_interval_seconds'], expected)
 
     def test_retry_after_seconds_dates_and_invalid_values(self):
         now = 1800000000

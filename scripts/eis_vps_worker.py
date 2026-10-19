@@ -33,7 +33,9 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
+DEFAULT_SEARCH_INTERVAL_SECONDS = 60
+DISCOVERY_PAGES = tuple(page for older in range(2, 11) for page in (1, older))
 DEFAULT_INTERVAL_SECONDS = 30
 MAX_ORIGINALS_PER_CYCLE = 48
 MAX_JOBS_PER_CYCLE = 2
@@ -49,7 +51,7 @@ UID = re.compile(r"[0-9A-F]{32}\Z")
 STOP = False
 SEARCH_URL = "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?" + urllib.parse.urlencode({
     "sortBy": "UPDATE_DATE", "sortDirection": "false", "pageNumber": "1",
-    "recordsPerPage": "_20", "showLotsInfoHidden": "false", "fz223": "on",
+    "recordsPerPage": "_50", "showLotsInfoHidden": "false", "fz223": "on",
     "af": "on", "currencyIdGeneral": "-1"})
 
 
@@ -67,7 +69,7 @@ class RegistryLinks(HTMLParser):
         self.node_count = 0
 
     def add_number(self, value):
-        if re.fullmatch(r"3[0-9]{10}", value) and value not in self.numbers and len(self.numbers) < 40:
+        if re.fullmatch(r"3[0-9]{10}", value) and value not in self.numbers and len(self.numbers) < 100:
             self.numbers.append(value)
 
     def notice_url(self, href):
@@ -162,11 +164,35 @@ def search_parser(data):
     return parser
 
 
-def discovery_numbers(data):
+def discovery_numbers(data, allow_empty=False):
     parser = search_parser(data)
     if not parser.numbers:
-        raise WorkerError("eis_search_no_verified_links", 1200)
+        visible = " ".join(" ".join(parser.visible).split()).casefold()
+        explicit_empty = any(text in visible for text in (
+            "по вашему запросу ничего не найдено", "по заданным параметрам ничего не найдено",
+            "по указанным параметрам ничего не найдено", "по вашему запросу не найдено записей"))
+        if not allow_empty or not explicit_empty:
+            raise WorkerError("eis_search_no_verified_links", 1200)
     return parser.numbers
+
+
+def discovery_url(page):
+    if type(page) is not int or not 1 <= page <= 10:
+        raise WorkerError("invalid_discovery_page")
+    parsed = urllib.parse.urlsplit(SEARCH_URL)
+    query = urllib.parse.parse_qs(parsed.query)
+    query["pageNumber"] = [str(page)]
+    return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query, doseq=True)))
+
+
+def discovery_source(source_url, page):
+    parsed = urllib.parse.urlsplit(official_url(source_url))
+    query = urllib.parse.parse_qs(parsed.query)
+    if (parsed.hostname != "zakupki.gov.ru" or parsed.path != "/epz/order/extendedsearch/results.html"
+            or query.get("pageNumber") != [str(page)] or query.get("fz223") != ["on"]
+            or query.get("customerInn")):
+        raise WorkerError("eis_discovery_page_mismatch")
+    return source_url
 
 
 def inn_search_url(inn, page):
@@ -395,6 +421,7 @@ def load_config(path):
         raise WorkerError("site_url_must_be_https_origin") from exc
     config["site_url"] = url
     config["interval_seconds"] = max(DEFAULT_INTERVAL_SECONDS, int(config.get("interval_seconds", DEFAULT_INTERVAL_SECONDS)))
+    config["search_interval_seconds"] = min(3600, max(30, int(config.get("search_interval_seconds", DEFAULT_SEARCH_INTERVAL_SECONDS))))
     config["timeout_seconds"] = min(60, max(10, int(config.get("timeout_seconds", 30))))
     return config
 
@@ -446,8 +473,14 @@ class Transport:
                         raise WorkerError("response_deadline")
                 return b"".join(chunks)
         except urllib.error.HTTPError as exc:
-            retry = retry_after_delay(exc.headers.get("Retry-After") if exc.headers else None,
-                                      1200 if exc.code in (403, 429) else 300)
+            retry_header = (exc.headers.get("Retry-After") or exc.headers.get("retry-after")) if exc.headers else None
+            scope = (exc.headers.get("X-EIS223-Retry-Scope") or exc.headers.get("x-eis223-retry-scope")) if exc.headers else None
+            # Only the authenticated site's exact discovery receiver may scope
+            # local queue backpressure. EIS/global limits never use this escape.
+            if (not eis and method == "POST" and url == self.config["site_url"] + "/api/eis-worker/discovered"
+                    and exc.code in (429, 503) and scope == "discovery"):
+                raise WorkerError("site_discovery_backpressure", retry_after_delay(retry_header, 30)) from None
+            retry = retry_after_delay(retry_header, 1200 if exc.code in (403, 429) else 300)
             # Never emit server response, request URL, or exception repr (tokens may be there).
             raise WorkerError(("eis" if eis else "site") + "_http_" + str(exc.code), retry) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -536,17 +569,36 @@ class State:
         if site:
             self.set("site_backoff_until", max(float(self.get("site_backoff_until", "0")), until))
 
-    def take_search_slot(self):
+    def take_search_slot(self, interval=DEFAULT_SEARCH_INTERVAL_SECONDS, kind="general"):
         now = time.time()
         allowed_at = float(self.get("search_not_before", "0"))
         if now < allowed_at:
             raise WorkerError("eis_search_cooldown", max(1, int(allowed_at - now + 1)))
         # Commit before the request so crashes/restarts cannot duplicate a page fetch.
-        self.set("search_not_before", now + 300)
+        self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", ("search_not_before", str(now + interval)))
+        self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", ("last_search_kind", kind))
+        self.db.commit()
+
+    def discovery_cursor(self):
+        return int(self.get("discovery_cursor", "0")) % len(DISCOVERY_PAGES)
+
+    def pending_discovery(self):
+        value = self.get("pending_discovery")
+        return json.loads(value) if value else None
+
+    def save_discovery(self, payload, next_cursor):
+        self.set("pending_discovery", json.dumps({"payload": payload, "next_cursor": next_cursor}))
+
+    def acknowledge_discovery(self, next_cursor):
+        # Cursor and removal commit together; a lost acknowledgement replays
+        # the same page, whose registry numbers the server deduplicates.
+        self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", ("discovery_cursor", str(next_cursor)))
+        self.db.execute("DELETE FROM settings WHERE name='pending_discovery'")
+        self.db.commit()
 
     def defer_search(self, seconds):
         self.set("search_not_before", max(float(self.get("search_not_before", "0")),
-                                         time.time() + max(300, seconds)))
+                                         time.time() + max(1, seconds)))
 
     def pending_reports(self):
         return [(row[0], json.loads(row[1])) for row in self.db.execute("SELECT job_id,payload FROM reports")]
@@ -581,6 +633,13 @@ class State:
         self.db.execute("INSERT OR REPLACE INTO downloads VALUES (?,?)",
                         (cache_key, hashlib.sha256(data).hexdigest()))
         self.db.commit()
+
+    def discard_download(self, cache_key):
+        if not cache_key:
+            return
+        self.db.execute("DELETE FROM downloads WHERE cache_key=?", (cache_key,))
+        self.db.commit()
+        (self.root / (cache_key + ".part")).unlink(missing_ok=True)
 
     def delivered(self, reg, kind, identity, data, cache_key):
         self.db.execute("INSERT OR REPLACE INTO deliveries VALUES (?,?,?,?,?)",
@@ -686,9 +745,11 @@ class OriginalPipeline:
 class Worker:
     def __init__(self, config, state, transport=None):
         self.config, self.state = config, state
+        self.search_interval = min(3600, max(30, int(config.get("search_interval_seconds", DEFAULT_SEARCH_INTERVAL_SECONDS))))
         self.http = transport or Transport(config)
         self.worker_id = state.worker_id
         self.files_this_cycle = 0
+        self.search_during_documents = False
         self.last_heartbeat = 0.0
         self.discovery_status = state.get("discovery_status", "pending")
         self.discovery_error = state.get("discovery_error", "")
@@ -700,7 +761,14 @@ class Worker:
             return
         body = {"worker_id": self.worker_id, "version": VERSION,
                 "status": "working" if job else "idle", "capabilities": ["inn_search"],
-                "discovery_status": self.discovery_status, "discovery_error": self.discovery_error}
+                "discovery_status": self.discovery_status, "discovery_error": self.discovery_error,
+                "queue_interval_seconds": self.config.get("interval_seconds", DEFAULT_INTERVAL_SECONDS),
+                "search_interval_seconds": self.search_interval,
+                "queue_backoff_seconds": max(0, math.ceil(float(self.state.get("backoff_until", "0")) - time.time())),
+                "search_backoff_seconds": max(0, math.ceil(max(float(self.state.get("search_not_before", "0")),
+                    float(self.state.get("discovery_backoff_until", "0"))) - time.time())),
+                "discovery_pending": self.state.pending_discovery() is not None,
+                "discovery_page": DISCOVERY_PAGES[self.state.discovery_cursor()]}
         if job:
             body.update(current_job_id=job["id"], lease_token=job["lease_token"])
         try:
@@ -711,33 +779,91 @@ class Worker:
             raise
         self.last_heartbeat = time.monotonic()
 
+    def retry_discovery(self):
+        pending = self.state.pending_discovery()
+        if pending is None:
+            return True
+        now = time.time()
+        if max(float(self.state.get("site_backoff_until", "0")),
+               float(self.state.get("discovery_delivery_not_before", "0"))) > now:
+            return False
+        try:
+            response = self.http.site("/api/eis-worker/discovered", pending["payload"])
+            if response.get("accepted") is not True:
+                raise WorkerError("site_discovery_not_accepted")
+            self.state.acknowledge_discovery(pending["next_cursor"])
+            self.discovery_status, self.discovery_error = "ok", ""
+            log("discovery", found=len(pending["payload"]["reg_numbers"]))
+            accepted = True
+        except WorkerError as exc:
+            self.discovery_status, self.discovery_error = "pending_delivery", exc.code
+            # Delivery errors cannot consume another EIS slot or discard the page.
+            # Source cooldown and receiving-site retry deadline are independent.
+            self.state.set("discovery_delivery_not_before", time.time() + exc.retry_after)
+            if global_backoff(exc.code):
+                self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
+            log("discovery_delivery_error", code=exc.code)
+            accepted = False
+        self.state.set("discovery_status", self.discovery_status)
+        self.state.set("discovery_error", self.discovery_error)
+        return accepted
+
+    def search_ready(self):
+        return (not STOP and self.state.pending_discovery() is None
+                and max(float(self.state.get("search_not_before", "0")),
+                        float(self.state.get("discovery_backoff_until", "0")),
+                        float(self.state.get("site_backoff_until", "0")),
+                        float(self.state.get("backoff_until", "0"))) <= time.time())
+
     def discover(self):
-        if float(self.state.get("discovery_backoff_until", "0")) > time.time():
+        # Deliver old results even while the source itself is cooling down.
+        if self.state.pending_discovery() is not None:
+            self.retry_discovery()
+            return
+        if not self.search_ready() or self.state.get("inn_opportunity_pending", "0") == "1":
             return
         try:
-            self.state.take_search_slot()
-        except WorkerError as exc:
-            if exc.code == "eis_search_cooldown":
-                return
-            raise
-        try:
-            raw = self.http.request(SEARCH_URL, eis=True, limit=6 * 1024 * 1024, send_token=False)
-            numbers = discovery_numbers(raw)
-            self.http.site("/api/eis-worker/discovered", {
-                "worker_id": self.worker_id, "reg_numbers": numbers,
-                "source_url": official_url(getattr(self.http, "last_response_url", SEARCH_URL))})
-            self.discovery_status, self.discovery_error = "ok", ""
-            log("discovery", found=len(numbers))
+            self.state.take_search_slot(self.search_interval, "general")
+            # Reserve the next free public slot for a capable queue claim.
+            # Otherwise long document jobs could consume every slot here and
+            # continuously exclude queued INN work from the following claims.
+            self.state.set("inn_opportunity_pending", "1")
+            cursor = self.state.discovery_cursor()
+            page = DISCOVERY_PAGES[cursor]
+            url = discovery_url(page)
+            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
+            source = discovery_source(getattr(self.http, "last_response_url", url), page)
+            numbers = discovery_numbers(raw, allow_empty=True)
+            next_cursor = (cursor + 1) % len(DISCOVERY_PAGES) if numbers else 0
+            self.state.save_discovery({"worker_id": self.worker_id, "reg_numbers": numbers,
+                                       "source_url": source}, next_cursor)
         except WorkerError as exc:
             self.discovery_status = "blocked" if exc.retry_after >= 1200 else "error"
             self.discovery_error = exc.code
-            if exc.code.startswith("site_") and global_backoff(exc.code):
-                self.state.defer_requests(exc.retry_after, site=True)
             self.state.defer_search(exc.retry_after)
-            self.state.set("discovery_backoff_until", time.time() + max(300, exc.retry_after))
+            self.state.set("discovery_backoff_until", max(float(self.state.get("discovery_backoff_until", "0")),
+                                                           time.time() + exc.retry_after))
+            self.state.set("discovery_status", self.discovery_status)
+            self.state.set("discovery_error", self.discovery_error)
             log("discovery_error", code=exc.code)
-        self.state.set("discovery_status", self.discovery_status)
-        self.state.set("discovery_error", self.discovery_error)
+            return
+        self.retry_discovery()
+
+    def discovery_checkpoint(self, pipeline=None):
+        if not self.search_during_documents:
+            return
+        pending = self.state.pending_discovery()
+        if (pending is None and (not self.search_ready() or self.state.get("inn_opportunity_pending", "0") == "1")) or (pending is not None
+                and float(self.state.get("discovery_delivery_not_before", "0")) > time.time()):
+            return
+        # Do not overlap public search with the look-ahead EIS download.
+        # The completed file remains cached for the next pipeline iteration.
+        if pipeline is not None and pipeline.pending is not None:
+            pipeline.result(pipeline.pending)
+        self.discover()
+        site_pause = float(self.state.get("site_backoff_until", "0")) - time.time()
+        if site_pause > 0:
+            raise WorkerError("site_backoff_active", math.ceil(site_pause))
 
     def retry_reports(self):
         for job_id, payload in self.state.pending_reports():
@@ -788,7 +914,7 @@ class Worker:
                   "has_more": False, "source_url": "", "error_code": "", "retry_after_seconds": 300}
         try:
             self.heartbeat(job, force=True)
-            self.state.take_search_slot()
+            self.state.take_search_slot(self.search_interval, "inn")
             raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
             source_url = getattr(self.http, "last_response_url", url)
             numbers, more = inn_candidates(raw, inn, page, source_url)
@@ -811,7 +937,7 @@ class Worker:
                   "reg_number": reg, "status": "error", "archives_uploaded": 0,
                   "originals_uploaded": 0, "originals_failed": 0,
                   "detail": "", "error_code": "", "retry_after_seconds": 300,
-                  "unresolved_attachment_count": 0, "archive_sha256s": []}
+                  "unresolved_attachment_count": 0, "archive_sha256s": [], "archives_rejected": 0}
         try:
             self.heartbeat(job, force=True)
             urls = self.http.soap(reg)
@@ -823,7 +949,16 @@ class Worker:
                 self.heartbeat(job)
                 key, data = self.get_file(reg, "archive", url, MAX_ZIP)
                 verify_zip(data)
-                receipt = self.http.upload("/api/v294/eis223/archive", data, "application/zip")
+                try:
+                    receipt = self.http.upload("/api/v294/eis223/archive", data, "application/zip")
+                except WorkerError as exc:
+                    if exc.code != "site_http_422":
+                        raise
+                    self.state.discard_download(key)
+                    report["archives_rejected"] += 1
+                    report.update(error_code="site_http_422", retry_after_seconds=min(86400, exc.retry_after))
+                    log("archive_rejected", reg_number=reg, code=exc.code)
+                    continue
                 digest = hashlib.sha256(data).hexdigest()
                 report["archive_sha256"] = digest
                 report["archive_sha256s"].append(digest)
@@ -832,11 +967,14 @@ class Worker:
                     int(receipt.get("unsupported_attachment_count", 0)))
                 self.state.delivered(reg, "archive", hashlib.sha256(data).hexdigest(), data, key)
                 report["archives_uploaded"] += 1
+                self.discovery_checkpoint()
             if job.get("metadata_only") is True:
                 # The server independently verifies these archives and writes
                 # the card before completing a metadata-only lease. Originals
                 # remain the responsibility of full-document jobs.
-                report.update(status="partial", detail="Официальные XML переданы для обновления карточки.")
+                report.update(status="error" if report["archives_rejected"] else "partial",
+                              detail="Часть архивов не принята сайтом; получение будет повторено." if report["archives_rejected"] else
+                                     "Официальные XML переданы для обновления карточки.")
                 return report
             manifest = self.http.site("/api/v295/eis223/manifest/" + reg)
             documents = manifest.get("documents")
@@ -858,11 +996,16 @@ class Worker:
                                          data, "application/octet-stream")
                         self.state.delivered(reg, "original", uid, data, key)
                         report["originals_uploaded"] += 1
+                        self.discovery_checkpoint(pipeline)
                     except WorkerError as exc:
                         if global_backoff(exc.code):
                             self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
                         report["originals_failed"] += 1
                         report.update(error_code=exc.code, retry_after_seconds=min(86400, exc.retry_after))
+                        if exc.code == "site_http_422":
+                            self.state.discard_download(transfer["key"])
+                            log("original_rejected", reg_number=reg, code=exc.code)
+                            continue
                         if (global_backoff(exc.code) or exc.retry_after >= 1200 or exc.code.startswith("site_")
                                 or exc.code == "invalid_manifest_uid"):
                             raise
@@ -877,7 +1020,12 @@ class Worker:
                              int(current.get("unresolved_attachment_count", 0)),
                              int(current.get("unsupported_attachment_count", 0)))
             report["unresolved_attachment_count"] = unresolved
-            if unresolved:
+            if report["archives_rejected"]:
+                # Missing archives can contain additional references absent from
+                # this manifest. Never let the partial known set imply complete.
+                report.update(status="error", detail="Часть архивов не принята сайтом; получение будет повторено.",
+                              error_code="site_http_422")
+            elif unresolved:
                 report.update(status="partial", detail="XML сохранены; часть ссылок не поддерживается приёмником.",
                               error_code="unsupported_attachment_links", retry_after_seconds=1200)
             elif not docs:
@@ -894,7 +1042,7 @@ class Worker:
                 # Keep the full remote pause locally, even beyond the report's
                 # one-day wire limit. A subsequent cycle must not shorten it.
                 self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
-            report.update(status="partial" if report["archives_uploaded"] else "error",
+            report.update(status="partial" if report["archives_uploaded"] and not report["archives_rejected"] else "error",
                           error_code=exc.code, retry_after_seconds=min(86400, exc.retry_after),
                           detail="Загрузка будет продолжена после повторной попытки.")
         return report
@@ -904,32 +1052,52 @@ class Worker:
         if float(self.state.get("site_backoff_until", "0")) > time.time():
             return
         self.retry_reports()
+        self.retry_discovery()
         now = time.time()
         if float(self.state.get("backoff_until", "0")) > now:
             self.heartbeat(force=True)
             return
         self.heartbeat(force=True)
+        # Alternate occupied slots under sustained INN demand. Otherwise give
+        # queued INN work first refusal, then discover before a long document job.
+        if self.state.get("last_search_kind") == "inn":
+            self.discover()
         inn_processed = False
         for _ in range(MAX_JOBS_PER_CYCLE):
-            if STOP or self.files_this_cycle >= MAX_ORIGINALS_PER_CYCLE:
+            if (STOP or self.files_this_cycle >= MAX_ORIGINALS_PER_CYCLE
+                    or float(self.state.get("backoff_until", "0")) > time.time()):
                 break
             # Claim only when ready to process: a large first procurement must
             # not let the second procurement's unused 15-minute lease expire.
+            offer_inn = not inn_processed and self.search_ready()
             result = self.http.site("/api/eis-worker/jobs/next?" + urllib.parse.urlencode(
                 {"limit": 1, "worker_id": self.worker_id,
-                 "capabilities": "" if inn_processed else "inn_search"}))
+                 "capabilities": "inn_search" if offer_inn else ""}))
             jobs = result.get("jobs", [])
             if (not isinstance(jobs, list) or len(jobs) > 1
                     or any(not isinstance(job, dict) for job in jobs)):
                 raise WorkerError("invalid_jobs_response")
+            if offer_inn:
+                # The server prioritizes due INN jobs; a reg/empty response is
+                # an explicit opportunity with no due INN, not a blind guess.
+                self.state.set("inn_opportunity_pending", "0")
             if not jobs:
+                self.discover()
                 break
             job = jobs[0]
             is_inn = job.get("kind") == "inn"
             if is_inn and inn_processed:
                 raise WorkerError("invalid_jobs_response")
             inn_processed = inn_processed or is_inn
-            report = self.process_inn(job) if is_inn else self.process(job)
+            if not is_inn:
+                self.discover()
+                if float(self.state.get("backoff_until", "0")) > time.time():
+                    break
+            self.search_during_documents = not is_inn
+            try:
+                report = self.process_inn(job) if is_inn else self.process(job)
+            finally:
+                self.search_during_documents = False
             self.state.save_report(job["id"], report)
             if is_inn:
                 log("inn_search_attempt", inn=report["inn"], page=report["page"],
@@ -938,6 +1106,7 @@ class Worker:
             else:
                 log("delivery_attempt", reg_number=report["reg_number"], requested_status=report["status"],
                     archives=report["archives_uploaded"], originals=report["originals_uploaded"],
+                    archives_rejected=report["archives_rejected"], originals_failed=report["originals_failed"],
                     error_code=report["error_code"])
             if not is_inn and global_backoff(report["error_code"]):
                 self.state.set("backoff_until", max(float(self.state.get("backoff_until", "0")),
@@ -947,6 +1116,7 @@ class Worker:
             if float(self.state.get("site_backoff_until", "0")) > time.time():
                 break
             self.retry_reports()
+            self.discover()
             if float(self.state.get("backoff_until", "0")) > time.time():
                 break
         if not STOP and float(self.state.get("backoff_until", "0")) <= time.time():
@@ -973,7 +1143,7 @@ def main(argv=None):
             raise WorkerError("worker_already_running") from None
         worker = Worker(config, state)
         log("worker_started", version=VERSION, interval_seconds=config["interval_seconds"],
-            originals_per_cycle=MAX_ORIGINALS_PER_CYCLE, search_interval_seconds=300)
+            originals_per_cycle=MAX_ORIGINALS_PER_CYCLE, search_interval_seconds=worker.search_interval)
         for reg in args.bootstrap_reg:
             if not REG.fullmatch(reg):
                 raise WorkerError("invalid_registry_number")

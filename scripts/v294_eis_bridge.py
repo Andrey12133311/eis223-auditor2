@@ -13,6 +13,32 @@ MAX_XML = 15*1024*1024
 ALLOWED_ORIGINS = frozenset(("https://int.zakupki.gov.ru","https://zakupki.gov.ru"))
 REG = re.compile(r"[0-9]{11,20}$")
 
+def _rejection_code(error):
+    """Log a fixed code, never an XML name, URL, token or response excerpt."""
+    message=str(error)
+    if message.startswith("Unsupported official EIS XML type: "):
+        return "unsupported_xml_type"
+    return {
+        "Archive exceeds size limit":"archive_size_limit",
+        "Invalid ZIP":"invalid_zip",
+        "Invalid ZIP entry count":"zip_entry_count",
+        "Archive decompression size limit":"zip_expansion_limit",
+        "Encrypted or oversized member":"zip_member_encrypted_or_oversized",
+        "Unsafe or duplicate XML filename":"xml_filename_unsafe_or_duplicate",
+        "Unreadable ZIP member":"zip_member_unreadable",
+        "Mixed registry numbers in archive":"mixed_registry_numbers",
+        "XML entities are disabled":"xml_entities_disabled",
+        "Malformed XML":"malformed_xml",
+        "Not an EIS 223-FZ purchase XML namespace":"xml_namespace",
+        "Registry number/type and ZIP filename differ":"xml_filename_type_or_registry",
+        "Missing or ambiguous official XML data":"xml_data_missing_or_ambiguous",
+        "Foreign official XML data namespace":"xml_data_namespace",
+        "Official XML data is outside the transport envelope":"xml_data_envelope",
+        "Registry number and ZIP filename differ":"xml_registry_mismatch",
+        "Unexpected document source host":"attachment_source_host",
+        "Attachment metadata exceeds limit":"attachment_metadata_limit",
+    }.get(message,"unclassified_validation_error")
+
 def _name(tag):
     return tag.rsplit("}",1)[-1]
 
@@ -117,7 +143,9 @@ def install(ns):
             blocks.append(piece)
         raw=b"".join(blocks)
         try: notices=parse_notices(raw)
-        except ValueError as exc: raise HTTPException(422,str(exc)) from exc
+        except ValueError as exc:
+            print(f"V294 ARCHIVE_REJECTED code={_rejection_code(exc)} bytes={total}",flush=True)
+            raise HTTPException(422,str(exc)) from exc
         sha=hashlib.sha256(raw).hexdigest()
         reg=notices[0]["reg_number"]
         data_root=Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")

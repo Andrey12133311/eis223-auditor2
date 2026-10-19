@@ -192,7 +192,8 @@ class InnSearchTests(unittest.TestCase):
         self.assertFalse(result["search_complete"])
         page_two = self.row(next_id)
         self.assertEqual((page_two["parent_id"], page_two["page"]), (one["id"], 2))
-        self.assertGreaterEqual(page_two["not_before"], time.time()+298)
+        self.assertGreaterEqual(page_two["not_before"], time.time()+58)
+        self.assertLessEqual(page_two["not_before"], time.time()+60)
         replay = self.report(one, has_more=True).json()
         self.assertEqual(replay["next_page_job_id"], next_id)
         self.make_ready(next_id)
@@ -254,6 +255,32 @@ class InnSearchTests(unittest.TestCase):
                 db.execute("UPDATE v301_search_jobs SET status='done' WHERE kind='reg'")
             later = self.claim(capable=False)
             self.assertEqual([item["reg_number"] for item in later], [REG])
+
+    def test_cooldown_uses_remaining_slot_and_real_errors_keep_backoff(self):
+        self.inn_job()
+        now = int(time.time())
+        for error, retry, expected, attempts in (("eis_search_cooldown", 7, 7, 0),
+                                                ("eis_search_cooldown", 0, 60, 0),
+                                                ("eis_connection_error", 0, 900, 1),
+                                                ("eis_http_429", 1200, 1200, 1)):
+            job = [job for job in self.claim() if job["kind"] == "inn"][0]
+            with patch.object(worker.time, "time", return_value=now):
+                response = self.report(job, status="error", reg_numbers=[], source_url="",
+                                       error_code=error, retry_after_seconds=retry)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(self.row(job["id"])["not_before"], now+expected)
+            self.assertEqual(self.row(job["id"])["attempts"], attempts)
+            self.make_ready(job["id"])
+
+    def test_inn_report_telemetry_distinguishes_empty_search_from_failed_page(self):
+        self.inn_job()
+        job = self.claim()[0]
+        with patch.object(worker, "_log_telemetry") as logged:
+            result = self.report(job, status="no_data", reg_numbers=[])
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(logged.call_args.kwargs["requested_status"], "no_data")
+        self.assertTrue(logged.call_args.kwargs["search_complete"])
+        self.assertEqual(logged.call_args.kwargs["candidate_count"], 0)
 
 
 if __name__ == "__main__":
