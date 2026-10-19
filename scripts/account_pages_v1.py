@@ -450,6 +450,76 @@ refresh();
 </script>""")
 
 ADMIN = page("Управление пользователями", TEAM_SCRIPT + """
+<h1>Управление пользователями</h1>
+<h2 id="registration-requests">Заявки на регистрацию</h2>
+<p>Новые заявки ожидают решения администратора. Одобрения и отклонения сохраняются в журнале действий.</p>
+<button type="button" id="registration-refresh">Обновить заявки</button>
+<p class="message" id="registration-result" role="status" aria-live="polite"></p>
+<p class="message" id="message" role="status" aria-live="polite"></p>
+<table aria-label="Заявки на регистрацию"><thead><tr><th>Email</th><th>Дата</th><th>Решение</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+(()=>{
+ const rows=document.getElementById('rows'),message=document.getElementById('message');
+ const result=document.getElementById('registration-result'),refresh=document.getElementById('registration-refresh');
+ let busy=false;
+ const errorText=error=>error instanceof TypeError?'Проверьте соединение с сервером.':
+  error instanceof SyntaxError?'Сервер вернул некорректный ответ.':error.message;
+ function checkResponse(response){
+  if(response.ok)return;
+  throw Error(response.status===401?'Сессия завершена. Войдите снова.':
+   response.status===403?'Для этого действия нужны права администратора.':
+   response.status===409?'Заявка уже обработана.':
+   'Ошибка сервера (HTTP '+response.status+').');
+ }
+ function setBusy(value){
+  busy=value;refresh.disabled=value;
+  for(const button of rows.querySelectorAll('button'))button.disabled=value;
+ }
+ async function load(){
+  rows.replaceChildren();message.textContent='Загружаем заявки на регистрацию…';
+  try{
+   const response=await fetch('/admin/accounts/pending',{credentials:'same-origin',cache:'no-store'});
+   checkResponse(response);
+   const data=await response.json();
+   if(!Array.isArray(data))throw Error('Сервер вернул некорректный список заявок.');
+   const fragment=document.createDocumentFragment();
+   for(const item of data){
+    const tr=document.createElement('tr'),email=document.createElement('td');
+    const date=document.createElement('td'),actions=document.createElement('td');
+    email.textContent=item.email;date.textContent=new Date(item.created_at).toLocaleString('ru-RU');
+    for(const [action,label] of [['approve','Одобрить'],['reject','Отклонить']]){
+     const button=document.createElement('button');button.type='button';button.textContent=label;button.disabled=true;
+     button.addEventListener('click',()=>decide(item,action));actions.append(button);
+    }
+    tr.append(email,date,actions);fragment.append(tr);
+   }
+   rows.replaceChildren(fragment);
+   message.textContent=data.length?'Ожидают решения: '+data.length+'.':'Новых заявок на регистрацию нет.';
+  }catch(error){
+   rows.replaceChildren();message.textContent='Не удалось загрузить заявки. '+errorText(error)+' Нажмите «Обновить заявки» для повторной загрузки.';
+  }
+ }
+ async function reload(){
+  if(busy)return;setBusy(true);
+  try{await load()}finally{setBusy(false)}
+ }
+ async function decide(item,action){
+  if(busy)return;setBusy(true);result.textContent='Сохраняем решение по заявке '+item.email+'…';
+  try{
+   const response=await fetch('/admin/accounts/'+encodeURIComponent(item.id)+'/'+action,
+    {method:'POST',credentials:'same-origin'});
+   checkResponse(response);
+   result.textContent='Заявка '+item.email+(action==='approve'?' одобрена.':' отклонена.');
+  }catch(error){
+   result.textContent='Не удалось подтвердить сохранение решения. '+errorText(error);
+  }finally{
+   try{await Promise.all([load(),loadRoles()])}finally{setBusy(false)}
+  }
+ }
+ refresh.addEventListener('click',reload);reload();
+})();
+</script>
+
 <h2>Роли существующих пользователей</h2><p id="role-message" role="status"></p><div id="role-users"></div>
 <script>
 async function loadRoles(){
@@ -482,26 +552,6 @@ async function loadRoles(){
  }catch(e){msg.textContent='Ошибка загрузки пользователей: '+e.message}
 }
 loadRoles();
-</script>
-
-<h1>Подтверждение новых пользователей</h1><p>Только для администратора. Решения сохраняются в журнале действий.</p>
-<p class="message" id="message" role="status"></p>
-<table><thead><tr><th>Email</th><th>Дата</th><th>Решение</th></tr></thead><tbody id="rows"></tbody></table>
-<script>
-async function load(){const r=await fetch('/admin/accounts/pending',{credentials:'same-origin'});
- const m=document.getElementById('message');if(!r.ok){m.textContent='Нет доступа или ошибка загрузки';return}
- const data=await r.json(),tbody=document.getElementById('rows');tbody.replaceChildren();
- for(const item of data){const tr=document.createElement('tr'),email=document.createElement('td'),date=document.createElement('td'),actions=document.createElement('td');
- email.textContent=item.email;date.textContent=new Date(item.created_at).toLocaleString('ru-RU');
- for(const [name,label] of [['approve','Одобрить'],['reject','Отклонить']]){
- const b=document.createElement('button');b.textContent=label;
- b.addEventListener('click',async()=>{b.disabled=true;try{
- const res=await fetch('/admin/accounts/'+encodeURIComponent(item.id)+'/'+name,{method:'POST',credentials:'same-origin'});
- if(res.ok){await load();m.textContent='Решение сохранено'}else{m.textContent='Не удалось сохранить решение';b.disabled=false}
- }catch{m.textContent='Ошибка соединения';b.disabled=false}});actions.append(b)}
- tr.append(email,date,actions);tbody.append(tr)}
-}
-load();
 </script>""")
 
 THEMATIC = page("Мои тематические проверки", """

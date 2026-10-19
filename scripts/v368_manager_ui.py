@@ -755,7 +755,7 @@ __STYLE__</head><body>
 <header class="mgr-top"><div class="mgr-brand"><div class="mgr-logo">223</div>
 <div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя</small>
 <small id="mgr-my-name">ФИО: загрузка…</small></div></div>
-<div class="mgr-actions"><a href="/account/profile">Моё ФИО</a>
+<div class="mgr-actions">__ADMIN_REGISTRATION_LINK__<a href="/account/profile">Моё ФИО</a>
 <a href="/">← Главная страница</a></div></header>
 <div class="mgr-shell">
 <nav class="mgr-side" aria-label="Разделы руководителя">
@@ -954,5 +954,6 @@ __STYLE__</head><body>
 <div id="mgr-toast" class="mgr-toast mgr-hidden" role="status" aria-live="polite"></div>
 __SCRIPT__</body></html>"""
     return (shell.replace("__STYLE__",STYLE+account_page_style())
+                 .replace("__ADMIN_REGISTRATION_LINK__",'<a href="/account/admin">Заявки на регистрацию</a>' if role=="admin" else "")
                  .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role)))
                  .replace("__LABEL__","Роль: "+("Администратор" if role=="admin" else "Руководитель")))
