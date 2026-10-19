@@ -511,7 +511,8 @@ def refresh_changed(ns,admission_limit=MAX_RECHECK_ADMISSIONS):
                 current=None if source_error else semantic_source_version(c,row["reg"])
             except (SemanticSnapshotError,OSError) as exc:
                 errors+=1
-                print(f"GENERAL_SNAPSHOT_RETRY reg={row['reg']} type={type(exc).__name__}",flush=True)
+                print(f"GENERAL_SNAPSHOT_RETRY reg={row['reg']} type={type(exc).__name__} "
+                      f"reason={exc.diagnostic_code if isinstance(exc,SemanticSnapshotError) else 'source_snapshot_io_error'}",flush=True)
                 # An unavailable snapshot is unknown, never a stable watermark.
                 continue
             retry=row["state"]=="failed" and locked_error(row["error"])
@@ -1234,7 +1235,8 @@ async def retry_operation(ns,phase,operation,worker=None,*,retry_seconds=None):
                 runtime["last_error_at"]=now()
             if worker is not None:
                 worker.update(phase="retrying_"+phase,last_error=message,
-                              retries=worker.get("retries",0)+1)
+                              last_error_at=now(),last_error_reg=worker.get("reg"),
+                              last_error_phase=phase,retries=worker.get("retries",0)+1)
             if deadline is not None:
                 remaining=deadline-time.monotonic()
                 if remaining<=0:
@@ -1393,6 +1395,7 @@ def install(ns):
                             elapsed_ms=round((time.monotonic()-started)*1000,1)
                             index+=1
                             slot["last_success_at"]=now()
+                            slot.update(last_error=None,last_error_at=None,last_error_reg=None,last_error_phase=None)
                             if state=="completed":
                                 if not incomplete:runtime["last_completed_at"]=slot["last_success_at"]
                                 print(f"V332 AUDITED reg={reg} worker={worker_id} docs={detail['documents_read']}/"
@@ -1414,18 +1417,26 @@ def install(ns):
                         except Exception as exc:
                             index+=1
                             error=str(exc)[:300]
-                            slot["last_error"]=f"{type(exc).__name__}: {error}"
+                            slot.update(last_error=f"{type(exc).__name__}: {error}",last_error_at=now(),
+                                        last_error_reg=str(reg),last_error_phase=slot.get("phase"))
                             if transient_sqlite(exc) or isinstance(exc,(SemanticSnapshotError,EngineSignatureError,OSError)):
                                 # Preserve the completed result's token when
                                 # persist committed but its queue mark stayed busy.
                                 detail=dict(result) if result is not None else {"result_token":uuid.uuid4().hex}
                                 if snapshot is not None:
                                     detail.update(snapshot if result is not None else {"reservation_token":snapshot["reservation_token"]})
-                                reason="Временная блокировка БД; проверка будет повторена без удаления результатов"
+                                database_busy=transient_sqlite(exc)
+                                code=exc.diagnostic_code if isinstance(exc,SemanticSnapshotError) else (
+                                    "engine_signature_unavailable" if isinstance(exc,EngineSignatureError) else
+                                    "source_io_error" if isinstance(exc,OSError) else "database_busy")
+                                reason=(f"{code}: снимок правовых исходных данных не завершён; проверка будет повторена без удаления результатов"
+                                        if isinstance(exc,SemanticSnapshotError) else
+                                        "Временная блокировка БД; проверка будет повторена без удаления результатов"
+                                        if database_busy else f"{code}: проверка будет повторена без удаления результатов")
                                 delay=await retry_operation(ns,"save_busy",lambda:thread_call(
                                     defer_retry,ns,reg,detail,reason,BUSY_RETRY_BASE_SECONDS),slot)
                                 print(f"V332 AUDIT_DEFERRED reg={reg} worker={worker_id} "
-                                      f"database_busy=True retry_after_seconds={delay}",flush=True)
+                                      f"database_busy={database_busy} reason={code} retry_after_seconds={delay}",flush=True)
                             else:
                                 # Preserve prior successful watermarks on a deterministic
                                 # engine failure, but do not hot-loop its unchanged input.
