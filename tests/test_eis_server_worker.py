@@ -1,5 +1,7 @@
 """VPS intake authentication, shared queue fencing and actual-byte completion."""
 import concurrent.futures
+import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -7,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -16,6 +19,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"scripts"))
 import eis_server_worker as worker
@@ -152,6 +156,145 @@ class ServerWorkerTests(unittest.TestCase):
         self.assertEqual(explicit["id"], one["job"]["id"])
         with self.ns["conn"]() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM v319_manual_inputs").fetchone()[0], 1)
+
+    def test_busy_report_is_quiet_backpressure_then_same_lease_replays_once(self):
+        self.enqueue()
+        job = self.claim()
+        archive_hash = self.archive()
+        original = self.original()
+        original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
+        before = self.row(job["id"])
+        # A real competing SQLite writer, with a short fixture-only deadline.
+        connector = self.ns["conn"]
+        self.ns["conn"] = lambda: sqlite3.connect(self.home/"queue.sqlite", timeout=.02)
+        blocker = self.ns["conn"]()
+        output = io.StringIO()
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            with contextlib.redirect_stdout(output):
+                response = self.report(job, archive_sha256s=[archive_hash])
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.headers["Retry-After"], "300")
+            self.assertEqual(response.json(), {"detail": "Worker report database is busy; retry the same report"})
+            self.assertNotIn("Traceback", output.getvalue())
+            self.assertNotIn(KEY, response.text + output.getvalue())
+            self.assertEqual(self.row(job["id"]), before)
+            with self.ns["conn"]() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_reports").fetchone()[0], 0)
+            self.assertEqual(self.reviews, [])
+        finally:
+            blocker.rollback()
+            blocker.close()
+            self.ns["conn"] = connector
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            replies = list(pool.map(lambda _: self.report(job, archive_sha256s=[archive_hash]), range(2)))
+        self.assertTrue(all(reply.status_code == 200 for reply in replies))
+        self.assertEqual(sum(bool(reply.json().get("replayed")) for reply in replies), 1)
+        self.assertTrue(all(reply.json()["download_complete"] for reply in replies))
+        with self.ns["conn"]() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_reports").fetchone()[0], 1)
+        self.assertEqual(self.reviews, [REG])
+        self.assertEqual(hashlib.sha256(original.read_bytes()).hexdigest(), original_hash)
+
+    def test_report_does_not_disguise_noncontention_database_faults(self):
+        self.enqueue()
+        job = self.claim()
+        with patch.object(worker, "report", side_effect=sqlite3.OperationalError("no such table: fixture")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.report(job)
+
+    def test_report_classifies_busy_and_locked_extended_codes_without_exposing_details(self):
+        self.enqueue()
+        job = self.claim()
+        for code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_BUSY | 256):
+            with self.subTest(code=code):
+                error = sqlite3.OperationalError("private database diagnostic " + KEY)
+                error.sqlite_errorcode = code
+                with patch.object(worker,"report",side_effect=error), contextlib.redirect_stdout(io.StringIO()) as output:
+                    response = self.report(job)
+                self.assertEqual(response.status_code,503)
+                self.assertNotIn(KEY,response.text+output.getvalue())
+                self.assertNotIn("private database",response.text+output.getvalue())
+        self.assertEqual(self.row(job["id"])["status"],"leased")
+        self.assertEqual(self.reviews,[])
+
+    def test_report_prefers_async_review_admission_and_preserves_replay(self):
+        self.enqueue()
+        job = self.claim()
+        archive_hash = self.archive()
+        self.original()
+        admitted = []
+        async def async_review(reg):
+            await asyncio.sleep(0)
+            admitted.append(reg)
+            return {"status": "queued"}
+        self.ns["_v295_enqueue_review_async"] = async_review
+        response = self.report(job, archive_sha256s=[archive_hash])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["review_status"], "queued")
+        self.assertEqual(admitted, [REG])
+        self.assertEqual(self.reviews, [])
+        replay = self.report(job, archive_sha256s=[archive_hash])
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(admitted, [REG])
+
+    def test_async_review_failure_keeps_committed_report_replayable(self):
+        self.enqueue()
+        job = self.claim()
+        archive_hash = self.archive()
+        self.original()
+        async def unavailable(reg):
+            raise OSError("fixture storage unavailable")
+        self.ns["_v295_enqueue_review_async"] = unavailable
+        response = self.report(job, archive_sha256s=[archive_hash])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["review_status"], "pending_retry")
+        self.assertTrue(response.json()["download_complete"])
+        self.assertTrue(self.report(job, archive_sha256s=[archive_hash]).json()["replayed"])
+
+    def test_canceled_http_report_cannot_ack_before_commit_and_remains_replayable(self):
+        self.enqueue()
+        job = self.claim()
+        archive_hash = self.archive()
+        self.original()
+        actual = worker.report
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def delayed_report(*args):
+            started.set()
+            if not release.wait(2):
+                raise AssertionError("report fixture was not released")
+            try:
+                return actual(*args)
+            finally:
+                finished.set()
+        endpoint = next(route.endpoint for route in self.ns["app"].routes
+                        if route.path == "/api/eis-worker/jobs/{identifier}/report")
+        payload = json.dumps({"worker_id": self.identity, "lease_token": job["lease_token"],
+                              "reg_number": REG, "status": "completed", "archive_sha256s": [archive_hash]}).encode()
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+        request = Request({"type": "http", "headers": [(b"x-eis223-upload-token", KEY.encode())]}, receive)
+        async def scenario():
+            task = asyncio.create_task(endpoint(job["id"], request))
+            try:
+                while not started.is_set():
+                    await asyncio.sleep(.001)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                with self.ns["conn"]() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_reports").fetchone()[0], 0)
+                self.assertEqual(self.reviews, [])
+            finally:
+                release.set()
+                while not finished.is_set():
+                    await asyncio.sleep(.001)
+        with patch.object(worker,"report",side_effect=delayed_report):
+            asyncio.run(scenario())
+        replay = self.report(job, archive_sha256s=[archive_hash])
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertTrue(replay.json()["download_complete"])
 
     def test_atomic_claims_are_disjoint_and_lost_response_is_recoverable(self):
         self.enqueue()

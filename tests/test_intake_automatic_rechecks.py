@@ -1,6 +1,8 @@
 """Bounded, local-only intake revisits independent of general/thematic campaigns."""
 import asyncio
 import hashlib
+import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -10,9 +12,12 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+import uuid
+import zipfile
 from unittest.mock import patch
 
 from fastapi import FastAPI
+from starlette.requests import Request
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 import v295_eis_originals as originals
 
@@ -542,6 +547,406 @@ class IntakeAutomaticRechecks(unittest.IsolatedAsyncioTestCase):
             return actual(path,data)
         with patch.object(originals,"save_atomic",side_effect=guarded):
             await self.tick();await self.settled()
+
+    async def test_async_intake_admission_keeps_slow_receipts_off_event_loop(self):
+        actual = originals.allowed_documents
+        started, release = threading.Event(), threading.Event()
+        loop_thread = threading.get_ident()
+        def slow_counts(reg):
+            self.assertNotEqual(threading.get_ident(), loop_thread)
+            started.set()
+            self.assertTrue(release.wait(2), "event loop did not resume while receipts were read")
+            return actual(reg)
+        async def release_from_loop():
+            for _ in range(100):
+                if started.is_set():
+                    release.set()
+                    return
+                await asyncio.sleep(.005)
+            self.fail("receipt read did not start")
+        tick = asyncio.create_task(release_from_loop())
+        try:
+            with patch.object(originals,"allowed_documents",side_effect=slow_counts):
+                result = await self.ns["_v295_enqueue_review_async"](REG)
+                await tick
+                await self.settled()
+            self.assertEqual(result["status"],"queued")
+            self.assertEqual(len(self.calls),1)
+        finally:
+            release.set()
+            tick.cancel()
+            await asyncio.gather(tick,return_exceptions=True)
+
+    async def test_parallel_async_intake_admissions_keep_one_physical_review(self):
+        self.block = asyncio.Event()
+        results = await asyncio.gather(*(
+            self.ns["_v295_enqueue_review_async"](REG) for _ in range(8)))
+        # Contending non-owners may all hand off to one durable queued state;
+        # the normal bounded scan also handles that tokenless admission.
+        await self.tick(source="eis223_official_review_jobs")
+        for _ in range(100):
+            if self.calls:break
+            await asyncio.sleep(.005)
+        self.assertEqual(len(self.calls),1,{"state":self.state(),"results":results})
+        # A non-owner can observe the tiny interval after the execution flock
+        # was acquired but before its first durable queued state was written.
+        self.assertTrue(all(result["status"] in ("not_queued","queued","running") for result in results))
+        self.assertTrue(any(result["status"] in ("queued","running") for result in results))
+        self.block.set();self.block=None
+        await self.settled()
+        replay = await self.ns["_v295_enqueue_review_async"](REG)
+        self.assertEqual(replay["status"],"completed")
+        self.assertEqual(len(self.calls),1)
+        admission=inspect.getclosurevars(self.ns["_v295_enqueue_review_async"]).nonlocals["enqueue_automatic"]
+        self.assertEqual(inspect.getclosurevars(admission).nonlocals["admission_locks"],{})
+
+    async def test_http_and_periodic_admission_share_one_registry_handoff(self):
+        self.block=asyncio.Event()
+        actual=originals.save_atomic
+        entered,release=threading.Event(),threading.Event()
+        def slow_reservation(path,data):
+            if Path(path).name==REG+".json" and json.loads(data).get("status")=="queued":
+                entered.set()
+                self.assertTrue(release.wait(2),"reservation fixture was not released")
+            return actual(path,data)
+        with patch.object(originals,"save_atomic",side_effect=slow_reservation):
+            request=asyncio.create_task(self.ns["_v295_enqueue_review_async"](REG))
+            periodic=None
+            try:
+                for _ in range(100):
+                    if entered.is_set():break
+                    await asyncio.sleep(.005)
+                self.assertTrue(entered.is_set())
+                periodic=asyncio.create_task(self.tick())
+                await asyncio.sleep(.03)
+                self.assertFalse(periodic.done())
+            finally:
+                release.set()
+                queued=await request
+                if periodic is not None:await periodic
+        for _ in range(100):
+            if self.calls:break
+            await asyncio.sleep(.005)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.state()["lease_token"],queued["lease_token"])
+        self.assertFalse(self.state()["automatic"])
+        self.block.set();self.block=None
+        await self.settled()
+        self.assertEqual(len(self.calls),1)
+
+    async def test_sibling_prepare_cannot_steal_new_reviewers_execution_flock(self):
+        self.block=asyncio.Event()
+        actual_try,actual_release=originals._try_execution_lock,originals._release_execution_lock
+        first_released,release_first,release_sibling=threading.Event(),threading.Event(),threading.Event()
+        reviewer_attempted=threading.Event()
+        reviewer_locks=[]
+        def preparing():
+            return any(frame.function=="prepare_review" for frame in inspect.stack(context=0))
+        def acquire(reg):
+            in_prepare=preparing()
+            handle=actual_try(reg)
+            if in_prepare and first_released.is_set() and handle is not None:
+                # Without serialization, the sibling holds this flock while
+                # the first preparation returns and schedules its reviewer.
+                release_sibling.wait(2)
+            elif not in_prepare:
+                reviewer_locks.append(handle is not None)
+                reviewer_attempted.set()
+            return handle
+        def unlock(handle):
+            actual_release(handle)
+            if preparing() and not first_released.is_set():
+                first_released.set()
+                release_first.wait(2)
+        with patch.object(originals,"_try_execution_lock",side_effect=acquire), \
+                patch.object(originals,"_release_execution_lock",side_effect=unlock):
+            first=asyncio.create_task(self.ns["_v295_enqueue_review_async"](REG))
+            sibling=None
+            try:
+                for _ in range(200):
+                    if first_released.is_set():break
+                    await asyncio.sleep(.005)
+                self.assertTrue(first_released.is_set())
+                sibling=asyncio.create_task(self.ns["_v295_enqueue_review_async"](REG))
+                await asyncio.sleep(.05)
+                release_first.set()
+                for _ in range(200):
+                    if reviewer_attempted.is_set():break
+                    await asyncio.sleep(.005)
+                self.assertTrue(reviewer_attempted.is_set())
+            finally:
+                release_first.set();release_sibling.set()
+                await first
+                if sibling is not None:await sibling
+        self.assertEqual(reviewer_locks,[True],"a sibling preparation stranded the new review lease")
+        self.block.set();self.block=None
+        await self.settled()
+        self.assertEqual(len(self.calls),1)
+
+    async def test_sync_upload_callback_during_async_admission_releases_before_reviewer(self):
+        self.block=asyncio.Event()
+        actual_try,actual_release=originals._try_execution_lock,originals._release_execution_lock
+        first_released,release_first=threading.Event(),threading.Event()
+        loop_thread=threading.get_ident()
+        reviewer_locks=[]
+        sync_owned=[]
+        def preparing():
+            return any(frame.function=="prepare_review" for frame in inspect.stack(context=0))
+        def acquire(reg):
+            in_prepare=preparing()
+            handle=actual_try(reg)
+            if in_prepare and threading.get_ident()==loop_thread:
+                sync_owned.append(handle is not None)
+                release_first.set()
+                # The background preparation returns during this callback;
+                # its reviewer still cannot execute before the callback exits.
+                originals.time.sleep(.05)
+            elif not in_prepare:
+                reviewer_locks.append(handle is not None)
+            return handle
+        def unlock(handle):
+            actual_release(handle)
+            if preparing() and threading.get_ident()!=loop_thread and not first_released.is_set():
+                first_released.set()
+                release_first.wait(2)
+        with patch.object(originals,"_try_execution_lock",side_effect=acquire), \
+                patch.object(originals,"_release_execution_lock",side_effect=unlock):
+            first=asyncio.create_task(self.ns["_v295_enqueue_review_async"](REG))
+            try:
+                for _ in range(200):
+                    if first_released.is_set():break
+                    await asyncio.sleep(.005)
+                self.assertTrue(first_released.is_set())
+                sync_result=self.ns["_v295_enqueue_review"](REG)
+            finally:
+                release_first.set()
+                async_result=await first
+            for _ in range(200):
+                if self.calls:break
+                await asyncio.sleep(.005)
+        self.assertEqual(sync_owned,[True])
+        self.assertEqual(reviewer_locks,[True])
+        self.assertEqual(sync_result["lease_token"],async_result["lease_token"])
+        self.assertEqual(len(self.calls),1)
+        self.block.set();self.block=None
+        await self.settled()
+
+    async def test_async_intake_admission_respects_existing_retry_deadline(self):
+        self.store_state({"status":"partial","source_version":originals._review_source_version(REG),
+                          "next_retry_at":4102444800,"attempts":3,"automatic":True})
+        result = await self.ns["_v295_enqueue_review_async"](REG)
+        self.assertEqual(result["status"],"partial")
+        self.assertEqual(result["next_retry_at"],4102444800)
+        self.assertEqual(self.calls,[])
+
+    async def test_async_explicit_force_and_automatic_flags_match_sync_defaults(self):
+        self.store_state({"status":"failed","source_version":originals._review_source_version(REG),
+                          "originals_received":1,"attempts":4,"retry_exhausted":True,
+                          "next_retry_at":4102444800})
+        with patch.object(originals,"MAX_REVIEW_TASKS",0):
+            skipped=await self.ns["_v295_enqueue_review_async"](REG,force=False,automatic=True)
+            self.assertEqual(skipped["status"],"failed")
+            queued=await self.ns["_v295_enqueue_review_async"](REG,force=True,automatic=False)
+        self.assertEqual(queued["status"],"queued")
+        self.assertFalse(queued["retry_exhausted"])
+        self.assertEqual(queued["next_retry_at"],0)
+        self.assertEqual(queued["attempts"],0)
+        await self.tick();await self.settled()
+
+    async def test_async_manual_repeat_promotes_existing_task_without_restart(self):
+        self.block=asyncio.Event()
+        await self.ns["_v295_enqueue_review_async"](REG,automatic=True)
+        while not self.calls:await asyncio.sleep(.005)
+        token=self.state()["lease_token"]
+        import v381_audit_scheduling as scheduling
+        loop_thread=threading.get_ident()
+        def manual(ns,reg):
+            self.assertNotEqual(threading.get_ident(),loop_thread)
+            return True
+        with patch.object(scheduling,"is_manual_review",side_effect=manual), \
+                patch.object(scheduling,"promote_review") as promote:
+            await self.ns["_v295_enqueue_review_async"](REG)
+            promote.assert_called_once()
+            await self.ns["_v295_enqueue_review_async"](REG,automatic=True)
+            promote.assert_called_once()
+        self.assertEqual(self.state()["lease_token"],token)
+        self.assertEqual(len(self.calls),1)
+        self.block.set();self.block=None
+        await self.settled()
+
+    def install_report_delivery(self):
+        import eis_server_worker as worker
+        import v301_search_jobs as queue
+        from v294_eis_bridge import parse_notices
+        key="local-fixture-report-key-long-enough"
+        env=patch.dict(os.environ,{"EIS223_UPLOAD_TOKEN":key})
+        env.start();self.addCleanup(env.stop)
+        queue.install(self.ns);worker.install(self.ns)
+        with self.connect() as db:db.execute("DELETE FROM v301_search_jobs")
+        identity=str(uuid.uuid4())
+        queue._enqueue(self.ns,"reg",REG,1,9,"worker-bootstrap",False)
+        job=worker.claim(self.ns,identity,1)[0]
+        url="https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="+UID
+        xml=(f'<purchaseNoticeKESMBO xmlns="http://zakupki.gov.ru/223fz/purchase/1">'
+             f'<body><item><purchaseNoticeKESMBOData><registrationNumber>{REG}</registrationNumber>'
+             f'<version>1</version><attachments><document><guid>fixture</guid><fileName>fixture.pdf</fileName>'
+             f'<url>{url}</url></document></attachments></purchaseNoticeKESMBOData></item></body></purchaseNoticeKESMBO>').encode()
+        buffer=io.BytesIO()
+        with zipfile.ZipFile(buffer,"w") as archive:archive.writestr("purchaseNoticeKESMBO_"+REG+"_fixture.xml",xml)
+        raw=buffer.getvalue();digest=hashlib.sha256(raw).hexdigest()
+        folder=self.root/"eis223_official_archive_inbox"/REG;folder.mkdir(parents=True)
+        (folder/(digest+".zip")).write_bytes(raw)
+        (folder/(digest+".json")).write_text(json.dumps({"source":"official_eis_soap_archive",
+            "reg_number":REG,"archive_sha256":digest,"notices":parse_notices(raw)}))
+        endpoint=next(route.endpoint for route in self.ns["app"].routes
+                      if route.path=="/api/eis-worker/jobs/{identifier}/report")
+        payload=json.dumps({"worker_id":identity,"reg_number":REG,"lease_token":job["lease_token"],
+                            "status":"completed","archive_sha256s":[digest]}).encode()
+        async def deliver():
+            async def receive():return {"type":"http.request","body":payload,"more_body":False}
+            request=Request({"type":"http","headers":[(b"x-eis223-upload-token",key.encode())]},receive)
+            return await endpoint(job["id"],request)
+        return deliver
+
+    async def test_committed_report_admission_failure_replay_recovers_from_durable_intake(self):
+        deliver=self.install_report_delivery()
+        async def unavailable(reg):raise OSError("temporary admission fixture")
+        actual=self.ns["_v295_enqueue_review_async"]
+        self.ns["_v295_enqueue_review_async"]=unavailable
+        result=await deliver()
+        self.assertTrue(result["download_complete"])
+        self.assertEqual(result["review_status"],"pending_retry")
+        self.assertTrue((await deliver())["replayed"])
+        self.assertEqual(self.calls,[])
+        self.ns["_v295_enqueue_review_async"]=actual
+        self.assertEqual((await self.tick(source="eis223_official_originals"))["admitted"],1)
+        await self.settled()
+        self.assertEqual(len(self.calls),1)
+
+    async def test_committed_report_admission_cancellation_replay_recovers_from_durable_intake(self):
+        deliver=self.install_report_delivery()
+        entered=asyncio.Event()
+        async def canceled_admission(reg):
+            entered.set()
+            await asyncio.Event().wait()
+        actual=self.ns["_v295_enqueue_review_async"]
+        self.ns["_v295_enqueue_review_async"]=canceled_admission
+        request=asyncio.create_task(deliver())
+        await asyncio.wait_for(entered.wait(),2)
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):await request
+        with self.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_reports").fetchone()[0],1)
+        self.assertTrue((await deliver())["replayed"])
+        self.assertEqual(self.calls,[])
+        self.ns["_v295_enqueue_review_async"]=actual
+        self.assertEqual((await self.tick(source="eis223_official_originals"))["admitted"],1)
+        await self.settled()
+        self.assertEqual(len(self.calls),1)
+
+    async def test_canceled_async_admission_settles_lease_without_freeing_task_capacity(self):
+        other="32616233662"
+        self.prepare(other)
+        self.block=asyncio.Event()
+        actual=originals.save_atomic
+        entered,release=threading.Event(),threading.Event()
+        def slow_reservation(path,data):
+            if Path(path).name==REG+".json" and json.loads(data).get("status")=="queued":
+                entered.set()
+                self.assertTrue(release.wait(2),"reservation fixture was not released")
+            return actual(path,data)
+        with patch.object(originals,"MAX_REVIEW_TASKS",1),patch.object(originals,"save_atomic",side_effect=slow_reservation):
+            admission=asyncio.create_task(self.ns["_v295_enqueue_review_async"](REG))
+            try:
+                for _ in range(100):
+                    if entered.is_set():break
+                    await asyncio.sleep(.005)
+                self.assertTrue(entered.is_set())
+                admission.cancel();await asyncio.sleep(.005)
+                admission.cancel();await asyncio.sleep(.005)
+                self.assertFalse(admission.done())
+                queued=await self.ns["_v295_enqueue_review_async"](other)
+                self.assertEqual(queued["status"],"queued")
+                self.assertFalse(queued["lease_token"])
+                self.assertEqual(queued["lease_until"],0)
+                self.assertEqual(self.calls,[])
+            finally:
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):await admission
+            for _ in range(100):
+                if self.calls:break
+                await asyncio.sleep(.005)
+            self.assertEqual([call[0] for call in self.calls],[REG])
+            self.assertTrue(self.state()["lease_token"])
+            self.block.set();self.block=None
+            await self.settled()
+            self.assertEqual((await self.tick(source="eis223_official_review_jobs",after=""))["admitted"],1)
+            await self.settled(2,reg=other)
+            self.assertCountEqual([call[0] for call in self.calls],[REG,other])
+
+    async def test_canceled_periodic_admission_keeps_http_handoff_serialized(self):
+        self.block=asyncio.Event()
+        actual=originals.save_atomic
+        entered,release=threading.Event(),threading.Event()
+        def slow_reservation(path,data):
+            if Path(path).name==REG+".json" and json.loads(data).get("status")=="queued":
+                entered.set()
+                self.assertTrue(release.wait(2),"periodic reservation fixture was not released")
+            return actual(path,data)
+        with patch.object(originals,"save_atomic",side_effect=slow_reservation):
+            periodic=asyncio.create_task(self.tick())
+            request=None
+            try:
+                for _ in range(200):
+                    if entered.is_set():break
+                    await asyncio.sleep(.005)
+                self.assertTrue(entered.is_set())
+                request=asyncio.create_task(self.ns["_v295_enqueue_review_async"](REG))
+                periodic.cancel();await asyncio.sleep(.005)
+                periodic.cancel();await asyncio.sleep(.005)
+                self.assertFalse(periodic.done())
+                self.assertFalse(request.done())
+            finally:
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):await periodic
+                if request is not None:await request
+        self.block.set();self.block=None
+        await self.settled()
+        self.assertEqual(len(self.calls),1)
+
+    async def test_shutdown_settles_periodic_admission_as_restartable_without_late_worker(self):
+        actual=originals.save_atomic
+        entered,release=threading.Event(),threading.Event()
+        def slow_reservation(path,data):
+            fields=json.loads(data)
+            if Path(path).name==REG+".json" and fields.get("status")=="queued" and fields.get("lease_token"):
+                entered.set()
+                self.assertTrue(release.wait(2),"shutdown reservation fixture was not released")
+            return actual(path,data)
+        with patch.object(originals,"REVIEW_SCAN_INTERVAL",.01),patch.object(originals,"save_atomic",side_effect=slow_reservation):
+            for handler in self.ns["app"].router.on_startup:await handler()
+            for _ in range(200):
+                if entered.is_set():break
+                await asyncio.sleep(.005)
+            self.assertTrue(entered.is_set())
+            async def stop():
+                for handler in self.ns["app"].router.on_shutdown:await handler()
+            shutdown=asyncio.create_task(stop())
+            try:
+                await asyncio.sleep(.01)
+                self.assertFalse(shutdown.done())
+                self.assertEqual(self.calls,[])
+            finally:
+                release.set()
+                await shutdown
+        self.assertEqual(self.state()["status"],"queued")
+        self.assertFalse(self.state()["lease_token"])
+        self.assertEqual(self.state()["lease_until"],0)
+        self.assertEqual(self.calls,[])
+        restarted=self.install()
+        self.assertEqual((await self.tick(ns=restarted,source="eis223_official_review_jobs"))["admitted"],1)
+        await self.settled()
+        self.assertEqual(len(self.calls),1)
 
     async def test_real_semantic_card_facts_reopen_once_and_hash_outside_sql_writer(self):
         import threading

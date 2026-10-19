@@ -797,6 +797,29 @@ class WorkerTests(unittest.TestCase):
         self.worker.retry_reports()
         self.assertEqual(self.state.pending_reports(), [])
 
+    def test_report_503_preserves_payload_and_site_backoff_across_restart(self):
+        report = self.worker.process(self.job)
+        self.state.save_report('job-1', report)
+        with patch.object(self.http, 'site', side_effect=w.WorkerError('site_http_503', 300)), \
+                patch.object(w.time, 'time', return_value=1800000000):
+            with self.assertRaises(w.WorkerError):
+                self.worker.retry_reports()
+        self.assertEqual(self.state.pending_reports(), [('job-1', report)])
+        self.assertEqual(float(self.state.get('site_backoff_until')), 1800000300)
+        restarted = w.State(self.temp.name)
+        try:
+            other = w.Worker({'interval_seconds': 30}, restarted, self.http)
+            self.http.calls.clear()
+            with patch.object(w.time, 'time', return_value=1800000299):
+                other.cycle()
+            self.assertEqual(self.http.calls, [])
+            self.assertEqual(restarted.pending_reports(), [('job-1', report)])
+            with patch.object(w.time, 'time', return_value=1800000301), contextlib.redirect_stdout(io.StringIO()):
+                other.retry_reports()
+            self.assertEqual(restarted.pending_reports(), [])
+        finally:
+            restarted.db.close()
+
     def test_report_log_uses_authoritative_server_downgrade(self):
         report = self.worker.process(self.job)
         self.assertEqual(report['status'], 'completed')

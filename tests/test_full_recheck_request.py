@@ -205,6 +205,66 @@ class FullRecheckRequestTests(unittest.TestCase):
         self.assertIn("membership_digest", report)
         self.assertEqual(sum(report["states"].values()), report["actual_count"])
 
+    def test_inventory_attempt_counts_exclude_pending_waiting_and_blocked_without_claim(self):
+        self.c.execute("INSERT INTO purchases VALUES('invalid-registration','','')")
+        self.create([A, "invalid-registration"])
+        with self.write():
+            ledger.note_waiting(self.c, REQUEST, B, now=1001)
+        before = self.c.total_changes
+        report = ledger.inventory(self.c, REQUEST)
+        self.assertEqual((report["unique_attempted"], report["total_attempts"]), (0, 0))
+        self.assertEqual(report["states"], dict(pending=2, running=0, completed=0,
+                                              waiting_originals=1, retry=0, blocked=1))
+        self.assertEqual(self.c.total_changes, before)
+        # An empty immutable request reports zero, not NULL.
+        self.c.execute("DELETE FROM v332_audit_queue")
+        empty = self.create([], request="empty-request")
+        self.assertEqual((empty["unique_attempted"], empty["total_attempts"]), (0, 0))
+
+    def test_inventory_attempt_counts_keep_retry_completion_and_restart_identity(self):
+        initial = self.create()
+        first = self.claim()
+        running = ledger.inventory(self.c, REQUEST)
+        self.assertEqual((running["unique_attempted"], running["total_attempts"]), (1, 1))
+        with self.write():
+            ledger.defer_member(self.c, first, status="retry", reason="incomplete_read", retry_after=0, now=1002)
+        second = self.claim(now=1003)
+        with self.write():
+            ledger.set_review_watermark(self.c, second, source_version="source-v1", engine_signature="engine-v1", now=1004)
+            self.receipt(second, now=1005)
+            self.receipt(second, now=1005)
+            ledger.finish_member(self.c, second, result_token="result-v1")
+        another = self.claim(B, now=1006)
+        with self.write():
+            ledger.defer_member(self.c, another, status="waiting_originals", reason="missing_originals", now=1007)
+        report = ledger.inventory(self.c, REQUEST)
+        self.assertEqual((report["unique_attempted"], report["total_attempts"]), (2, 3))
+        self.assertEqual(report["states"]["completed"], 1)
+        self.assertEqual(report["states"]["waiting_originals"], 1)
+        self.assertEqual(report["actual_count"], initial["actual_count"])
+        self.assertEqual(report["membership_digest"], initial["membership_digest"])
+        never = Mock(side_effect=AssertionError("Restart must reuse the frozen request"))
+        with sqlite3.connect(self.path, isolation_level=None) as restarted:
+            ledger.initialize(restarted)
+            self.assertEqual(ledger.create_request(restarted, REQUEST, never), report)
+        never.assert_not_called()
+
+    def test_inventory_attempt_counts_do_not_mix_requests_for_the_same_registration(self):
+        self.create()
+        self.create(request="second-request")
+        first = self.claim()
+        with self.write():
+            ledger.defer_member(self.c, first, status="retry", reason="interrupted", retry_after=0, now=1002)
+        other = self.claim(request="second-request", now=1003)
+        with self.write():
+            ledger.defer_member(self.c, other, status="retry", reason="interrupted", retry_after=0, now=1004)
+        self.claim(request="second-request", now=1005)
+        self.claim(B, request="second-request", now=1006)
+        first_report = ledger.inventory(self.c, REQUEST)
+        second_report = ledger.inventory(self.c, "second-request")
+        self.assertEqual((first_report["unique_attempted"], first_report["total_attempts"]), (1, 1))
+        self.assertEqual((second_report["unique_attempted"], second_report["total_attempts"]), (2, 3))
+
     def test_claim_returns_str_identity_and_fences_second_request(self):
         self.create()
         self.create(request="second-request")

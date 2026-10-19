@@ -701,6 +701,7 @@ def install(ns):
     scan_lock=asyncio.Lock()
     scan_task=None
     pending_admissions=0
+    admission_locks={}
     stopping=False
     review_priorities={}
 
@@ -1126,10 +1127,41 @@ def install(ns):
         return start_review(reg,data,token,foreground,automatic)
 
     async def enqueue_automatic(reg,force=True,automatic=True,versions=None):
+        # Serialize only this registry's admission (HTTP and periodic alike).
+        # A sibling preparation must not briefly own the execution flock just
+        # as its newly scheduled review_worker tries to acquire that flock.
+        entry=admission_locks.setdefault(reg,[asyncio.Lock(),0])
+        entry[1]+=1
+        try:
+            async with entry[0]:
+                task=asyncio.create_task(_enqueue_automatic(reg,force,automatic,versions))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    # Keep the registry mutex and physical admission count
+                    # until prepare_review has handed its lease to a reviewer.
+                    # HTTP and periodic cancellation must both settle this.
+                    while not task.done():
+                        try:await asyncio.shield(task)
+                        except asyncio.CancelledError:continue
+                        except Exception:break
+                    if not task.cancelled():task.exception()
+                    raise
+        finally:
+            entry[1]-=1
+            if not entry[1]:admission_locks.pop(reg,None)
+
+    async def _enqueue_automatic(reg,force=True,automatic=True,versions=None):
         # All recurring receipt, state and fsync work runs off the event loop.
         nonlocal pending_admissions
         from v381_audit_scheduling import run_file_io
         if reg in review_jobs and not review_jobs[reg].done():
+            if not automatic:
+                from v381_audit_scheduling import is_manual_review,promote_review
+                if await run_file_io(is_manual_review,ns,reg):
+                    task=review_jobs.get(reg)
+                    if task is not None and not task.done():
+                        review_priorities[reg]=True;promote_review(task)
             return await run_file_io(record_completion_arrival,reg,force,versions)
         reserve=active_reviews()<MAX_REVIEW_TASKS
         if reserve:pending_admissions+=1
@@ -1137,7 +1169,17 @@ def install(ns):
             data,token,foreground=await run_file_io(prepare_review,reg,force,automatic,versions,reserve)
         finally:
             if reserve:pending_admissions-=1
+        if token and stopping:
+            # Shutdown may begin during off-thread preparation. Leave a
+            # restartable queue entry, never a late worker or orphaned lease.
+            return await run_file_io(lambda:update_review(reg,"queued",expected_token=token,
+                                                          lease_token=None,lease_until=0))
         return start_review(reg,data,token,foreground,automatic)
+
+    async def enqueue_review_async(reg,force=False,automatic=False,versions=None):
+        # HTTP intake uses the same bounded admission and durable file leases,
+        # with the synchronous callback's defaults and manual promotion intact.
+        return await enqueue_automatic(reg,force,automatic,versions)
 
     scan_sources=("purchases","eis223_official_review_jobs","eis223_official_archive_inbox",
                   "eis223_public_browser_intake","eis223_official_originals")
@@ -1204,6 +1246,7 @@ def install(ns):
         with background_audit():return await _review_tick()
 
     ns["_v295_enqueue_review"]=enqueue_review
+    ns["_v295_enqueue_review_async"]=enqueue_review_async
     ns["_v295_review_tick"]=review_tick
     ns["_v295_review_state"]=public_review_state
 
