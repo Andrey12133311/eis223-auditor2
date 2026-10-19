@@ -101,6 +101,12 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
                 # A new process namespace still observes the durable cooldown.
                 fresh_ns = {'conn':fixture.connect}
                 self.assertIsNone(general.claim_next(fresh_ns))
+                # Finish the old process before testing its replacement. The
+                # four live workers can correctly win the same atomic claim
+                # once this fixture manually expires the cooldown below.
+                ns['_v332_campaign_worker'].cancel()
+                await asyncio.gather(ns['_v332_campaign_worker'], return_exceptions=True)
+                self.assertIsNone(general.claim_next(fresh_ns))
                 c = fixture.connect()
                 c.execute("UPDATE v332_audit_queue SET next_retry_at=0 WHERE reg=?", (first,))
                 c.commit(); c.close()

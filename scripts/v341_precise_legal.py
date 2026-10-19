@@ -39,8 +39,24 @@ from v341_eis_facts import DATE_TOKEN, enrich, persist_facts, parse_day as day, 
 
 LAW32 = "https://www.consultant.ru/document/cons_doc_LAW_116964/05cd0add21b39d478c8b8af91fb2f2cd80d4a6e8/"
 LAW4 = "https://www.consultant.ru/document/cons_doc_LAW_116964/441d00be62e3224cdc0514cffaf2a26b5b40a1c7/"
-REQUEST = r"(?:дата\s+(?:и\s+время\s+)?(?:поступления|получения|регистрации)\s+запроса(?:\s+(?:на\s+)?разъяснени[еяй])?|запрос\s+(?:на\s+)?разъяснени[еяй]\s+(?:поступил|получен|зарегистрирован))"
-ANSWER = r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:ответа|разъяснени[яй])(?:\s+на\s+запрос)?(?:\s+в\s+ЕИС)?|(?:ответ|разъяснени[ея])\s+(?:размещен[оы]?|опубликован[оы]?)\s+в\s+ЕИС)"
+# Recognize the complete ordinary field label. The date still has to follow
+# that label directly; an answer's preparation/date or a generic document
+# publication is not a substitute for receipt or EIS placement evidence.
+_CLARIFICATION_SUBJECT = (r"(?:\s+(?:положени[йя]\s+)?документации"
+                          r"(?:\s+о\s+(?:конкурентной\s+)?закупке)?)?")
+_REQUEST_SUBJECT = (r"\s+(?:(?:на\s+)?разъяснени[еяй]|о\s+разъяснении)"
+                    + _CLARIFICATION_SUBJECT)
+_EIS_LABEL = r"(?:ЕИС|единой\s+информационной\s+системе(?:\s+в\s+сфере\s+закупок)?)"
+REQUEST = (r"(?:дата\s+(?:и\s+время\s+)?(?:поступления|получения|регистрации)\s+"
+           r"(?:заказчиком\s+)?запроса(?:" + _REQUEST_SUBJECT + r")?|"
+           r"запрос" + _REQUEST_SUBJECT + r"\s+(?:поступил|получен|зарегистрирован))")
+ANSWER = (r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+"
+          r"(?:ответа(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
+          r"разъяснени[яй]" + _CLARIFICATION_SUBJECT + r"(?:\s+на\s+запрос)?)"
+          r"(?:\s+в\s+" + _EIS_LABEL + r")?|"
+          r"(?:ответ(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
+          r"разъяснени[ея]" + _CLARIFICATION_SUBJECT + r")\s+"
+          r"(?:размещ[её]н[оы]?|опубликован[оы]?)\s+в\s+" + _EIS_LABEL + r")")
 SIGNED = r"(?:дата\s+подписания\s+(?:итогового\s+)?протокола|протокол\s+подписан)"
 PROTOCOL_PUBLISHED = r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:итогового\s+)?протокола(?:\s+в\s+ЕИС)?|протокол\s+(?:размещ[её]н|опубликован)\s+в\s+ЕИС)"
 COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)", re.I)
@@ -156,7 +172,9 @@ def _deduplicate_events(items, event_key, *, checklist=False):
 
 def evaluate(p, docs):
     findings, checks = [], []
-    from v348_cross_document_legal import ambiguous_original_documents, document_event_number
+    from v348_cross_document_legal import (ambiguous_original_documents,
+                                           document_event_number,
+                                           _document_event_identity, EXCLUDE)
     from official_publication_evidence import protocol_publication_verifier
     official_publication = protocol_publication_verifier(p)
     ambiguous = ambiguous_original_documents(docs[:650])
@@ -178,11 +196,18 @@ def evaluate(p, docs):
         for index, request in enumerate(requests):
             # Resolve repeated clarification events automatically when each
             # request owns a single reply before the next request begins.
-            # A reply before its request or after another request is ambiguous.
+            # A reply after another request is ambiguous. A unique reversed
+            # table is safe only within one unambiguous actual original.
             next_request = requests[index+1].start() if index+1 < len(requests) else len(text)
             peers = [x for x in answers
                      if request.end() <= x.start() < next_request
                      and x.start()-request.end() <= 1500]
+            if (not peers and len(requests) == len(answers) == 1
+                    and 0 <= request.start()-answers[0].end() <= 1500
+                    and id(doc) not in ambiguous
+                    and not _document_event_identity(doc, "CLARIFICATION")[1]
+                    and not EXCLUDE.search(str(doc.get("name") or ""))):
+                peers = [answers[0]]
             if len(peers) != 1:
                 checks.append(review(doc, "v341-clarification-pair", "Сопоставить запрос разъяснений с публикацией ответа",
                                      request[0], "223-ФЗ, ст. 3.2 ч. 3", request))

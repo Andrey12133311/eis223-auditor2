@@ -29,10 +29,14 @@ RECHECK_SECONDS=90
 INDEX_SECONDS=90
 # Establish a source snapshot once for historical completed reviews. Prior
 # findings remain intact; only newly evidenced legal episodes are appended.
-ANALYSIS_VERSION=4
+ANALYSIS_VERSION=5
 DB_RETRY_DELAYS=(.15,.4)
 MAX_RETRY_SECONDS=1800
 ITEM_TIMEOUT_SECONDS=600
+PENDING_RESULT_LIMIT=MAX_PER_CYCLE
+PENDING_RESULT_BYTES=4*1024*1024
+PENDING_RESULT_SECONDS=600
+PENDING_RESULT_REUSES=3
 
 def _open(ns):
     c=original.db(ns)
@@ -43,6 +47,8 @@ async def _retry_db(operation,*args):
     """Retry a complete short operation after its failed connection is closed."""
     for attempt in range(len(DB_RETRY_DELAYS)+1):
         try:
+            # A cancelled asyncio.to_thread future does not stop its SQLite
+            # thread. Settle any actual commit before ending this worker cycle.
             return await thread_call(operation,*args)
         except sqlite3.OperationalError as exc:
             if not original.sqlite_busy(exc) or attempt==len(DB_RETRY_DELAYS):
@@ -306,7 +312,7 @@ def _require_item_reservation(c,item):
         raise LookupError("Thematic audit reservation superseded")
 
 
-async def _one(ns,item,sem):
+async def _one(ns,item,sem,pending=None):
     async with sem:
         try:
             if not await _retry_db(_start_item,ns,item):return item,"superseded",[],""
@@ -319,6 +325,11 @@ async def _one(ns,item,sem):
             except OriginalCatalogueError as exc:
                 item["source_error"]=str(exc)
                 for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
+            # Reuse is still a newly owned attempt: queued -> running and a
+            # fresh pre-analysis source/engine snapshot are mandatory. A cached
+            # result never carries the released reservation into this attempt.
+            reused=_reuse_pending_result(item,pending) if pending is not None else None
+            if reused is not None:return reused
             from audit_write_guard import background_write_guard
             with background_audit(), background_write_guard(lambda c:_require_item_reservation(c,item)):
                 # Include waiting for a physical file permit and both legal
@@ -347,32 +358,137 @@ async def _one(ns,item,sem):
             for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
             return item,"retry",[],type(exc).__name__
 
+
+def _pending_results(ns):
+    """Keep only a bounded, short-lived set of finished but uncommitted reviews."""
+    pending=ns.setdefault("_thematic_pending_results",{})
+    clock=time.monotonic()
+    for key,entry in list(pending.items()):
+        if entry["expires_at"]<=clock or entry["reuses"]>=PENDING_RESULT_REUSES:
+            pending.pop(key,None)
+    return pending
+
+
+def _reuse_pending_result(item,pending):
+    key=(item["batch"],item["reg"])
+    entry=pending.get(key)
+    if entry is not None and (entry["expires_at"]<=time.monotonic() or
+                              entry["reuses"]>=PENDING_RESULT_REUSES):
+        pending.pop(key,None)
+        entry=None
+    if entry is not None:
+        saved=entry["result"][0]
+        # A new source or rule revision needs a new legal analysis. Never mark
+        # its current watermark using a result computed from older originals.
+        same=(not item.get("source_error") and not saved.get("source_error")
+            and all(item.get(field) for field in ("source_version","semantic_version","engine_signature"))
+            and all(saved.get(field)==item.get(field) for field in (
+                "source_version","semantic_version","engine_signature","doc_id","ready",
+                "originals_ready","analysis_version","categories","campaign_guard")))
+        if same:
+            entry["reuses"]+=1
+            print(f"THEMATIC_RESULT_REUSED batch={item['batch']} reg={item['reg']} "
+                  f"attempt={entry['reuses']}",flush=True)
+            return (item,*entry["result"][1:])
+        pending.pop(key,None)
+    return None
+
+
+async def _review_or_reuse(ns,item,sem,pending):
+    return await _one(ns,item,sem,pending)
+
+
+def _retain_pending_result(pending,result):
+    item=result[0]
+    key=(item["batch"],item["reg"])
+    entry=pending.get(key)
+    if entry is not None:
+        # Retries cannot keep the same result alive indefinitely.
+        if entry["reuses"]>=PENDING_RESULT_REUSES or entry["expires_at"]<=time.monotonic():
+            pending.pop(key,None)
+        return
+    size=len(json.dumps(result,ensure_ascii=False).encode("utf-8"))
+    if size>PENDING_RESULT_BYTES:return
+    while pending and (len(pending)>=PENDING_RESULT_LIMIT or
+                       sum(value["bytes"] for value in pending.values())+size>PENDING_RESULT_BYTES):
+        oldest=min(pending,key=lambda key:pending[key]["expires_at"])
+        pending.pop(oldest)
+    pending[key]={"result":result,"bytes":size,"reuses":0,
+                  "expires_at":time.monotonic()+PENDING_RESULT_SECONDS}
+
+def _thematic_result_snapshot(c,batch,reg):
+    return [dict(row) for row in c.execute("""SELECT title,law,evidence,category,
+        code,document,source_url,law_url FROM thematic_findings
+        WHERE batch_id=? AND reg=? ORDER BY rowid""",(batch,reg)).fetchall()]
+
+
+def _plan_thematic_results(results,snapshots):
+    from v333_dedup_ui import _same_finding
+    previous_by_key={key:list(rows) for key,rows in snapshots.items()}
+    planned=[]
+    for item,state,findings,detail in results:
+        previous=previous_by_key[(item["batch"],item["reg"])]
+        before=list(previous)
+        inserted=[]
+        if state in ("completed","retry"):
+            # All pairwise documentary/regex comparisons happen before the
+            # sole SQLite writer is reserved. A full archive can yield many
+            # checks without blocking other audits or incoming EIS reports.
+            unique_keys={(f.get("category"),f.get("title"),f.get("evidence")) for f in previous
+                         if all(f.get(k) is not None for k in ("category","title","evidence"))}
+            for f in findings:
+                if any(_same_finding(old,f,"title") for old in previous):continue
+                key=(f["category"],f["title"],f.get("evidence"))
+                # Match the table's historical UNIQUE constraint too. SQLite
+                # allows repeated NULLs; all non-NULL keys are binary strings.
+                if all(value is not None for value in key) and key in unique_keys:continue
+                inserted.append(f)
+                previous.append(f)
+                if all(value is not None for value in key):unique_keys.add(key)
+        planned.append((item,state,inserted,detail,before,list(previous)))
+    return planned
+
+
 def _persist(ns,results):
-    from v333_dedup_ui import collapse,_same_finding
+    from v333_dedup_ui import collapse
     from v352_dashboard_truth import collapse_legal_events
-    # Incoming-result normalization has no database dependency. In particular,
-    # fuzzy documentary comparisons must not occupy SQLite's single writer.
+    # Normalize incoming findings once, without opening SQLite. Comparisons
+    # with existing evidence are planned from read snapshots below.
     results=[(item,state,collapse(findings) if state in ("completed","retry") else findings,detail)
              for item,state,findings,detail in results]
     c=_open(ns)
     saved_events=[]
     applied=0
     try:
-        # Keep the scope/active checks and saved result in one write transaction.
-        # EIS corrections and stop/delete actions may otherwise commit between
-        # the SELECT guards and the first INSERT below.
-        c.execute("BEGIN IMMEDIATE")
-        for item,state,findings,detail in results:
+        for attempt in range(4):
+            snapshots={(item["batch"],item["reg"]):_thematic_result_snapshot(c,item["batch"],item["reg"])
+                       for item,_,_,_ in results}
+            planned=_plan_thematic_results(results,snapshots)
+            c.execute("BEGIN IMMEDIATE")
+            # Rebase the legal comparisons if a concurrent save changed the
+            # same result. Unrelated intake writes do not invalidate this work.
+            if any(_thematic_result_snapshot(c,*key)!=rows for key,rows in snapshots.items()):
+                c.rollback()
+                continue
+            break
+        else:
+            raise sqlite3.OperationalError("database is locked: thematic results changed during save")
+        for item,state,findings,detail,before,after in planned:
             batch,reg=item["batch"],item["reg"]
+            if state=="superseded":continue
             # Do not resurrect an already deleted or stopped thematic campaign.
             campaign=c.execute("SELECT * FROM thematic_batches WHERE id=? AND status='active'",(batch,)).fetchone()
             if not campaign:
                 continue
+            row=c.execute("SELECT status,reservation_token,retry_attempts FROM thematic_items "
+                "WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
+            if not row:continue
             if item.get("reservation_token"):
-                row=c.execute("SELECT 1 FROM thematic_items WHERE batch_id=? AND reg=? "
-                    "AND status='running' AND reservation_token=?",
-                    (batch,reg,item["reservation_token"])).fetchone()
-                if not row or item.get("campaign_guard")!=_campaign_identity(campaign):continue
+                if (row["status"]!="running" or row["reservation_token"]!=item["reservation_token"]
+                    or item.get("campaign_guard")!=_campaign_identity(campaign)):continue
+            elif row["reservation_token"]:
+                # Legacy direct callers cannot mutate a durably owned attempt.
+                continue
             scope,scope_args=selection_sql(c,campaign)
             # A later EIS metadata correction must not persist a new result
             # outside the chosen period while a slow original was being read.
@@ -385,14 +501,8 @@ def _persist(ns,results):
             customer=c.execute("SELECT customer FROM purchases WHERE reg_number=?",(reg,)).fetchone()
             if not customer or original.customer_form(customer[0]) not in set(json.loads(campaign["legal_forms"])):continue
             if state in ("completed","retry"):
-                previous=[dict(r) for r in c.execute(
-                    """SELECT title,law,evidence,category,code,document,source_url,law_url
-                       FROM thematic_findings WHERE batch_id=? AND reg=?""",
-                    (batch,reg))]
-                previous_before=None
+                added=0
                 for f in findings:
-                    if any(_same_finding(old,f,"title") for old in previous):
-                        continue
                     inserted=c.execute("""INSERT OR IGNORE INTO thematic_findings
                       (batch_id,reg,category,title,law,evidence,
                        code,document,source_url,law_url)
@@ -400,15 +510,12 @@ def _persist(ns,results):
                       (batch,reg,f["category"],f["title"],f.get("law"),f.get("evidence"),
                        f.get("code") or "",f.get("document") or "",
                        f.get("source_url") or "",f.get("law_url") or ""))
-                    if inserted.rowcount==1:
-                        if previous_before is None:
-                            previous_before=list(previous)
-                        previous.append(f)
-                if previous_before is not None:
-                    saved_events.append((batch,reg,previous_before,previous,
-                                         item.get("analysis_version",ANALYSIS_VERSION)))
-            old=c.execute("SELECT retry_attempts FROM thematic_items WHERE batch_id=? AND reg=?",(batch,reg)).fetchone()
-            attempts=(int(old[0])+1) if state=="retry" else 0
+                    added+=int(inserted.rowcount==1)
+                if added!=len(findings):
+                    raise sqlite3.OperationalError("database is locked: thematic insert changed during save")
+                if added:
+                    saved_events.append((batch,reg,before,after,item.get("analysis_version",ANALYSIS_VERSION)))
+            attempts=(int(row["retry_attempts"])+1) if state=="retry" else 0
             delay=min(MAX_RETRY_SECONDS,RECHECK_SECONDS*2**min(5,max(0,attempts-1)))
             retry_at=time.time()+delay if state in ("retry","waiting_originals","waiting_engine") else 0
             # Source and engine are the actual pre-analysis snapshot; never take
@@ -430,9 +537,8 @@ def _persist(ns,results):
         c.rollback()
         raise
     finally:c.close()
-    # Exact before/after snapshots preserve the log's meaning without another
-    # DB read. This potentially expensive grouping is diagnostic only: failure
-    # after a successful commit must never cause retry/release of that result.
+    # Exact before/after snapshots keep diagnostic counting outside the writer.
+    # Neither grouping nor a broken log sink can invalidate committed evidence.
     for batch,reg,before,after,version in saved_events:
         try:
             gained=len(collapse_legal_events(after))-len(collapse_legal_events(before))
@@ -444,7 +550,7 @@ def _persist(ns,results):
                 print(f"THEMATIC_DIAGNOSTIC_FAILED batch={batch} reg={reg} "
                       f"committed=True type={type(exc).__name__}",flush=True)
             except Exception:
-                pass  # A broken log sink cannot invalidate committed evidence.
+                pass
     return applied
 
 def _request_missing_originals(ns,results=()):
@@ -603,6 +709,7 @@ async def faster_tick(ns):
 
 async def _faster_tick(ns):
     started=time.monotonic()
+    pending=_pending_results(ns)
     if original.storage_health()["blocked"]:
         original.WORKER_STATE["last_error"]="Недостаточно места на диске Railway для сохранения проверок"
         return
@@ -615,7 +722,7 @@ async def _faster_tick(ns):
             print("V353 THEME_EIS_DISPATCH_ERROR "+type(exc).__name__,flush=True)
         return
     sem=asyncio.Semaphore(MAX_CONCURRENT)
-    tasks=[asyncio.create_task(_one(ns,item,sem)) for item in items]
+    tasks=[asyncio.create_task(_review_or_reuse(ns,item,sem,pending)) for item in items]
     processed=completed=0
     first_result_ms=None
     try:
@@ -630,11 +737,16 @@ async def _faster_tick(ns):
                 # Leave this row eligible for retry and let every other finished
                 # analysis save its result instead of cancelling the whole batch.
                 item=result[0]
+                if isinstance(exc,sqlite3.OperationalError) and original.sqlite_busy(exc):
+                    _retain_pending_result(pending,result)
+                else:
+                    pending.pop((item["batch"],item["reg"]),None)
                 original.WORKER_STATE["last_error"]=type(exc).__name__+": "+str(exc)[:120]
                 print(f"THEMATIC_ITEM_RETRY batch={item['batch']} reg={item['reg']} "
                       f"stage=persist type={type(exc).__name__} error={str(exc)[:120]!r}",flush=True)
                 await _release_eventually(ns,[item],True)
                 continue
+            pending.pop((result[0]["batch"],result[0]["reg"]),None)
             if result[1]=="superseded" or applied==0:continue
             processed+=1
             completed+=int(result[1]=="completed")

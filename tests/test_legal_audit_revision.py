@@ -199,5 +199,29 @@ def analyze(values): return stored_docs(values)
             with self.assertRaises(revision.EngineSignatureError):revision.engine_signature()
         self.assertEqual(len(revision.engine_signature()),64)
 
+    def test_partial_soap_acceptance_and_completeness_are_engine_inputs(self):
+        baseline=revision.engine_signature()
+        original=revision._read_engine
+        for module,function in (("v294_eis_bridge.py","parse_notices"),
+                                ("v294_eis_bridge.py","soap_metadata_incomplete"),
+                                ("eis223_soap_xml.py","quarantine_document")):
+            with self.subTest(module=module,function=function):
+                revision.engine_signature.cache_clear()
+                def changed(path):
+                    source=original(path)
+                    if path.name!=module:return source
+                    tree=ast.parse(source)
+                    target=next(node for node in tree.body
+                                if isinstance(node,ast.FunctionDef) and node.name==function)
+                    # A changed acceptance/completeness result must invalidate
+                    # existing audits even without an explicit version bump.
+                    offset=int(isinstance(target.body[0],ast.Expr) and
+                               isinstance(target.body[0].value,ast.Constant) and
+                               isinstance(target.body[0].value.value,str))
+                    target.body.insert(offset,ast.Return(ast.Constant(None)))
+                    return ast.unparse(tree)
+                with patch.object(revision,'_read_engine',changed):
+                    self.assertNotEqual(baseline,revision.engine_signature())
+
 
 if __name__ == '__main__': unittest.main()

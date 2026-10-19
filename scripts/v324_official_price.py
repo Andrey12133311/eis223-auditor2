@@ -49,6 +49,10 @@ NOT_ACTUAL=re.compile(
     r"в\s+случае|может\s+составля\w*|"
     r"не\s+подлеж\w*\s+определени\w*|не\s+долж\w*\s+превыша\w*)",re.I,
 )
+CONDITIONAL_PRICE_PREFIX=re.compile(
+    r"\b(?:если|например|пример(?:у|а)?|образец|допустим|предположим|когда)\b|"
+    r"\bв\s+случае\b|\bпри\s+(?:условии|проведении|осуществлении)\b",re.I,
+)
 FIELD_SUFFIX=re.compile(
     r"^\s*(?:\((?:цена\s+лота|НМЦД|НМЦК|НМЦ|с\s+НДС|включая\s+НДС)\)\s*|"
     r"[,;:]\s*(?:руб\.?|рублей|Российск\w*\s+рубл\w*)\s*)*",re.I)
@@ -109,20 +113,52 @@ def _match_amount(part):
 
 def prices_in_text(text):
     source=str(text or "")[:600000].replace("\xa0"," ").replace("\u202f"," ").replace("\u00ad","")
-    # Reconstruct wrapped DOC/DOCX monetary fields while preserving columns.
+    raw_lines=source.splitlines()
+    lines=[" ".join(line.split()) for line in raw_lines]
+    contexts=[]
+    previous=""
+    table_context=None
+    for line in lines:
+        if "|" in line:
+            if table_context is None:table_context=previous
+            contexts.append(table_context)
+        else:
+            contexts.append(previous)
+            if line:table_context=None
+        if line:previous=line
+    entries=[(line,contexts[index],lines[index+1] if index+1<len(lines) else "")
+             for index,line in enumerate(lines)]
+    # Reconstruct wrapped DOC/DOCX fields at their original table context.
+    # Appending bare label/value strings to the document would erase a nearby
+    # "Например:" heading and turn a hypothetical price into an actual one.
     from v314_eis_metadata import table_pairs
-    extra=[]
-    for label,value,_ in table_pairs(source):
+    cursor=0
+    for label,value,block in table_pairs(source):
+        first_line=block.splitlines()[0] if block else ""
+        origin=next((index for index in range(cursor,len(raw_lines))
+                     if raw_lines[index]==first_line),None)
+        if origin is None:continue
+        cursor=origin+1
         if len(label)<300 and LABEL.search(label) and value:
-            extra.append(label+" | "+value)
-    source+="\n"+"\n".join(extra)
+            entries.append((label+" | "+value,contexts[origin],""))
     candidates=[]
-    lines=[" ".join(line.split()) for line in source.splitlines()]
-    for index,line in enumerate(lines):
-        if not line or len(line)>2000:continue
+    for line,prior_context,next_line in entries:
+        # PDF extraction and long DOCX table cells may flatten several
+        # paragraphs into one line. Scan labels with bounded local windows
+        # instead of discarding the entire line, including its explicit NMCD.
+        if not line:continue
         for hit in LABEL.finditer(line):
             before=line[max(0,hit.start()-105):hit.start()]
             if UNSUITABLE.search(before) or NOTE_ONLY.search(before):continue
+            # A labelled amount inside "Например, НМЦД..." or "Если НМЦД..."
+            # is not this notice's price. Keep the scope to this sentence so
+            # a completed example cannot hide a later independent real field.
+            context=re.split(r"[.!?;]",before)[-1]
+            if (re.fullmatch(r"[\s:|]*(?:\d+[.)]?[\s:|]*)?",context)
+                    and prior_context and (not re.search(r"[.!?;]\s*$",prior_context)
+                        or re.fullmatch(r"(?:пример|например|образец)[\s:.!?;]*",prior_context,re.I))):
+                context=prior_context[-200:]+" "+context
+            if CONDITIONAL_PRICE_PREFIX.search(context):continue
             # "5% от начальной максимальной цены договора — 8 829,89"
             # states the security amount, not NMCD itself.
             if re.search(r"(?:%|процент\w*)\s*от\s*$",before,re.I):continue
@@ -136,8 +172,8 @@ def prices_in_text(text):
             if suffix:after=after[suffix.end():]
             # An EIS notice may put the NMCD label and the sum in adjacent
             # DOCX table cells; accept a directly following monetary cell only.
-            if not after.strip(" \t:;|=,-–—()") and index+1<len(lines):
-                next_line=lines[index+1].lstrip(" :;|=,-–—()")
+            if not after.strip(" \t:;|=,-–—()") and next_line:
+                next_line=next_line.lstrip(" :;|=,-–—()")
                 if (not LABEL.search(next_line) and
                     re.match(r"^\d[\d \u00a0,.]*",next_line) and
                     (re.search(r"(?:₽|руб(?:ль|ля|лей|\.)|коп(?:ейки|\.))",next_line,re.I)
