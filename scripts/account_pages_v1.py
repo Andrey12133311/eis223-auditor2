@@ -218,9 +218,24 @@ HOME = page("Мои самостоятельные проверки", """
 <script>
 (()=>{
 const el=id=>document.getElementById(id);
-const state={queued:'В очереди',leased:'Загружаются данные ЕИС',
- done:'Загрузка завершена',partial:'Частичная загрузка',
- deferred:'Ожидает источник',error:'Ошибка загрузки',unknown:'Статус уточняется'};
+const state={queued:'Ожидает загрузки',leased:'Загружаются данные ЕИС',
+ done:'Загрузка завершена',completed:'Загрузка завершена',partial:'Частичная загрузка',
+ deferred:'Ожидает источник',error:'Ошибка загрузки',failed:'Ошибка загрузки',unknown:'Статус загрузки уточняется'};
+function legalStatus(item){
+ const state=item.legal_review_state;
+ if(['pending','queued'].includes(state))return 'Юридическая проверка в очереди';
+ if(['running','processing'].includes(state))return 'Идёт юридическая проверка';
+ if(['failed','error'].includes(state))return 'Ошибка юридической проверки';
+ if(state==='no_readable_documents')return 'Не удалось прочитать документы для юридической проверки';
+ if(state==='completed')return Number(item.legal_review_documents)>0?
+  'Юридическая проверка завершена':'Юридическая проверка не завершена: нет проверенных документов';
+ return 'Юридическая проверка ещё не завершена';
+}
+function retainedResults(item){
+ return ['pending','queued','running','processing','failed','error'].includes(item.legal_review_state)&&
+  (Number(item.documents_checked)>0||Number(item.violations)>0)?
+  'Показаны сохранённые результаты предыдущей проверки. Новая проверка ещё не завершена.':'';
+}
 let manualCache=[],manualRefresh=null,manualRefreshQueued=false;
 function refresh(force=false){
  if(manualRefresh){if(force===true)manualRefreshQueued=true;return manualRefresh}
@@ -275,10 +290,13 @@ function renderManual(){
   if(item.customer){const name=document.createElement('small');name.textContent=item.customer;reg.append(name)}
   if(item.customer_inn){const inn=document.createElement('small');inn.textContent='ИНН '+item.customer_inn;reg.append(inn)}
   const label=document.createElement('span');label.className='manual-chip';
-  label.textContent=state[item.job_status]||'Проверяется';
+  label.textContent=state[item.job_status]||'Статус загрузки уточняется';
   if(['queued','deferred','leased'].includes(item.job_status))label.classList.add('wait');
-  if(item.job_status==='error')label.classList.add('fail');
+  if(['failed','error'].includes(item.job_status))label.classList.add('fail');
   status.append(label);
+  const legal=document.createElement('small');legal.textContent=legalStatus(item);status.append(legal);
+  const previous=retainedResults(item);
+  if(previous){const note=document.createElement('small');note.textContent=previous;status.append(note)}
   docs.textContent=String(Math.max(0,Number(item.documents_checked||0)))+' проверено';
   violations.textContent=String(Math.max(0,Number(item.violations||0)));
   const wrapper=document.createElement('div');wrapper.className='manual-actions';

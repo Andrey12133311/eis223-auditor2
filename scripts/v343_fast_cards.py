@@ -127,6 +127,64 @@ def read(ns,reg):
     finally:
         c.close()
 
+def intake_legal_state(ns,reg):
+    """Read-only fallback for original-intake jobs outside the general queue."""
+    reader=ns.get("_v295_review_state")
+    if not callable(reader):return {}
+    try:
+        value=reader(reg)
+        if not isinstance(value,dict) or value.get("reg_number")!=reg:return {}
+        state=str(value.get("status") or "unknown")
+        if state=="not_queued":return {}
+        if state in ("partial","waiting_for_originals"):
+            state="failed" if value.get("retry_exhausted") else "pending"
+        documents=max(0,int(value.get("checked_documents") or 0))
+        return {"state":state,"documents_read":documents}
+    except (OSError,ValueError,TypeError,OverflowError):
+        return {"state":"unknown","documents_read":0}
+
+
+def read_legal_state(ns,reg):
+    """Optional, read-only queue metadata; keep read()'s seven-value contract."""
+    c=ns["conn"]()
+    audit={}
+    try:
+        c.row_factory=sqlite3.Row
+        c.execute("PRAGMA busy_timeout=1200")
+        c.execute("PRAGMA query_only=ON")
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'").fetchone():
+            row=c.execute("SELECT state,documents_read FROM v332_audit_queue "
+                          "WHERE reg=? ORDER BY updated_at DESC LIMIT 1",(reg,)).fetchone()
+            audit=dict(row) if row else {}
+    finally:
+        c.close()
+    # The original-intake state reader touches a small bounded JSON record;
+    # close every SQLite reader before touching the filesystem.
+    return audit or intake_legal_state(ns,reg)
+
+
+def legal_state_notice(audit,has_previous):
+    state=(audit or {}).get("state")
+    if state in ("pending","queued"):
+        label="Юридическая проверка в очереди"
+    elif state in ("running","processing"):
+        label="Идёт юридическая проверка"
+    elif state in ("failed","error"):
+        label="Ошибка юридической проверки"
+    elif state=="no_readable_documents":
+        label="Не удалось прочитать документы для юридической проверки"
+    elif state=="completed":
+        label=("Юридическая проверка завершена" if int(audit.get("documents_read") or 0)>0
+               else "Юридическая проверка не завершена: нет проверенных документов")
+    else:
+        label="Юридическая проверка ещё не завершена"
+    note='<p class="meta" data-legal-review-state="1">'+esc(label)+'</p>'
+    if has_previous and state in ("pending","queued","running","processing","failed","error"):
+        note+=('<p class="meta" data-previous-results="1">Показаны сохранённые результаты '
+               'предыдущей проверки. Новая проверка ещё не завершена.</p>')
+    return note
+
+
 def verified_legal_references(item):
     """Use the existing verified catalog only for the explicitly cited act."""
     from v365_consultant_refs import references
@@ -311,7 +369,7 @@ def render_thematic_panel(reg,thematic,account_review=False):
     result.append('</section>')
     return ''.join(result)
 
-def render(reg,data,thematic=None,account_review=False):
+def render(reg,data,thematic=None,account_review=False,legal_review=None):
     p,findings,checks,docs,ftotal,ctotal,dtotal=data
     from v333_dedup_ui import collapse
     from v352_dashboard_truth import collapse_legal_events
@@ -359,6 +417,8 @@ def render(reg,data,thematic=None,account_review=False):
         if eis:basic+='<p>'+eis+'</p>'
     else:
         basic='<p>Карточка закупки пока не сохранена. После получения сведений ЕИС она появится здесь автоматически. Ранее найденные нарушения, если они есть в базе, показаны ниже.</p>'
+    if not thematic:
+        basic+=legal_state_notice(legal_review,bool(findings or checks or int(val(p,'documents_checked') or 0)))
     # The shared account shell is injected only on the homepage, not this
     # read-only card. Keep a single quiet return path, not three duplicate
     # button-style section links; the sections remain in the main navigation.
@@ -418,7 +478,8 @@ def render(reg,data,thematic=None,account_review=False):
 def read_and_render(ns, reg, account_review=False):
     # Legal reconciliation and HTML construction can take longer than the
     # indexed SQLite read. Keep both outside the shared HTTP event loop.
-    return render(reg, read(ns, reg), account_review=account_review)
+    return render(reg, read(ns, reg), account_review=account_review,
+                  legal_review=read_legal_state(ns,reg))
 
 
 class FastCardASGI:

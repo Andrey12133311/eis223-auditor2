@@ -123,12 +123,46 @@ def price_summary(ns):
         requested=db.execute("SELECT COUNT(*) FROM v338_price_requests").fetchone()[0]
         pending=db.execute("SELECT COUNT(*) FROM v338_price_rechecks WHERE state='pending'").fetchone()[0]
         rechecked=db.execute("SELECT COUNT(*) FROM v338_price_rechecks WHERE state='completed'").fetchone()[0]
+        automatic=db.execute("SELECT COUNT(*) FROM v338_price_rechecks WHERE state='automatic'").fetchone()[0]
         return {"purchases":total,"missing_price_fields":missing,
                 "official_cards_captured":known,"price_conflicts_require_review":conflicted,
                 "bridge_backfill_jobs_submitted":requested,
                 "price_triggered_legal_rechecks_pending":pending,
-                "price_triggered_legal_rechecks_completed":rechecked}
+                "price_triggered_legal_rechecks_completed":rechecked,
+                "price_triggered_legal_rechecks_automatically_monitored":automatic}
     finally:db.close()
+
+def handoff_card_rechecks(ns,limit=32):
+    """Retire the parallel price-only analyzer in favor of durable queues.
+
+    A handoff is not a completed legal analysis. Existing campaign membership
+    stays unchanged; semantic source polling observes the actual authoritative
+    card change and applies its usual ready-document/backpressure guards.
+    """
+    from v332_all_procurements_audit import CAMPAIGN
+    from v381_audit_scheduling import notify_evidence
+    notify_evidence(ns)
+    db=ns["conn"]();db.row_factory=sqlite3.Row
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'").fetchone():
+            return 0
+        rows=db.execute("""SELECT r.reg,r.changed_at FROM v338_price_rechecks r
+            WHERE r.state='pending' AND EXISTS(
+                SELECT 1 FROM v332_audit_queue q WHERE q.reg=r.reg AND q.campaign=?)
+            ORDER BY r.changed_at,r.reg LIMIT ?""",(CAMPAIGN,max(0,min(32,int(limit))))).fetchall()
+        changed=0
+        for row in rows:
+            changed+=db.execute("""UPDATE v338_price_rechecks SET state='automatic',
+                result=? WHERE reg=? AND state='pending' AND changed_at=?""",
+                ("Передано автоматическому наблюдению основной очереди; юридическая проверка ещё не подтверждена",
+                 row["reg"],row["changed_at"])).rowcount
+        db.commit()
+        return changed
+    except BaseException:
+        db.rollback()
+        raise
+    finally:db.close()
+
 
 def enqueue_missing_prices(ns,limit=8):
     """Put EIS-card reads in the same browser queue, behind manual requests."""
@@ -217,46 +251,15 @@ def install(ns):
                 await asyncio.sleep(300)
         ns["_v338_card_price_worker"]=asyncio.create_task(worker())
         async def recheck_after_card_price():
-            # Finish the current full-database re-audit before rechecking
-            # individual procurements whose official EIS price just arrived.
+            # Card-only changes belong to the same bounded semantic queue as
+            # originals and rule changes. Never wait for every procurement to
+            # finish and never invoke a second, unscheduled legal analyzer.
             await asyncio.sleep(90)
-            from v332_all_procurements_audit import progress,inspect_one
             while True:
                 try:
-                    run=await asyncio.to_thread(progress,ns)
-                    if run.get("status")=="finished":
-                        from v332_all_procurements_audit import CAMPAIGN
-                        db=ns["conn"]()
-                        try:
-                            # Source-price rechecks may not extend the 985-item
-                            # user-requested audit into the rest of the database.
-                            db.execute("""UPDATE v338_price_rechecks SET
-                                state='out_of_scope', checked_at=?,result=?
-                                WHERE state='pending' AND reg NOT IN
-                                (SELECT reg FROM v332_audit_queue WHERE campaign=?)""",
-                                (_now(),"За пределами текущего списка перепроверки",CAMPAIGN))
-                            db.commit()
-                            reg_row=db.execute("""SELECT reg FROM v338_price_rechecks
-                                    WHERE state='pending'
-                                    AND reg IN (SELECT reg FROM v332_audit_queue WHERE campaign=?)
-                                    ORDER BY changed_at LIMIT 1""",(CAMPAIGN,)).fetchone()
-                        finally:db.close()
-                        if reg_row:
-                            reg=str(reg_row[0])
-                            lock=ns.get("lock")
-                            if lock is None:raise RuntimeError("Audit lock unavailable")
-                            async with lock:
-                                state,summary=await asyncio.wait_for(inspect_one(ns,reg),timeout=600)
-                            db=ns["conn"]()
-                            try:
-                                db.execute("""UPDATE v338_price_rechecks
-                                    SET state=?,checked_at=?,result=?
-                                    WHERE reg=?""",("completed" if state=="completed" else "failed",
-                                                   _now(),json.dumps(summary,ensure_ascii=False)[:800],reg))
-                                db.commit()
-                            finally:db.close()
-                            print(f"V338 PRICE_LEGAL_RECHECK reg={reg} state={state} "
-                                  f"new_findings={summary.get('new_findings',0)}",flush=True)
+                    handed=await asyncio.to_thread(handoff_card_rechecks,ns)
+                    if handed:
+                        print(f"V338 PRICE_AUTOMATIC_HANDOFF count={handed}",flush=True)
                 except Exception as exc:
                     print(f"V338 PRICE_LEGAL_RECHECK_ERROR {type(exc).__name__}: "
                           f"{str(exc)[:130]}",flush=True)

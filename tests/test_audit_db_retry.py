@@ -28,6 +28,9 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
             saved.extend(r[0]['reg'] for r in results)
         with patch.object(thematic,'storage_health',return_value={'blocked':False}), \
              patch.object(thematic,'independent_review',side_effect=review), \
+             patch.object(fast,'_start_item',return_value=True), \
+             patch.object(fast,'_watermark',return_value=('fixture','engine')), \
+             patch.object(fast,'_release_items',return_value=None), \
              patch.object(fast,'_prepare',return_value=items), \
              patch.object(fast,'_persist',side_effect=persist), \
              patch.object(fast,'_request_missing_originals',return_value=0):
@@ -78,7 +81,7 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(general,'initialize',return_value={}), \
              patch.object(general,'claim_next',side_effect=flaky_claim), \
              patch.object(general,'inspect_one',side_effect=inspect), \
-             patch.object(general,'evidence_version',return_value='fixture'), \
+             patch.object(general,'review_watermark',return_value={'last_semantic_version':'fixture','last_engine_signature':'engine'}), \
              patch.object(general,'mark'), \
              patch.object(general,'return_running'), \
              patch.object(general,'add_new_verified',return_value=0), \
@@ -130,7 +133,7 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(general,'initialize',return_value={}), \
              patch.object(general,'claim_next',side_effect=claim), \
              patch.object(general,'inspect_one',side_effect=inspect), \
-             patch.object(general,'evidence_version',return_value='fixture'), \
+             patch.object(general,'review_watermark',return_value={'last_semantic_version':'fixture','last_engine_signature':'engine'}), \
              patch.object(general,'mark',side_effect=flaky_mark), \
              patch.object(general,'return_running'), \
              patch.object(general,'add_new_verified',return_value=0), \

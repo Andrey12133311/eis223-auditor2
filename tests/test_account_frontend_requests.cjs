@@ -62,6 +62,7 @@ function harness(source, exposed, responder) {
   const context = {
     document, console, URL, URLSearchParams, location: {search: '', replace() {}, assign() {}},
     confirm: () => true, prompt: () => '',
+    addEventListener() {},
     setTimeout: callback => { const id = nextTimer++; timers.set(id, callback); return id; },
     clearTimeout: id => timers.delete(id), setInterval: callback => intervals.push(callback),
     FormData: class {
@@ -421,6 +422,113 @@ async function testOlderCaseSearchesCannotRenderIntoNewCase() {
 }
 
 const flatten = node => [node, ...node.children.flatMap(flatten)];
+const words = node => flatten(node).map(x => x.textContent).join(' ');
+
+async function testLegalStatusSeparateFromCompletedDownload() {
+  for (const [file, assignment, target] of [
+    ['account_pages_v1.py', 'HOME =', 'manual-rows'],
+    ['account_site_ui_v1.py', 'def site_header(', 'eis223-my-procurements'],
+  ]) {
+    let row = {...manualRows[0], job_status: 'completed', documents_checked: 2, card_available: true,
+      legal_review_state: 'pending', legal_review_documents: 2, legal_review_completed: false};
+    const ui = harness(embedded(file, assignment), 'refresh', async call => {
+      if (call.url === '/me/manual-checks') return [row];
+      if (call.url === '/me/profile') return {completed: true, full_name: 'Employee'};
+      if (call.url === '/api/thematic/history') return {batches: []};
+      return [];
+    });
+    await flush(); await ui.api.refresh();
+    for (const [state, documents, expected] of [
+      ['pending', 2, 'Юридическая проверка в очереди'],
+      ['running', 2, 'Идёт юридическая проверка'],
+      ['completed', 2, 'Юридическая проверка завершена'],
+      ['completed', 0, 'Юридическая проверка не завершена: нет проверенных документов'],
+      ['failed', 2, 'Ошибка юридической проверки'],
+      ['no_readable_documents', 0, 'Не удалось прочитать документы для юридической проверки'],
+      ['unknown', 0, 'Юридическая проверка ещё не завершена'],
+      ['unexpected_state', 0, 'Юридическая проверка ещё не завершена'],
+    ]) {
+      row = {...row, legal_review_state: state, legal_review_documents: documents};
+      await ui.api.refresh();
+      const rendered = words(ui.get(target));
+      assert.ok(rendered.includes('Загрузка завершена'), file + ': download label retained');
+      assert.ok(rendered.includes(expected), file + ': ' + state);
+      assert.ok(!rendered.includes('unexpected_state'), 'unknown backend states are not shown raw');
+      if (['pending', 'running', 'failed'].includes(state))
+        assert.match(rendered, /сохранённые результаты предыдущей проверки/);
+      assert.ok(flatten(ui.get(target)).some(x => x.href === '/me/cases/' + row.reg_number),
+        file + ': retained case stays accessible');
+    }
+    row = {...row, legal_review_state: 'pending', documents_checked: 0, violations: 0};
+    await ui.api.refresh();
+    assert.doesNotMatch(words(ui.get(target)), /результаты предыдущей проверки/,
+      'initial queue must not claim previous results');
+    if (file === 'account_site_ui_v1.py') {
+      ui.get('eis223-cabinet').hidden = true;
+      ui.get('eis223-toggle-cabinet').listeners.click();
+      await flush();
+      ui.get('eis223-toggle-cabinet').listeners.click();
+      ui.get('eis223-toggle-cabinet').listeners.click();
+      await flush();
+    } else {
+      await ui.get('manual-refresh').onclick();
+    }
+    assert.ok(ui.calls.every(x => x.method === 'GET'), file + ': refresh/reopen must not mutate');
+  }
+}
+
+async function testCaseLegalQueueKeepsFindingsAndUsesReadOnlyRefresh() {
+  let data = {audit: {state: 'pending', documents_read: 2}, findings_count: 1,
+    findings: [{title: 'Сохранённое нарушение', evidence: 'Сохранённое доказательство'}]};
+  const ui = harness(embedded('v369_case_ui.py', 'SCRIPT=').replace('__REG__', '"32616412317"'),
+    'load', async () => data);
+  await flush();
+  for (const [state, read, label] of [
+    ['pending', 2, 'Юридическая проверка в очереди'],
+    ['running', 2, 'Идёт юридическая проверка'],
+    ['failed', 2, 'Ошибка юридической проверки'],
+    ['completed', 2, 'Юридическая проверка завершена'],
+    ['completed', 0, 'Юридическая проверка не завершена: нет проверенных документов'],
+    ['unknown', 0, 'Юридическая проверка ещё не завершена'],
+    ['no_readable_documents', 0, 'Не удалось прочитать документы для юридической проверки'],
+  ]) {
+    data = {...data, audit: {state, documents_read: read}};
+    await ui.api.load();
+    assert.equal(ui.get('case-audit').textContent, label);
+    assert.match(words(ui.get('case-finding-entries')), /Сохранённое доказательство/);
+    if (['pending', 'running', 'failed'].includes(state))
+      assert.match(ui.get('case-note').textContent, /результаты предыдущей проверки/);
+  }
+  assert.ok(ui.calls.every(x => x.method === 'GET'), 'case opening/refresh cannot queue a new audit');
+}
+
+async function testWorkbenchAutomaticReviewHasNoManualMutation() {
+  const source = embedded('v370_staff_ui.py', 'JS=');
+  assert.doesNotMatch(read('v370_staff_ui.py'), /staff-recheck/,
+    'remove both the obsolete button and its unconditional binding');
+  assert.doesNotMatch(source, /\/recheck/);
+  assert.match(read('v370_staff_ui.py'), /staff-automatic-review-note/);
+  const ui = harness(source, 'loadCase,loadProgress', async call => {
+    if (call.url.endsWith('/progress')) return {available: true, checks: [{
+      reg_number: manualRows[0].reg_number, stage: 'Юридическая проверка в очереди',
+      documents_checked: 2, violations: 1,
+      previous_results_note: 'Показаны сохранённые результаты предыдущей проверки.',
+    }]};
+    return staffResponse(call);
+  });
+  await flush();
+  ui.get('staff-reg').value = manualRows[0].reg_number;
+  await ui.api.loadCase(); await ui.api.loadCase();
+  await ui.get('staff-case-load').onclick();
+  await ui.get('staff-refresh').listeners.click();
+  await ui.api.loadProgress();
+  assert.match(words(ui.get('staff-progress-list')), /сохранённые результаты предыдущей проверки/);
+  assert.ok(ui.calls.every(x => x.method === 'GET'), 'workbench reopening/refresh never rechecks');
+  assert.equal(ui.get('staff-case-link').href, '/me/cases/' + manualRows[0].reg_number);
+  assert.equal(ui.get('staff-case-download').href, '/me/workbench/' + manualRows[0].reg_number + '/export.zip');
+  assert.equal(typeof ui.get('staff-bulk-form').onsubmit, 'function', 'initial bulk intake retained');
+}
+
 const reviewKey = 'a'.repeat(64), reviewReg = '32616412317';
 const findingFixture = () => ({finding_key: reviewKey, title: 'Нарушение', law: '223-ФЗ ст. 4 ч. 12',
   evidence: 'Проверенное доказательство', document: 'Протокол.pdf', warnings: [], review: null, submission: null});
@@ -667,6 +775,8 @@ async function testManagerSelfAttachAndRefresh() {
     testCaseSwitchDisablesOldDraftAndControls, testDirtyDraftSurvivesRefreshAndCaseSwitch,
     testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
     testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue,
+    testLegalStatusSeparateFromCompletedDownload, testCaseLegalQueueKeepsFindingsAndUsesReadOnlyRefresh,
+    testWorkbenchAutomaticReviewHasNoManualMutation,
     testFindingSubmissionLifecycleAndNoDuplicate, testFindingMissingManagerStaleAndErrors,
     testFindingMutationOutranksInFlightRead, testThematicFindingContextAndNoDuplicate,
     testMspRecheckButtonScopeAndSingleMutation, testMspInvalidatedSubmissionAndRecheckFailureRetry,
@@ -674,5 +784,5 @@ async function testManagerSelfAttachAndRefresh() {
     testAdminTeamSaveCancelRetryAndInactive, testManagerSelfAttachAndRefresh]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 21 scenarios passed');
+  console.log('Account frontend request/race regressions: 24 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

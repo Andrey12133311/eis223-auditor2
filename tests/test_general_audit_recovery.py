@@ -142,7 +142,7 @@ class QueueRecovery(DatabaseFixture, unittest.TestCase):
         audit.initialize(self.ns)
         for reg in (locked, invalid, completed):
             self.assertEqual(audit.claim_next(self.ns), reg)
-            audit.mark(self.ns, reg, "completed")
+            audit.mark(self.ns, reg, "completed", audit.review_watermark(self.ns, reg))
         with self.connect() as con:
             con.execute("UPDATE v332_audit_queue SET state='failed',error='database is locked' WHERE reg=?", (locked,))
             con.execute("UPDATE v332_audit_queue SET state='failed',error='unsupported document' WHERE reg=?", (invalid,))
@@ -151,7 +151,7 @@ class QueueRecovery(DatabaseFixture, unittest.TestCase):
         self.assertEqual([self.row(reg)["state"] for reg in (locked, invalid, completed)],
                          ["pending", "failed", "completed"])
         self.assertEqual(audit.claim_next(self.ns), locked)
-        audit.mark(self.ns, locked, "completed")
+        audit.mark(self.ns, locked, "completed", audit.review_watermark(self.ns, locked))
         self.assertEqual(audit.refresh_changed(self.ns), 0)
         with self.connect() as con:
             self.assertEqual([tuple(row) for row in con.execute("SELECT * FROM docs ORDER BY id")], before)
@@ -161,18 +161,16 @@ class QueueRecovery(DatabaseFixture, unittest.TestCase):
         restored = self.document(reg, "Дополнительный оригинал", status="waiting", present=False)
         audit.initialize(self.ns)
         self.assertEqual(audit.claim_next(self.ns), reg)
-        audit.mark(self.ns, reg, "completed")
+        audit.mark(self.ns, reg, "completed", audit.review_watermark(self.ns, reg))
         last_id = self.row(reg)["last_doc_id"]
         with self.connect() as con:
             con.execute("UPDATE docs SET status='downloaded_no_text' WHERE id=?", (last_id,))
-        self.assertEqual(audit.refresh_changed(self.ns), 1)
-        self.assertEqual(audit.claim_next(self.ns), reg)
-        audit.mark(self.ns, reg, "completed")
+        # Extraction readiness metadata is not a new legal input.
         self.assertEqual(audit.refresh_changed(self.ns), 0)
         restored.write_bytes(self.contents[restored])
         self.assertEqual(audit.refresh_changed(self.ns), 1)
         self.assertEqual(audit.claim_next(self.ns), reg)
-        audit.mark(self.ns, reg, "completed")
+        audit.mark(self.ns, reg, "completed", audit.review_watermark(self.ns, reg))
         self.assertEqual(self.row(reg)["last_doc_id"], last_id)
         self.assertEqual(audit.refresh_changed(self.ns), 0)
 
@@ -180,28 +178,31 @@ class QueueRecovery(DatabaseFixture, unittest.TestCase):
         reg = self.purchase()
         audit.initialize(self.ns)
         self.assertEqual(audit.claim_next(self.ns), reg)
-        snapshot = audit.evidence_version(self.ns, reg)
-        with self.connect() as con:
-            con.execute("UPDATE docs SET text_chars=text_chars+1 WHERE reg_number=?", (reg,))
-        audit.mark(self.ns, reg, "completed", {"last_source_version": snapshot})
+        snapshot = audit.review_watermark(self.ns, reg)
+        self.document(reg, "Новый подтверждённый оригинал " + LATE_REPLY)
+        audit.mark(self.ns, reg, "completed", snapshot)
         self.assertEqual(audit.refresh_changed(self.ns), 1)
         self.assertEqual(audit.claim_next(self.ns), reg)
-        audit.mark(self.ns, reg, "completed")
+        audit.mark(self.ns, reg, "completed", audit.review_watermark(self.ns, reg))
         self.assertEqual(audit.refresh_changed(self.ns), 0)
 
-    def test_source_change_bypasses_bounded_retry_without_hot_loop(self):
+    def test_source_change_preserves_bounded_retry_without_hot_loop(self):
         reg = self.purchase()
         audit.initialize(self.ns)
         self.assertEqual(audit.claim_next(self.ns), reg)
-        detail = {"last_source_version": audit.evidence_version(self.ns, reg)}
+        detail = audit.review_watermark(self.ns, reg)
         self.assertEqual(audit.defer_retry(self.ns, reg, detail, "temporary extraction"), 90)
         self.assertIsNone(audit.claim_next(self.ns))
         self.assertEqual(audit.refresh_changed(self.ns), 0)
+        retry_at = self.row(reg)["next_retry_at"]
+        self.document(reg, "Новый подтверждённый оригинал " + LATE_REPLY)
+        self.assertEqual(audit.refresh_changed(self.ns), 0)
+        self.assertEqual(self.row(reg)["next_retry_at"], retry_at)
+        self.assertIsNone(audit.claim_next(self.ns))
         with self.connect() as con:
-            con.execute("UPDATE docs SET text_chars=text_chars+1 WHERE reg_number=?", (reg,))
-        self.assertEqual(audit.refresh_changed(self.ns), 1)
-        self.assertEqual(self.row(reg)["next_retry_at"], 0)
+            con.execute("UPDATE v332_audit_queue SET next_retry_at=0 WHERE reg=?", (reg,))
         self.assertEqual(audit.claim_next(self.ns), reg)
+        detail = audit.review_watermark(self.ns, reg)
         with self.connect() as con:
             con.execute("UPDATE v332_audit_queue SET retry_count=100 WHERE reg=?", (reg,))
         self.assertEqual(audit.defer_retry(self.ns, reg, detail, "temporary extraction"), 1800)
@@ -210,15 +211,15 @@ class QueueRecovery(DatabaseFixture, unittest.TestCase):
         reg = self.purchase()
         audit.initialize(self.ns)
         self.assertEqual(audit.claim_next(self.ns), reg)
-        audit.mark(self.ns, reg, "completed")
-        original = audit.source_version
+        audit.mark(self.ns, reg, "completed", audit.review_watermark(self.ns, reg))
+        original = audit.semantic_source_version
         def concurrent_update(con, number):
             self.assertFalse(con.in_transaction)
             version = original(con, number)
             with self.connect() as writer:
                 writer.execute("UPDATE v332_audit_queue SET state='running',updated_at='new-reservation' WHERE reg=?", (reg,))
             return version + "changed"
-        with patch.object(audit, "source_version", side_effect=concurrent_update):
+        with patch.object(audit, "semantic_source_version", side_effect=concurrent_update):
             self.assertEqual(audit.refresh_changed(self.ns), 0)
         self.assertEqual(self.row(reg)["state"], "running")
 

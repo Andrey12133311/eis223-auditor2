@@ -84,6 +84,61 @@ def data(findings=None, checks=None):
 
 
 class CardPresentationTests(unittest.TestCase):
+    def test_general_queue_status_keeps_previous_evidence_visible(self):
+        for state, label in (("pending", "Юридическая проверка в очереди"),
+                             ("running", "Идёт юридическая проверка"),
+                             ("failed", "Ошибка юридической проверки")):
+            with self.subTest(state=state):
+                original = data()
+                before = copy.deepcopy(original)
+                markup = card.render(REG, original, legal_review={"state": state, "documents_read": 1})
+                dom = DOM(markup).root
+                self.assertIn(label, dom.content())
+                self.assertIn("результаты предыдущей проверки", dom.content())
+                self.assertIn(FINDING["evidence"], dom.content())
+                self.assertEqual(len(dom.find("article", **{"class": "legal"})), 1)
+                self.assertEqual(original, before)
+
+    def test_legal_state_never_claims_completion_without_read_documents(self):
+        for state, count, label in (
+            ("completed", 0, "Юридическая проверка не завершена: нет проверенных документов"),
+            ("completed", 1, "Юридическая проверка завершена"),
+            ("unknown", 1, "Юридическая проверка ещё не завершена"),
+            ("future-state", 1, "Юридическая проверка ещё не завершена"),
+            ("no_readable_documents", 0, "Не удалось прочитать документы для юридической проверки"),
+        ):
+            with self.subTest(state=state, count=count):
+                markup = card.render(REG, data(), legal_review={"state": state, "documents_read": count})
+                self.assertIn(label, markup)
+                self.assertNotIn("future-state", markup)
+        empty = list(data([], []))
+        empty[0] = {"documents_checked": 0}
+        self.assertNotIn('data-previous-results=', card.render(REG, empty, legal_review={"state": "pending"}))
+
+    def test_optional_queue_lookup_is_read_only_and_handles_absent_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "queue.sqlite"
+            statements = []
+            def connect():
+                c = sqlite3.connect(path)
+                c.set_trace_callback(statements.append)
+                return c
+            ns = {"conn": connect}
+            self.assertEqual(card.read_legal_state(ns, REG), {})
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE v332_audit_queue(reg TEXT,state TEXT,documents_read INTEGER,updated_at TEXT)")
+                db.executemany("INSERT INTO v332_audit_queue VALUES(?,?,?,?)", [
+                    (REG, "completed", 2, "2026-10-18"),
+                    (REG, "pending", 2, "2026-10-19"),
+                    ("32616412318", "running", 3, "2026-10-20")])
+                db.commit()
+                before = list(db.iterdump())
+                self.assertEqual(card.read_legal_state(ns, REG), {"state": "pending", "documents_read": 2})
+                self.assertEqual(card.read_legal_state(ns, "32600000000"), {})
+                self.assertEqual(list(db.iterdump()), before)
+            self.assertTrue(all(sql.startswith(("PRAGMA", "SELECT")) for sql in statements), statements)
+            self.assertIn("PRAGMA query_only=ON", statements)
+
     def test_finding_shows_one_applied_law_without_duplicate_basis_row(self):
         original = data()
         before = copy.deepcopy(original)
@@ -322,6 +377,7 @@ class CardPresentationTests(unittest.TestCase):
             db.commit()
             before = list(db.iterdump())
             saved = card.read({"conn": lambda: sqlite3.connect(path)}, REG)
+            self.assertEqual(len(saved), 7, "existing read tuple contract must not change")
             for field in ("location", "match_text", "note"):
                 self.assertEqual(saved[1][0][field], FINDING[field])
             card.render(REG, saved)

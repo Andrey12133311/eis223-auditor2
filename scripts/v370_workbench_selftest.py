@@ -201,6 +201,13 @@ def check_routes_schema_and_ui():
         assert phrase in html,phrase
     assert "Календарь сроков" not in html
     assert "staff-case-draft" in html and "staff-task-list" in html
+    assert "staff-recheck" not in html
+    assert "'/recheck','POST'" not in html
+    assert 'id="staff-automatic-review-note"' in html
+    assert "при получении новых подтверждённых материалов или обновлении правил" in html
+    for ident in ("staff-case-load", "staff-case-link", "staff-case-download",
+                  "staff-bulk-form", "staff-checklist", "staff-save-pref"):
+        assert ident in parser.ids,ident
     assert "innerHTML" not in html
     director=render_manager("manager")
     assert 'id="mgr-goal-form"' in director
