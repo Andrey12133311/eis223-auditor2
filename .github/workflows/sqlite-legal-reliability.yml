@@ -1,0 +1,27 @@
+name: SQLite and legal reliability
+on:
+  push:
+    branches: [fix/sqlite-legal-reliability-20261020]
+    paths: [.github/workflows/sqlite-legal-reliability.yml]
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source only
+        run: |
+          mkdir -p /tmp/reliability-source
+          git archive --format=zip --output=/tmp/reliability-source/source.zip HEAD
+          git rev-parse HEAD > /tmp/reliability-source/COMMIT
+          sha256sum /tmp/reliability-source/source.zip > /tmp/reliability-source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reliability-source
+          path: /tmp/reliability-source/
+          retention-days: 1
+          if-no-files-found: error
