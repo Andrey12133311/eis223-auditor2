@@ -69,7 +69,7 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             before = ledger.inventory(c, runtime.AUTHORIZED_EPOCH)
         old_attempt = self.member(reg)["attempt_id"]
         self.assertEqual(before["current_completed"], 1)
-        with patch.object(runtime, "TARGET_GENERATION", 2), patch.object(general, "engine_signature", return_value="corrected-engine"):
+        with patch.object(runtime, "TARGET_GENERATION", runtime.TARGET_GENERATION + 1), patch.object(general, "engine_signature", return_value="corrected-engine"):
             runtime.initialize(self.ns)
             self.assertEqual(self.member(reg)["reason"], "engine_changed")
             self.assertTrue(await runtime.run_one(self.ns, {}))
@@ -117,7 +117,7 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         from test_full_recheck_request import LEGACY_FUNCTIONS
         scope = dict(vars(ledger))
         exec(LEGACY_FUNCTIONS, scope)
-        with patch.object(runtime, "TARGET_GENERATION", 2), patch.object(general, "engine_signature", return_value="corrected-engine"):
+        with patch.object(runtime, "TARGET_GENERATION", runtime.TARGET_GENERATION + 1), patch.object(general, "engine_signature", return_value="corrected-engine"):
             runtime.initialize(self.ns)
             self.assertEqual(self.member(reg)["status"], "running")
             with self.connect() as c:
@@ -140,7 +140,7 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await runtime.release(self.ns, claimed)
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            ledger.activate_target(c, runtime.AUTHORIZED_EPOCH, generation=2, engine_signature="new-engine")
+            ledger.activate_target(c, runtime.AUTHORIZED_EPOCH, generation=runtime.TARGET_GENERATION + 1, engine_signature="new-engine")
         before = self.member(reg)
         with patch.dict(os.environ, {runtime.REQUEST_ENV: ""}):
             runtime.initialize(self.ns)

@@ -254,6 +254,14 @@ def verified_price(p,docs):
     remain unknown even when one happens to equal the DB/card price.
     """
     if "price" in (p.get("_official_context_conflicts") or {}):return None
+    # Equality of amounts does not establish equality of legal price kinds.
+    # A generic heading in an original must not relabel a selected unit-price
+    # sum, maximum contract value, or other explicitly non-NMCD field.
+    if p.get("price_kind") not in (None,"","nmcd"):return None
+    official=p.get("verified_price_source")
+    if isinstance(official,dict) and official.get("kind") not in (None,"","nmcd"):
+        from v311_verified_customer import _official_source
+        if _official_source(official.get("source"),str(p.get("reg") or "")):return None
     expected=money(p.get("price_num"))
     if expected and expected[1]<=0:return None
     expected_value=Decimal(str(expected[1])) if expected else None
@@ -300,7 +308,6 @@ def verified_price(p,docs):
     # The authenticated EIS card has its own verified browser-source
     # provenance. Only the explicit NMCD price kind can confirm this value,
     # not a maximum/subject-cost field from an unrelated lot.
-    official=p.get("verified_price_source")
     if isinstance(official,dict) and official.get("kind")=="nmcd":
         from v311_verified_customer import _official_source
         card_value=money(official.get("price"))
@@ -363,7 +370,7 @@ def security_findings(p,docs):
                     "field_path":"v336-bid-security-needs-verified-nmcd",
                     "law":"223-ФЗ, ст. 3.2 ч. 25–27","law_url":LAW_URL,
                     "location":f"Оригинал ЕИС, позиция {match.start()+1}",
-                    "note":"Не подтверждено совпадение числовой НМЦД с официальным оригиналом. "
+                    "note":"Не подтверждены вид цены и числовая НМЦД по официальным источникам. "
                            "Не квалифицировать условие как нарушение до установления цены."
                 })
                 continue
