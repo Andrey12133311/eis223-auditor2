@@ -1,39 +1,30 @@
 name: Recheck 4007 safety regressions
 on:
+  pull_request:
+    paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-4007-regressions.yml']
   push:
-    branches: [fix/recheck-4007-locks-20261020]
-    paths: [.github/workflows/recheck-4007-regressions.yml]
+    branches: [fix/recheck-4007-locks-20261020, thematic-audit-20261015]
+    paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-4007-regressions.yml']
 permissions:
   contents: read
 jobs:
-  tested-concurrent-integration:
-    if: github.ref == 'refs/heads/fix/recheck-4007-locks-20261020'
+  frozen-cohort-and-evidence:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify reviewed concurrent integration
-        run: |
-          echo 'f3283e61ff516803dd81f4ff843f40bd49153a3a124c7cd5533b97ab3f8fa59b  maintenance/recheck-concurrent.patch.gz' | sha256sum -c -
-          gzip -dc maintenance/recheck-concurrent.patch.gz > /tmp/concurrent.patch
-          echo '293c31cfdefe67478d534406feea08d17b82fb5ee79d3e869f6671b74119de84  /tmp/concurrent.patch' | sha256sum -c -
-          git apply --check /tmp/concurrent.patch
-          git apply /tmp/concurrent.patch
-          git diff --check
       - name: Install isolated dependencies
         run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
       - name: Verify fixed native SQLite
         run: |
           python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
           echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
-      - name: Both branches' regressions and generation transition
+      - name: Preserved production and new evidence regressions
         env:
           PYTHONPATH: '.:scripts:tests'
         run: |
@@ -44,17 +35,4 @@ jobs:
           python -m unittest test_legal_audit_revision test_official_publication_evidence test_legal_date_label_archive_recall test_legal_event_coverage test_legal_event_recall test_local_numbered_event_recall
           python -m unittest test_ingestion_metadata_contention test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain test_eis223_soap_archive test_eis_mixed_soap_quarantine test_eis_hard_failure_backoff test_automatic_review_scheduler
           python -m pytest -q tests/test_v314_eis_metadata.py
-      - name: Commit only tested integration to isolated branch
-        run: |
-          python - <<'PY'
-          import subprocess
-          expected = {'.github/workflows/throughput-regressions.yml','Dockerfile','docs/legal-write-contention-20261020.md','scripts/full_recheck_runtime.py','scripts/v335_price_recovery.py','scripts/v341_eis_facts.py','scripts/v341_precise_legal.py','tests/test_fact_persistence_contention.py','tests/test_full_recheck_runtime.py','tests/test_legal_fact_write_contention.py','tests/test_parenthesized_event_date_labels.py'}
-          changed = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
-          untracked = set(subprocess.check_output(['git','ls-files','--others','--exclude-standard'],text=True).splitlines())
-          assert changed | {p for p in untracked if p.endswith(('.py','.md'))} == expected, (changed,untracked)
-          subprocess.run(['git','add','--',*sorted(expected)],check=True)
-          PY
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Preserve concurrent PR100 fixes and advance verified clarification target to generation 10'
-          git push origin HEAD:refs/heads/fix/recheck-4007-locks-20261020
+          git diff --check

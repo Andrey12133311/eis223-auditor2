@@ -2,32 +2,32 @@
 
 ## Scope and activation
 
-The user explicitly requested all 4007 procurements to be rechecked after correcting contention and improving legal analysis. The available production inventory already counted 4014 dashboard procurements at 2026-10-20T17:41:27Z; a displayed count is not a list to truncate or fabricate.
+The user explicitly requested all 4007 procurements to be rechecked after correcting contention and improving legal analysis. The available inventory already counted 4014 dashboard procurements at 2026-10-20T17:41:27Z; a displayed count is not a list to truncate or fabricate.
 
-This release authorizes the fixed request ID `2026-10-20-all-dashboard-4007` with expected_count=4007. It freezes the actual complete dashboard membership once, records actual_count and its digest, and excludes manual-only purchases according to the existing dashboard ownership contract. All eligible saved dashboard entries are included even if actual_count differs. It neither limits membership to 4007 nor claims unverified purchases completed.
+This release authorizes the fixed request ID `2026-10-20-all-dashboard-4007`, expected_count=4007. It freezes actual complete dashboard membership once, records actual_count and its digest, and excludes manual-only purchases under the existing ownership contract. All eligible saved dashboard entries are included even when actual_count differs. No unverified purchase is declared complete.
 
-Activation requires explicitly setting `EIS223_FULL_RECHECK_REQUEST=2026-10-20-all-dashboard-4007` on the web service and starting this tested release. An old image does not understand this request; do not restart an old image with the new value. Runtime must confirm the new request ID, actual_count, membership digest and target_generation=9. Reusing the same ID on subsequent startups does not refreeze or duplicate membership.
+Activate with `EIS223_FULL_RECHECK_REQUEST=2026-10-20-all-dashboard-4007` on the web service using this tested release. An old image does not understand this epoch. Verify the new ID, actual_count, membership digest and target_generation=10 in runtime logs. Reusing the same ID on startup does not refreeze or duplicate membership.
 
-The original request `2026-10-19-all-saved-214328`, its members and receipts remain intact. Switching the configured request does not delete old findings or mark old work completed. Expired leases from either explicitly authorized request are recovered only after the existing physical exclusion lock and ownership token checks; a live old lease is never stolen.
+The original request `2026-10-19-all-saved-214328`, members, attempts and receipts remain intact. Switching the configured request does not delete findings or mark old work completed. Expired leases from either authorized request are recovered only after physical-lock and token ownership checks. Live old claims are not stolen.
 
-## Lock and snapshot changes
+## Concurrency and snapshots
 
-Repeated legal fact persistence now prepares outside the SQLite writer transaction and skips unchanged values. Changed values use the existing guarded transaction and a bounded optimistic rebase to avoid overwriting concurrent intake or a fresher customer/price correction. PR99 metadata preflight is included with real writer-contention and stale-lease tests. No source throttles, validation checks, durability settings or logging are disabled.
+Metadata and legal facts prepare outside the SQLite writer and skip unchanged values. Changes use the existing guarded transaction and bounded optimistic rebase, preserving concurrent intake and official source precedence. The concurrent PR100 fixes for price writes and explicit date labels are retained, together with their tests. No logging, validation or source throttling is disabled.
 
-The opaque local dashboard source may take longer than a short SQLite transaction. This explicitly requested cohort has a separate bounded source-capture budget of 60 seconds, outside the writer, followed by the original short atomic database snapshot budget. Source and database capture times are recorded separately. An incomplete or budget-exceeded capture commits no partial request. Ordinary callers retain their earlier timing defaults. No additional analysis workers or EIS requests per second are introduced.
+The opaque local dashboard source has a separate bounded 60-second capture budget outside the writer, followed by the existing short atomic SQLite snapshot budget. Source and database capture times remain distinct. Incomplete captures commit no partial membership. Ordinary callers retain prior defaults. Worker counts and EIS requests per second are not increased.
 
-## Legal evidence chain
+## Legal evidence
 
-The user-provided official TFF 223-FZ 16.3, Appendix 1 pp.78-79, defines explanation purchaseRegNum, requestDate, decisionDate, creationDate and publishDate separately. The parser handles the documented explanation root with strict namespace/identity and attachment binding. An identity-only incomplete document remains quarantined, not silently promoted.
+The user-provided official 223-FZ TFF 16.3 Appendix 1 pp.78-79 defines explanation purchaseRegNum, requestDate, decisionDate, creationDate and publishDate separately. This parser uses strict namespace, identity and attachment binding. Incomplete identity-only documents remain quarantined.
 
-Clarification publication evidence is accepted only after revalidating the received XML/archive hash and the exact original-file hash and UID. Only a published explanation with consistent request, decision and publication dates can supply the missing response publication date for the same single request in that original. Creation and decision dates are not substituted for publication. Ambiguous versions, foreign UIDs, changed files, text/XML disagreement, draft status, missing dates, mixed requests and unproven applicability remain review-only. The existing legal deadline rule is not relaxed and findings are not manufactured to meet a quota.
+Publication evidence is accepted only after revalidating XML/archive hashes and the exact original binary hash and UID. Only a published explanation with consistent dates can fill an absent answer publication date for the same single request in that original. Creation and decision dates are never substituted for publication. Ambiguous versions, foreign UIDs, changed files, draft status, text/XML disagreement, mixed requests and unproven applicability remain review-only. Existing statutory thresholds are unchanged and findings are not generated to meet a quota.
 
-The legal engine fingerprint includes the new verifier and the authorized target generation advances from 8 to 9. Historical completed receipts are not counted as current-engine completion until actually rechecked and committed. General and thematic persistence, duplicate collapse and evidence retention are covered by the regression suite.
+The legal fingerprint includes the verifier. Concurrent PR100 already authorized generation 9, so this distinct interpretation advances to generation 10 rather than reusing 9 with a different signature. Historical completion counts do not prove current-engine completion. Existing general/thematic deduplication and evidence retention stay enabled.
 
-## Validation and rollout
+## Tests and rollout
 
-The dedicated integration run 39474231790 compiled the checksum-verified native SQLite 3.51.3 and passed 494 test executions across six isolated groups before committing the implementation. Final PR CI must also pass. Temporary compressed-patch transport and the writable branch-only integration workflow were removed from the final source; the remaining workflow is read-only.
+Initial integration run 39474231790 passed 494 test executions. After concurrent production changes were discovered, run 39475788604 verified the exact reviewed integration patch, compiled checksum-verified native SQLite 3.51.3 and passed both branches' regressions before committing. Final PR CI must also pass. Temporary patch transport and writable/snapshot workflows were removed; the final workflow is read-only.
 
-After deployment, verify SUCCESS, health and successful heartbeat requests, `SQLITE_RUNTIME version=3.51.3 journal_mode=wal`, creation/progress of the new frozen request and preserved originals. Compare equal log windows for retries and accepted unique (reg, uid) files before reporting performance improvement. WAL still has one writer; neither a passing build nor a short zero-error window proves all future contention is eliminated.
+After deployment verify SUCCESS, health/heartbeat, `SQLITE_RUNTIME version=3.51.3 journal_mode=wal`, the actual frozen cohort and new-engine committed receipts. Compare equal windows before claiming fewer retries or faster intake. Neither passing tests nor a short zero-error window means SQLite will never be busy. Original intake, document analysis and newly committed findings are different metrics.
 
-The existing backup-first WAL runtime is retained. Never roll back to an old image with unpatched SQLite or delete WAL/SHM files to clear locks. This change does not upgrade the external VPS from 1.4.0 to 1.4.1; its version and size-limit failures must be checked separately.
+Retain the backup-first fixed WAL runtime. Do not roll back to an unpatched SQLite image, restore over live data, or delete WAL/SHM sidecars. External VPS version 1.4.0 versus 1.4.1 is a separate update; this release does not silently upgrade it.
