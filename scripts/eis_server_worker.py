@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException, Request
 from starlette.requests import ClientDisconnect
+import v295_eis_originals as original_intake
 from v295_eis_originals import EXT, allowed_documents, root, saved_document, uid_from_url
 from v301_search_jobs import MAX_QUEUE, REG, _db, _enqueue, _utc
 
@@ -136,7 +137,7 @@ _TELEMETRY_ERROR_CODES = frozenset((
     "eis_soap_fault", "eis_incomplete_response", "unexpected_soap_response", "unsafe_soap_xml",
     "invalid_soap_xml", "too_many_eis_archives", "archive_exceeds_15_mib", "archive_expansion_limit",
     "unsafe_archive_member", "archive_crc_error", "invalid_archive", "response_size_limit",
-    "response_deadline", "site_invalid_json", "site_upload_not_accepted", "site_report_not_accepted",
+    "response_deadline", "response_length_mismatch", "site_invalid_json", "site_upload_not_accepted", "site_report_not_accepted",
     "site_discovery_not_accepted", "site_discovery_backpressure", "unsupported_attachment_links",
     "manifest_missing_documents", "invalid_manifest_uid", "download_cancelled", "untrusted_eis_url",
     "site_redirect_refused", "unexpected_site_url", "invalid_discovery_page", "invalid_inn_job",
@@ -227,6 +228,21 @@ def _telemetry_state(data):
     return {key: bool(value) if key.endswith("backoff_seconds") else value for key, value in data.items()}
 
 
+def _size_limit_context(value):
+    # Ignore arbitrary URLs/messages/secrets in client telemetry.
+    if not isinstance(value, dict) or value.get("kind") not in (
+            "eis_original", "eis_archive", "eis_soap", "eis_search", "site_response"):
+        return {}
+    if any(type(value.get(key)) is not int or not 0 < value[key] <= 2**50
+           for key in ("limit_bytes", "observed_bytes")):
+        return {}
+    result = {key: value[key] for key in ("kind", "limit_bytes", "observed_bytes")}
+    uid = value.get("uid")
+    if isinstance(uid, str) and re.fullmatch(r"[0-9A-F]{32}", uid):
+        result["uid"] = uid
+    return result
+
+
 def _report_telemetry(result, kind="reg"):
     output = {"kind": kind}
     for key in ("status", "requested_status"):
@@ -239,6 +255,13 @@ def _report_telemetry(result, kind="reg"):
         match = re.search(r": ([a-z][a-z0-9_]{0,79})$", str(result.get("detail", "")))
         error = match.group(1) if match else ""
     output["error_code"] = _telemetry_error(error)
+    if output["error_code"] == "response_size_limit":
+        context = _size_limit_context(result.get("size_limit"))
+        if context:
+            output["size_limit"] = context
+            reg = result.get("reg_number")
+            if isinstance(reg, str) and REG.fullmatch(reg):
+                output["reg_number"] = reg
     for key in ("download_complete", "metadata_received", "metadata_stored", "page_complete", "search_complete"):
         if type(result.get(key)) is bool:
             output[key] = result[key]
@@ -735,6 +758,9 @@ def report(ns, identifier, data):
                   "originals_expected": proof["expected"], "originals_received": proof["received"],
                   "unresolved_attachment_count": proof["unresolved"],
                   "unsupported_xml_count": proof.get("unsupported_xml_count", 0), "detail": detail}
+        context = _size_limit_context(data.get("size_limit")) if error_code == "response_size_limit" else {}
+        if context:
+            result["size_limit"] = context
         db.execute("""UPDATE v301_search_jobs SET status=?,detail=?,found=?,accepted=?,
           not_before=?,lease_until=0,lease_owner='server-retry',lease_token='',updated_at=?,attempts=? WHERE id=?""",
           (state, detail, int(proof["metadata_received"]), max(row["accepted"], proof["received"]),
@@ -845,7 +871,8 @@ def install(ns):
         return {"feature": FEATURE, "protocol_version": 1,
                 "intake_mode": "vps_only" if vps_only else "server_and_browser",
                 "browser_collector_enabled": not vps_only,
-                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES)}
+                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES),
+                "max_original_bytes": original_intake.MAX_BYTES}
 
     @app.get("/api/eis-worker/jobs/next")
     async def next_jobs(request: Request, worker_id: str, limit: int = 2, capabilities: str = ""):
@@ -911,6 +938,7 @@ def install(ns):
         finally:
             db.close()
         return {"feature": FEATURE, "protocol_version": 1, "server": health(ns), "queue": counts,
-                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES)}
+                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES),
+                "max_original_bytes": original_intake.MAX_BYTES}
 
     print("EIS_SERVER_WORKER_READY token_auth=True browser_origin_required=False leased_queue=True", flush=True)

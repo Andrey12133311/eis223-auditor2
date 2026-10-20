@@ -182,6 +182,8 @@ def setup():
         status = http.site('/api/eis-worker/status')
         if status.get('protocol_version') != 1 or status.get('feature') != 'eis-soap-vps-worker':
             raise RuntimeError('Site has not received the worker update; installation stopped')
+        if type(status.get('max_original_bytes')) is not int or status['max_original_bytes'] < module.MAX_FILE:
+            raise RuntimeError('Сначала обновите приёмник Railway: лимит оригинала ещё меньше лимита нового загрузчика')
         http.soap(args.bootstrap_reg)
         print('Ключ сайта, токен ЕИС и защищённые соединения проверены.')
         # Enqueue is idempotent and makes the first known purchase reviewable.

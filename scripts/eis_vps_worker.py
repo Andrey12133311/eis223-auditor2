@@ -33,7 +33,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 DEFAULT_SEARCH_INTERVAL_SECONDS = 60
 DISCOVERY_PAGES = tuple(page for older in range(2, 11) for page in (1, older))
 DEFAULT_INTERVAL_SECONDS = 30
@@ -43,7 +43,8 @@ ENDPOINT = "https://int.zakupki.gov.ru/eis-integration/services/getDocsIP"
 SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 API_NS = "http://zakupki.gov.ru/fz44/get-docs-ip/ws"
 MAX_ZIP = 15 * 1024 * 1024
-MAX_FILE = 25 * 1024 * 1024
+# Two originals at most are resident; keep this in sync with the server.
+MAX_FILE = 64 * 1024 * 1024
 MAX_XML = 2 * 1024 * 1024
 REG = re.compile(r"[0-9]{11,20}\Z")
 INN = re.compile(r"(?:[0-9]{10}|[0-9]{12})\Z")
@@ -248,6 +249,13 @@ class WorkerError(Exception):
         self.retry_after = retry_after
 
 
+class ResponseSizeLimit(WorkerError):
+    """Non-secret diagnostics; sizes are observations, never delivery receipts."""
+    def __init__(self, kind, limit, observed):
+        super().__init__("response_size_limit")
+        self.context = {"kind": kind, "limit_bytes": limit, "observed_bytes": observed}
+
+
 def global_backoff(code):
     return code in {"eis_http_403", "eis_http_429", "site_http_403", "site_http_429",
                     "eis_http_503", "site_http_503",
@@ -437,7 +445,7 @@ class Transport:
             urllib.request.HTTPSHandler(context=ssl.create_default_context()))
         self.last_file_at = 0.0
 
-    def request(self, url, method="GET", data=None, *, eis=False, headers=None, limit=MAX_XML, send_token=True):
+    def request(self, url, method="GET", data=None, *, eis=False, headers=None, limit=MAX_XML, send_token=True, response_kind=None):
         if eis:
             official_url(url)
         elif not url.startswith(self.config["site_url"] + "/"):
@@ -456,22 +464,26 @@ class Transport:
         try:
             with opener.open(request, timeout=self.config["timeout_seconds"]) as response:
                 self.last_response_url = response.geturl()
+                kind = response_kind or ("eis_soap" if eis else "site_response")
                 advertised = response.headers.get("Content-Length", "")
                 if advertised.isdigit() and int(advertised) > limit:
-                    raise WorkerError("response_size_limit")
+                    raise ResponseSizeLimit(kind, limit, int(advertised))
                 deadline = time.monotonic() + self.config["timeout_seconds"] * 2
-                chunks, count = [], 0
+                # BytesIO avoids retaining a chunk list plus a second full copy.
+                output, count = io.BytesIO(), 0
                 while True:
                     chunk = response.read(min(65536, limit + 1 - count))
                     if not chunk:
                         break
                     count += len(chunk)
                     if count > limit:
-                        raise WorkerError("response_size_limit")
-                    chunks.append(chunk)
+                        raise ResponseSizeLimit(kind, limit, count)
+                    output.write(chunk)
                     if time.monotonic() > deadline:
                         raise WorkerError("response_deadline")
-                return b"".join(chunks)
+                if advertised.isdigit() and count != int(advertised):
+                    raise WorkerError("response_length_mismatch")
+                return output.getvalue()
         except urllib.error.HTTPError as exc:
             retry_header = (exc.headers.get("Retry-After") or exc.headers.get("retry-after")) if exc.headers else None
             scope = (exc.headers.get("X-EIS223-Retry-Scope") or exc.headers.get("x-eis223-retry-scope")) if exc.headers else None
@@ -531,7 +543,8 @@ class Transport:
             else:
                 cancel.wait(wait)
         self.last_file_at = time.monotonic()
-        return self.request(url, eis=True, limit=limit)
+        return self.request(url, eis=True, limit=limit,
+                            response_kind="eis_archive" if limit == MAX_ZIP else "eis_original")
 
 
 class State:
@@ -831,7 +844,7 @@ class Worker:
             cursor = self.state.discovery_cursor()
             page = DISCOVERY_PAGES[cursor]
             url = discovery_url(page)
-            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
+            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False, response_kind="eis_search")
             source = discovery_source(getattr(self.http, "last_response_url", url), page)
             numbers = discovery_numbers(raw, allow_empty=True)
             next_cursor = (cursor + 1) % len(DISCOVERY_PAGES) if numbers else 0
@@ -915,7 +928,7 @@ class Worker:
         try:
             self.heartbeat(job, force=True)
             self.state.take_search_slot(self.search_interval, "inn")
-            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
+            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False, response_kind="eis_search")
             source_url = getattr(self.http, "last_response_url", url)
             numbers, more = inn_candidates(raw, inn, page, source_url)
             report.update(status="completed" if numbers else "no_data", reg_numbers=numbers,
@@ -1001,6 +1014,8 @@ class Worker:
                         if global_backoff(exc.code):
                             self.state.defer_requests(exc.retry_after, site=exc.code.startswith("site_"))
                         report["originals_failed"] += 1
+                        if isinstance(exc, ResponseSizeLimit):
+                            report["size_limit"] = {**exc.context, "uid": transfer["uid"]}
                         report.update(error_code=exc.code, retry_after_seconds=min(86400, exc.retry_after))
                         if exc.code == "site_http_422":
                             self.state.discard_download(transfer["key"])
@@ -1038,6 +1053,8 @@ class Worker:
                 report.update(status="completed", detail="Все оригиналы переданы; проверка выполняется отдельно.",
                               review_status=str(review.get("status", "queued"))[:50], retry_after_seconds=0)
         except WorkerError as exc:
+            if isinstance(exc, ResponseSizeLimit):
+                report["size_limit"] = exc.context
             if global_backoff(exc.code):
                 # Keep the full remote pause locally, even beyond the report's
                 # one-day wire limit. A subsequent cycle must not shorten it.

@@ -1,0 +1,38 @@
+name: VPS transfer regression
+on:
+  push:
+    branches: [fix/vps-response-size-20261020]
+  pull_request:
+    paths:
+      - scripts/eis_vps_worker.py
+      - scripts/eis_server_worker.py
+      - scripts/install_eis_vps_worker.sh
+      - scripts/v295_eis_originals.py
+      - tests/test_eis_response_size.py
+      - tests/test_eis_original_upload_stream.py
+      - .github/workflows/vps-transfer-regression.yml
+permissions:
+  contents: read
+concurrency:
+  group: vps-transfer-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated regression dependencies
+        run: python -m pip install -r requirements-accounts.txt beautifulsoup4 python-docx openpyxl striprtf
+      - name: Compile and test transfer safety
+        env:
+          PYTHONPATH: .:scripts:tests
+        run: |
+          python -m py_compile scripts/eis_vps_worker.py scripts/eis_server_worker.py scripts/v295_eis_originals.py
+          bash -n scripts/install_eis_vps_worker.sh
+          python -m unittest test_eis_vps_worker test_eis_server_worker test_eis_worker_backpressure test_eis_vps_installer test_eis_original_upload_stream test_eis_response_size -v

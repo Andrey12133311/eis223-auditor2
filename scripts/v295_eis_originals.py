@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import fcntl
 from itertools import islice
 import hashlib
+import io
 import hmac
 import heapq
 import json
@@ -29,7 +30,8 @@ from starlette.requests import ClientDisconnect
 REG = re.compile(r"[0-9]{11,20}$")
 UID = re.compile(r"[0-9A-F]{32}$")
 EXT = frozenset((".docx",".doc",".xlsx",".xlsm",".xls",".pdf",".rtf",".odt",".ods",".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab",".xml"))
-MAX_BYTES = 25*1024*1024
+# Matches the bounded VPS v1.4.1 original limit; XML/archive limits are unchanged.
+MAX_BYTES = 64*1024*1024
 MAX_EXPANDED = 80*1024*1024
 # Per-request limits do not truncate the accumulated evidence of later captures.
 # Fail visibly when the local retention boundary is reached; never report a
@@ -1394,18 +1396,21 @@ def install(ns):
         allowed=allowed_documents(reg)
         if uid not in allowed:raise HTTPException(404,"Upload official XML first")
         if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_BYTES:
-            raise HTTPException(413,"Original exceeds 25 MiB")
-        raw=[];size=0
+            raise HTTPException(413,"Original exceeds 64 MiB")
+        raw=io.BytesIO();size=0
         try:
             async for part in request.stream():
                 size+=len(part)
-                if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 25 MiB")
-                raw.append(part)
+                if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 64 MiB")
+                raw.write(part)
         except ClientDisconnect:
             # A partial body must never reach format checks, retained original
             # bytes/receipts or review admission.
             raise HTTPException(400,"Incomplete original request body") from None
-        data=b"".join(raw)
+        advertised=request.headers.get("content-length", "")
+        if advertised.isdigit() and int(advertised)!=size:
+            raise HTTPException(400,"Incomplete original request body")
+        data=raw.getvalue()
         entry=allowed[uid]
         try:assert_format(data,entry["ext"])
         except ValueError as exc:
@@ -1431,7 +1436,7 @@ def install(ns):
             items.append({**d,"received":receipt is not None,
                           "extracted_chars":receipt[1].get("extracted_chars",0) if receipt else 0})
         return {"reg_number":reg,"metadata_received":bool(items),"documents":items,
-                "counted_as_audited":False}
+                "counted_as_audited":False,"max_original_bytes":MAX_BYTES}
 
     @app.post("/api/v295/eis223/recheck/{reg}")
     async def recheck_official(reg:str,request:Request):

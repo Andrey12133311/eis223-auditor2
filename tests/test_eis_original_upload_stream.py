@@ -147,7 +147,7 @@ class OriginalUploadStreamTests(unittest.TestCase):
                       {"type": "http.disconnect"}]
             start, body, reads = self.asgi_post(events)
             self.assertEqual((start["status"], body, reads),
-                             (413, {"detail": "Original exceeds 25 MiB"}, 2))
+                             (413, {"detail": "Original exceeds 64 MiB"}, 2))
             validate.assert_not_called()
         with self.untouched_intake() as validate, redirect_stdout(io.StringIO()) as output:
             start, body, reads = self.asgi_post([
