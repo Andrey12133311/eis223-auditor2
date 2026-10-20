@@ -109,8 +109,12 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await self._assert_generation_transition(6, 7)
 
     async def test_generation_eight_reconciles_documented_explanation_identity_once(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 8)
-        await self._assert_generation_transition(7, 8)
+        with patch.object(runtime, "TARGET_GENERATION", 8):
+            await self._assert_generation_transition(7, 8)
+
+    async def test_generation_nine_reconciles_legal_fact_and_label_receipt_once(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 9)
+        await self._assert_generation_transition(8, 9)
 
     async def _assert_pending_and_active_generation_transition(self, previous, current):
         regs = [self.purchase(number) for number in range(1, 4)]
@@ -163,8 +167,12 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await self._assert_pending_and_active_generation_transition(6, 7)
 
     async def test_generation_eight_keeps_pending_member_and_active_generation_seven_lease(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 8)
-        await self._assert_pending_and_active_generation_transition(7, 8)
+        with patch.object(runtime, "TARGET_GENERATION", 8):
+            await self._assert_pending_and_active_generation_transition(7, 8)
+
+    async def test_generation_nine_preserves_existing_membership_receipts_and_active_lease(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 9)
+        await self._assert_pending_and_active_generation_transition(8, 9)
 
     async def test_corrected_engine_catches_up_completed_noncompany_without_new_epoch(self):
         reg = self.purchase()

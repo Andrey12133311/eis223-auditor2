@@ -430,47 +430,73 @@ def enrich(ns, purchase, docs, card=None, detail=None):
     return purchase
 
 
+def _fact_updates(row, purchase, evidence):
+    """Plan derived cache writes without reserving SQLite's single writer."""
+    values = {}
+    for key, item in evidence.items():
+        column = "published_at" if key == "published" else key
+        if item.get("source") == "official_eis_xml":
+            continue
+        if column in row and (not row[column] or item.get("source") == "official_eis_card"):
+            values[column] = item["value"]
+    if values.get("submission_end") and "deadline" in row:
+        values["deadline"] = values["submission_end"]
+    try:
+        card = json.loads(row.get("card_fields_json") or "{}")
+    except (TypeError, ValueError):
+        card = {}
+    if not isinstance(card, dict):
+        card = {}
+    previous = json.dumps(card, ensure_ascii=False, sort_keys=True)
+    for key in ("fact_evidence", "summary"):
+        if not isinstance(card.get(key), dict):
+            card[key] = {}
+    card["fact_evidence"].update(evidence)
+    card["summary"].update({key: purchase.get(key) for key in evidence})
+    if "price" in evidence:
+        card["summary"].update({key: purchase.get(key) for key in ("price", "price_num", "price_kind")})
+    if ("card_fields_json" in row and
+            json.dumps(card, ensure_ascii=False, sort_keys=True) != previous):
+        values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
+    return {key: value for key, value in values.items() if value != row[key]}
+
+
 def persist_facts(ns, purchase):
     reg = purchase.get("reg")
     evidence = purchase.get("fact_evidence") or {}
     if not evidence:
         return
-    db = ns["conn"](); db.row_factory = sqlite3.Row
-    try:
-        from audit_write_guard import guarded_transaction
-        with guarded_transaction(db):
+    # A repeated analysis often produces identical facts. A read-only preflight
+    # lets it complete even while an unrelated writer holds the WAL database.
+    # Real changes retain the original transaction/lease fence and rebase check.
+    from audit_write_guard import guarded_transaction
+    for _ in range(4):
+        db = ns["conn"](); db.row_factory = sqlite3.Row
+        try:
             row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-            if not row:
-                return
-            row = dict(row)
-            values = {}
-            for key, item in evidence.items():
-                column = "published_at" if key == "published" else key
-                # Intake owns the source-labelled purchase row. Rechecks keep
-                # current XML provenance below without changing their own
-                # semantic source token merely by filling derived cache fields.
-                if item.get("source")=="official_eis_xml":continue
-                if column in row and (not row[column] or item.get("source") == "official_eis_card"):
-                    values[column] = item["value"]
-            if values.get("submission_end") and "deadline" in row:
-                values["deadline"] = values["submission_end"]
-            try:
-                card = json.loads(row.get("card_fields_json") or "{}")
-            except (TypeError, ValueError):
-                card = {}
-            if not isinstance(card, dict):
-                card = {}
-            card.setdefault("fact_evidence", {}).update(evidence)
-            card.setdefault("summary", {}).update({k: purchase.get(k) for k in evidence})
-            if "price" in evidence:
-                card["summary"].update({key:purchase.get(key) for key in ("price","price_num","price_kind")})
-            if "card_fields_json" in row:
-                values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
-            if values:
+            snapshot = dict(row) if row else None
+        finally:
+            db.close()
+        if snapshot is None:
+            return
+        values = _fact_updates(snapshot, purchase, evidence)
+        if not values:
+            return
+        db = ns["conn"](); db.row_factory = sqlite3.Row
+        try:
+            with guarded_transaction(db):
+                row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+                if row is None or dict(row) != snapshot:
+                    db.rollback()
+                    continue
                 db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in values)+" WHERE reg_number=?", (*values.values(), reg))
-            db.commit()
-    finally:
-        db.close()
+                db.commit()
+                return
+        finally:
+            if db.in_transaction:
+                db.rollback()
+            db.close()
+    raise sqlite3.OperationalError("database is locked")
 
 
 def save_snapshot(ns, data):
