@@ -241,7 +241,7 @@ def finding_protocol_number(item):
     """Read persisted evidence too: custom in-memory fields are not stored."""
     local = _local_identity_number(item, "PROTOCOL")
     if local is not None:return local
-    identifiers=protocol_numbers("\n".join(str(item.get(key) or "")
+    identifiers=protocol_numbers("\n".join(event_evidence_text(item.get(key)) if key=="evidence" else str(item.get(key) or "")
         for key in ("title","evidence","match_text","document")))
     return next(iter(identifiers)) if len(identifiers)==1 else ""
 
@@ -295,7 +295,10 @@ def _identity_prefix(family):
     return "Идентификатор " + ("протокола" if family == "PROTOCOL" else "запроса") + " по оригиналу: "
 
 
-def event_identity_evidence(evidence, family, number, doc=None):
+_LOCAL_EVENT_PREFIX="Локальный эпизод оригинала ЕИС: "
+
+
+def event_identity_evidence(evidence, family, number, doc=None, local_event=None):
     # Persist even the unresolved state: a later UI/persistence pass must not
     # recover an invalid filename identifier after the full original is gone.
     provenance = ""
@@ -305,7 +308,9 @@ def event_identity_evidence(evidence, family, number, doc=None):
             digest = str((doc.get("meta") or {}).get("sha256") or "")
             if re.fullmatch(r"[0-9a-f]{64}", digest):identity = (*identity, digest)
             provenance = "Идентичность оригинала ЕИС: " + json.dumps(identity, ensure_ascii=False) + ".\n"
-    return _identity_prefix(family) + (number or "не установлен") + ".\n" + provenance + evidence
+    local=( _LOCAL_EVENT_PREFIX + json.dumps(local_event,ensure_ascii=False,separators=(",",":")) + ".\n"
+            if local_event is not None else "")
+    return _identity_prefix(family) + (number or "не установлен") + ".\n" + provenance + local + evidence
 
 
 def _cross_original_evidence(evidence, family, number, doc):
@@ -387,6 +392,9 @@ def event_evidence_text(value):
         text = rest
     first, separator, rest = text.partition("\n")
     if separator and first.startswith("Идентичность оригинала ЕИС: ") and first.endswith("."):
+        text = rest
+    first, separator, rest = text.partition("\n")
+    if separator and first.startswith(_LOCAL_EVENT_PREFIX) and first.endswith("."):
         text = rest
     return text
 
@@ -483,6 +491,146 @@ def protocol_date_context(doc,event,events):
     # different independently readable local headings prevent a date pair.
     number=next(iter(numbers)) if not invalid and len(numbers)==1 else ""
     return {"valid":True,"number":number}
+
+
+def local_protocol_event(doc,signature,publication,events):
+    """Bind a numbered local date pair to the verified original at extraction.
+
+    This is source-linked evidence, not a signature/authentication scheme for
+    arbitrary caller dictionaries. It can be emitted only from actual matching
+    source slices; the intake layer remains responsible for binary provenance.
+    """
+    if not verified(doc) or protocol_template_title(doc.get("name")):return None
+    digest=str((doc.get("meta") or {}).get("sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}",digest) or not _document_original_identity(doc):return None
+    before=protocol_date_context(doc,signature,events)
+    after=protocol_date_context(doc,publication,events)
+    number=before["number"]
+    if not before["valid"] or not after["valid"] or not number or after["number"]!=number:return None
+    text=str(doc.get("text") or "")[:750000].replace("\xa0"," ")
+    first=min(signature.start(),publication.start())
+    headings=list(PROTOCOL_NUMBER.finditer(text,0,first))
+    if not headings:return None
+    heading=headings[-1]
+    end=max(signature.end(),publication.end())
+    if end-heading.start()>1600:return None
+    numbers,invalid=_number_identity(text[heading.start():end])
+    title,title_invalid=_number_identity(doc.get("name") or "",title=True)
+    if invalid or numbers!={number} or title_invalid or (title and title!={number}):return None
+    proof={"v":1,"family":"PROTOCOL","number":number,"sha256":digest,
+           "span":[heading.start(),end],
+           "heading":[heading.start(),heading.end(),heading.group(0)],
+           "dates":[[match.start(),match.end(),match.group(0)] for match in (signature,publication)]}
+    if len(json.dumps(proof,ensure_ascii=False,separators=(",",":")))>1200:return None
+    return proof
+
+
+def local_protocol_cohort(doc,pairs,events):
+    """Only a complete independently numbered section cohort refines global IDs.
+
+    A singleton plus an unrelated number elsewhere remains unresolved under
+    the established whole-original identity guard. Every explicit supported
+    number must have a complete, disjoint actual local date pair.
+    """
+    candidates=[(signature.start(),local_protocol_event(doc,signature,publication,events))
+                for signature,publication in pairs]
+    candidates=[(offset,proof) for offset,proof in candidates if proof]
+    numbers={proof["number"] for _,proof in candidates}
+    if len(numbers)<2:return {}
+    body,invalid=_number_identity(str(doc.get("text") or "")[:750000])
+    if invalid or body!=numbers:return {}
+    ordered=sorted({(proof["number"],*proof["span"]) for _,proof in candidates},key=lambda item:item[1:])
+    if any(left[2]>right[1] for left,right in zip(ordered,ordered[1:])):return {}
+    cohort=[list(value) for value in ordered]
+    result={}
+    for offset,proof in candidates:
+        value={**proof,"cohort":cohort}
+        if len(json.dumps(value,ensure_ascii=False,separators=(",",":")))<=1200:
+            result[offset]=value
+    return result
+
+
+def finding_local_event(item):
+    """Read only the bounded source-bound local proof emitted by this parser.
+
+    Merely setting event_number, a filename, offsets or an extra caller key
+    never qualifies a local episode. Physical binary identity stays separate.
+    """
+    if not isinstance(item,dict):return None
+    if str(item.get("code") or item.get("field_path") or "")!="223-4-12-PROTOCOL-PUBLICATION-LATE":return None
+    lines=str(item.get("evidence") or "").split("\n",3)
+    if len(lines)<4 or not lines[2].startswith(_LOCAL_EVENT_PREFIX) or not lines[2].endswith("."):return None
+    raw=lines[2][len(_LOCAL_EVENT_PREFIX):-1]
+    if len(raw)>1200:return None
+    try:proof=json.loads(raw)
+    except (ValueError,TypeError):return None
+    if not isinstance(proof,dict) or set(proof)!={"v","family","number","sha256","span","heading","dates","cohort"}:return None
+    if type(proof["v"]) is not int or proof["v"]!=1 or proof["family"]!="PROTOCOL":return None
+    if (not isinstance(proof["number"],str) or proof["number"]!=_local_identity_number(item,"PROTOCOL")
+            or not proof["number"]):return None
+    digest=finding_binary_identity(item)
+    if not digest or proof["sha256"]!=digest:return None
+    span=proof["span"]
+    if (not isinstance(span,list) or len(span)!=2 or any(type(value) is not int for value in span)
+            or not 0<=span[0]<span[1]<=750000 or span[1]-span[0]>1600):return None
+    heading=proof["heading"]
+    dates=proof["dates"]
+    if not isinstance(dates,list) or len(dates)!=2:return None
+    for field in [heading,*dates]:
+        if (not isinstance(field,list) or len(field)!=3 or type(field[0]) is not int or type(field[1]) is not int
+                or not isinstance(field[2],str) or not span[0]<=field[0]<field[1]<=span[1]
+                or field[1]-field[0]!=len(field[2]) or len(field[2])>400):return None
+    if heading[0]!=span[0] or heading[1]>min(field[0] for field in dates):return None
+    if max(field[1] for field in dates)!=span[1]:return None
+    numbers,invalid=_number_identity(heading[2])
+    if invalid or numbers!={proof["number"]} or PROTOCOL_NUMBER.fullmatch(heading[2]) is None:return None
+    for field,pattern in zip(dates,(SIGNED,PROTOCOL_PUBLISHED)):
+        found=matches(pattern,field[2])
+        if len(found)!=1 or found[0].start()!=0 or found[0].end()!=len(field[2]) or not day(found[0]["date"]):return None
+    if max(dates[0][0],dates[1][0])<min(dates[0][1],dates[1][1]):return None
+    cohort=proof["cohort"]
+    if not isinstance(cohort,list) or not 2<=len(cohort)<=40:return None
+    for section in cohort:
+        if (not isinstance(section,list) or len(section)!=3 or not isinstance(section[0],str)
+                or type(section[1]) is not int or type(section[2]) is not int
+                or not 0<=section[1]<section[2]<=750000 or section[2]-section[1]>1600):return None
+        identifiers,invalid=_number_identity("Номер протокола: "+section[0])
+        if invalid or identifiers!={section[0]}:return None
+    if [proof["number"],*span] not in cohort or len({part[0] for part in cohort})<2:return None
+    ordered=sorted(cohort,key=lambda part:part[1:])
+    if any(left[2]>right[1] for left,right in zip(ordered,ordered[1:])):return None
+    return proof
+
+
+def distinct_local_events(left,right):
+    """Different proven local sections may be distinct acts in one physical file."""
+    first,second=finding_local_event(left),finding_local_event(right)
+    if not first or not second or first["sha256"]!=second["sha256"]:return False
+    if first["family"]!=second["family"] or first["number"]==second["number"]:return False
+    a,b=first["span"],second["span"]
+    return a[1]<=b[0] or b[1]<=a[0]
+
+
+def local_event_refines(candidate,previous):
+    """A source-bound local act may refine an unresolved saved whole-file row.
+
+    The prior raw evidence is retained. A different known number, missing hash
+    or independently different episode never becomes a refinement credit.
+    """
+    if not finding_local_event(candidate) or finding_local_event(previous):return False
+    if finding_protocol_number(previous):return False
+    first=str(candidate.get("code") or candidate.get("field_path") or "")
+    second=str(previous.get("code") or previous.get("field_path") or "")
+    if first!=second:return False
+    digest=finding_binary_identity(candidate)
+    if not digest or digest!=finding_binary_identity(previous):return False
+    if not same_original_identity(candidate,previous):return False
+    def dates(item):
+        return {parsed for value in re.findall(DATE_TOKEN,event_occurrence_text(item),re.I)
+                if (parsed:=day(value)) is not None}
+    if not dates(candidate) or dates(candidate)!=dates(previous):return False
+    from v353_episode_guard import same_episode
+    return same_episode(previous,candidate)
 
 
 def cross_doc_protocols(p,docs):

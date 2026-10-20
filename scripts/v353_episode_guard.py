@@ -10,7 +10,7 @@ from v333_dedup_ui import issue_key,_different_fact,_proof
 from v352_dashboard_truth import _common_event
 from v341_eis_facts import DATE_TOKEN,parse_day
 from v348_cross_document_legal import (finding_protocol_number, finding_clarification_number,
-                                     same_original_identity, event_evidence_text,
+                                     same_original_identity, event_evidence_text,distinct_local_events,
                                      event_occurrence_text)
 
 DATED_RULES=("223-3.2-3-CLARIFICATION-","223-4-12-PROTOCOL-",
@@ -41,7 +41,8 @@ def same_episode(old,new):
     # dates alone are not an identity when both originals say otherwise.
     if "PROTOCOL-" in a and "PROTOCOL-" in b:
         old_number,new_number=finding_protocol_number(old),finding_protocol_number(new)
-        if old_number and new_number and old_number!=new_number and not same_original_identity(old,new):
+        if (old_number and new_number and old_number!=new_number
+                and (not same_original_identity(old,new) or distinct_local_events(old,new))):
             return False
     if "CLARIFICATION-" in a and "CLARIFICATION-" in b:
         old_number,new_number=finding_clarification_number(old),finding_clarification_number(new)
@@ -69,10 +70,13 @@ def same_episode(old,new):
         {**new,"title":new.get("title") or new.get("item") or b})
 
 def distinct_new(candidate,existing):
+    from v348_cross_document_legal import local_event_refines
     code=str(candidate.get("code") or candidate.get("field_path") or "")
     reader=next((reader for family,reader in
                  (("PROTOCOL-",finding_protocol_number),("CLARIFICATION-",finding_clarification_number))
                  if family in code),None)
     identified=bool(reader and reader(candidate))
     return not any(same_episode(previous,candidate) for previous in existing
-                   if not identified or reader(previous) or same_original_identity(previous,candidate))
+                   if not local_event_refines(candidate,previous)
+                   and (not identified or reader(previous) or same_original_identity(previous,candidate)))
+

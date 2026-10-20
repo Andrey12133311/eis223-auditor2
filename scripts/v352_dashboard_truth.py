@@ -17,7 +17,7 @@ from v365_consultant_refs import legal_identity
 from v342_identity import organization_display_name
 from v348_cross_document_legal import (finding_clarification_number,
                                      finding_protocol_number, finding_original_identity,
-                                     same_original_identity, event_evidence_text,
+                                     same_original_identity, event_evidence_text,distinct_local_events,
                                      finding_binary_identity, event_occurrence_text)
 
 def _normalized_law(row):
@@ -60,7 +60,8 @@ def _common_event(a,b):
                           ("PROTOCOL-",finding_protocol_number)):
         if family in a_code and family in b_code:
             left_number,right_number=number(a),number(b)
-            if left_number and right_number and left_number!=right_number and not same_original_identity(a,b):return False
+            if (left_number and right_number and left_number!=right_number
+                    and (not same_original_identity(a,b) or distinct_local_events(a,b))):return False
     ta=issue_key(a.get("title") or a.get("item") or a.get("code"))
     tb=issue_key(b.get("title") or b.get("item") or b.get("code"))
     same_title=bool(ta and ta==tb)
@@ -102,7 +103,9 @@ def _common_event(a,b):
 
 def _choose(a,b):
     def quality(d):
-        return (int(bool(d.get("document")))*2000+
+        from v348_cross_document_legal import finding_local_event
+        return (int(bool(finding_local_event(d)))*100000+
+                int(bool(d.get("document")))*2000+
                 int(bool(d.get("source_url")))*2000+
                 int(bool(d.get("law")))*1000+
                 min(len(str(d.get("evidence") or "")),1200))
@@ -247,3 +250,4 @@ def dashboard_counts(conn,sql,args,page_offset,page_limit):
         row["violations"]=counts.get(row["reg_number"],0)
         row["customer"]=organization_display_name(row.get("customer"))
     return summaries,records
+

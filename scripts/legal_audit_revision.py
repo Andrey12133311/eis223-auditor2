@@ -48,7 +48,9 @@ DEPENDENCY_REGISTRY = {
     "v342_thematic_queue": ("independent_review",),
     "v347_text_cache": ("cached_extract",),
     "v348_cross_document_legal": ("event_occurrence_text", "finding_protocol_number", "finding_clarification_number",
-                                  "finding_original_identity", "finding_binary_identity", "same_original_identity"),
+                                  "finding_original_identity", "finding_binary_identity", "same_original_identity",
+                                  "local_protocol_event", "local_protocol_cohort", "finding_local_event", "distinct_local_events",
+                                  "local_event_refines"),
     "v352_dashboard_truth": ("collapse_legal_events",),
     "v353_episode_guard": ("distinct_new",),
     "v365_consultant_refs": ("legal_identity",),
@@ -204,3 +206,4 @@ def engine_signature() -> str:
         payload["installed_entry"] = canonical_engine_ast(_read_engine(Path(entry.__file__)), BASE_ENGINE_ROOTS, "entry")
     raw = json.dumps({"format": 1, "modules": payload}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+

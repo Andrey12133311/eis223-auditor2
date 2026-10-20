@@ -30,8 +30,10 @@ def records(output):
 
 class RuleTaxonomy(unittest.TestCase):
     def test_actual_static_confirmed_emitters_only(self):
-        self.assertEqual(len(rules.RULE_IDS), 16)
-        self.assertEqual(len(set(rules.RULE_IDS)), 16)
+        self.assertEqual(len(rules.RULE_IDS), 17)
+        self.assertEqual(len(set(rules.RULE_IDS)), 17)
+        self.assertEqual(rules.count(["1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS"]),
+                         {"1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS": 1})
         self.assertEqual(rules.count(rules.RULE_IDS), dict.fromkeys(rules.RULE_IDS, 1))
         # These are actual review-only catalog/checklist codes, not confirmed rules.
         review_codes = ("v383-bid-security-msp-scope", "v336-bid-security-needs-verified-nmcd",
@@ -276,3 +278,4 @@ class CommittedRuleCounts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

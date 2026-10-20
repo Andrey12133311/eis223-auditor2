@@ -27,6 +27,10 @@ on:
       - 'tests/test_amendment_date_label_recall.py'
       - 'tests/test_date_label_pipeline_parity.py'
       - 'tests/test_docx_event_separators.py'
+      - 'tests/test_local_numbered_event_recall.py'
+      - 'tests/test_local_event_pipeline_parity.py'
+      - 'tests/test_amendment_revised_deadline_evidence.py'
+      - 'tests/test_sme_payment_clause_recall.py'
       - 'tests/test_legal_price_recall.py'
       - 'tests/test_audit_persistence_lock_scope.py'
       - 'tests/test_general_db_stage_retry.py'
@@ -86,6 +90,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_procurement_fact_trace.py'
           python -m unittest discover -s tests -p 'test_legal_date_label_archive_recall.py'
           python -m unittest test_protocol_date_label_recall test_clarification_date_label_recall test_amendment_date_label_recall test_date_label_pipeline_parity test_docx_event_separators
+          python -m unittest test_local_numbered_event_recall test_local_event_pipeline_parity test_amendment_revised_deadline_evidence test_sme_payment_clause_recall
           python -m unittest discover -s tests -p 'test_legal_price_recall.py'
           python -m unittest discover -s tests -p 'test_audit_persistence_lock_scope.py'
           python -m unittest discover -s tests -p 'test_general_db_stage_retry.py'

@@ -97,27 +97,31 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await self._assert_generation_transition(3, 4)
 
     async def test_generation_five_reconciles_generation_four_date_receipt_once(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 5)
-        await self._assert_generation_transition(4, 5)
+        with patch.object(runtime, "TARGET_GENERATION", 5):
+            await self._assert_generation_transition(4, 5)
 
-    async def test_generation_five_keeps_pending_member_and_active_generation_four_lease(self):
+    async def test_generation_six_reconciles_generation_five_local_event_receipt_once(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 6)
+        await self._assert_generation_transition(5, 6)
+
+    async def _assert_pending_and_active_generation_transition(self, previous, current):
         regs = [self.purchase(number) for number in range(1, 4)]
         with self.connect() as c:
             c.execute("UPDATE purchases SET customer='ГБУ Учреждение'")
         general.initialize(self.ns)
-        with patch.object(runtime, "TARGET_GENERATION", 4), patch.object(
-                general, "engine_signature", return_value="previous-generation-4-engine"):
+        with patch.object(runtime, "TARGET_GENERATION", previous), patch.object(
+                general, "engine_signature", return_value=f"previous-generation-{previous}-engine"):
             self.activate()
             self.assertTrue(await runtime.run_one(self.ns, {}))
             self.assertEqual(self.member(regs[0])["status"], "completed")
             with self.connect() as c:
                 c.execute("BEGIN IMMEDIATE")
                 old_claim = ledger.claim_member(c, runtime.AUTHORIZED_EPOCH, regs[1],
-                    engine_signature=general.engine_signature(), generation=4)
+                    engine_signature=general.engine_signature(), generation=previous)
                 before = ledger.inventory(c, runtime.AUTHORIZED_EPOCH)
             active, pending = self.member(regs[1]), self.member(regs[2])
         self.assertIsNotNone(old_claim)
-        self.assertEqual(runtime.TARGET_GENERATION, 5)
+        self.assertEqual(runtime.TARGET_GENERATION, current)
         runtime.initialize(self.ns)
         self.assertEqual(self.member(regs[1]), active)
         self.assertEqual(self.member(regs[2]), pending)
@@ -130,13 +134,21 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with self.connect() as c:
             after = ledger.inventory(c, runtime.AUTHORIZED_EPOCH)
             receipts = c.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0]
-        self.assertEqual(after["target_generation"], 5)
+        self.assertEqual(after["target_generation"], current)
         self.assertEqual(after["target_engine_signature"], general.engine_signature())
         self.assertEqual(after["membership_digest"], before["membership_digest"])
         self.assertEqual(after["db_snapshot_at"], before["db_snapshot_at"])
         self.assertEqual(after["total_attempts"], before["total_attempts"])
         self.assertEqual((after["current_completed"], receipts), (0, 1))
         self.assertEqual(self.findings(regs[0]), 1)
+
+    async def test_generation_five_keeps_pending_member_and_active_generation_four_lease(self):
+        with patch.object(runtime, "TARGET_GENERATION", 5):
+            await self._assert_pending_and_active_generation_transition(4, 5)
+
+    async def test_generation_six_keeps_pending_member_and_active_generation_five_lease(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 6)
+        await self._assert_pending_and_active_generation_transition(5, 6)
 
     async def test_corrected_engine_catches_up_completed_noncompany_without_new_epoch(self):
         reg = self.purchase()

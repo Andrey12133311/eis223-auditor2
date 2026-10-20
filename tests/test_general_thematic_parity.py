@@ -41,6 +41,15 @@ def compare(originals):
 
 
 class GeneralThematicParity(unittest.TestCase):
+    def test_amendment_after_deadline_is_selected_for_dates(self):
+        finding = {"code": "223-4-11-CHANGE-AFTER-BID-DEADLINE",
+                   "title": "Изменения размещены после окончания срока подачи заявок",
+                   "law": "223-ФЗ, статья 4, часть 11"}
+        self.assertEqual(theme.match_legal_category(finding, ["dates"]), "dates")
+        self.assertEqual(theme.match_legal_category({**finding, "title": ""}, ["dates"]), "dates")
+        self.assertEqual(theme.match_legal_category({**finding, "code": ""}, ["dates"]), "dates")
+        self.assertIsNone(theme.match_legal_category(finding, ["contract"]))
+
     def test_same_verified_originals_have_identical_findings(self):
         first, second, thematic, found, counts = compare(docs)
         self.assertEqual(first[0], "completed")
@@ -100,3 +109,4 @@ class GeneralThematicParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
