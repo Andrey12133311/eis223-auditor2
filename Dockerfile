@@ -88,6 +88,8 @@ COPY tests/test_local_numbered_event_recall.py tests/test_local_event_pipeline_p
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_local_numbered_event_recall test_local_event_pipeline_parity test_amendment_revised_deadline_evidence test_sme_payment_clause_recall
 COPY tests/test_intake_sqlite_pressure.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_intake_sqlite_pressure
+COPY tests/test_legal_fact_write_contention.py tests/test_parenthesized_event_date_labels.py tests/test_ingestion_metadata_contention.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_legal_fact_write_contention test_parenthesized_event_date_labels test_ingestion_metadata_contention
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

@@ -430,7 +430,7 @@ def enrich(ns, purchase, docs, card=None, detail=None):
     return purchase
 
 
-def _facts_plan(row, purchase, evidence):
+def _fact_updates(row, purchase, evidence):
     """Derive the small cache update outside SQLite's single-writer section.
 
     Equal JSON with different formatting/order is not changed evidence. Keep
@@ -497,7 +497,7 @@ def persist_facts(ns, purchase):
             db.close()
         if snapshot is None:
             return
-        values = _facts_plan(snapshot, purchase, evidence)
+        values = _fact_updates(snapshot, purchase, evidence)
         if not values:
             return
         db = ns["conn"](); db.row_factory = sqlite3.Row

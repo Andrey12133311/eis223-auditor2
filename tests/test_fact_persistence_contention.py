@@ -68,7 +68,7 @@ class FactPersistenceContention(unittest.TestCase):
         self.assertEqual(self.row(), before)
 
     def test_plan_runs_outside_writer_and_concurrent_correction_is_not_lost(self):
-        original = facts._facts_plan
+        original = facts._fact_updates
         count = []
         def racing(row, purchase, evidence):
             count.append(1)
@@ -80,7 +80,7 @@ class FactPersistenceContention(unittest.TestCase):
                     c.execute('UPDATE purchases SET card_fields_json=?', (json.dumps(card),))
                     c.commit()
             return original(row, purchase, evidence)
-        with patch.object(facts, '_facts_plan', side_effect=racing):
+        with patch.object(facts, '_fact_updates', side_effect=racing):
             facts.persist_facts(self.ns, self.purchase)
         self.assertEqual(len(count), 2)
         row = self.row()
@@ -123,7 +123,7 @@ class FactPersistenceContention(unittest.TestCase):
         self.assertEqual(self.row()['deadline'], '2026-10-30')
 
     def test_hot_row_rebase_is_bounded_and_never_commits_stale_plan(self):
-        original = facts._facts_plan
+        original = facts._fact_updates
         count = []
         def racing(row, purchase, evidence):
             count.append(1)
@@ -131,7 +131,7 @@ class FactPersistenceContention(unittest.TestCase):
                 c.execute('UPDATE purchases SET price=?', (str(len(count)),))
                 c.commit()
             return original(row, purchase, evidence)
-        with patch.object(facts, '_facts_plan', side_effect=racing):
+        with patch.object(facts, '_fact_updates', side_effect=racing):
             with self.assertRaises(sqlite3.OperationalError):
                 facts.persist_facts(self.ns, self.purchase)
         self.assertEqual(len(count), 4)
