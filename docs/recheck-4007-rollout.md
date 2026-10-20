@@ -2,32 +2,32 @@
 
 ## Scope and activation
 
-The user explicitly requested all 4007 procurements to be rechecked after correcting contention and improving legal analysis. The available inventory already counted 4014 dashboard procurements at 2026-10-20T17:41:27Z; a displayed count is not a list to truncate or fabricate.
+The user requested all 4007 procurements rechecked after correcting contention and improving legal analysis. Inventory already counted 4014 dashboard procurements at 2026-10-20T17:41:27Z. Do not truncate a changing population to a displayed historical count.
 
-This release authorizes the fixed request ID `2026-10-20-all-dashboard-4007`, expected_count=4007. It freezes actual complete dashboard membership once, records actual_count and its digest, and excludes manual-only purchases under the existing ownership contract. All eligible saved dashboard entries are included even when actual_count differs. No unverified purchase is declared complete.
+The fixed request ID `2026-10-20-all-dashboard-4007` has expected_count=4007. It freezes actual complete dashboard membership once, records actual_count and its digest, and excludes manual-only entries under the existing dashboard contract. All eligible saved dashboard entries are included even if actual_count differs. Missing originals are not completion.
 
-Activate with `EIS223_FULL_RECHECK_REQUEST=2026-10-20-all-dashboard-4007` on the web service using this tested release. An old image does not understand this epoch. Verify the new ID, actual_count, membership digest and target_generation=10 in runtime logs. Reusing the same ID on startup does not refreeze or duplicate membership.
+Activate `EIS223_FULL_RECHECK_REQUEST=2026-10-20-all-dashboard-4007` only with this release. Verify its ID, actual_count, digest and target_generation=11. Reusing the ID does not refreeze or duplicate membership.
 
-The original request `2026-10-19-all-saved-214328`, members, attempts and receipts remain intact. Switching the configured request does not delete findings or mark old work completed. Expired leases from either authorized request are recovered only after physical-lock and token ownership checks. Live old claims are not stolen.
+Concurrent PR101's separate all-saved epoch `2026-10-20-all-saved-explicit-2100` remains supported, including its explicit manual/noncanonical scope and blocked reason; it is not silently substituted for the dashboard scope. The original `2026-10-19-all-saved-214328` ledger and all historical attempts/receipts are retained. Physical exclusion and exact lease-token checks protect live claims across authorized epochs; only expired leases are recovered.
 
-## Concurrency and snapshots
+## Contention changes
 
-Metadata and legal facts prepare outside the SQLite writer and skip unchanged values. Changes use the existing guarded transaction and bounded optimistic rebase, preserving concurrent intake and official source precedence. The concurrent PR100 fixes for price writes and explicit date labels are retained, together with their tests. No logging, validation or source throttling is disabled.
+Unchanged metadata, legal facts and prices avoid reserving SQLite's writer. Changed facts are prepared outside the transaction and revalidated with bounded optimistic rebases under the existing ownership guard. PR100 and PR101 fixes and tests are preserved, including empty lease-renewal preflight, claim-only schema readiness and guarded stage-only retries. No validation, durability, logging or source throttling is disabled.
 
-The opaque local dashboard source has a separate bounded 60-second capture budget outside the writer, followed by the existing short atomic SQLite snapshot budget. Source and database capture times remain distinct. Incomplete captures commit no partial membership. Ordinary callers retain prior defaults. Worker counts and EIS requests per second are not increased.
+The local source capture has a separate 60-second budget outside the writer, followed by the original short atomic DB snapshot. Incomplete captures commit no partial membership. Actual timestamps and counts are recorded. Worker counts and source requests per second are unchanged.
 
 ## Legal evidence
 
-The user-provided official 223-FZ TFF 16.3 Appendix 1 pp.78-79 defines explanation purchaseRegNum, requestDate, decisionDate, creationDate and publishDate separately. This parser uses strict namespace, identity and attachment binding. Incomplete identity-only documents remain quarantined.
+The official user-provided 223-FZ TFF16.3 explanation format has distinct requestDate, decisionDate, creationDate and publishDate. Preserve PR101's strict published format, GUID/date/namespace validation and the `explanation` record family. Incomplete or draft documents remain quarantined.
 
-Publication evidence is accepted only after revalidating XML/archive hashes and the exact original binary hash and UID. Only a published explanation with consistent dates can fill an absent answer publication date for the same single request in that original. Creation and decision dates are never substituted for publication. Ambiguous versions, foreign UIDs, changed files, draft status, text/XML disagreement, mixed requests and unproven applicability remain review-only. Existing statutory thresholds are unchanged and findings are not generated to meet a quota.
+The new publication verifier rechecks received XML/archive hashes and the exact original-file hash/UID. Only a published explanation with consistent dates may fill an absent answer publication date for the same single request in that original. Creation and decision dates are not publication. Foreign UIDs, drafts, ambiguity, mixed requests, changed files and text/XML disagreement remain review-only. Existing statutory thresholds and applicability checks are unchanged; no quota-driven findings are created.
 
-The legal fingerprint includes the verifier. Concurrent PR100 already authorized generation 9, so this distinct interpretation advances to generation 10 rather than reusing 9 with a different signature. Historical completion counts do not prove current-engine completion. Existing general/thematic deduplication and evidence retention stay enabled.
+Generation 11 uniquely identifies this verifier after concurrent production generations 9 and 10. Historical receipts do not count as current-engine completion without a committed recheck.
 
-## Tests and rollout
+## Verification and safety
 
-Initial integration run 39474231790 passed 494 test executions. After concurrent production changes were discovered, run 39475788604 verified the exact reviewed integration patch, compiled checksum-verified native SQLite 3.51.3 and passed both branches' regressions before committing. Final PR CI must also pass. Temporary patch transport and writable/snapshot workflows were removed; the final workflow is read-only.
+The final combined integration run 39478349673 compiled checksum-verified native SQLite3.51.3 and passed 540 test executions in six groups before committing the implementation. Earlier isolated runs also passed. Final PR checks must pass before merge. Temporary snapshot/writable integration workflows and patch transport were removed; final CI is read-only.
 
-After deployment verify SUCCESS, health/heartbeat, `SQLITE_RUNTIME version=3.51.3 journal_mode=wal`, the actual frozen cohort and new-engine committed receipts. Compare equal windows before claiming fewer retries or faster intake. Neither passing tests nor a short zero-error window means SQLite will never be busy. Original intake, document analysis and newly committed findings are different metrics.
+Verify deployment SUCCESS, health/heartbeat, SQLite3.51.3/WAL and the actual new request ledger before reporting activation. Compare equal log windows before claiming throughput improvement. Neither test success nor a short zero-error window proves SQLite can never be busy. Accepted files, analyzed documents and newly committed findings are separate metrics.
 
-Retain the backup-first fixed WAL runtime. Do not roll back to an unpatched SQLite image, restore over live data, or delete WAL/SHM sidecars. External VPS version 1.4.0 versus 1.4.1 is a separate update; this release does not silently upgrade it.
+Preserve the fixed backup-first WAL runtime. Never delete WAL/SHM files, restore over a live DB or roll back to an unpatched SQLite image. External VPS1.4.0 versus1.4.1 is separate; this release does not silently update that host.
