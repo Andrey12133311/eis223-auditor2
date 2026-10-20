@@ -74,7 +74,7 @@ deliver = source.parent.parent / 'deliverables'
 deliver.mkdir(exist_ok=True)
 apk = deliver / 'EIS223-Auditor-Android-1.0.0.apk'
 run(bt / 'apksigner', 'sign', '--ks', key, '--ks-key-alias', 'eisauditor',
-    '--ks-pass', f'file:{password}', '--key-pass', f'file:{password}',
+    '--ks-pass', f'file:{password}',
     '--v4-signing-enabled', 'false', '--out', apk, aligned)
 verify = run(bt / 'apksigner', 'verify', '--verbose', '--print-certs', apk, capture=True)
 run(bt / 'zipalign', '-c', '4', apk)
