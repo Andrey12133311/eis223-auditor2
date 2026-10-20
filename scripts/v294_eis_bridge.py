@@ -6,6 +6,7 @@ from itertools import islice
 from pathlib import Path
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.requests import ClientDisconnect
 from eis223_soap_xml import parse_document, quarantine_document, UnsupportedXmlType
 
 MAX_UPLOAD = 15*1024*1024
@@ -183,10 +184,15 @@ def install(ns):
         if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_UPLOAD:
             raise HTTPException(413,"Too large")
         blocks=[];total=0
-        async for piece in request.stream():
-            total+=len(piece)
-            if total>MAX_UPLOAD:raise HTTPException(413,"Too large")
-            blocks.append(piece)
+        try:
+            async for piece in request.stream():
+                total+=len(piece)
+                if total>MAX_UPLOAD:raise HTTPException(413,"Too large")
+                blocks.append(piece)
+        except ClientDisconnect:
+            # No parsing, persistence or queue work starts before the entire
+            # authenticated upload arrives; a partial body cannot be accepted.
+            raise HTTPException(400,"Incomplete archive request body") from None
         raw=b"".join(blocks)
         try: notices=parse_notices(raw)
         except ValueError as exc:

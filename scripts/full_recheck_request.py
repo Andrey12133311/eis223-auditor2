@@ -3,7 +3,8 @@
 This module owns only additive, request-scoped operational SQLite tables. Request IDs are supplied by an
 explicit operation/configuration, never inferred from an engine revision or a
 deployment. All runtime writes use the caller's transaction and never commit.
-Only ``create_request`` owns its transaction and requires an idle connection.
+Only ``create_request`` owns a write transaction and requires an idle connection.
+``inventory`` uses the caller's transaction or a short deferred read snapshot.
 
 The restored dashboard getter is materialized once *before* taking a writer
 lock. Its capture timestamp and the subsequent atomic database snapshot time
@@ -227,6 +228,21 @@ def _dict_one(cursor):
 
 def inventory(c, request_id):
     """Privacy-safe aggregate: no registry values, titles, source text or owners."""
+    # Separate autocommit SELECTs can straddle a receipt completion, making
+    # current_completed exceed the earlier completed count. A deferred read
+    # snapshot keeps every aggregate consistent without reserving a writer.
+    # Some callers already own a write/read transaction: never finish theirs.
+    owns_snapshot = not c.in_transaction
+    if owns_snapshot:
+        c.execute("BEGIN")
+    try:
+        return _inventory(c, request_id)
+    finally:
+        if owns_snapshot:
+            c.rollback()
+
+
+def _inventory(c, request_id):
     request = _dict_one(c.execute("SELECT * FROM full_recheck_requests WHERE request_id=?", (_request_id(request_id),)))
     if request is None:
         return None
