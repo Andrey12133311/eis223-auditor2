@@ -117,7 +117,7 @@ _PAYMENT_OTHER_TERM = re.compile(
     r"(?:[,\n]\s*(?:а\s+|при\s+этом\s+)?(?:срок\s+(?:поставки|доставки|"
     r"при[её]мки|выполнения|оказания|оформления|подписания)|"
     r"(?:поставка|доставка|при[её]мка|выполнение|оказание|оформление|подписание)\b)|"
-    r"\bсчет\w*\s*,\s*котор\w*[^,;.!?]{0,130}"
+    r"\bсч[её]т\w*\s*,\s*котор\w*[^,;.!?]{0,130}"
     r"\b(?:выставлен\w*|предоставлен\w*|получен\w*|передан\w*|направлен\w*)"
     r"(?:\s+(?:заказчиком|поставщиком|исполнителем))?\s*$)", re.I)
 _PAYMENT_NUMBER_WORDS = (
@@ -161,6 +161,35 @@ def _payment_spelling_matches(payment):
     return total == int(payment['days'])
 
 
+def _payment_is_advance(prefix, term):
+    return bool(re.search(r"\b(?:авансов\w*|предварительн\w*)\s*$", prefix, re.I)
+        or re.match(r"оплат[ауы]\s+(?:аванса|предоплаты|авансового\s+платежа)\b", term, re.I)
+        or re.search(r"\b(?:авансом|в\s+(?:виде|качестве)\s+"
+                     r"(?:аванса|авансового\s+платежа))\b", term, re.I))
+
+
+def _payment_advance_context(prefix, payment):
+    if _payment_is_advance(prefix, payment.group(0)):
+        return True
+    if not payment['label']:
+        return False
+    # An inner field such as "Авансовая оплата: срок оплаты составляет ..."
+    # inherits its owning payment heading. A later payment/settlement heading
+    # establishes its own type; earlier advances cannot qualify that heading.
+    headings = list(re.finditer(r"\b(?:срок\s+оплаты|оплата|расч[её]т[ы]?|плат[её]ж)\b",
+                                prefix, re.I))
+    advance = False
+    for index, heading in enumerate(headings):
+        before = prefix[:heading.start()]
+        end = headings[index+1].start() if index+1 < len(headings) else len(prefix)
+        if heading.group(0).casefold().startswith('срок'):
+            if re.search(r"\bокончательн\w*\s*$", before, re.I):
+                advance = False
+        else:
+            advance = _payment_is_advance(before, prefix[heading.start():end])
+    return advance and not re.search(r"\bокончательн\w*\s*$", prefix, re.I)
+
+
 def _payment_acceptance_clause(text, payment):
     """Return only a payment's own, explicit acceptance-based term.
 
@@ -180,12 +209,8 @@ def _payment_acceptance_clause(text, payment):
     if (_PAYMENT_EXAMPLE.search(lead) or _PAYMENT_STATUTE_QUOTE.search(lead)
             or _PAYMENT_INACTIVE_CLAUSE.search(lead) or _PAYMENT_OTHER_TERM.search(before)):
         return None
-    if (re.search(r"\b(?:авансов\w*|предварительн\w*|предлагаем\w*|планируем\w*|"
-                  r"предполагаем\w*)\s*$", prefix, re.I)
-            or re.match(r"оплат[ауы]\s+(?:аванса|предоплаты|авансового\s+платежа)\b",
-                        payment.group(0), re.I)
-            or re.search(r"\b(?:авансом|в\s+(?:виде|качестве)\s+"
-                         r"(?:аванса|авансового\s+платежа))\b", payment.group(0), re.I)):
+    if (_payment_advance_context(prefix, payment)
+            or re.search(r"\b(?:предлагаем\w*|планируем\w*|предполагаем\w*)\s*$", prefix, re.I)):
         return None
     after = text[payment.end():min(end, payment.end()+350)]
     direct = re.match(r"[\s,:：–—-]*", after).end()
