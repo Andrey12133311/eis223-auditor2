@@ -1,0 +1,39 @@
+name: Android installed app launch
+on:
+  push:
+    branches: [mobile-clients-20261020]
+    paths: ['mobile/android/**', '.github/workflows/android-launch-check.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-launch-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android-15-launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install and launch the actual APK on Android 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: bash mobile/android/tests/check-launch.sh mobile/android/runtime-fixtures/candidate.apk
+      - name: Preserve runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-15-startup-evidence
+          path: android-runtime-results/
+          retention-days: 7
