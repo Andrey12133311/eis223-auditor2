@@ -53,7 +53,7 @@ class IdentityMismatch(ValueError):
             if not value:return "missing"
             return value if re.fullmatch(r"[0-9]{11,20}(?:-[0-9]{2})?",value) else "invalid"
         self.diagnostic={"stage":stage if stage in ("supported","quarantine") else "unknown",
-            "xml_type":kind if kind in NOTICE_TYPES|PROTOCOL_TYPES else "unsupported",
+            "xml_type":kind if kind in NOTICE_TYPES|PROTOCOL_TYPES|{"explanation"} else "unsupported",
             "filename_reg":number(filename_reg),"own_reg":number(own_number),
             "parent_reg":number(parent_number)}
 
@@ -198,7 +198,19 @@ def quarantine_document(raw, filename, expected_reg):
     purchase_number = (parent_reg.text or "").strip() if parent_reg is not None else ""
     # A protocol may have a document-specific suffix, but it must name the
     # same procurement explicitly. A filename by itself never proves identity.
-    if purchase_number:
+    if kind == "explanation":
+        # Official 223-FZ TFF 16.3, Appendix 1 pp.78-79: explanationData
+        # uses the direct required purchaseRegNum, not registrationNumber or
+        # purchaseInfo/purchaseNoticeNumber. This is an identity-only exception
+        # for this exact documented root; it does not support arbitrary XML or
+        # invent legal facts/attachment links from a quarantined document.
+        declared = unique_child(data, "purchaseRegNum")
+        declared_number = (declared.text or "").strip() if declared is not None else ""
+        valid = (declared_number == expected_reg
+                 and (own is None or own_number == expected_reg)
+                 and (parent_reg is None or purchase_number == expected_reg))
+        purchase_number = declared_number
+    elif purchase_number:
         valid = purchase_number == expected_reg and (
             own is None or re.fullmatch(re.escape(expected_reg) + r"(?:-[0-9]{2})?", own_number))
     else:

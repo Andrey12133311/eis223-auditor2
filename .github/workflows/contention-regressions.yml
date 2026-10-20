@@ -1,0 +1,48 @@
+name: Contention and archive retry regressions
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'scripts/**'
+      - 'tests/test_sqlite_wal_startup.py'
+      - 'tests/test_explanation_quarantine_identity.py'
+      - 'tests/test_eis_hard_failure_backoff.py'
+      - 'tests/test_full_recheck*.py'
+      - '.github/workflows/contention-regressions.yml'
+  push:
+    branches: [fix/contention-and-archive-retry-20261020, thematic-audit-20261015]
+    paths:
+      - 'Dockerfile'
+      - 'scripts/**'
+      - 'tests/test_sqlite_wal_startup.py'
+      - 'tests/test_explanation_quarantine_identity.py'
+      - 'tests/test_eis_hard_failure_backoff.py'
+      - 'tests/test_full_recheck*.py'
+      - '.github/workflows/contention-regressions.yml'
+permissions:
+  contents: read
+jobs:
+  patched-sqlite-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1' 'openpyxl>=3.1,<4'
+      - name: Compile and verify the pinned WAL-reset-fixed runtime
+        run: |
+          python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
+          echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
+      - name: Verify native runtime and safety regressions
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3', sqlite3.sqlite_version"
+          python -m unittest test_sqlite_wal_startup test_explanation_quarantine_identity test_eis_hard_failure_backoff test_eis_mixed_soap_quarantine test_eis_worker_backpressure
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract
+          python -m unittest test_eis_server_worker test_eis_vps_worker test_legal_audit_revision test_audit_persistence_lock_scope test_thematic_persist_lock_scope
