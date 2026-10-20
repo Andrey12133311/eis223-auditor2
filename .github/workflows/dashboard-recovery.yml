@@ -5,23 +5,57 @@ on:
     paths: [.github/workflows/dashboard-recovery.yml]
 permissions:
   contents: read
+concurrency:
+  group: dashboard-reviewed-integration
+  cancel-in-progress: false
 jobs:
-  source:
+  apply-tested-integration:
+    if: github.ref == 'refs/heads/fix/dashboard-load-20261020'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - name: Export tracked source only, no runtime data or credentials
-        run: |
-          mkdir -p /tmp/eis-dashboard-source
-          git archive --format=zip --output=/tmp/eis-dashboard-source/source.zip HEAD
-          git rev-parse HEAD > /tmp/eis-dashboard-source/COMMIT
-          sha256sum /tmp/eis-dashboard-source/source.zip > /tmp/eis-dashboard-source/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
         with:
-          name: dashboard-source
-          path: /tmp/eis-dashboard-source/
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply only the reviewed integration diff
+        run: |
+          echo 'ce4dcc7568a03347fc73aee566fd8bd6d6e8ea9e56a5dd713427f334372be341  maintenance/dashboard-integration.patch' | sha256sum -c -
+          git apply --check maintenance/dashboard-integration.patch
+          git apply maintenance/dashboard-integration.patch
+          git diff --check
+      - name: Install isolated test dependencies
+        run: |
+          python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+          npm install --prefix /tmp/dashboard-jsdom --no-package-lock --ignore-scripts jsdom@26.1.0
+      - name: Verify dashboard safety, browser behavior, evidence and frozen rechecks
+        env:
+          PYTHONPATH: '.:scripts:tests'
+          NODE_PATH: /tmp/dashboard-jsdom/node_modules
+          EIS_REQUIRE_BROWSER_TESTS: '1'
+        run: |
+          python -m unittest test_dashboard_read_recovery test_dashboard_load_ui test_page_response_performance test_full_recheck_cohort_contract test_dashboard_filter_reset test_eis_vps_only_offline test_legal_audit_revision
+          python -m unittest test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_originals
+          python -m unittest test_eis223_soap_archive test_eis_mixed_soap_quarantine test_eis_server_worker test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+      - name: Commit only verified integration files to isolated branch
+        run: |
+          python - <<'PY'
+          import subprocess
+          expected = {'scripts/v257_features.py', 'scripts/v270_count_display.py', 'scripts/v298_eis_only.py'}
+          changed = set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines())
+          assert changed == expected, changed
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/v257_features.py scripts/v270_count_display.py scripts/v298_eis_only.py
+          git commit -m 'Recover dashboard reads without duplicate source scans or fabricated counters'
+          git push origin HEAD:refs/heads/fix/dashboard-load-20261020
+          git rev-parse HEAD
