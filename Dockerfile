@@ -20,8 +20,8 @@ COPY tests/test_eis223_soap_archive.py tests/test_eis_server_worker.py tests/tes
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_eis*.py'
 COPY tests/test_extraction_throughput.py tests/test_v381_audit_scheduling.py tests/test_memo_requisites.py tests/test_organization_display.py tests/test_v381_memo_layout.py tests/memo_fixture.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_extraction_throughput.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_audit_scheduling.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_requisites.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_organization_display.py' && EIS_MEMO_RENDER_TESTS=1 PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v381_memo_layout.py'
-COPY tests/test_customer_name_completion.py tests/
-RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_customer_name_completion.py'
+COPY tests/test_customer_name_completion.py tests/test_customer_metadata_lock_scope.py tests/
+RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_customer_name_completion.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_customer_metadata_lock_scope.py'
 COPY tests/test_v382_finding_submissions.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_v382_finding_submissions.py'
 COPY tests/test_manual_navigation_fix.py tests/test_personal_inn_search.py tests/test_manual_inn_ui.py tests/test_dashboard_filter_reset.py tests/

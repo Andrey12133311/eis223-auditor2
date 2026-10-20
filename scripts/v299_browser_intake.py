@@ -374,25 +374,38 @@ def _real_customer(value):
     from v311_verified_customer import _name
     return _name(value)
 
+def _customer_changes(row,name,inn,title):
+    if row is None:return {}
+    old_title,old_name,old_inn=row
+    changes={}
+    if title and not _valid_subject(old_title):changes["title"]=title
+    clean_name=_real_customer(old_name)
+    if name and not clean_name:changes["customer"]=name
+    elif clean_name and clean_name!=old_name:changes["customer"]=clean_name
+    if inn and not valid_inn(old_inn):changes["customer_inn"]=inn
+    return changes
+
 def _apply_customer(ns,value):
     name=_real_customer(value.get("customer"))
     inn=valid_inn(value.get("customer_inn"))
+    title=_valid_subject(value.get("title"))
+    reg=value["reg_number"]
+    query="SELECT title,customer,customer_inn FROM purchases WHERE reg_number=?"
+    # Periodic reconciliation revisits incomplete rows even when no new
+    # trusted metadata exists. Do not reserve SQLite's only writer for those
+    # no-ops. Close this reader before acquiring a separate write transaction.
+    db=ns["conn"]()
+    try:
+        row=db.execute(query,(reg,)).fetchone()
+        if not _customer_changes(row,name,inn,title):return False
+    finally:db.close()
     db=ns["conn"]()
     try:
         db.execute("BEGIN IMMEDIATE")
-        reg=value["reg_number"]
-        row=db.execute("SELECT title,customer,customer_inn FROM purchases WHERE reg_number=?",(reg,)).fetchone()
-        if row is None:
-            db.commit()
-            return False
-        old_title,old_name,old_inn=row
-        changes={}
-        title=_valid_subject(value.get("title"))
-        if title and not _valid_subject(old_title):changes["title"]=title
-        clean_name=_real_customer(old_name)
-        if name and not clean_name:changes["customer"]=name
-        elif clean_name and clean_name!=old_name:changes["customer"]=clean_name
-        if inn and not valid_inn(old_inn):changes["customer_inn"]=inn
+        # A concurrent intake can fill, correct or remove the row after the
+        # preflight. Recompute from its current values under the writer lock.
+        row=db.execute(query,(reg,)).fetchone()
+        changes=_customer_changes(row,name,inn,title)
         if changes:
             db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in changes)+
                        " WHERE reg_number=?",(*changes.values(),reg))
