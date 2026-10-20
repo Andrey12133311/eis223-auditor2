@@ -24,6 +24,7 @@ from urllib.parse import urlsplit,parse_qs
 from fastapi import HTTPException,Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import ClientDisconnect
 
 REG = re.compile(r"[0-9]{11,20}$")
 UID = re.compile(r"[0-9A-F]{32}$")
@@ -1395,10 +1396,15 @@ def install(ns):
         if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_BYTES:
             raise HTTPException(413,"Original exceeds 25 MiB")
         raw=[];size=0
-        async for part in request.stream():
-            size+=len(part)
-            if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 25 MiB")
-            raw.append(part)
+        try:
+            async for part in request.stream():
+                size+=len(part)
+                if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 25 MiB")
+                raw.append(part)
+        except ClientDisconnect:
+            # A partial body must never reach format checks, retained original
+            # bytes/receipts or review admission.
+            raise HTTPException(400,"Incomplete original request body") from None
         data=b"".join(raw)
         entry=allowed[uid]
         try:assert_format(data,entry["ext"])
