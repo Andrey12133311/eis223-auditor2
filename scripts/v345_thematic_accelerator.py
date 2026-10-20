@@ -480,6 +480,7 @@ def _thematic_result_snapshot(c,batch,reg):
 
 def _plan_thematic_results(results,snapshots,diagnostic_events=None):
     from v333_dedup_ui import _same_finding
+    from v348_cross_document_legal import local_event_refines
     previous_by_key={key:list(rows) for key,rows in snapshots.items()}
     planned=[]
     for item,state,findings,detail in results:
@@ -494,7 +495,8 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
             unique_keys={(f.get("category"),f.get("title"),f.get("evidence")) for f in previous
                          if all(f.get(k) is not None for k in ("category","title","evidence"))}
             for f in findings:
-                if any(_same_finding(old,f,"title") for old in previous):
+                if any(not local_event_refines(f,old) and _same_finding(old,f,"title")
+                       for old in previous):
                     audit_funnel.increment(diagnostic,"reasons","duplicate")
                     continue
                 key=(f["category"],f["title"],f.get("evidence"))
@@ -889,3 +891,4 @@ def install(ns):
     # while idle. The fallback poll still handles external DB writers.
     print("THEMATIC_FAST_WORKER_READY concurrency=4 per_cycle=36 index_seconds=90 "
           f"analysis_version={ANALYSIS_VERSION} inclusive_publication_period=True",flush=True)
+

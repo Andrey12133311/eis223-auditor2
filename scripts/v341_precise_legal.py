@@ -80,7 +80,108 @@ COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:ко�
 CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+закупки|решение\s+об\s+отмене\s+закупки\s+принято)"
 CANCEL_POSTED = r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки(?:\s+в\s+ЕИС)?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+размещено)"
 SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\s+субъект[ыа-я\s]{0,35}малого\s+и\s+среднего\s+предпринимательства|участниками\s+которо[йго]+\s+могут\s+быть\s+только\s+субъект",re.I)
-PAYMENT_DAYS = re.compile(r"(?:оплата|расч[её]т[ыа]?|оплат[уы])[^.;]{0,280}?(?:в\s+течение|не\s+позднее|срок\s+оплаты\s+составляет)\s*(?P<days>\d{1,3})\s*(?:\([^)]{0,40}\)\s*)?рабочих\s+дн",re.I)
+PAYMENT_DAYS = re.compile(
+    r"(?:\bсрок\s+оплаты\s*(?P<label>составляет|[:：])|"
+    r"\b(?:оплата|расч[её]т[ыа]?|оплат[уы])\b[^.;!?]{0,280}?"
+    r"(?P<period>в\s+течение|не\s+позднее(?:\s+чем)?))"
+    r"\s*(?P<days>\d{1,3})\s*(?:\((?P<spelling>[^)]{0,40})\)\s*)?"
+    r"рабоч(?:их|его)\s+(?:дней|дня|дн\.?)(?!\w)", re.I)
+_PAYMENT_ACCEPTANCE = re.compile(
+    r"(?:со?\s+дня|с\s+дат[ыа]|с\s+момента|после(?:\s+дат[ыа])?)\s+"
+    r"(?:подписания|утверждения)\s+(?:заказчиком\s+|сторонами\s+)?"
+    r"(?:акт(?:а|ов)|документ(?:а|ов))\s+"
+    r"(?:сдачи[-–]при[её]мки|при[её]мки|о\s+при[её]мке)\b", re.I)
+_PAYMENT_ACCEPTANCE_BRIDGE = re.compile(
+    r"(?:\s|[,–—-]|оказанных\b|услуг\b|выполненных\b|работ\b|"
+    r"поставленн(?:ого|ых)\b|товар(?:а|ов)\b|продукции\b|заказчиком\b|"
+    r"сторонами\b|производится\b|осуществляется\b|проводится\b)*", re.I)
+_PAYMENT_EXAMPLE = re.compile(
+    r"\b(?:например|справочно|цитата|пример\s+(?:условия|расч[её]та)|"
+    r"образец\s+расч[её]та|для\s+справки)\b", re.I)
+_PAYMENT_INACTIVE_CLAUSE = re.compile(
+    r"\b(?:условие\s+(?:исключено|не\s+применяется|утратило\s+силу)|"
+    r"исключено\s+(?:следующее\s+)?условие)\b", re.I)
+_PAYMENT_STATUTE_QUOTE = re.compile(
+    r"\b(?:пунктом|положением|постановлением|законом)\b[^.;!?]{0,200}"
+    r"(?:постановлени\w*|1352|223[-–]?\s*ФЗ)[^.;!?]{0,100}"
+    r"\b(?:предусмотрено|установлено|определено)\b", re.I)
+_PAYMENT_NUMBER_WORDS = (
+    (1, 'один одного'), (2, 'два двух'), (3, 'три трех'), (4, 'четыре четырех'),
+    (5, 'пять пяти'), (6, 'шесть шести'), (7, 'семь семи'), (8, 'восемь восьми'),
+    (9, 'девять девяти'), (10, 'десять десяти'), (11, 'одиннадцать одиннадцати'),
+    (12, 'двенадцать двенадцати'), (13, 'тринадцать тринадцати'),
+    (14, 'четырнадцать четырнадцати'), (15, 'пятнадцать пятнадцати'),
+    (16, 'шестнадцать шестнадцати'), (17, 'семнадцать семнадцати'),
+    (18, 'восемнадцать восемнадцати'), (19, 'девятнадцать девятнадцати'),
+    (20, 'двадцать двадцати'), (30, 'тридцать тридцати'), (40, 'сорок сорока'),
+    (50, 'пятьдесят пятидесяти'), (60, 'шестьдесят шестидесяти'),
+    (70, 'семьдесят семидесяти'), (80, 'восемьдесят восьмидесяти'),
+    (90, 'девяносто девяноста'), (100, 'сто ста'), (200, 'двести двухсот'),
+    (300, 'триста трехсот'), (400, 'четыреста четырехсот'),
+    (500, 'пятьсот пятисот'), (600, 'шестьсот шестисот'),
+    (700, 'семьсот семисот'), (800, 'восемьсот восьмисот'),
+    (900, 'девятьсот девятисот'))
+_PAYMENT_NUMBER_VALUES = {word: value for value, words in _PAYMENT_NUMBER_WORDS
+                          for word in words.split()}
+
+
+def _payment_spelling_matches(payment):
+    """Conflicting digit/word amounts cannot establish a concrete duration."""
+    spelling = payment['spelling']
+    if spelling is None:
+        return True
+    words = spelling.casefold().replace('ё', 'е').split()
+    if not words:
+        return False
+    total, previous_rank = 0, 4
+    for word in words:
+        value = _PAYMENT_NUMBER_VALUES.get(word)
+        if value is None:
+            return False
+        rank = 3 if value >= 100 else (2 if value >= 20 else 1)
+        if rank >= previous_rank:
+            return False
+        total += value
+        previous_rank = rank
+    return total == int(payment['days'])
+
+
+def _payment_acceptance_clause(text, payment):
+    """Return only a payment's own, explicit acceptance-based term.
+
+    An invoice clock or a second payment condition must not borrow an unrelated
+    acceptance phrase later in the same sentence or in a neighbouring clause.
+    """
+    if not _payment_spelling_matches(payment):
+        return None
+    start = max((text.rfind(mark, 0, payment.start()) + 1 for mark in '.;!?'), default=0)
+    ends = [position for mark in '.;!?'
+            if (position := text.find(mark, payment.end())) >= 0]
+    end = min(ends) if ends else len(text)
+    prefix = text[max(start, payment.start()-300):payment.start()]
+    lead = prefix + payment.group(0)
+    if (_PAYMENT_EXAMPLE.search(lead) or _PAYMENT_STATUTE_QUOTE.search(lead)
+            or _PAYMENT_INACTIVE_CLAUSE.search(lead)):
+        return None
+    if (re.search(r"\b(?:авансов\w*|предварительн\w*|предлагаем\w*|планируем\w*|"
+                  r"предполагаем\w*)\s*$", prefix, re.I)
+            or re.match(r"оплат[ауы]\s+(?:аванса|предоплаты|авансового\s+платежа)\b",
+                        payment.group(0), re.I)
+            or re.search(r"\b(?:авансом|в\s+виде\s+аванса)\b", payment.group(0), re.I)):
+        return None
+    after = text[payment.end():min(end, payment.end()+350)]
+    direct = re.match(r"[\s,:：–—-]*", after).end()
+    acceptance = _PAYMENT_ACCEPTANCE.match(after, direct)
+    if acceptance is None:
+        # Preserve the ordinary inverse order: "Оплата после подписания акта
+        # приёмки производится в течение ...". The closed bridge prevents an
+        # invoice/supply clause between acceptance and the payment duration.
+        period = payment.start('period') if payment['period'] else payment.start('label')
+        before = text[payment.start():period]
+        candidates = list(_PAYMENT_ACCEPTANCE.finditer(before))
+        if not candidates or not _PAYMENT_ACCEPTANCE_BRIDGE.fullmatch(before[candidates[-1].end():]):
+            return None
+    return text[max(start, payment.start()-100):min(end, payment.end()+350)].strip()
 _PLANNED_EVENT_PREFIX=re.compile(
     r"\b(?:планов\w*|планируем\w*|предполагаем\w*|ориентировочн\w*|"
     r"ожидаем\w*|предварительн\w*|расч[её]тн\w*)\s*$",re.I)
@@ -126,12 +227,12 @@ def _event_dates(item):
                          if (parsed:=day(value)) is not None}))
 
 
-def finding(doc, code, title, law, evidence, match, url=LAW32, event_number=None):
+def finding(doc, code, title, law, evidence, match, url=LAW32, event_number=None, local_event=None):
     family = next((value for value in ("PROTOCOL", "CLARIFICATION") if value + "-" in code), None)
     if family:
         from v348_cross_document_legal import document_event_number, event_identity_evidence
         if event_number is None:event_number = document_event_number(doc, family)
-        evidence = event_identity_evidence(evidence, family, event_number, doc)
+        evidence = event_identity_evidence(evidence, family, event_number, doc, local_event=local_event)
     return {"code": code, "kind": "violation", "title": title,
             "law": law, "law_url": url, "evidence": evidence[:2200],
             "note": "Расчёт по подтверждённым календарным датам без времени. Источник и конкретная норма приведены в выводе.",
@@ -157,8 +258,8 @@ def _distinct_numbered_events(left, right):
     """
     from v348_cross_document_legal import (finding_protocol_number,
                                            finding_clarification_number,
-                                           same_original_identity)
-    if same_original_identity(left, right):return False
+                                           same_original_identity,distinct_local_events)
+    if same_original_identity(left, right) and not distinct_local_events(left,right):return False
     a = str(left.get("code") or left.get("field_path") or "")
     b = str(right.get("code") or right.get("field_path") or "")
     for family, number in (("PROTOCOL-", finding_protocol_number),
@@ -205,7 +306,7 @@ def evaluate(p, docs):
                                            document_event_number,
                                            _document_event_identity, EXCLUDE,
                                            _protocol_kinds,protocol_template_title,
-                                           protocol_date_context)
+                                           protocol_date_context,local_protocol_cohort)
     from official_publication_evidence import protocol_publication_verifier
     official_publication = protocol_publication_verifier(p)
     ambiguous = ambiguous_original_documents(docs[:650])
@@ -288,18 +389,16 @@ def evaluate(p, docs):
         if sme_scope:
             for payment in list(PAYMENT_DAYS.finditer(text))[:15]:
                 days = int(payment["days"])
-                snippet = text[max(0,payment.start()-100):payment.end()+500]
-                # A payment term must run from acceptance. Generic law
-                # quotations and a mere mention of SME support are not scope.
-                acceptance = re.search(r"(?:со?\s+дня|с\s+дат[ыа]|после)\s+"
-                    r"(?:подписания|утверждения)\s+(?:заказчиком\s+|сторонами\s+)?"
-                    r"(?:акта|документа)\s+(?:(?:сдачи[-–]при[её]мки|при[её]мки)|о\s+при[её]мке)",snippet,re.I)
-                if days>7 and acceptance and not re.search(r"например|образец\s+расч[её]та",snippet,re.I):
-                    findings.append(finding(doc,"1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS",
+                snippet = _payment_acceptance_clause(text, payment) if days > 7 else None
+                if snippet:
+                    payment_finding = finding(doc,"1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS",
                         "В закупке только для субъектов МСП установлен срок оплаты свыше семи рабочих дней",
                         "Постановление Правительства РФ № 1352, Положение, п. 28",
                         f"Условие об оплате: {days} рабочих дней. {snippet}",payment,
-                        "https://www.consultant.ru/document/cons_doc_LAW_172683/"))
+                        "https://www.consultant.ru/document/cons_doc_LAW_172683/")
+                    payment_finding['note'] = ("Проверено условие об оплате в рабочих днях от подписания "
+                        "или утверждения документа о приёмке; подтверждены оригинал ЕИС и закупка только для МСП.")
+                    findings.append(payment_finding)
         # Protocol signing and EIS publication must each be explicitly named.
         # Templates and draft/sample originals do not establish actual event
         # dates, even when their fields contain concrete example values.
@@ -363,6 +462,7 @@ def evaluate(p, docs):
                     f"Подписаний: {len(signed)}; публикаций: {len(published)}; "
                     f"однозначных пар: {len(pairs)}. Остальные события требуют сверки.",
                     "223-ФЗ, ст. 4 ч. 12", anchor))
+        local_events=local_protocol_cohort(doc,pairs,date_events) if id(doc) not in ambiguous else {}
         for signature, publication in pairs:
             if protocol_conflict:continue
             start, end = day(signature["date"]), day(publication["date"])
@@ -371,10 +471,12 @@ def evaluate(p, docs):
             if working is False:
                 due = shifted(due, 1)
             if start and end and due and working is not None and end > due and 0 <= (end-start).days < 365:
+                local=local_events.get(signature.start())
                 findings.append(finding(doc, "223-4-12-PROTOCOL-PUBLICATION-LATE",
                     "Протокол размещён в ЕИС с нарушением срока публикации", "223-ФЗ, ст. 4 ч. 12; ГК РФ, ст. 193",
                     f"Протокол подписан {start}; крайний день размещения {due}; публикация в ЕИС {end}. {signature[0]}; {publication[0]}",
-                    signature, LAW4, event_number=number(doc, "PROTOCOL")))
+                    signature, LAW4, event_number=local["number"] if local else number(doc, "PROTOCOL"),
+                    local_event=local))
         # Some official protocol originals contain the signature but publish
         # no EIS posting timestamp in their text. Only the receipt/XML-verified
         # attachment-specific accessor may supply that missing date.

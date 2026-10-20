@@ -25,6 +25,7 @@ RULE_IDS = (
     "223-3.2-3-CLARIFICATION-RESPONSE-LATE",
     "223-3.2-6-CANCELLATION-POSTED-LATE",
     "223-4-12-PROTOCOL-PUBLICATION-LATE",
+    "1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS",
     # v348_cross_document_legal: cross_doc_clarifications, cross_doc_protocols.
     "223-3.2-3-CLARIFICATION-CROSS-DOC-LATE",
     "223-4-12-PROTOCOL-CROSS-DOC-LATE",
@@ -65,3 +66,4 @@ def merge(left, right):
     for key, value in clean(right).items():
         result[key] = min(MAX_COUNT, result.get(key, 0) + value)
     return result
+

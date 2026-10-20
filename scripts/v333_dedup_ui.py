@@ -63,7 +63,7 @@ def _same_finding(a,b,field):
     tb=issue_key(b.get(field) or b.get("item") or b.get("code"))
     if not ta or ta!=tb:return False
     from v348_cross_document_legal import (finding_protocol_number, finding_clarification_number,
-                                           same_original_identity, event_occurrence_text)
+                                           same_original_identity, event_occurrence_text,distinct_local_events)
     left_code = str(a.get("code") or a.get("field_path") or "")
     right_code = str(b.get("code") or b.get("field_path") or "")
     same_origin=False
@@ -72,7 +72,7 @@ def _same_finding(a,b,field):
         if family in left_code and family in right_code:
             same_origin=same_original_identity(a,b)
             left, right = identifier(a), identifier(b)
-            if left and right and left != right and not same_origin:
+            if left and right and left != right and (not same_origin or distinct_local_events(a,b)):
                 return False
     # Distinct legal bases, documents, source URLs and real locations cannot
     # be hidden merely because the violation title is shared.
@@ -111,7 +111,9 @@ def collapse(items,field="title",violation_only=False):
             # Retain the best documented representation of the SAME proof.
             old=answer[found]
             def quality(obj):
-                return (sum(bool(obj.get(k)) for k in
+                from v348_cross_document_legal import finding_local_event
+                return (int(bool(finding_local_event(obj)))*100000+
+                        sum(bool(obj.get(k)) for k in
                             ("document","source_url","law","location","note"))*1000
                         +min(len(str(obj.get("evidence") or "")),1500))
             if quality(item)>quality(old):
@@ -357,3 +359,4 @@ def install(ns):
             return HTMLResponse(html,status_code=200,headers=hdr)
     app.add_middleware(FinalQualityMiddleware)
     print("V333 QUALITY_READY canonical_findings=True memo_justify=True clean_ui=True",flush=True)
+

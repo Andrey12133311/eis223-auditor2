@@ -56,6 +56,74 @@ SUBMISSION_DATE=re.compile(
     r"(?:дата\s+(?:и\s+время\s+)?окончани\w*\s+(?:срока\s+)?"
     r"подачи\s+заявок|окончани\w*\s+(?:срока\s+)?подачи\s+заявок)"
     r".{0,70}?"+DATE_RX,re.I)
+_SUBMISSION_END_FIELD=(r"дата\s+(?:и\s+время\s+)?окончания\s+"
+                       r"(?:срока\s+)?подачи\s+заявок")
+REVISED_SUBMISSION_DATE=re.compile(
+    r"(?:после\s+внесения\s+изменений\s*[:：,–—-]?\s*"+_SUBMISSION_END_FIELD+r"|"
+    +_SUBMISSION_END_FIELD+r"\s+(?:после\s+внесения\s+изменений|"
+    r"(?:в|по)\s+новой\s+редакции(?:\s+(?:извещения|документации))?)|"
+    r"новая\s+"+_SUBMISSION_END_FIELD+r"|новый\s+срок\s+(?:окончания\s+)?подачи\s+заявок)"
+    +SEPARATOR+DATE_RX,re.I)
+_AMENDMENT_ID=re.compile(
+    r"\b(?:изменени[еяй]|редакци[яиюй]|верси[яиюй])\s*№\s*"
+    r"([0-9A-Za-zА-Яа-я][0-9A-Za-zА-Яа-я./_-]{0,79})",re.I)
+_NON_ACTUAL_PREFIX=re.compile(
+    r"\b(?:планов\w*|планир\w*|предполагаем\w*|предлагаем\w*|предлага\w*|"
+    r"ориентировочн\w*|рекомендуем\w*|рекоменду\w*|предварительн\w*|"
+    r"ожидаем\w*|прогнозн\w*|расч[её]тн\w*|возможн\w*|желаем\w*|"
+    r"проект\w*|не\s+(?:утвержден\w*|согласован\w*))"
+    r"(?:\s+(?:установить|считать|определить|назначить|перенести|изменить))?"
+    r"\s*(?:\([^\n)]{0,80}\)\s*)?[:：,–—()«»\"\s]*$",re.I)
+_EXAMPLE_SECTION=re.compile(
+    r"(?:^|[\n\r]|(?<=[.;:])\s+)\s*(?:пример|образец|шаблон|проект)\b"
+    r"[^\n.:;]{0,90}[:：]|\bнапример\s*[:,：]",re.I)
+
+
+def actual_date_label(text,match):
+    """A planned field or a nearby example section is not an actual event."""
+    prefix=text[max(0,match.start()-400):match.start()]
+    return not (_NON_ACTUAL_PREFIX.search(prefix[-180:]) or _EXAMPLE_SECTION.search(prefix))
+
+
+def revised_submission_evidence(doc,text,decisions,publications):
+    """Bind only an explicit revised deadline to one actual amendment.
+
+    The current card, a generic deadline or a duration is never a substitute.
+    Compilations and competing dates/identities remain review items; a future
+    source-specific event reader can resolve those rows without guessing here.
+    """
+    revised=list(REVISED_SUBMISSION_DATE.finditer(text))
+    if not revised:return {}
+    unresolved={"submission_review":
+        "Не установлено однозначное соответствие новой даты подачи заявок и публикации данной редакции изменений"}
+    if any(not actual_date_label(text,match) for match in revised):return unresolved
+    if len(revised)!=1 or len(publications)!=1 or len(decisions)>1:return unresolved
+    deadline,publication=revised[0],publications[0]
+    title=str((doc.get("meta") or {}).get("archive_member") or doc.get("name") or "").rsplit(" / ",1)[-1]
+    title=re.sub(r"[.](?:pdf|docx?|rtf|odt|txt|xlsx?|xml)$","",title,flags=re.I)
+    identities={value.rstrip('.').casefold() for value in _AMENDMENT_ID.findall(title+"\n"+text)}
+    if len(identities)>1:return unresolved
+    if max(deadline.start(),publication.start())-min(deadline.end(),publication.end())>1500:
+        return unresolved
+    for match in (deadline,publication):
+        if not actual_date_label(text,match):return unresolved
+        if re.search(r"(?:проект|образец|пример|например|шаблон)\s*[:：,–—-]?\s*$",
+                     text[max(0,match.start()-40):match.start()],re.I):return unresolved
+    value=day(deadline.group("day"))
+    if not value:return unresolved
+    # A second, differently dated current deadline in the same original is
+    # not resolved by arrival order. Explicitly marked old dates cannot
+    # replace the new date, but may accompany it in a before/after table.
+    for other in SUBMISSION_DATE.finditer(text):
+        if deadline.start()<=other.start() and other.end()<=deadline.end():continue
+        other_day=day(other.group("day"))
+        if other_day and other_day!=value:
+            prefix=text[max(0,other.start()-80):other.start()]
+            if not re.search(r"\b(?:до\s+внесения\s+изменений|до\s+изменений|"
+                             r"прежн\w*|стар\w*|первоначальн\w*)\s*[:：,–—-]?\s*$",prefix,re.I):
+                return unresolved
+    return {"submission_end":value,
+            "submission_evidence":" ".join(deadline.group(0).split())[:450]}
 
 def day(value):
     if not value:return None
@@ -94,10 +162,11 @@ def document_evidence(docs):
         text=str(d.get("text") or "")[:650000].replace("\xa0"," ")
         if re.search(r"\b(?:проект|образец|пример|шаблон)\b",str(d.get("name") or ""),re.I):continue
         decisions=sorted([*DECISION.finditer(text),*DECISION_ACT.finditer(text)],key=lambda m:m.start())
-        decisions=[m for m in decisions if not re.search(
+        decisions=[m for m in decisions if actual_date_label(text,m) and not re.search(
             r"(?:проект|образец|пример|например|шаблон)\s*[:：,–—-]?\s*$",
             text[max(0,m.start()-35):m.start()],re.I)]
-        publications=list(PUBLISHED.finditer(text))
+        publications=[m for m in PUBLISHED.finditer(text) if actual_date_label(text,m)]
+        revised_deadline=revised_submission_evidence(d,text,decisions,publications)
         used=set()
         for index,m in enumerate(decisions):
             decision=day(m.group("day"))
@@ -124,14 +193,20 @@ def document_evidence(docs):
                         "document":d.get("name"),"source":(d.get("meta") or {}).get("source_url"),
                         "decision_evidence":" ".join(text[max(0,m.start()-90):m.end()+110].split())[:360],
                         "publication_evidence":" ".join(pub.group(0).split())[:270] if pub else "",
-                        "kind":"document_explicit"})
+                        "kind":"document_explicit",**(revised_deadline if pub else {})})
             if len(out)>=40:return out
         for pub in publications:
             if pub.start() in used:continue
             out.append({"decision_date":None,"publication_date":day(pub.group("day")),
                         "document":d.get("name"),"source":(d.get("meta") or {}).get("source_url"),
                         "decision_evidence":"","publication_evidence":pub.group(0)[:270],
-                        "kind":"document_explicit"})
+                        "kind":"document_explicit",**revised_deadline})
+            if len(out)>=40:return out
+        if revised_deadline and not publications:
+            out.append({"decision_date":None,"publication_date":None,
+                        "document":d.get("name"),"source":(d.get("meta") or {}).get("source_url"),
+                        "decision_evidence":"","publication_evidence":"",
+                        "kind":"document_explicit",**revised_deadline})
             if len(out)>=40:return out
     return out
 
@@ -283,15 +358,18 @@ def evaluation(p,docs):
             reviews.append({"reason":"Для ч. 11 ст. 4 не установлены обе даты решения и публикации изменений","event":event})
     # The minimum extension depends on the procurement regulation for THIS
     # procurement method, not on a universal 7-day or 15-day guess.
-    for event in events:
+    for event in [*events,*(proof for proof in proofs
+                           if proof.get("submission_end") or proof.get("submission_review"))]:
         if scope_reason(event):continue
         published=event.get("publication_date")
-        if not published:continue
+        if not published:
+            reviews.append({"reason":"Не подтверждена публикация именно той редакции, для которой указан новый срок подачи заявок", "event":event})
+            continue
         # A current card deadline can belong to an earlier or later revision.
         # Only the deadline attached to this specific EIS change is admissible.
         deadline=event.get("submission_end")
         if not deadline:
-            reviews.append({"reason":"Не подтверждён срок подачи заявок именно после данного изменения", "event":event})
+            reviews.append({"reason":event.get("submission_review") or "Не подтверждён срок подачи заявок именно после данного изменения", "event":event})
             continue
         # Any deadline before publication cannot satisfy the half-term rule
         # regardless of a procurement regulation duration.
@@ -301,7 +379,10 @@ def evaluation(p,docs):
                 "code":"223-4-11-CHANGE-AFTER-BID-DEADLINE",
                 "kind":"violation","title":"Изменения размещены после окончания срока подачи заявок",
                 "law":LAW,"law_url":LAW_URL,
-                "evidence":f"Размещение изменений: {published}; окончание подачи заявок по проверенной редакции: {deadline}.",
+                "evidence":(f"Размещение изменений: {published}; окончание подачи заявок по проверенной редакции: {deadline}."
+                            +(f" Подтверждение срока в данной редакции: {event['submission_evidence']}. "
+                              f"Публикация: {event.get('publication_evidence') or event.get('source')}."
+                              if event.get("submission_evidence") else "")),
                 "note":"Срок подачи не мог быть продлён с даты размещения изменений; проверить последующую редакцию и применимые исключения.",
                 "document":event.get("document"),"source_url":event.get("source"),
                 "location":"Официальные изменения и срок подачи заявок",

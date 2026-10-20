@@ -1064,6 +1064,36 @@ def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
     return new_findings,new_checks,confirmed_checks
 
 
+def _local_refinement_counts(snapshot,insert_findings,insert_checks):
+    """Credit proven local refinements as unique acts, outside SQLite's writer.
+
+    Historical unresolved rows remain append-only evidence. Normally persistence
+    retains its established raw-row counters. Only a parser-validated local act
+    refining that same dated original needs exact before/after unique counts.
+    """
+    from v348_cross_document_legal import local_event_refines,finding_local_event
+    from v352_dashboard_truth import collapse_legal_events
+    saved_findings,saved_checks=snapshot
+    previous=list(saved_findings)
+    previous.extend({**row,"code":row["field_path"],"title":row["item"]}
+                    for row in saved_checks if row["status"]=="violation")
+    added_findings=[{"code":row[1],"title":row[3],"law":row[4],"evidence":row[6],
+                     "document":row[8],"source_url":row[9]}
+                    for row in insert_findings]
+    added_checks=[{"code":row[8],"title":row[2],"law":row[10],"evidence":row[4],
+                   "document":row[7],"source_url":row[6],"status":row[3]}
+                  for row in insert_checks if row[3]=="violation"]
+    # Later review-only/unrelated inserts must retain an already established
+    # refinement's unique count too, rather than restoring the raw generic row.
+    local=[row for row in (*previous,*added_findings,*added_checks) if finding_local_event(row)]
+    if not any(local_event_refines(candidate,old) for candidate in local for old in previous):
+        return None
+    before=len(collapse_legal_events(previous))
+    after_findings=len(collapse_legal_events([*previous,*added_findings]))
+    after_checks=len(collapse_legal_events([*previous,*added_findings,*added_checks]))
+    return max(0,after_findings-before),max(0,after_checks-after_findings),after_checks
+
+
 @audit_funnel.safe
 def _merge_committed_audit_diagnostics(diagnostic):
     if diagnostic is None:return
@@ -1103,6 +1133,7 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows
             # Discard diagnostic counts along with any stale outside-writer plan.
             diagnostic=audit_funnel.new("general",reg)
             insert_findings,insert_checks,confirmed_checks=_plan_audit_results(reg,findings,checks,snapshot,diagnostic)
+            refinement=_local_refinement_counts(snapshot,insert_findings,insert_checks)
             c.execute("BEGIN IMMEDIATE")
             require_reservation(c,reg)
             _require_reconciled_rows(c,reg,reconciled_rows)
@@ -1115,7 +1146,14 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows
             break
         else:
             raise sqlite3.OperationalError("database is locked: audit results changed during save")
-        new_f,new_c=len(insert_findings),len(insert_checks)
+        raw_new_f,raw_new_c=len(insert_findings),len(insert_checks)
+        if refinement is None:
+            new_f,new_c=raw_new_f,raw_new_c
+            confirmed_credit=confirmed_checks
+            unique_total=None
+        else:
+            new_f,confirmed_credit,unique_total=refinement
+            new_c=raw_new_c-confirmed_checks+confirmed_credit
         if insert_findings:
             c.executemany("""INSERT INTO findings
                 (reg_number,code,kind,title,law,law_url,evidence,note,
@@ -1126,16 +1164,18 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows
                 (reg_number,scope,item,status,evidence,source,source_url,
                  document,field_path,note,law,law_url,location)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",insert_checks)
-        if new_f or new_c:
+        if raw_new_f or raw_new_c:
             counts=c.execute("""SELECT
               (SELECT COUNT(*) FROM findings WHERE reg_number=? AND kind='violation')
               +(SELECT COUNT(*) FROM checks WHERE reg_number=? AND status='violation'),
               (SELECT COUNT(*) FROM checks WHERE reg_number=? AND status='ok'),
               (SELECT COUNT(*) FROM checks WHERE reg_number=? AND status IN ('check','violation','risk'))
             """,(reg,reg,reg,reg)).fetchone()
+            counts=[int(value) for value in counts]
+            if unique_total is not None:counts[0]=unique_total
             c.execute("""UPDATE purchases SET
                 violations=?,checks_ok=?,checks_attention=? WHERE reg_number=?""",
-                (*[int(v) for v in counts],reg))
+                (*counts,reg))
         if progress_token and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'").fetchone():
             # Legal facts and their cumulative campaign credit commit together.
             # A crash before mark/defer cannot erase their recorded growth.
@@ -1144,11 +1184,11 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows
                 new_findings=COALESCE(new_findings,0)+?,
                 new_checks=COALESCE(new_checks,0)+?,last_counted_token=?
                 WHERE campaign=? AND reg=? AND last_counted_token<>?""",
-                (new_f+confirmed_checks,new_c-confirmed_checks,progress_token,
+                (new_f+confirmed_credit,new_c-confirmed_credit,progress_token,
                  CAMPAIGN,reg,progress_token))
-        full_recheck_runtime.record_receipt(c,reg,progress_token,new_f+confirmed_checks,new_c-confirmed_checks)
+        full_recheck_runtime.record_receipt(c,reg,progress_token,new_f+confirmed_credit,new_c-confirmed_credit)
         c.commit()
-        audit_funnel.current_increment("counts","persisted_confirmed",new_f+confirmed_checks)
+        audit_funnel.current_increment("counts","persisted_confirmed",raw_new_f+confirmed_checks)
         _merge_committed_audit_diagnostics(diagnostic)
         audit_funnel.committed()
         audit_funnel.committed_general_rules(insert_findings,insert_checks)
@@ -1872,3 +1912,4 @@ def install(ns):
     print("V332 FULL_LEGAL_QUEUE_READY main_dashboard_only=True max_purchases=1253 "
           "partial_originals=True local_files=True no_deletions=True "
           "evidence_only=True",flush=True)
+

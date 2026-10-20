@@ -27,6 +27,7 @@ class FullRecheckRequestTests(unittest.TestCase):
         self.c = sqlite3.connect(self.path, isolation_level=None, timeout=2)
         self.addCleanup(self.c.close)
         self.c.executescript("""
+            BEGIN;
             CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT,title TEXT);
             CREATE TABLE v332_audit_queue(campaign TEXT,reg TEXT,state TEXT,updated_at TEXT,
                 reservation_token TEXT DEFAULT '',retained TEXT,PRIMARY KEY(campaign,reg));
@@ -44,6 +45,7 @@ class FullRecheckRequestTests(unittest.TestCase):
             (ledger.CAMPAIGN, C, "failed", "2020-01-01T00:00:00+00:00", "", "retain-c"),
             ("other-campaign", E, "completed", "2020-01-01T00:00:00+00:00", "", "retain-e")])
         ledger.initialize(self.c)
+        self.c.commit()
 
     def create(self, values=(A,), request=REQUEST, **kwargs):
         with patch.object(ledger.time, "time", return_value=1000):
@@ -582,13 +584,17 @@ class FullRecheckRequestTests(unittest.TestCase):
 
 
     def test_3058_unique_saved_purchases_are_frozen_without_legacy_cap(self):
-        self.c.execute("DELETE FROM v332_audit_queue")
-        self.c.execute("DELETE FROM purchases")
         registrations = [str(32610000000 + index) for index in range(3058)]
-        self.c.executemany("INSERT INTO purchases VALUES(?,?,?)",
-            [(reg, "" if index % 2 else "Other synthetic organization", "Fixture") for index, reg in enumerate(registrations)])
-        self.c.executemany("INSERT INTO v332_audit_queue VALUES(?,?,?,?,?,?)",
-            [(ledger.CAMPAIGN, reg, "completed", "old", "", "retained") for reg in registrations[1000:]])
+        # Seed the fixture atomically. The snapshot under test starts after
+        # this commit; thousands of unrelated autocommit fsyncs only slowed
+        # storage-constrained build runners and exercised no audit behavior.
+        with self.write():
+            self.c.execute("DELETE FROM v332_audit_queue")
+            self.c.execute("DELETE FROM purchases")
+            self.c.executemany("INSERT INTO purchases VALUES(?,?,?)",
+                [(reg, "" if index % 2 else "Other synthetic organization", "Fixture") for index, reg in enumerate(registrations)])
+            self.c.executemany("INSERT INTO v332_audit_queue VALUES(?,?,?,?,?,?)",
+                [(ledger.CAMPAIGN, reg, "completed", "old", "", "retained") for reg in registrations[1000:]])
         report = self.create(registrations[:2000])
         self.assertEqual(report["expected_count"], 3058)
         self.assertEqual(report["actual_count"], 3058)
@@ -1138,3 +1144,4 @@ class InventorySnapshots(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

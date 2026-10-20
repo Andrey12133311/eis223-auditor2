@@ -136,7 +136,7 @@ def match_legal_category(f,categories):
    "national":r"национальн|режим|запрет|1875|импортозамещ",
    "security":r"обеспечени|гаранти|security",
    "protocols":r"протокол|отмен|cancellation|protocol",
-   "dates":r"разъяснен|срок подач|срок размещени|продлен|срок публикац|clarification|amendment",
+   "dates":r"разъяснен|срок(?:а|и|ов)?\s+подач|срок размещени|продлен|срок публикац|clarification|amendment|223-4-11-change-after-bid-deadline",
    "docs":r"извещени|документац|техническ|предмет закупки|notice",
    "access":r"участник|допуск|квалификац|дискриминац|access",
    "evaluation":r"оценк|критери|балл|evaluation",
@@ -827,3 +827,4 @@ def install(ns):
   if WORKER_TASK is None or WORKER_TASK.done():
    WORKER_TASK=asyncio.create_task(worker(),name="thematic-audit-worker")
  print("THEMATIC_QUEUE_READY",flush=True)
+
