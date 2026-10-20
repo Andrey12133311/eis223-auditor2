@@ -38,31 +38,82 @@ def field(parent,name):
     return (el.text or "").strip() if el is not None else ""
 
 
-def verified_xml_nmcd(notice):
-    """Read only explicit starting-price fields from validated EIS SOAP XML.
+def verified_xml_price(notice):
+    """Read one documented lot price with its meaning, never arbitrary descendants.
 
-    This value is never inferred from an executed contract, lot unit price,
-    or maximum-looking number. Different lot prices are left unresolved.
+    TFF 16.3 Appendix 2, pp. 21–22 distinguishes initialSum, commodityPrice,
+    maxContractPrice and initialSumInfo. Unknown shapes and multiple lots are
+    review-only, even when their numbers agree. This is not XSD validation.
     """
-    if notice is None:return ""
-    from v311_verified_customer import _verified_money
-    tags={"initialSum","initialMaxPrice","initialMaximumPrice",
-          "initialContractPrice","initialMaximumContractPrice"}
-    candidates={}
-    for node in notice.iter():
-        if tag(node) not in tags:continue
-        values=[]
-        if (node.text or "").strip():values.append(node.text)
-        for child in list(node):
-            if tag(child) in ("value","sum","amount","price") and (child.text or "").strip():
-                values.append(child.text)
-        for value in values[:2]:
-            try:
-                price,number=_verified_money(value)
-                candidates[round(number,2)]=price
-            except ValueError:
-                continue
-    return next(iter(candidates.values())) if len(candidates)==1 else ""
+    if notice is None:return {}
+    from v335_price_recovery import money
+    from v324_official_price import UNIT_TOTAL_LABEL
+    invalid_namespace=False
+    def children(parent,name):
+        nonlocal invalid_namespace
+        nodes=[node for node in parent if tag(node)==name] if parent is not None else []
+        if any(node.tag not in (name,"{http://zakupki.gov.ru/223fz/purchase/1}"+name) for node in nodes):
+            invalid_namespace=True
+        return nodes
+    groups=children(notice,"lots")
+    if len(groups)!=1:return {"price_kind":"unknown"}
+    lots=children(groups[0],"lot")
+    if len(lots)!=1:return {"price_kind":"unknown"}
+    data=children(lots[0],"lotData")
+    if len(data)!=1:return {"price_kind":"unknown"}
+    data=data[0]
+    if invalid_namespace:return {"price_kind":"unknown"}
+    cancelled=children(lots[0],"cancelled")
+    if invalid_namespace or len(cancelled)>1:return {"price_kind":"unknown"}
+    if cancelled and (list(cancelled[0]) or (cancelled[0].text or "").strip().casefold() not in ("false","0")):
+        return {"price_kind":"unknown"}
+    names={"initialSum","commodityPrice","maxContractPrice","initialSumInfo","currency"}
+    if any(tag(node) in names and node.tag not in (tag(node),
+           "{http://zakupki.gov.ru/223fz/purchase/1}"+tag(node)) for node in data):
+        return {"price_kind":"unknown"}
+    currencies=children(data,"currency")
+    if len(currencies)>1:return {"price_kind":"unknown"}
+    if currencies:
+        codes=[(node.text or "").strip().upper() for name in ("letterCode","digitalCode","code")
+               for node in children(currencies[0],name) if not list(node)]
+        if invalid_namespace or not codes or any(code not in ("RUB","RUR","643","810") for code in codes):
+            return {"price_kind":"unknown"}
+    infos=children(data,"initialSumInfo")
+    if invalid_namespace or len(infos)>1:return {"price_kind":"unknown"}
+    info=" ".join(" ".join(node.itertext()) for node in infos)
+    # initialSumInfo is descriptive text in this supported format. Nested
+    # fields are not a licence to search descendant names for a price.
+    if any(list(node) for node in infos):return {"price_kind":"unknown"}
+    records=[]
+    for name,kind in (("initialSum","nmcd"),("commodityPrice","subject_cost"),
+                      ("maxContractPrice","maximum_contract_value")):
+        nodes=children(data,name)
+        if len(nodes)>1:return {"price_kind":"unknown"}
+        for node in nodes:
+            parsed=money((node.text or "").strip())
+            if list(node) or not parsed:return {"price_kind":"unknown"}
+            records.append({"price":parsed[0],"price_num":parsed[1],
+                            "price_kind":kind,"field_path":"lots/lot/lotData/"+name})
+    if UNIT_TOTAL_LABEL.search(info):
+        # The explicit unit-price qualification prevents an initialSum number
+        # from being treated as contract NMCD, including inconsistent exports.
+        return {**(records[0] if len(records)==1 else {}),"price_kind":"total_unit_prices"}
+    kinds={item["price_kind"] for item in records}
+    if "nmcd" in kinds and len(kinds)>1:return {"price_kind":"unknown"}
+    if records:
+        # A maximum value and a commodity price may coexist legitimately;
+        # neither establishes the NMCD threshold. Retain the maximum for UI.
+        preferred=[item for item in records if item["price_kind"]=="maximum_contract_value"] or records
+        if len({(item["price"],item["price_kind"]) for item in preferred})!=1:
+            return {"price_kind":"unknown"}
+        return preferred[0]
+    return {"price_kind":"unknown"}
+
+
+def verified_xml_nmcd(notice):
+    """Compatibility accessor: return only an explicit, unambiguous NMCD."""
+    selected=verified_xml_price(notice)
+    return selected.get("price","") if selected.get("price_kind")=="nmcd" else ""
 
 
 def official_xml_documents(reg):
@@ -167,7 +218,8 @@ def import_soap_metadata(ns,reg):
     if values.get("submission_end"):values["deadline"]=values["submission_end"]
     if values.get("customer") and callable(ns.get("org_form")):
         values["org_form"]=ns["org_form"](values["customer"])
-    parsed=money(verified_xml_nmcd(notice))
+    xml_price=verified_xml_price(notice)
+    parsed=money(xml_price.get("price"))
     if parsed:values.update(price=parsed[0],price_num=parsed[1])
     source_url=field(notice,"urlEIS")
     try:
@@ -197,6 +249,9 @@ def import_soap_metadata(ns,reg):
         summary.update({key:value for key,value in values.items()
                         if key in ("title","customer","method","price","price_num",
                                    "submission_start","submission_end")})
+        if xml_price:
+            summary["price_kind"]=xml_price["price_kind"]
+            card["soap_metadata"]["price"]=xml_price
         card["summary"]=summary
         values["card_fields_json"]=json.dumps(card,ensure_ascii=False)
         if row is None:
@@ -350,9 +405,22 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
     from v311_verified_customer import read_verified_price
     verified_price=await asyncio.to_thread(read_verified_price,ns,reg)
     from v335_price_recovery import money
-    candidates=(verified_xml_nmcd(notice),public.get("price"),previous.get("price"),
-                previous.get("price_num"),verified_price.get("price"))
-    parsed=next((money(value) for value in candidates if money(value)),None)
+    xml_price=verified_xml_price(notice)
+    try:saved_card=json.loads(previous.get("card_fields_json") or "{}")
+    except (ValueError,TypeError):saved_card={}
+    summary=(saved_card.get("summary") or {}) if isinstance(saved_card,dict) else {}
+    if not isinstance(summary,dict):summary={}
+    from v341_eis_facts import saved_price_kind
+    saved_kind=saved_price_kind(saved_card,reg) or previous.get("price_kind")
+    candidates=((xml_price.get("price"),xml_price.get("price_kind")),
+                (public.get("price"),public.get("price_kind")),
+                (previous.get("price"),saved_kind),(previous.get("price_num"),saved_kind),
+                (verified_price.get("price"),verified_price.get("price_kind")))
+    selected=next(((money(value),kind) for value,kind in candidates if money(value)),(None,None))
+    parsed,price_kind=selected
+    # An explicit current SOAP meaning survives a missing amount or stale DB
+    # fallback. Equal original numbers never promote it to another price kind.
+    if xml_price:price_kind=xml_price.get("price_kind")
     price,num=parsed if parsed else ("",None)
     p={"reg":reg,
        "title":reg_name,
@@ -360,6 +428,7 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
        "customer_inn":customer_inn,
        "method":field(notice,"purchaseCodeName") or previous.get("method") or "",
        "price":price,
+       "price_kind":price_kind,
        "price_num":num if num is not None else (previous.get("price_num")
                      if previous.get("price_num") is not None else verified_price.get("price_num")),
        "published":published or previous.get("published_at") or "",
@@ -376,10 +445,9 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
                 "published":field(notice,"publicationDateTime"),
                 "submission_start":field(notice,"applSubmisionStartDate")[:10],
                 "submission_end":field(notice,"submissionCloseDateTime")[:10]}
-        xml_price=money(verified_xml_nmcd(notice))
         p["_current_soap_context"]={"record":notice_record,
             "fields":{key:value for key,value in fields.items() if value},
-            "price":({"price":xml_price[0],"price_num":xml_price[1]} if xml_price else {})}
+            "price":xml_price}
 
     extractor=ns.get("extract_text")
     if extractor is None and _collected_docs is None:
@@ -498,6 +566,8 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
             if metadata.get("price_num") is not None:
                 p["price"]=metadata["price"]
                 p["price_num"]=metadata["price_num"]
+                if not p.get("price_kind"):
+                    p["price_kind"]=metadata.get("price_kind") or "unknown"
         elif p.get("price_num") is None and metadata.get("price_num") is not None:
             try:
                 from v311_verified_customer import _verified_money
@@ -516,11 +586,9 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
                   "method":p["method"],"published":p["published"],
                   "submission_start":p["submission_start"],
                   "submission_end":p["submission_end"],"price":p["price"],
-                  "price_num":p["price_num"]},
+                  "price_num":p["price_num"],"price_kind":p.get("price_kind")},
        "discovery":"getDocsIP, RI223, official-browser-bridge",
     }
-    if metadata and money(metadata.get("price"))==money(p.get("price")) and money(p.get("price")):
-        card["summary"]["price_kind"]=metadata.get("price_kind") or "nmcd"
     if metadata:card["metadata_evidence"]={"source":"official_eis_document",**metadata}
     detail={
        "registrationNumber":reg,

@@ -17,6 +17,9 @@ MAX_ACTIVE_JOBS = 4
 POLL_SECONDS = 30
 CHECK_SECONDS = 600
 BACKPRESSURE_SECONDS = 60
+# One automatic queue place may wait for the next due local probe. The lease
+# is never extended by drainers, restarts or repeated pressure observations.
+ADMISSION_SECONDS = BACKPRESSURE_SECONDS + POLL_SECONDS
 PARENT_ID = "full-recheck-originals"
 GAP_REASONS = ("missing_originals", "no_readable_documents", "no_verified_documents",
                "unverified_readable_documents", "partial_or_unverified_documents",
@@ -25,7 +28,7 @@ ACTIVE = ("queued", "leased", "deferred")
 
 
 def initialize(c):
-    """One additive operational table; callers own the short transaction."""
+    """Additive operational tables; callers own the short transaction."""
     c.execute("""CREATE TABLE IF NOT EXISTS full_recheck_originals(
         request_id TEXT NOT NULL, reg TEXT NOT NULL,
         source_version TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '',
@@ -36,6 +39,87 @@ def initialize(c):
         FOREIGN KEY(request_id,reg) REFERENCES full_recheck_members(request_id,reg))""")
     c.execute("CREATE INDEX IF NOT EXISTS full_recheck_originals_due "
               "ON full_recheck_originals(request_id,next_check_at,reg)")
+    c.execute("""CREATE TABLE IF NOT EXISTS full_recheck_originals_turn(
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+        request_id TEXT NOT NULL, reg TEXT NOT NULL DEFAULT '',
+        engine_signature TEXT NOT NULL, generation INTEGER NOT NULL,
+        hold_until REAL NOT NULL DEFAULT 0,
+        yield_automatic INTEGER NOT NULL DEFAULT 0)""")
+
+
+def _automatic_pending(c):
+    """Only existing durable discovery relations; never source polling."""
+    import full_recheck_request as ledger
+    return any(ledger._exists(c, table) and c.execute(
+        "SELECT 1 FROM " + table + " WHERE reg_job_id='' LIMIT 1").fetchone()
+        for table in ("eis_server_discovery_candidates", "eis_inn_candidates"))
+
+
+def _release_turn(c):
+    c.execute("UPDATE full_recheck_originals_turn SET reg='',hold_until=0,yield_automatic=1 WHERE singleton=1")
+
+
+def _turn(c, request, target, stamp):
+    row = c.execute("SELECT * FROM full_recheck_originals_turn WHERE singleton=1").fetchone()
+    if row and (row["request_id"], row["engine_signature"], row["generation"]) != (
+            request, target["engine_signature"], target["generation"]):
+        return None
+    if row and row["hold_until"] and row["hold_until"] <= stamp:
+        _release_turn(c)
+        row = c.execute("SELECT * FROM full_recheck_originals_turn WHERE singleton=1").fetchone()
+    return row
+
+
+def _save_turn(c, request, target, *, reg="", until=0, yielding=False):
+    c.execute("""INSERT INTO full_recheck_originals_turn
+        (singleton,request_id,reg,engine_signature,generation,hold_until,yield_automatic)
+        VALUES(1,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET
+        request_id=excluded.request_id,reg=excluded.reg,engine_signature=excluded.engine_signature,
+        generation=excluded.generation,hold_until=excluded.hold_until,
+        yield_automatic=excluded.yield_automatic""",
+        (request, reg, target["engine_signature"], target["generation"], until, int(yielding)))
+
+
+def discovery_reservation(c, ns, *, now=None):
+    """Honor one live request turn without probing files under a writer.
+
+    A reservation is only a capacity opportunity. The bridge still obtains its
+    execution lock, reprobes receipts and runs every original admission fence.
+    A stopped, disabled, changed-target, ineligible or expired waiter yields.
+    """
+    import full_recheck_request as ledger
+    import full_recheck_runtime as runtime
+    if not ledger._exists(c, "full_recheck_originals_turn"):
+        return 0
+    row = c.execute("SELECT * FROM full_recheck_originals_turn WHERE singleton=1").fetchone()
+    if not row or not row["hold_until"]:
+        return 0
+    stamp = time.time() if now is None else now
+    request, target = runtime.request_id(ns), runtime._target_args(ns)
+    valid = (row["hold_until"] > stamp and _automatic_pending(c) and request == row["request_id"]
+             and target == {"engine_signature": row["engine_signature"], "generation": row["generation"]}
+             and ledger._target_accepts(c, request, **target))
+    if valid:
+        where, args = _eligible(c, request, reg=row["reg"])
+        valid = bool(c.execute("SELECT 1 FROM full_recheck_members m WHERE " + where, args).fetchone()
+                     and c.execute("""SELECT 1 FROM full_recheck_originals
+                         WHERE request_id=? AND reg=? AND outcome IN ('backpressure','execution_busy')
+                         AND job_id=''""",
+                         (request, row["reg"])).fetchone()
+                     and not c.execute("""SELECT 1 FROM v301_search_jobs WHERE kind='reg' AND target=?
+                         AND status IN ('queued','leased','deferred') LIMIT 1""", (row["reg"],)).fetchone()
+                     and c.execute("""SELECT COUNT(*) FROM v301_search_jobs WHERE parent_id=?
+                         AND status IN ('queued','leased','deferred')""", (PARENT_ID,)).fetchone()[0] < MAX_ACTIVE_JOBS)
+    if not valid:
+        _release_turn(c)
+    return int(valid)
+
+
+def discovery_admitted(c, created):
+    """A real automatic admission repays the turn; duplicate bindings do not."""
+    import full_recheck_request as ledger
+    if ledger._exists(c, "full_recheck_originals_turn") and (created or not _automatic_pending(c)):
+        c.execute("UPDATE full_recheck_originals_turn SET yield_automatic=0 WHERE singleton=1 AND yield_automatic<>0")
 
 
 def _eligible(c, request, *, reg=None):
@@ -165,6 +249,12 @@ def admit(c, request, candidate, observation, *, now=None, allow_create=True, re
             next_check_at=excluded.next_check_at,
             updated_at=excluded.updated_at""",
             (request, reg, fingerprint, job_id, outcome, phase, stamp + delay, stamp))
+        # A losing peer cannot revoke the actual lock owner's opportunity.
+        # Busy observations neither create nor extend a hold; an abandoned
+        # physical owner still yields at the original fixed expiry.
+        if outcome not in ("backpressure", "execution_busy"):
+            c.execute("""UPDATE full_recheck_originals_turn SET reg='',hold_until=0,yield_automatic=1
+                WHERE singleton=1 AND request_id=? AND reg=? AND hold_until>0""", (request, reg))
         return outcome
 
     if observation.get("error"):
@@ -214,11 +304,23 @@ def admit(c, request, candidate, observation, *, now=None, allow_create=True, re
         return save("terminal", old["id"])
     total = c.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0]
     owned = c.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE parent_id=? AND status IN ('queued','leased','deferred')", (PARENT_ID,)).fetchone()[0]
-    if not allow_create or total >= MAX_QUEUE - RESERVED_MANUAL_SLOTS or owned >= MAX_ACTIVE_JOBS:
+    if not allow_create or owned >= MAX_ACTIVE_JOBS:
         return save("backpressure", delay=BACKPRESSURE_SECONDS)
+    turn = _turn(c, request, target, stamp)
+    if turn and turn["yield_automatic"] and _automatic_pending(c):
+        return save("backpressure", delay=BACKPRESSURE_SECONDS)
+    if total >= MAX_QUEUE - RESERVED_MANUAL_SLOTS:
+        result = save("backpressure", delay=BACKPRESSURE_SECONDS)
+        if not _automatic_pending(c):
+            if turn and turn["hold_until"]:
+                _release_turn(c)
+        elif not turn or not turn["hold_until"]:
+            _save_turn(c, request, target, reg=reg, until=stamp + ADMISSION_SECONDS)
+        return result
     c.execute("""INSERT INTO v301_search_jobs(id,kind,target,status,priority,parent_id,created_at,updated_at)
         VALUES(?,'reg',?,'queued',8,?,?,?)""", (identity, reg, PARENT_ID, _utc(), _utc()))
     save("active", identity, BACKPRESSURE_SECONDS, phase="active")
+    _save_turn(c, request, target, yielding=_automatic_pending(c))
     return "enqueued"
 
 

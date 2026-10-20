@@ -397,13 +397,15 @@ def enqueue_discovery_candidates(db, limit=100, max_new=None):
     return created
 
 
-def drain_candidates(db, limit=100):
+def drain_candidates(db, limit=100, *, ns=None):
     """Share automatic admission fairly; eight queue places stay reserved."""
     from eis_inn_search import enqueue_pending_candidates
     db.execute("INSERT OR IGNORE INTO eis_server_discovery(singleton) VALUES(1)")
     turn = db.execute("SELECT drain_turn FROM eis_server_discovery WHERE singleton=1").fetchone()[0]
     active = db.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0]
     budget = min(limit, max(0, MAX_QUEUE-RESERVED_MANUAL_SLOTS-active))
+    from full_recheck_originals import discovery_reservation, discovery_admitted
+    budget = max(0, budget-discovery_reservation(db, ns or {}))
     general = []
     # Give each source half of the free places and alternate the odd place.
     # A source with no pending work yields its share in the second pass.
@@ -415,12 +417,14 @@ def drain_candidates(db, limit=100):
         if turn % 2 == 0:
             extra = enqueue_discovery_candidates(db, limit, remaining)
             general.extend(extra)
-            enqueue_pending_candidates(db, limit, remaining-len(extra))
+            inn_created += enqueue_pending_candidates(db, limit, remaining-len(extra))
         else:
             extra = enqueue_pending_candidates(db, limit, remaining)
+            inn_created += extra
             general.extend(enqueue_discovery_candidates(db, limit, remaining-extra))
     if budget:
         db.execute("UPDATE eis_server_discovery SET drain_turn=? WHERE singleton=1", ((turn+1) % 2,))
+    discovery_admitted(db, len(general)+inn_created)
     return general
 
 
@@ -438,7 +442,7 @@ def claim(ns, identity, limit=2, supported=()):
           detail='Истёк лимит повторных попыток загрузки ЕИС',lease_until=0,
           lease_owner='',lease_token='',updated_at=?
           WHERE status='leased' AND lease_until<? AND attempts>=?""", (_utc(), now, MAX_ATTEMPTS))
-        drain_candidates(db)
+        drain_candidates(db, ns=ns)
         capable = "inn_search" in supported
         # Re-deliver live claims only to a worker that still supports their kind.
         rows = list(db.execute("""SELECT * FROM v301_search_jobs WHERE
@@ -801,7 +805,7 @@ def discovered(ns, data):
             db.execute("""INSERT INTO eis_server_discovery_candidates(reg_number,discovered_at,source_url)
               VALUES(?,?,?) ON CONFLICT(reg_number) DO UPDATE SET discovered_at=excluded.discovered_at,
               source_url=excluded.source_url,reg_job_id=''""", (reg, now, source))
-        drained = set(drain_candidates(db))
+        drained = set(drain_candidates(db, ns=ns))
         pending = {row[0] for row in db.execute("SELECT reg_number FROM eis_server_discovery_candidates WHERE reg_job_id=''")}
         result = {"accepted": True, "created": [reg for reg in numbers if reg in drained],
                   "skipped": skipped, "pending": [reg for reg in numbers if reg in pending],

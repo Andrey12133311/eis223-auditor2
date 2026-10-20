@@ -43,7 +43,7 @@ DEPENDENCY_REGISTRY = {
     "v332_all_procurements_audit": ("as_procurement", "source_verified", "stored_docs.read_one", "merge_docs", "is_official",
                                    "collect_saved_evidence", "_require_reconciled_rows"),
     "v335_price_recovery": ("money",),
-    "v341_eis_facts": ("enrich", "persist_facts", "card_predates_notice", "reconcile_notice_context"),
+    "v341_eis_facts": ("enrich", "persist_facts", "card_predates_notice", "reconcile_notice_context", "saved_price_kind"),
     "v342_identity": ("valid_inn", "subject", "customer_label", "organization_display_name"),
     "v342_thematic_queue": ("independent_review",),
     "v347_text_cache": ("cached_extract",),

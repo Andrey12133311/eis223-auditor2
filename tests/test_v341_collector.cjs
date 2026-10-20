@@ -30,7 +30,8 @@ for(const [label,kind] of [
 assert.equal(api.cardPriceFromDocument(make(row('Стоимость предмета закупки','0,00 ₽')),reg).price,'0.00');
 assert.equal(api.cardPriceFromDocument(make('<table><tr><th>Стоимость предмета закупки</th><td>120 000 рублей 45 копеек</td></tr></table>'),reg).price,'120000.45');
 assert.equal(api.cardPriceFromDocument(make('<span class="title">Стоимость предмета закупки: 999,50 руб.</span>'),reg).price,'999.50');
-for(const label of ['Цена победителя','Обеспечение заявки','Обеспечение исполнения договора'])
+for(const label of ['Цена победителя','Обеспечение заявки','Обеспечение исполнения договора',
+ 'Начальная (максимальная) цена','Начальная максимальная цена','Начальная цена лота'])
  assert.equal(api.cardPriceFromDocument(make(row(label,'300 000 ₽')),reg),null,label);
 for(const value of ['','—','100-200 ₽','31.12.2026','1000 USD'])
  assert.equal(api.cardPriceFromDocument(make(row('НМЦД',value)),reg),null,value);

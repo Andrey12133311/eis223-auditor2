@@ -95,7 +95,7 @@ def run():
     assert verified_nmcd([doc("НМЦД 394 633,33 руб.",
                                source="unknown_other_source")])=={}
     xml=ET.fromstring("<purchaseNoticeData><lots><lot><lotData><initialSum>"
-                      "<value>394633.33</value></initialSum></lotData></lot></lots>"
+                      "394633.33</initialSum></lotData></lot></lots>"
                       "</purchaseNoticeData>")
     assert verified_xml_nmcd(xml)=="394633.33"
     conflicting=ET.fromstring("<purchaseNoticeData><initialSum>10.00</initialSum>"

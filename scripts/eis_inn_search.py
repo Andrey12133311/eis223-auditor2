@@ -186,7 +186,7 @@ def report(ns, identifier, data):
                           (id,kind,target,page,status,priority,created_at,updated_at,not_before,parent_id)
                           VALUES(?,'inn',?,?,'queued',12,?,?,?,?)""",
                           (next_id, inn, page+1, _utc(), _utc(), int(time.time())+60, root))
-            drain_candidates(db)
+            drain_candidates(db, ns=ns)
             queued = db.execute("SELECT COUNT(*) FROM eis_inn_candidates WHERE source_job_id=? AND reg_job_id<>''", (identifier,)).fetchone()[0]
         pending = db.execute("SELECT COUNT(*) FROM eis_inn_candidates WHERE root_job_id=? AND reg_job_id=''", (root,)).fetchone()[0]
         result = {"received": True, "id": identifier, "kind": "inn", "inn": inn, "page": page,

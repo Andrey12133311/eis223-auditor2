@@ -619,5 +619,389 @@ class OriginalsBridge(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.jobs(), [])
 
 
+    def saturation(self, *, discovery=20, inn=20):
+        """Existing active jobs and durable candidates only; no source requests."""
+        with self.connect() as c:
+            c.executemany("""INSERT INTO v301_search_jobs
+                (id,kind,target,priority,created_at,updated_at,attempts)
+                VALUES(?,'reg',?,8,'0','0',3)""",
+                [(f"{i:024x}", str(32618000000+i))
+                 for i in range(queue.MAX_QUEUE-worker.RESERVED_MANUAL_SLOTS)])
+            c.executemany("""INSERT INTO eis_server_discovery_candidates
+                (reg_number,discovered_at,source_url) VALUES(?,1,'fixture')""",
+                [(str(32617000000+i),) for i in range(discovery)])
+            c.executemany("""INSERT INTO eis_inn_candidates
+                (root_job_id,inn,reg_number,source_job_id,page,source_url,discovered_at)
+                VALUES('fixture','7701234567',?,'fixture',1,'fixture','0')""",
+                [(str(32616000000+i),) for i in range(inn)])
+
+    def admission_counts(self):
+        with self.connect() as c:
+            return {"active": c.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE status IN ('queued','leased','deferred')").fetchone()[0],
+                    "originals": c.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE parent_id=?", (bridge.PARENT_ID,)).fetchone()[0],
+                    "discovery": c.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE parent_id='server-discovery'").fetchone()[0],
+                    "inn": c.execute("SELECT COUNT(*) FROM v301_search_jobs WHERE parent_id LIKE 'inn-search:%'").fetchone()[0]}
+
+    def admission_turn(self):
+        with self.connect() as c:
+            row = c.execute("SELECT * FROM full_recheck_originals_turn WHERE singleton=1").fetchone()
+            return dict(row) if row else None
+
+    def free_admission_slot(self):
+        # Fixture terminal state. End-to-end saturation test below instead
+        # uses the real fenced report path to release every queue place.
+        with self.connect() as c:
+            c.execute("""UPDATE v301_search_jobs SET status='partial' WHERE id=(SELECT id
+                FROM v301_search_jobs WHERE parent_id='' AND status IN ('queued','leased','deferred')
+                ORDER BY created_at,id LIMIT 1)""")
+
+    async def test_report_claim_pump_saturation_gives_all_three_sources_a_bounded_turn(self):
+        regs = self.activate(6)
+        for reg in regs: self.waiting(reg)
+        before = [self.member(reg) for reg in regs]
+        self.saturation()
+        await bridge.pump(self.ns)
+        self.assertGreater(self.admission_turn()["hold_until"], time.time())
+        identity = str(uuid.uuid4())
+        claimed, = worker.claim(self.ns, identity, limit=1)
+        history = []
+        for cycle in range(12):
+            result = worker.report(self.ns, claimed["id"], {"worker_id": identity,
+                "lease_token": claimed["lease_token"], "reg_number": claimed["reg_number"],
+                "status": "error", "error_code": "unsupported_xml_type"})
+            self.assertEqual(result["status"], "partial")
+            # This exact scheduler order starved originals on the old build:
+            # drain took every new place before the due local bridge probe.
+            claimed, = worker.claim(self.ns, identity, limit=1)
+            self.due()
+            await bridge.pump(self.ns)
+            counts = self.admission_counts()
+            history.append(counts)
+            self.assertLessEqual(counts["active"], queue.MAX_QUEUE-worker.RESERVED_MANUAL_SLOTS)
+            self.assertLessEqual(counts["originals"], bridge.MAX_ACTIVE_JOBS)
+        self.assertEqual([h["originals"] for h in history[:7]], [1, 1, 2, 2, 3, 3, 4])
+        self.assertEqual(history[-1], {"active": 342, "originals": 4, "discovery": 4, "inn": 4})
+        # Admission cannot count a legal attempt or complete the frozen cohort.
+        self.assertEqual([self.member(reg) for reg in regs], before)
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT actual_count FROM full_recheck_requests").fetchone()[0], 6)
+
+    async def test_admission_expiry_is_not_renewed_by_pressure_or_restart(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        stamp = time.time()
+        observation = bridge.probe(reg)
+        self.assertEqual(self.admit(reg, observation, now=stamp), "backpressure")
+        hold = self.admission_turn()["hold_until"]
+        self.due()
+        self.assertEqual(self.admit(reg, observation, now=stamp+61), "backpressure")
+        self.assertEqual(self.admission_turn()["hold_until"], hold)
+        runtime.initialize(self.ns)
+        worker.init(self.ns)
+        self.assertEqual(self.admission_turn()["hold_until"], hold)
+        self.due()
+        self.assertEqual(self.admit(reg, observation, now=hold+1), "backpressure")
+        self.assertEqual(self.admission_turn()["hold_until"], 0)
+        self.assertTrue(self.admission_turn()["yield_automatic"])
+        self.free_admission_slot()
+        with patch.object(bridge.time, "time", return_value=hold+2):
+            worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+        self.assertEqual(self.admission_counts(), {"active": 342, "originals": 0, "discovery": 1, "inn": 0})
+        self.assertFalse(self.admission_turn()["yield_automatic"])
+
+    async def test_idle_expired_waiter_cannot_withhold_capacity(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(reg), "backpressure")
+        hold = self.admission_turn()["hold_until"]
+        self.free_admission_slot()
+        with patch.object(bridge.time, "time", return_value=hold+1):
+            worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+        self.assertEqual(self.admission_counts()["active"], 342)
+        self.assertEqual(self.admission_counts()["discovery"], 1)
+        self.assertEqual(self.admission_turn()["hold_until"], 0)
+
+    async def test_disabled_changed_target_and_ineligible_waiter_release_immediately(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        target = runtime._target_args(self.ns)
+        for mode in ("disabled", "local_target", "durable_target", "completed", "ordinary_busy", "owned_cap"):
+            with self.subTest(mode=mode):
+                self.due()
+                self.assertEqual(self.admit(reg), "backpressure")
+                self.assertGreater(self.admission_turn()["hold_until"], time.time())
+                if mode == "disabled":
+                    self.ns["_full_recheck"].pop("request_id")
+                elif mode == "local_target":
+                    self.ns["_full_recheck"]["engine_signature"] = "other"
+                else:
+                    with self.connect() as c:
+                        if mode == "durable_target":
+                            c.execute("UPDATE full_recheck_targets SET generation=generation+1")
+                        elif mode == "completed":
+                            c.execute("UPDATE full_recheck_members SET status='completed'")
+                        elif mode == "ordinary_busy":
+                            c.execute("UPDATE v332_audit_queue SET state='running' WHERE reg=?", (reg,))
+                        else:
+                            c.execute("""UPDATE v301_search_jobs SET parent_id=? WHERE id IN
+                                (SELECT id FROM v301_search_jobs WHERE parent_id='' AND status='queued' LIMIT 4)""", (bridge.PARENT_ID,))
+                old = self.admission_counts()
+                self.free_admission_slot()
+                worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+                new = self.admission_counts()
+                self.assertEqual(new["active"], 342)
+                self.assertEqual(new["discovery"]+new["inn"], old["discovery"]+old["inn"]+1)
+                self.assertEqual(self.admission_turn()["hold_until"], 0)
+                self.ns["_full_recheck"].update(request_id=runtime.AUTHORIZED_EPOCH,
+                    engine_signature=target["engine_signature"])
+                with self.connect() as c:
+                    c.execute("UPDATE full_recheck_targets SET generation=?", (target["generation"],))
+                    c.execute("UPDATE full_recheck_members SET status='waiting_originals'")
+                    c.execute("UPDATE v332_audit_queue SET state='pending' WHERE reg=?", (reg,))
+                    c.execute("UPDATE v301_search_jobs SET parent_id='' WHERE parent_id=?", (bridge.PARENT_ID,))
+
+    async def test_present_unavailable_or_terminal_observation_yields_held_place(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        for mode in ("present", "unavailable", "terminal"):
+            with self.subTest(mode=mode):
+                self.due()
+                self.assertEqual(self.admit(reg), "backpressure")
+                self.free_admission_slot()
+                self.due()
+                if mode == "present":
+                    self.assertEqual(self.admit(reg, {"source_version": "a"*64, "missing": False}), "originals_present")
+                elif mode == "unavailable":
+                    self.assertEqual(self.admit(reg, {"error": "catalogue_unavailable"}), "catalogue_unavailable")
+                else:
+                    with self.connect() as c:
+                        c.execute("""INSERT INTO v301_search_jobs(id,kind,target,status,created_at,updated_at)
+                            VALUES('terminal','reg',?,'partial','0','0')""", (reg,))
+                    self.assertEqual(self.admit(reg), "terminal")
+                self.assertEqual(self.admission_turn()["hold_until"], 0)
+                worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+                self.assertEqual(self.admission_counts()["active"], 342)
+        for _ in range(3):
+            self.due()
+            self.assertEqual(self.admit(reg, {"source_version": "b"*64, "missing": True}), "terminal")
+        self.assertEqual(self.admission_counts()["originals"], 0)
+
+    async def test_reserved_turn_reprobes_source_before_idempotent_admission(self):
+        import hashlib
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(reg, {"source_version": "a"*64, "missing": True}), "backpressure")
+        self.free_admission_slot()
+        worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+        self.due()
+        with patch.object(bridge, "probe", return_value={"source_version": "b"*64, "missing": True}) as probe:
+            await bridge.pump(self.ns)
+        probe.assert_called_once_with(reg)
+        expected = hashlib.sha256((runtime.AUTHORIZED_EPOCH+"\0"+reg+"\0"+"b"*64).encode()).hexdigest()[:24]
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT id FROM v301_search_jobs WHERE parent_id=?", (bridge.PARENT_ID,)).fetchone()[0], expected)
+        self.due()
+        await bridge.pump(self.ns)
+        self.assertEqual(self.admission_counts()["originals"], 1)
+
+    async def test_contested_original_must_yield_even_when_pump_precedes_drainer(self):
+        first, second = self.activate(2)
+        for reg in (first, second): self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(first), "backpressure")
+        self.free_admission_slot()
+        self.due()
+        self.assertEqual(self.admit(first), "enqueued")
+        self.free_admission_slot()
+        self.assertEqual(self.admit(second), "backpressure")
+        self.assertEqual(self.admission_turn()["hold_until"], 0)
+        worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+        self.assertEqual(self.admission_counts()["discovery"], 1)
+        self.due()
+        self.assertEqual(self.admit(second), "backpressure")
+        self.assertGreater(self.admission_turn()["hold_until"], time.time())
+
+    async def test_manual_places_and_pump_limits_survive_reservation(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation(discovery=0, inn=0)
+        self.assertEqual(self.admit(reg), "backpressure")
+        self.assertIsNone(self.admission_turn())
+        for number in range(worker.RESERVED_MANUAL_SLOTS):
+            queue._enqueue(self.ns, "reg", str(32615000000+number), 1, 0, "", True)
+        self.assertEqual(self.admission_counts()["active"], queue.MAX_QUEUE)
+        self.due()
+        self.assertEqual(self.admit(reg), "backpressure")
+        # With no competing automatic work there is no fairness debt, but
+        # no hold can manufacture capacity or take a manual queue place.
+        self.assertEqual(self.admission_counts()["originals"], 0)
+        self.assertIsNone(self.admission_turn())
+        self.free_admission_slot()
+        self.due()
+        self.assertEqual(self.admit(reg), "backpressure")
+        self.assertEqual(self.admission_counts()["active"], queue.MAX_QUEUE-1)
+
+    async def test_concurrent_process_drainers_and_bridge_serialize_one_reserved_place(self):
+        import multiprocessing
+        if "fork" not in multiprocessing.get_all_start_methods():
+            self.skipTest("deployment process fixture requires fork")
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(reg), "backpressure")
+        self.free_admission_slot()
+        self.due()
+        context = multiprocessing.get_context("fork")
+        start, results = context.Event(), context.Queue()
+        def run(kind):
+            try:
+                if not start.wait(5): raise TimeoutError("fixture process start")
+                value = self.admit(reg) if kind == "bridge" else worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+                results.put((kind, "ok", value))
+            except BaseException as exc:
+                results.put((kind, "error", repr(exc)))
+        processes = [context.Process(target=run, args=(kind,)) for kind in ("drain", "bridge", "drain")]
+        try:
+            for process in processes: process.start()
+            start.set()
+            reports = [results.get(timeout=10) for _ in processes]
+            for process in processes:
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+            self.assertTrue(all(row[1] == "ok" for row in reports), reports)
+            self.assertEqual([row[2] for row in reports if row[0] == "bridge"], ["enqueued"])
+            self.assertEqual(self.admission_counts(), {"active": 342, "originals": 1, "discovery": 0, "inn": 0})
+        finally:
+            start.set()
+            for process in processes:
+                if process.is_alive(): process.terminate()
+                process.join(2)
+            results.close()
+
+
+    async def test_discovery_event_honors_live_hold_without_writer_file_work(self):
+        from pathlib import Path
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(reg), "backpressure")
+        hold = self.admission_turn()["hold_until"]
+        self.free_admission_slot()
+        result = worker.discovered(self.ns, {"worker_id": str(uuid.uuid4()), "reg_numbers": [],
+            "source_url": "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?fz223=on"})
+        self.assertEqual(result["created"], [])
+        self.assertEqual(self.admission_counts()["active"], 341)
+        with runtime.transaction(self.ns) as c, patch.object(Path, "open", side_effect=AssertionError("file under writer")), \
+                patch.object(bridge, "probe", side_effect=AssertionError("probe under writer")), \
+                patch.object(json, "loads", side_effect=AssertionError("JSON under writer")), \
+                patch.object(json, "dumps", side_effect=AssertionError("JSON under writer")):
+            self.assertEqual(worker.drain_candidates(c, ns=self.ns), [])
+        self.assertEqual(self.admission_turn()["hold_until"], hold)
+        self.due()
+        await bridge.pump(self.ns)
+        self.assertEqual(self.admission_counts()["originals"], 1)
+
+    async def test_successful_inn_report_honors_reserved_original_turn(self):
+        import eis_inn_search as inn
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        with self.connect() as c:
+            c.execute("UPDATE v301_search_jobs SET kind='inn',target='7701234567',priority=12 WHERE id=?", (f"{0:024x}",))
+        self.assertEqual(self.admit(reg), "backpressure")
+        identity = str(uuid.uuid4())
+        job, = worker.claim(self.ns, identity, limit=1, supported=("inn_search",))
+        self.assertEqual(job["kind"], "inn")
+        result = inn.report(self.ns, job["id"], {"worker_id": identity, "lease_token": job["lease_token"],
+            "kind": "inn", "inn": "7701234567", "page": 1, "status": "no_data", "reg_numbers": [], "has_more": False,
+            "source_url": "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?fz223=on&customerInn=7701234567&pageNumber=1"})
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(self.admission_counts()["active"], 341)
+        self.due()
+        await bridge.pump(self.ns)
+        self.assertEqual(self.admission_counts(), {"active": 342, "originals": 1, "discovery": 0, "inn": 0})
+
+    async def test_absent_automatic_backlog_releases_hold_and_old_code_can_ignore_table(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(reg), "backpressure")
+        self.free_admission_slot()
+        with runtime.transaction(self.ns) as c:
+            # Old code still reads and admits from these unchanged tables.
+            # It ignores the new table, so rollback removes the fairness
+            # improvement, without blocking any pre-existing queue operation.
+            created = worker.enqueue_discovery_candidates(c, max_new=1)
+            self.assertEqual(len(created), 1)
+            c.execute("UPDATE eis_server_discovery_candidates SET reg_job_id='fixture-finished' WHERE reg_job_id=''")
+            c.execute("UPDATE eis_inn_candidates SET reg_job_id='fixture-finished' WHERE reg_job_id=''")
+            self.assertEqual(bridge.discovery_reservation(c, self.ns), 0)
+        self.assertEqual(self.admission_turn()["hold_until"], 0)
+        self.assertEqual(self.admission_counts()["active"], 342)
+
+
+    async def test_losing_busy_peer_and_intervening_drainer_preserve_actual_probe_owner_turn(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        self.assertEqual(self.admit(reg), "backpressure")
+        hold = self.admission_turn()["hold_until"]
+        self.free_admission_slot()
+        self.due()
+        peer = {**self.ns, "_full_recheck": dict(self.ns["_full_recheck"])}
+        started, proceed = threading.Event(), threading.Event()
+        actual_probe = bridge.probe
+        def paused_probe(number):
+            observation = actual_probe(number)
+            started.set()
+            if not proceed.wait(5): raise TimeoutError("fixture held probe")
+            return observation
+        task = None
+        try:
+            with patch.object(bridge, "probe", side_effect=paused_probe):
+                task = asyncio.create_task(bridge.pump(self.ns))
+                self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                await bridge.pump(peer)
+                with self.connect() as c:
+                    self.assertEqual(c.execute("SELECT outcome FROM full_recheck_originals WHERE reg=?", (reg,)).fetchone()[0], "execution_busy")
+                self.assertEqual(self.admission_turn()["hold_until"], hold)
+                worker.claim(peer, str(uuid.uuid4()), limit=1)
+                self.assertEqual(self.admission_counts()["active"], 341)
+                self.assertEqual(self.admission_turn()["hold_until"], hold)
+                proceed.set()
+                await task
+            self.assertEqual(self.admission_counts(), {"active": 342, "originals": 1, "discovery": 0, "inn": 0})
+        finally:
+            proceed.set()
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_repeated_busy_observations_cannot_create_or_extend_a_turn(self):
+        reg, = self.activate()
+        self.waiting(reg)
+        self.saturation()
+        stamp = time.time()
+        self.assertEqual(self.admit(reg, {"error": "execution_busy"}, now=stamp), "execution_busy")
+        self.assertIsNone(self.admission_turn())
+        self.due()
+        self.assertEqual(self.admit(reg, now=stamp+1), "backpressure")
+        hold = self.admission_turn()["hold_until"]
+        for elapsed in (20, 40, 70, 100):
+            self.due()
+            self.assertEqual(self.admit(reg, {"error": "execution_busy"}, now=stamp+elapsed), "execution_busy")
+            self.assertEqual(self.admission_turn()["hold_until"], hold)
+        self.free_admission_slot()
+        with patch.object(bridge.time, "time", return_value=hold+1):
+            worker.claim(self.ns, str(uuid.uuid4()), limit=1)
+        self.assertEqual(self.admission_turn()["hold_until"], 0)
+        self.assertEqual(self.admission_counts(), {"active": 342, "originals": 0, "discovery": 1, "inn": 0})
+
+
 if __name__ == "__main__":
     unittest.main()
