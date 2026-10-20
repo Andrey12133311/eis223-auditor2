@@ -1,0 +1,27 @@
+name: Recheck 4007 safety
+on:
+  push:
+    branches: [fix/4007-recheck-lock-scope-20261020]
+    paths: [.github/workflows/recheck-4007-safety.yml]
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source only
+        run: |
+          mkdir -p /tmp/source
+          git archive --format=zip --output=/tmp/source/source.zip HEAD
+          git rev-parse HEAD > /tmp/source/COMMIT
+          sha256sum /tmp/source/source.zip > /tmp/source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recheck-4007-source
+          path: /tmp/source/
+          retention-days: 1
+          if-no-files-found: error
