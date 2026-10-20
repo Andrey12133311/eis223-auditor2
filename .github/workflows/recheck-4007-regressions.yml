@@ -27,12 +27,12 @@ jobs:
         run: |
           python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
           echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
-      - name: Preserved production and new evidence regressions
+      - name: Shared DB admission, frozen scope and verified legal evidence
         env:
           PYTHONPATH: '.:scripts:tests'
         run: |
           python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3'"
-          python -m unittest test_fact_persistence_contention test_legal_fact_write_contention test_parenthesized_event_date_labels test_clarification_xml_evidence test_dashboard_4007_request test_explanation_quarantine_identity test_recheck_contention_improvements test_explanation_supported_format
+          python -m unittest test_fact_persistence_contention test_legal_fact_write_contention test_parenthesized_event_date_labels test_clarification_xml_evidence test_dashboard_4007_request test_explanation_quarantine_identity test_recheck_contention_improvements test_explanation_supported_format test_recheck4007_safety
           python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_originals
           python -m unittest test_full_recheck_capacity
           python -m unittest test_legal_audit_revision test_official_publication_evidence test_legal_date_label_archive_recall test_legal_event_coverage test_legal_event_recall test_local_numbered_event_recall
