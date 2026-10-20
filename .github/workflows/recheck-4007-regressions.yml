@@ -1,0 +1,27 @@
+name: Recheck 4007 safety regressions
+on:
+  push:
+    branches: [fix/recheck-4007-write-contention-20261020]
+    paths: [.github/workflows/recheck-4007-regressions.yml]
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source only
+        run: |
+          mkdir -p /tmp/eis-recheck-source
+          git archive --format=zip --output=/tmp/eis-recheck-source/source.zip HEAD
+          git rev-parse HEAD > /tmp/eis-recheck-source/COMMIT
+          sha256sum /tmp/eis-recheck-source/source.zip > /tmp/eis-recheck-source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recheck-4007-source
+          path: /tmp/eis-recheck-source/
+          retention-days: 1
+          if-no-files-found: error
