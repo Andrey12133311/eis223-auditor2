@@ -1,0 +1,31 @@
+name: Performance and INN regressions
+on:
+  push:
+    branches: [fix/performance-inn-20261020]
+  pull_request:
+    branches: [thematic-audit-20261015]
+    paths:
+      - '.github/workflows/performance-inn.yml'
+      - 'scripts/eis_inn_search.py'
+      - 'scripts/eis_server_worker.py'
+      - 'tests/test_performance_inn*.py'
+permissions:
+  contents: read
+jobs:
+  source-and-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check Python syntax without importing application
+        run: python -m compileall -q scripts
+      - name: Archive exact test source (no runtime data or secrets)
+        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: performance-inn-source
+          path: source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
