@@ -27,6 +27,7 @@ on:
       - 'tests/test_general_db_stage_retry.py'
       - 'tests/test_eis_mixed_soap_quarantine.py'
       - 'tests/test_eis_worker_backpressure.py'
+      - 'tests/test_eis_original_upload_stream.py'
       - 'tests/test_official_publication_evidence.py'
       - 'tests/test_ingestion_*.py'
       - 'tests/test_v381*.py'
