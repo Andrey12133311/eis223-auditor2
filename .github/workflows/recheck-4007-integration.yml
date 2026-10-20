@@ -1,0 +1,27 @@
+name: Recheck 4007 integration review
+on:
+  push:
+    branches: [fix/recheck-4007-write-contention-20261020]
+    paths: [.github/workflows/recheck-4007-integration.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Export concurrent revision for local integration tests
+        run: |
+          mkdir -p /tmp/recheck-integration
+          git archive --format=zip --output=/tmp/recheck-integration/upstream.zip dc95372b03e9b44cfeb1b8c88ec5f7f0f71152b7
+          git archive --format=zip --output=/tmp/recheck-integration/ours.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recheck4007-latest-integration
+          path: /tmp/recheck-integration/
+          retention-days: 1
+          if-no-files-found: error
