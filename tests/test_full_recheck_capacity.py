@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import json
 import os
@@ -466,12 +467,18 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             return {r['reg']: dict(r) for r in c.execute('SELECT * FROM full_recheck_members')}
 
     async def test_contended_admission_then_real_renew_persist_release(self):
-        await self.exercise_contention(admission_busy=True)
+        await self.exercise_contention(admission_busy=True, executor_workers=6)
 
     async def test_saturated_explicit_slots_during_real_renew_persist_release(self):
-        await self.exercise_contention(admission_busy=False)
+        await self.exercise_contention(admission_busy=False, executor_workers=5)
 
-    async def exercise_contention(self, *, admission_busy):
+    async def test_delayed_renewal_entry_preserves_all_four_real_claims(self):
+        await self.exercise_contention(admission_busy=False, executor_workers=5, delayed_renewal=True)
+
+    async def exercise_contention(self, *, admission_busy, executor_workers, delayed_renewal=False):
+        # Test-local pool sizes reproduce small CI hosts; production allocation
+        # is untouched. IsolatedAsyncioTestCase shuts this executor down.
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=executor_workers))
         regs = [self.purchase(i) for i in range(1, 9)]
         with self.connect() as c:
             for reg in regs[:4]:
@@ -496,21 +503,65 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item['reg'] for item in selected], [theme])
 
         observed = threading.Lock()
-        claims, analyzed = {}, []
-        first_analysis = threading.Event()
-        allow_analysis = threading.Event()
+        claims, analyzed = {}, Counter()
+        ready_for_analysis = set()
+        first_analysis = asyncio.Event()
+        allow_analysis = asyncio.Event()
         cleanup_arrived = set()
         allow_cleanup = asyncio.Event()
         original_analyze = self.ns['analyze']
         def analyze(p, docs):
             with observed:
-                analyzed.append(p['reg'])
-                if len(analyzed) >= 5:
-                    first_analysis.set()
-            if not allow_analysis.wait(20):
-                raise AssertionError('analyzer barrier not released')
+                analyzed[p['reg']] += 1
             return original_analyze(p, docs)
         self.ns['analyze'] = analyze
+        real_to_thread = asyncio.to_thread
+        async def await_analysis(reg):
+            ready_for_analysis.add(str(reg))
+            if len(ready_for_analysis) == 5:
+                first_analysis.set()
+            # Hold actual claim ownership without occupying executor threads.
+            # Five synchronous analyzer waits previously left only one free
+            # thread on a six-thread CI pool, deadlocking the fixture itself.
+            await allow_analysis.wait()
+        async def park_analyzer(function, *args, **kwargs):
+            # Both real analysis paths reach this after source preparation and
+            # reservation checks. Do not park earlier preprocessing writes.
+            if function is analyze:
+                await await_analysis(args[0]['reg'])
+            return await real_to_thread(function, *args, **kwargs)
+
+        renewal_calls = Counter()
+        renewed_busy = set()
+        first_three_busy, all_four_busy = asyncio.Event(), asyncio.Event()
+        delayed_entry, return_busy = asyncio.Event(), asyncio.Event()
+        delayed_reg = None
+        real_thread_call = general.thread_call
+        async def controlled_thread_call(function, *args):
+            if function is not runtime._renew:
+                return await real_thread_call(function, *args)
+            reg = str(args[1])
+            first = renewal_calls[reg] == 0
+            if first and reg == delayed_reg:
+                await delayed_entry.wait()
+            renewal_calls[reg] += 1
+            try:
+                return await real_thread_call(function, *args)
+            except sqlite3.OperationalError as exc:
+                if not first or not general.transient_sqlite(exc):
+                    raise
+                # This event proves this exact claim reached SQLite and got a
+                # real BUSY response. Only the delayed-entry coverage case
+                # parks the response; the coupled-pressure case leaves the
+                # production retry/backoff entirely ungated while DB is busy.
+                renewed_busy.add(reg)
+                if len(renewed_busy) == 3:
+                    first_three_busy.set()
+                if len(renewed_busy) == 4:
+                    all_four_busy.set()
+                if delayed_renewal:
+                    await return_busy.wait()
+                raise
         real_claim, real_attach, real_release = runtime._claim, runtime.attach_general, runtime.release
         def claim(*args):
             result = real_claim(*args)
@@ -536,6 +587,8 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(runtime, '_claim', side_effect=claim))
         self.stack.enter_context(patch.object(runtime, 'attach_general', side_effect=attach))
         self.stack.enter_context(patch.object(runtime, 'release', side_effect=release))
+        self.stack.enter_context(patch.object(general.asyncio, 'to_thread', side_effect=park_analyzer))
+        self.stack.enter_context(patch.object(general, 'thread_call', side_effect=controlled_thread_call))
         self.stack.enter_context(patch.object(general.asyncio, 'sleep', side_effect=start_now))
 
         blocker = self.block() if admission_busy else None
@@ -562,7 +615,7 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                 blocker.rollback(); blocker.close(); blocker = None
             else:
                 during_admission = {'unblocked_initial_wave': True}
-            self.assertTrue(await asyncio.to_thread(first_analysis.wait, 10))
+            await asyncio.wait_for(first_analysis.wait(), 10)
             await self.until(lambda: len(claims) == 4)
             self.monitor.end()
             await self.until(lambda: self.monitor.pending == self.monitor.holders == 0)
@@ -581,21 +634,44 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             # This calls unchanged renewal+db_stage code, with no cadence,
             # lease, busy timeout or retry-delay modifications.
             blocker = self.block()
-            self.monitor.begin('renewal_3s')
+            self.monitor.begin('renewal_busy_barrier')
+            if delayed_renewal:
+                delayed_reg = max(active_regs)
             renewals = [asyncio.create_task(general.db_stage(
                 self.ns, 'controlled_real_renew', runtime._renew, self.ns, claims[reg]))
                 for reg in active_regs]
-            await self.until(lambda: self.monitor.pending == 4)
-            await real_sleep(3)
-            renewal_blocked = self.monitor.snapshot()['renewal_3s']
+            if delayed_renewal:
+                # Deliberately admit the fourth thread only after the first
+                # three have already returned BUSY. Simultaneous pending==4
+                # is impossible by construction, despite complete coverage.
+                await asyncio.wait_for(first_three_busy.wait(), 15)
+                self.assertEqual(renewed_busy, active_regs - {delayed_reg})
+                self.assertEqual(renewal_calls[delayed_reg], 0)
+                self.assertEqual(self.monitor.pending, 0)
+                delayed_entry.set()
+            else:
+                # The async analyzer barrier leaves room for all four DB
+                # threads even in the explicit six-thread test pool. Keep
+                # this independent pressure measurement fully ungated.
+                await self.until(lambda: self.monitor.pending == 4)
+                await real_sleep(3)
+            await asyncio.wait_for(all_four_busy.wait(), 15)
+            self.assertEqual(renewed_busy, active_regs)
+            self.assertEqual(dict(renewal_calls), dict.fromkeys(active_regs, 1))
+            renewal_blocked = self.monitor.snapshot()['renewal_busy_barrier']
+            self.assertEqual(renewal_blocked.get('attempts'), 4)
             self.assertEqual(renewal_blocked.get('busy_errors'), 4)
+            self.assertLessEqual(renewal_blocked['peak_waiting_or_entering_writers'],
+                                 3 if delayed_renewal else 4)
             during_renew = self.members()
             for reg in active_regs:
                 self.assertEqual(during_renew[reg]['lease_token'], active_before[reg]['lease_token'])
                 self.assertEqual(during_renew[reg]['attempt_count'], 1)
                 self.assertIsNone(_try_execution_lock(reg))
             blocker.rollback(); blocker.close(); blocker = None
+            return_busy.set()
             await asyncio.wait_for(asyncio.gather(*renewals), 6)
+            self.assertEqual(dict(renewal_calls), dict.fromkeys(active_regs, 2))
             self.monitor.end()
             after_renew = self.members()
             for reg in active_regs:
@@ -628,12 +704,22 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.monitor.snapshot()['release_250ms'].get('busy_errors', 0), 0)
             blocker.rollback(); blocker.close(); blocker = None
             await self.until(lambda: self.inventory()['current_completed'] == 8)
+            # A committed receipt precedes the last lease/lock cleanup. Drain
+            # the actual workers before teardown rather than cancel during
+            # their successful-finally settlement (a pre-existing lifecycle
+            # edge, separate from this occupied-writer proof).
+            await self.until(lambda: all(
+                slot['phase'] == 'waiting_for_documents' and slot['reg'] is None
+                for slot in self.ns['_v332_runtime']['workers'].values())
+                and (not hasattr(runtime, '_dispatch') or runtime._dispatch(self.ns)['active'] == 0)
+                and self.monitor.pending == self.monitor.holders == 0)
             self.monitor.end()
             final = self.inventory()
             self.assertEqual((final['actual_count'], final['membership_digest'], final['db_snapshot_at']),
                              (before['actual_count'], before['membership_digest'], before['db_snapshot_at']))
             self.assertEqual((final['unique_attempted'], final['total_attempts'], final['committed_new_findings']), (8, 8, 8))
             self.assertEqual([self.findings(reg) for reg in regs], [1] * 8)
+            self.assertEqual(analyzed, Counter({reg: 1 for reg in [*regs, theme]}))
             with self.connect() as c:
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM thematic_findings WHERE batch_id=?', (batch,)).fetchone()[0], 1)
                 self.assertEqual(c.execute('SELECT status FROM thematic_items WHERE batch_id=? AND reg=?', (batch, theme)).fetchone()[0], 'completed')
@@ -651,6 +737,9 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(phase.get('peak_actual_writers', 0), 1)
                 self.assertLessEqual(phase.get('peak_waiting_or_entering_writers', 0), 5)
             print('CONTENTION_RESULT ' + json.dumps({
+                'executor_workers': executor_workers, 'delayed_renewal': delayed_renewal,
+                'retry_pressure_ungated': not delayed_renewal,
+                'renewed_claims': len(renewed_busy),
                 'admission_busy': admission_busy, 'first_wave_explicit_occupancy': explicit_occupancy,
                 'explicit_limit': getattr(runtime, 'EXPLICIT_WORKERS', 1),
                 'metrics': metrics,
@@ -669,7 +758,7 @@ class FullRecheckContention(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         finally:
             if blocker is not None:
                 blocker.rollback(); blocker.close()
-            allow_analysis.set(); allow_cleanup.set()
+            allow_analysis.set(); allow_cleanup.set(); return_busy.set(); delayed_entry.set()
             for task in [*renewals, themed, campaign]:
                 task.cancel()
             await asyncio.wait_for(asyncio.gather(*renewals, themed, campaign, return_exceptions=True), 15)

@@ -27,7 +27,7 @@ work is empty, disabled, conflicting or temporarily ineligible.
 
 A nonwaiting admission counter caps explicit-only turns at two per application
 runtime/event loop. The permit is acquired before waiting for selection and is
-held through cancellation-safe claim, analyzer and database settlement and
+held through claim, analyzer and database settlement and
 exact request lease/physical-lock cleanup. Detached read-only file work keeps
 its existing shared physical permit until it exits; the explicit-turn cap does
 not replace that file-resource bound. An extra caller immediately returns to ordinary work.
@@ -81,11 +81,9 @@ while waiting for selection, cancellation during a cursor-wrap thread, repeated
 cancellation after a durable claim, real analyzer-thread cancellation, exact
 stale-claim persistence fencing and same-membership restart recovery.
 
-The original runtime/ledger suite passes (97 tests); the focused scheduling,
-recovery, DB retry, fairness and cohort suite also passes (79 tests before the
-additional independent real-thread regression). Before the contention supplement, the combined full-recheck
-command passed 117 tests, including nine new capacity regressions. The final
-capacity module passes all 11 tests including both coupled contention cases. The
+The capacity module contains 12 tests, including both coupled contention cases
+and a separate delayed-renewal coverage case. The combined full-recheck command
+also includes the deterministic ownership-race and turn-cleanup regressions. The
 worker-share test fails on the clean production base with actual counts
 `ordinary=14, explicit=2` instead of `ordinary=8, explicit=8`. The new module is included in
 the existing throughput workflow's full-recheck test command.
@@ -107,7 +105,7 @@ changed; only the initial 14-second startup delay is skipped. Each test uses
 barriers to observe real blocked operations before a fixed writer-hold window.
 
 `FullRecheckContention` in the existing
-`tests/test_full_recheck_capacity.py` covers two cases:
+`tests/test_full_recheck_capacity.py` covers two ungated pressure cases:
 
 1. A writer is already held when workers start. Hold it for three seconds,
    exceeding the unchanged 2.5-second request/thematic busy timeout. Both base
@@ -127,13 +125,24 @@ is five including thematic persistence. During a 250-ms cleanup hold, all four
 physical locks remain held until their cleanup transactions can finish, with
 four contenders and no BUSY return. The single SQLite writer never exceeds one.
 
-Every run completes all eight frozen members with exactly eight attempts,
-eight durable receipts and eight newly credited findings. All four ordinary
+The corrected contention cases require all eight frozen members to complete
+with exactly eight attempts, eight durable receipts and eight newly credited
+findings. All four ordinary
 members and the separate thematic member finish. Membership count, digest and
 capture timestamp stay unchanged; active lease identities and attempt counts
 stay intact across blocked renewals. Old tokens cannot persist after completion,
 and another request turn adds neither a claim nor a duplicate credit. After
 settled worker shutdown, every registration’s physical lock is reacquirable.
+
+The tests explicitly use five- and six-thread executors. Test-only analyzer
+barriers park asynchronously before real analyzer submission; synchronous
+barriers previously exhausted a small executor and made four renewal entries
+impossible. Both pressure cases leave real SQLite BUSY delivery and production
+backoff ungated. A third case deliberately delays the fourth renewal until the
+first three have returned BUSY. It proves exact claim coverage without relying
+on a transient simultaneous-pending count; it is not retry-pressure evidence.
+Shutdown begins only after all four workers and database operations are idle,
+without increasing the existing shutdown timeout.
 
 The contended-admission case emits four general retry lines, two thematic retry
 lines and one request-deferred line on both builds. The initially saturated case
@@ -147,6 +156,33 @@ endpoint handling, establish production performance under sustained external
 writers, or turn prolonged storage contention into successful completion. Those
 remain separate rollout checks; scheduling publication remains gated on the
 integrator's approval and verification of the live contention issue.
+
+## Ordinary/request ownership handoff
+
+A stale explicit candidate page could briefly take the physical lock of an
+already claimed ordinary row before its database claim was rejected. Ordinary
+attachment previously treated that transient lock conflict as permission to
+continue without request identity. A controlled baseline case retained one
+actual finding, but analyzed twice and attributed zero new findings to the
+later request receipt. This was duplicate work and incomplete request
+attribution, not proof that the finding itself was deleted.
+
+Selection now skips currently running ordinary rows before taking their lock.
+Because state can still change after that read, unsuccessful attachment to an
+unfinished request raises a dedicated ownership conflict. The general worker
+defers that reservation through its existing 60-second busy schedule, preserving
+old results and exact tokens; no analyzer runs and no receipt is invented.
+Completed, blocked and nonmember cases retain ordinary behavior. Fixed reason
+labels omit exception text. Real-flock tests cover both race orderings, a
+foreign process, stale claims and continued progress by another ordinary item.
+
+Successful and already-started explicit turns now propagate cancellation only
+after their existing shielded cleanup settles, including when cleanup itself
+raises. Slot and permit cleanup remains unconditional. This is not a guarantee
+covering every shutdown phase: the separate pre-existing claim-time combination
+of cancellation plus physical-unlock failure remains outside this correction.
+If an actual unlock fails before release, the retained physical handle keeps
+that registration fenced until it closes or the process exits.
 
 ## Authenticated worker backpressure and failure diagnostics
 

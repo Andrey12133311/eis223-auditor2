@@ -1627,6 +1627,16 @@ def install(ns):
                             elif index<=4 or index%20==0:
                                 print(f"V332 NO_DOCUMENT_TEXT reg={reg}",flush=True)
                         except asyncio.CancelledError:raise
+                        except full_recheck_runtime.RequestOwnershipBusy:
+                            # No analyzer ran: preserve prior facts/tokens and
+                            # retry this exact ordinary reservation through
+                            # the existing bounded busy schedule. This is an
+                            # ownership handoff, not a SQLite lock diagnosis.
+                            reason="full_request_ownership_busy"
+                            delay=await retry_operation(ns,"save_request_busy",lambda:thread_call(
+                                defer_retry,ns,reg,{},reason,BUSY_RETRY_BASE_SECONDS),slot)
+                            print(f"V332 REQUEST_ATTACH_DEFERRED reg={reg} worker={worker_id} "
+                                  f"retry_after_seconds={delay} reason=full_request_ownership_busy",flush=True)
                         except asyncio.TimeoutError:
                             detail={"result_token":uuid.uuid4().hex}
                             if snapshot is not None:detail["reservation_token"]=snapshot["reservation_token"]

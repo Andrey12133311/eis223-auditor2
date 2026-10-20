@@ -37,6 +37,10 @@ CATCHUP_PAGE_SIZE = 32
 EXPLICIT_WORKERS = 2
 
 
+class RequestOwnershipBusy(RuntimeError):
+    """An unfinished requested member needs a fresh, owned ordinary attempt."""
+
+
 def _dispatch(ns):
     loop = asyncio.get_running_loop()
     state = ns.get("_full_recheck_dispatch")
@@ -349,18 +353,26 @@ def _attachable(ns, reg):
                            (request_id(ns), str(reg))).fetchone()
     finally:
         c.close()
-    return bool(member and member[0] not in ("completed", "blocked", "running"))
+    # A running member is not permission to analyze without its identity.
+    # Cross-process/restarted owners remain fenced until their exact release.
+    return bool(member and member[0] not in ("completed", "blocked"))
 
 
 async def attach_general(ns, reg):
     """Only a new ordinary reservation can carry a user-request attempt."""
-    if not request_id(ns) or reg is None:
+    if not request_id(ns) or reg is None or getattr(reg, "full_recheck_claim", None) is not None:
         return
     from v332_all_procurements_audit import thread_call, settle_task
     if not await thread_call(_attachable, ns, reg):
         return
     lock = await _lock(reg)
     if lock is None:
+        # A selector can briefly own this flock before its durable claim is
+        # rejected by the ordinary reservation. Never turn that handoff race
+        # into an uncredited analysis. A concurrently finished member no
+        # longer needs attachment and keeps normal ordinary behavior.
+        if await thread_call(_attachable, ns, reg):
+            raise RequestOwnershipBusy("request_execution_busy")
         return
     try:
         task = asyncio.create_task(thread_call(_attach, ns, reg))
@@ -375,6 +387,8 @@ async def attach_general(ns, reg):
                 await settle_task(asyncio.create_task(release(ns, reg)))
             raise
         if claim is None:
+            if await thread_call(_attachable, ns, reg):
+                raise RequestOwnershipBusy("request_claim_unavailable")
             return
         reg.full_recheck_claim = claim
         reg.full_recheck_lock = lock
@@ -432,7 +446,12 @@ async def release(ns, reg):
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        await settle_task(task)
+        try:
+            await settle_task(task)
+        except Exception as exc:
+            # The original shutdown request must still propagate if physical
+            # cleanup fails. Preserve visibility without logging source data.
+            print("FULL_RECHECK_RELEASE cleanup_failed=True type=" + type(exc).__name__, flush=True)
         raise
 
 
@@ -536,7 +555,10 @@ def _ordinary_pending(ns, reg):
                         "AND d.status IN ('checked','downloaded_no_text') AND COALESCE(d.local_path,'')<>'') "
                         "FROM v332_audit_queue q JOIN purchases p ON p.reg_number=q.reg "
                         "WHERE q.campaign=? AND q.reg=?", (CAMPAIGN, reg)).fetchone()
-        return bool(row and row[0] == "pending" and business_company(row[1])), bool(row and row[2])
+        # The selected page can predate an ordinary claim. Avoid its flock
+        # while that owner attaches; attach_general also guards later races.
+        return bool(row and (row[0] == "running" or
+                    row[0] == "pending" and business_company(row[1]))), bool(row and row[2])
     finally:
         c.close()
 
@@ -626,11 +648,12 @@ async def _claim_next(ns):
 
 async def _run_one(ns, slot):
     """One explicit-first turn inside the unchanged general worker pool."""
-    from v332_all_procurements_audit import file_stage, db_stage, inspect_one, settle_task
+    from v332_all_procurements_audit import file_stage, db_stage, inspect_one
     from v381_audit_scheduling import background_audit
     reg = await _claim_next(ns)
     if reg is None:
         return False
+    cancelled = False
     try:
         slot.update(reg=reg, phase="full_request_source")
         snapshot = await file_stage(ns, "full_request_source", _snapshot, ns, reg, worker=slot)
@@ -641,10 +664,22 @@ async def _run_one(ns, slot):
         await finish_result(ns, reg, state, detail)
         return True
     except asyncio.CancelledError:
+        cancelled = True
         raise
     except Exception as exc:
         print("FULL_RECHECK_ATTEMPT deferred=True type=" + type(exc).__name__, flush=True)
         return True
     finally:
-        await settle_task(asyncio.create_task(release(ns, reg)))
-        slot.update(reg=None, phase="full_request_waiting")
+        # release already settles its shielded cleanup before propagating
+        # cancellation. An extra settle_task here would consume a cancellation
+        # first delivered after successful analysis and let the worker resume.
+        try:
+            await release(ns, reg)
+        except Exception as exc:
+            if not cancelled:
+                raise
+            # A cleanup exception must not replace cancellation already
+            # unwinding from source preparation, analysis or persistence.
+            print("FULL_RECHECK_RELEASE cleanup_failed=True type=" + type(exc).__name__, flush=True)
+        finally:
+            slot.update(reg=None, phase="full_request_waiting")
