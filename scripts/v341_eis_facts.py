@@ -30,7 +30,7 @@ LABELS = {
     "unit_price": "Цена единицы",
 }
 PATTERNS = {
-    "nmcd": r"(?:начальная\s*\(\s*максимальная\s*\)\s*цена(?:\s+договора|\s+контракта)?|начальная\s+максимальная\s+цена(?:\s+договора|\s+контракта)?|начальная\s+цена\s+(?:договора|контракта|лота)|нмц[дк])(?:\s*\(цена\s+лота\))?",
+    "nmcd": r"(?:начальная\s*\(\s*максимальная\s*\)\s*цена(?:\s+договора|\s+контракта)|начальная\s+максимальная\s+цена(?:\s+договора|\s+контракта)|начальная\s+цена\s+(?:договора|контракта)|нмц[дк])(?:\s*\(цена\s+лота\))?",
     "maximum_contract_value": r"максимальн\w*\s+(?:значени\w*\s+)?цен\w*\s+договора",
     "subject_cost": r"(?:стоимост\w*\s+(?:предмет\w*\s+)?закупк\w*|стоимост\w*\s+предмет\w*\s+договора|сумма\s+закупк\w*)",
     "contract_price": r"(?:(?:общая\s+)?(?:цена|стоимость|сумма)\s+договора|цена\s+контракта)",
@@ -108,7 +108,27 @@ def validate_prices(items):
     return output
 
 
+def saved_price_kind(card,reg):
+    """Preserve saved meaning, rechecking old browser labels before NMCD use."""
+    if not isinstance(card,dict):return None
+    summary=card.get("summary") or {}
+    kind=summary.get("price_kind") if isinstance(summary,dict) else None
+    evidence=card.get("price_evidence") or {}
+    if (isinstance(evidence,dict) and evidence.get("source")=="official_eis_card" and
+            _official_source(evidence.get("source_url") or evidence.get("evidence_page"),reg)):
+        evidence_kind=evidence.get("price_kind")
+        if evidence_kind=="nmcd" and not KINDS["nmcd"].fullmatch(normalize_label(evidence.get("price_label"))):
+            return "unknown"
+        if kind and evidence_kind and kind!=evidence_kind:return "unknown"
+        kind=kind or evidence_kind
+    return kind
+
+
 def chosen_price(prices):
+    # A malformed/generic saved sibling remains an unresolved alternative.
+    # Do not erase a former conflict by filtering it out of known types.
+    if any(x.get("price_kind")=="unknown" for x in prices):
+        return {"price":"","price_num":None,"price_kind":"unknown"}
     for kind in PRIORITY:
         candidates = [x for x in prices if x["price_kind"] == kind]
         if candidates:
@@ -133,7 +153,16 @@ def read_card(ns, reg):
     try:
         row = db.execute("SELECT payload FROM v341_card_facts WHERE reg=?", (reg,)).fetchone()
         result = json.loads(row[0]) if row else {}
-        return result if result and _official_source(result.get("source_page"), reg) else {}
+        if not isinstance(result,dict) or not _official_source(result.get("source_page"),reg):return {}
+        normalized=[]
+        for item in result.get("prices") or []:
+            try:normalized.extend(validate_prices([item]))
+            except (ValueError,TypeError,AttributeError):
+                parsed=money(item.get("price")) if isinstance(item,dict) else None
+                normalized.append({"price":parsed[0] if parsed else "","price_num":parsed[1] if parsed else None,
+                                   "price_kind":"unknown","price_label":"Вид цены не подтверждён"})
+        result["prices"]=normalized
+        return result
     except (sqlite3.OperationalError, ValueError, TypeError):
         return {}
     finally:
@@ -269,29 +298,27 @@ def reconcile_notice_context(purchase, direct):
             proof[key]=evidence(value)
     xml_price=context.get("price") or {}
     selected=chosen_price(direct.get("prices") or [])
-    if xml_price and selected:
-        # The current SOAP starting-price field is NMCD. A unit-price sum or
-        # maximum-value card field cannot corroborate it merely because its
-        # number is equal, nor replace it without the same revision check.
-        same=(selected.get("price_kind")=="nmcd" and
-              money(xml_price.get("price"))==money(selected.get("price")))
+    if xml_price:
+        xml_kind=xml_price.get("price_kind") or "unknown"
+        same=bool(selected and xml_kind!="unknown" and selected.get("price_kind")==xml_kind and
+                  money(xml_price.get("price"))==money(selected.get("price")))
         price_older=card_predates_notice(direct.get("price_captured_at",direct.get("captured_at")),record)
-        if not same and not price_older:
+        if selected and not same and not price_older:
             conflicts["price"]={"source":"official_eis_context_conflict","value":None,
                 "evidence":"Не установлена действующая редакция или вид противоречащей цены ЕИС",
-                "alternatives":[{**evidence(xml_price.get("price")),"price_kind":"nmcd"},
+                "alternatives":[{**evidence(xml_price.get("price")),"price_kind":xml_kind},
                     {"value":selected.get("price"),"source":"official_eis_card",
                      "price_kind":selected.get("price_kind"),
                      "source_url":direct.get("source_page"),
                      "captured_at":direct.get("price_captured_at",direct.get("captured_at"))}]}
-            purchase.update(price="",price_num=None)
+            purchase.update(price="",price_num=None,price_kind="unknown")
             purchase.pop("verified_price_source",None)
             proof["price"]=conflicts["price"]
-        elif not same:
-            purchase.update(xml_price)
-            purchase["price_kind"]="nmcd"
-            purchase.pop("verified_price_source",None)
-            proof["price"]=evidence(xml_price["price"])
+        else:
+            purchase.update(price=xml_price.get("price") or "",price_num=xml_price.get("price_num"),
+                            price_kind=xml_kind)
+            if not same:purchase.pop("verified_price_source",None)
+            proof["price"]={**evidence(xml_price.get("price")),"price_kind":xml_kind}
     purchase["_official_context_conflicts"]=conflicts
     # Missing publication context must not activate modern competitive rules;
     # a known method cannot resolve an unordered historical-edition conflict.
@@ -310,21 +337,30 @@ def enrich(ns, purchase, docs, card=None, detail=None):
                       "source_url": direct["source_page"], "source": "official_eis_card",
                       "evidence": str(direct.get("field_evidence", {}).get(key) or value)[:650],
                       "captured_at": direct.get("captured_at")}
-    # A saved EIS card is useful even if it captured a price before v341.
-    if not direct.get("prices"):
-        db = ns["conn"](); db.row_factory = sqlite3.Row
-        try:
-            row = db.execute("SELECT * FROM v338_card_price WHERE reg=? AND conflict=0", (reg,)).fetchone()
-            if row and _official_source(row["source_page"], reg):
+    # Read legacy conflicts even when a newer-format snapshot has prices.
+    # v338 retains its first capture time when recording an alternative, so
+    # that timestamp cannot prove the unresolved conflict predates SOAP.
+    db = ns["conn"](); db.row_factory = sqlite3.Row
+    try:
+        row = db.execute("SELECT * FROM v338_card_price WHERE reg=?", (reg,)).fetchone()
+        if row and _official_source(row["source_page"], reg):
+            if row["conflict"]:
+                direct={**direct,"source_page":row["source_page"],
+                        "field_source_page":direct.get("source_page"),"price_captured_at":"",
+                        "price_conflict":True,
+                        "prices":[{"price":"","price_num":None,"price_kind":"unknown"}]}
+            elif not direct.get("prices"):
                 direct = {**direct, "source_page": row["source_page"],
                           "field_source_page": direct.get("source_page"),
                           "price_captured_at": row["captured_at"],
                           "prices": [{"price": row["price"], "price_num": row["price_num"],
-                                      "price_kind": row["price_kind"], "price_label": row["price_label"]}]}
-        except sqlite3.OperationalError:
-            pass
-        finally:
-            db.close()
+                                      "price_kind": row["price_kind"] if row["price_kind"] in KINDS and
+                                          KINDS[row["price_kind"]].fullmatch(normalize_label(row["price_label"])) else "unknown",
+                                      "price_label": row["price_label"]}]}
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        db.close()
     # Never replace a saved authoritative card flag with document inference.
     # Resolve the current document separately so disagreement remains visible.
     existing = (purchase.get("fact_evidence") or {}).get("sme_only") or {}
@@ -349,8 +385,15 @@ def enrich(ns, purchase, docs, card=None, detail=None):
         purchase.update(price=selected["price"], price_num=selected["price_num"],
                         price_kind=selected["price_kind"], price_source_url=direct["source_page"])
         purchase["verified_price_source"] = {"kind": selected["price_kind"],
-            "price": selected["price"], "source": direct["source_page"]}
+            "price": selected["price"], "source": direct["source_page"], "label":selected.get("price_label")}
     reconcile_notice_context(purchase,direct)
+    if direct.get("price_conflict"):
+        conflict={"source":"official_eis_context_conflict","value":None,
+                  "evidence":"Не разрешено противоречие вида или значения цены в сохранённых сведениях ЕИС"}
+        purchase.setdefault("_official_context_conflicts",{}).setdefault("price",conflict)
+        purchase.update(price="",price_num=None,price_kind="unknown")
+        purchase.pop("verified_price_source",None)
+        purchase["fact_evidence"]["price"]=purchase["_official_context_conflicts"]["price"]
     conflicts=purchase.get("_official_context_conflicts") or {}
     if purchase.get("_current_soap_context"):
         # Only resolved summary values flow to later wrappers. The raw source
@@ -358,7 +401,7 @@ def enrich(ns, purchase, docs, card=None, detail=None):
         current_card=dict(saved_card(purchase))
         current_summary=dict(current_card.get("summary") or {})
         current_summary.update({key:purchase.get(key) for key in
-            ("method","published","submission_start","submission_end","price","price_num")})
+            ("method","published","submission_start","submission_end","price","price_num","price_kind")})
         current_card["summary"]=current_summary
         purchase["card_fields_json"]=current_card
         scope=resolve(purchase,docs)
@@ -419,6 +462,8 @@ def persist_facts(ns, purchase):
                 card = {}
             card.setdefault("fact_evidence", {}).update(evidence)
             card.setdefault("summary", {}).update({k: purchase.get(k) for k in evidence})
+            if "price" in evidence:
+                card["summary"].update({key:purchase.get(key) for key in ("price","price_num","price_kind")})
             if "card_fields_json" in row:
                 values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
             if values:

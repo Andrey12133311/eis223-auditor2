@@ -31,7 +31,7 @@ COUNTS = frozenset(("documents", "unreadable", "readable_input_documents", "veri
 REASONS = frozenset(("no_readable_documents", "no_verified_documents", "source_incomplete",
     "non_violation", "missing_law", "missing_evidence", "source_unverified", "category_unselected",
     "company_excluded", "review_only", "msp_scope_unknown", "msp_scope_conflict",
-    "verified_nmcd_missing", "applicability_review", "date_pair_review", "publication_conflict",
+    "verified_nmcd_missing", "price_basis_non_nmcd", "price_basis_conflict", "applicability_review", "date_pair_review", "publication_conflict",
     "fact_comparison_review", "duplicate", "invalid_record", "campaign_inactive", "reservation_changed",
     "outside_period", "company_scope_changed", "not_persistable", "analysis_failed", "analysis_cancelled", "analysis_timeout",
     "analysis_reservation_changed", "analysis_sqlite_busy", "analysis_sqlite_locked"))
@@ -123,7 +123,9 @@ def _review_reason(row):
     if code == "v383-bid-security-msp-scope":
         scope = row.get("sme_scope")
         return "msp_scope_conflict" if isinstance(scope, dict) and scope.get("state") == "conflict" else "msp_scope_unknown"
-    if code == "v336-bid-security-needs-verified-nmcd":return "verified_nmcd_missing"
+    if code == "v336-bid-security-needs-verified-nmcd":
+        reason=row.get("price_basis_reason")
+        return reason if isinstance(reason,str) and reason in ("price_basis_non_nmcd","price_basis_conflict") else "verified_nmcd_missing"
     if code == "v341-clarification-applicability":return "applicability_review"
     if code in ("v341-clarification-pair", "v341-cancellation-date-chain", "v341-protocol-ambiguous"):
         return "date_pair_review"

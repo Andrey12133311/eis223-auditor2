@@ -22,7 +22,7 @@ import test_receipt_original_parity as receipt_fixtures
 
 REG = "32619000001"
 CARD = "https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=" + REG
-PRICE = "Начальная (максимальная) цена: 195 167,20 руб."
+PRICE = "Начальная (максимальная) цена договора: 195 167,20 руб."
 BID = "Обеспечение заявки составляет 404 000 рублей."
 PURCHASE = {"reg": REG, "method": "Запрос предложений в электронной форме",
             "published": "2026-10-19", "price_num": 195167.2}

@@ -58,18 +58,18 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await runtime.finish_result(self.ns, reg, state, detail)
         return reg, state, detail
 
-    async def test_generation_three_reconciles_existing_generation_two_receipt_once(self):
+    async def _assert_generation_transition(self, previous, current):
         reg = self.purchase()
         with self.connect() as c:
             c.execute("UPDATE purchases SET customer='ГБУ Учреждение' WHERE reg_number=?", (reg,))
         general.initialize(self.ns)
-        with patch.object(runtime, "TARGET_GENERATION", 2), patch.object(general, "engine_signature", return_value="previous-generation-two-engine"):
+        with patch.object(runtime, "TARGET_GENERATION", previous), patch.object(general, "engine_signature", return_value=f"previous-generation-{previous}-engine"):
             self.activate()
             self.assertTrue(await runtime.run_one(self.ns, {}))
             with self.connect() as c:
                 before = ledger.inventory(c, runtime.AUTHORIZED_EPOCH)
             old_attempt = self.member(reg)["attempt_id"]
-        self.assertEqual(runtime.TARGET_GENERATION, 3)
+        self.assertEqual(runtime.TARGET_GENERATION, current)
         runtime.initialize(self.ns)
         self.assertEqual(self.member(reg)["reason"], "engine_changed")
         self.assertTrue(await runtime.run_one(self.ns, {}))
@@ -78,7 +78,7 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with self.connect() as c:
             after = ledger.inventory(c, runtime.AUTHORIZED_EPOCH)
             receipts = c.execute("SELECT attempt_id FROM full_recheck_receipts WHERE reg=?", (reg,)).fetchall()
-        self.assertEqual((after["target_generation"], after["current_completed"], after["current_pending"]), (3, 1, 0))
+        self.assertEqual((after["target_generation"], after["current_completed"], after["current_pending"]), (current, 1, 0))
         self.assertEqual(after["target_engine_signature"], general.engine_signature())
         self.assertEqual(after["membership_digest"], before["membership_digest"])
         self.assertEqual(after["db_snapshot_at"], before["db_snapshot_at"])
@@ -87,6 +87,14 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn(old_attempt, [row[0] for row in receipts])
         self.assertEqual(self.findings(reg), 1)
         self.assertEqual(after["committed_new_findings"], before["committed_new_findings"])
+
+    async def test_generation_three_reconciles_existing_generation_two_receipt_once(self):
+        with patch.object(runtime, "TARGET_GENERATION", 3):
+            await self._assert_generation_transition(2, 3)
+
+    async def test_generation_four_reconciles_generation_three_price_receipt_once(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 4)
+        await self._assert_generation_transition(3, 4)
 
     async def test_corrected_engine_catches_up_completed_noncompany_without_new_epoch(self):
         reg = self.purchase()

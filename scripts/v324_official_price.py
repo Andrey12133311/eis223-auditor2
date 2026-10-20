@@ -18,6 +18,22 @@ LABEL=re.compile(
     r"\bнмц(?:д|к)?\b)(?:\s*\(нмцд\))?",
     re.I,
 )
+EXPLICIT_NMCD_LABEL=re.compile(
+    r"(?:начальн\w*\s*\(максимальн\w*\)\s*цен\w*\s*(?:договора|контракта)|"
+    r"начальн\w*\s+максимальн\w*\s+цен\w*\s*(?:договора|контракта)|"
+    r"начальн\w*\s+цен\w*\s*(?:договора|контракта)|\bнмц[дк]\b)", re.I,
+)
+UNIT_TOTAL_LABEL=re.compile(r"(?:начальн\w*\s+)?сумм\w*\s+цен\w*\s+(?:всех\s+)?единиц\w*", re.I)
+
+
+def price_kind_from_label(evidence):
+    """A general initial-price heading does not identify contract NMCD."""
+    if UNIT_TOTAL_LABEL.search(evidence):return "total_unit_prices"
+    if re.search(r"максимальн\w*\s+значени\w*\s+цен",evidence,re.I):
+        return "maximum_contract_value"
+    return "nmcd" if EXPLICIT_NMCD_LABEL.search(evidence) else "unknown"
+
+
 UNSUITABLE=re.compile(
     r"(?:цен\w*\s+победител\w*|цен\w*\s+единиц\w*|"
     r"стоимост\w*\s+единиц\w*|начальн\w*\s+цен\w*\s+единиц\w*|"
@@ -111,7 +127,7 @@ def _match_amount(part):
         return None
     return f"{number:.2f}",float(number)
 
-def prices_in_text(text):
+def prices_in_text(text, *, typed=False):
     source=str(text or "")[:600000].replace("\xa0"," ").replace("\u202f"," ").replace("\u00ad","")
     raw_lines=source.splitlines()
     lines=[" ".join(line.split()) for line in raw_lines]
@@ -191,7 +207,8 @@ def prices_in_text(text):
             if result is not None:
                 price,number=result
                 evidence=line[max(0,hit.start()-80):hit.end()]+after[:320]
-                candidates.append((price,number,evidence[:500]))
+                item=(price,number,evidence[:500])
+                candidates.append((*item,price_kind_from_label(hit.group(0))) if typed else item)
     return candidates
 
 def verified_nmcd(docs):
@@ -206,20 +223,19 @@ def verified_nmcd(docs):
             continue
         if any(v in name for v in ("договор заключен","итоговый протокол","протокол итог")):
             continue
-        values=prices_in_text(d.get("text") or "")
+        values=prices_in_text(d.get("text") or "",typed=True)
         if not values:continue
         # Some explanatory documentation lists several LOT prices; use a
         # unanimous amount only, otherwise require comparison with EIS XML.
-        unique={round(n,2) for _,n,_ in values}
+        unique={(round(value[1],2),value[3]) for value in values}
         if len(unique)!=1:continue
         value=values[0]
         records.append({"price":value[0],"price_num":value[1],
-                        "price_kind":"maximum_contract_value" if re.search(
-                            r"максимальн\w*\s+значени\w*\s+цен",value[2],re.I) else "nmcd",
+                        "price_kind":value[3],
                         "evidence":value[2],"source_url":(d.get("meta") or {}).get("source_url"),
                         "document":d.get("name")})
     if not records:return {}
-    amounts={round(x["price_num"],2) for x in records}
+    amounts={(round(x["price_num"],2),x["price_kind"]) for x in records}
     if len(amounts)!=1:return {"price_conflict":True,"source_count":len(records)}
     # Prefer the notice over documentation while keeping only a unanimous value.
     records.sort(key=lambda x:(0 if re.search("извещени",x["document"],re.I) else 1,x["document"]))

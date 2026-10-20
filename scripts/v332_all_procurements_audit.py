@@ -825,17 +825,19 @@ def as_procurement(row):
         if isinstance(card,dict):
             out["card_fields_json"]=card
             out["fact_evidence"]=card.get("fact_evidence") or {}
+            from v341_eis_facts import saved_price_kind
+            if saved_price_kind(card,reg):out["price_kind"]=saved_price_kind(card,reg)
         from v311_verified_customer import _official_source
         from v335_price_recovery import money
         verified=money(ev.get("price"))
         number=money(out["price_num"])
         if (ev.get("source")=="official_eis_card" and
-            ev.get("price_kind")=="nmcd" and verified and
+            ev.get("price_kind")=="nmcd" and out.get("price_kind")=="nmcd" and verified and
             number and verified[1]==number[1] and
             _official_source(ev.get("source_url") or ev.get("evidence_page"),reg)):
             out["verified_price_source"]={
                 "kind":"nmcd","source":ev.get("source_url") or ev.get("evidence_page"),
-                "price":verified[0]
+                "price":verified[0],"label":ev.get("price_label")
             }
     except (ValueError,TypeError,AttributeError,KeyError):
         pass
@@ -1393,7 +1395,7 @@ async def _inspect_one(ns,reg):
     source_incomplete=source["source_incomplete"]
     for key,value in source["p"].items():
         if value is not None and value != "" and (not purchase.get(key) or key in ("method","published","submission_end","submission_start",
-                                                                "deadline","price","price_num")):
+                                                                "deadline","price","price_num","price_kind")):
             purchase[key]=value
     card=source["card"] or card
     detail=source["detail"] or detail

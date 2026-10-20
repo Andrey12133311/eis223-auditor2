@@ -259,6 +259,13 @@ def verified_price(p,docs):
     # sum, maximum contract value, or other explicitly non-NMCD field.
     if p.get("price_kind") not in (None,"","nmcd"):return None
     official=p.get("verified_price_source")
+    context=p.get("_current_soap_context") or {}
+    record=context.get("record") or {}
+    xml_price=context.get("price") or {}
+    xml_verified=(record.get("reg_number")==str(p.get("reg") or "") and
+                  record.get("xml_family")=="notice" and
+                  bool(re.fullmatch(r"[0-9a-f]{64}",str(record.get("xml_sha256") or ""))))
+    if xml_verified and xml_price and xml_price.get("price_kind")!="nmcd":return None
     if isinstance(official,dict) and official.get("kind") not in (None,"","nmcd"):
         from v311_verified_customer import _official_source
         if _official_source(official.get("source"),str(p.get("reg") or "")):return None
@@ -266,6 +273,7 @@ def verified_price(p,docs):
     if expected and expected[1]<=0:return None
     expected_value=Decimal(str(expected[1])) if expected else None
     records=[]
+    observed_prices=set()
     lots=set()
     for d in docs[:MAX_DOCS]:
         if not isinstance(d,dict) or not verified(d):continue
@@ -276,14 +284,18 @@ def verified_price(p,docs):
         if len(lots)>1:return None
         # prices_in_text already rejects dates, percentages, unit/winner
         # prices, conditional statutory thresholds and unrelated table cells.
-        values=prices_in_text(body)
+        values=prices_in_text(body,typed=True)
         if not values:continue
         amounts={Decimal(value[0]) for value in values}
         if len(amounts)!=1:return None
         observed=next(iter(amounts))
         if observed<=0:return None
         if expected_value is not None and observed!=expected_value:return None
-        if records and observed!=records[0][0]:return None
+        observed_prices.add(observed)
+        if len(observed_prices)>1:return None
+        # Unknown/generic and ceiling values still participate in conflict
+        # checks. Filtering them first would hide a different revision/price.
+        if not any(value[3]=="nmcd" for value in values):continue
         # Inspect the original, not its capped evidence excerpt. Recovery
         # accepts numeric fields with a spelling; a legal finding must not
         # choose the digits when that spelling conflicts or cannot be read.
@@ -315,10 +327,20 @@ def verified_price(p,docs):
             if not card_value or card_value[1]<=0:return None
             confirmed_value=Decimal(str(card_value[1]))
             if expected_value is not None and confirmed_value!=expected_value:return None
+            if observed_prices and observed_prices!={confirmed_value}:return None
             if records and confirmed_value!=records[0][0]:return None
             if records:return records[0]
             return (confirmed_value,{"name":"Карточка ЕИС — подтверждённая НМЦД"},None)
     return records[0] if records else None
+
+def price_basis_reason(p):
+    """Bounded diagnostic labels; never include source text, amounts or URLs."""
+    if "price" in (p.get("_official_context_conflicts") or {}):return "price_basis_conflict"
+    if p.get("price_kind") in ("unit_price","total_unit_prices","maximum_contract_value",
+                                "subject_cost","lot_price","contract_price"):
+        return "price_basis_non_nmcd"
+    return "verified_nmcd_missing"
+
 
 def security_findings(p,docs):
     """Very narrow checks under parts 25–27 of article 3.2.
@@ -368,6 +390,7 @@ def security_findings(p,docs):
                     "status":"check","evidence":evidence,
                     "source":doc.get("name"),"source_url":source,"document":doc.get("name"),
                     "field_path":"v336-bid-security-needs-verified-nmcd",
+                    "price_basis_reason":price_basis_reason(p),
                     "law":"223-ФЗ, ст. 3.2 ч. 25–27","law_url":LAW_URL,
                     "location":f"Оригинал ЕИС, позиция {match.start()+1}",
                     "note":"Не подтверждены вид цены и числовая НМЦД по официальным источникам. "
