@@ -36,7 +36,7 @@ jobs:
           PYTHONPATH: '.:scripts:tests'
         run: |
           python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3'"
-          python -m unittest test_recheck4007_safety test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_full_recheck_request
+          python -m unittest test_recheck4007_safety test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_full_recheck_request test_ingestion_metadata_contention test_legal_fact_write_contention test_parenthesized_event_date_labels
           python -m unittest test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract
           python -m unittest test_price_provenance_chain test_procurement_fact_trace test_clarification_identity test_clarification_date_label_recall test_protocol_date_label_recall test_audit_persistence_lock_scope test_thematic_persist_lock_scope
           python -m pytest -q tests/test_v314_eis_metadata.py
