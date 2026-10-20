@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_funnel as funnel
+from audit_source_version import SemanticSnapshotError
+from audit_write_guard import guarded_transaction
 import legal_audit_revision as revision
 import v314_eis_metadata as metadata
 import v332_all_procurements_audit as general
@@ -340,6 +342,123 @@ class FunnelRuntime(unittest.TestCase):
         self.assertFalse(event["persist_applied"])
         self.assertEqual(event["counts"]["persisted_confirmed"], 0)
 
+    def test_lost_reservation_failure_is_fenced_and_fresh_owner_can_save(self):
+        fixture = self.thematic_fixture()
+        fast._persist(fixture.ns, fixture.results())
+        with fixture.connection() as c:
+            c.execute("UPDATE thematic_items SET status='queued',reservation_token='lease-a'")
+        fixture.item["categories"] = ["dates"]
+        before = fixture.snapshot()[1]
+        def stale_write():
+            # Real startup recovery can invalidate an older process's attempt.
+            fast.install(fixture.ns)
+            with fixture.connection() as c:
+                c.execute("UPDATE thematic_items SET reservation_token='lease-b'")
+            with fixture.connection() as c:
+                with guarded_transaction(c):
+                    c.execute("INSERT INTO unrelated_writer VALUES('must not commit')")
+        async def review(*args):
+            await asyncio.to_thread(stale_write)
+            self.fail("stale source writes must be fenced")
+        output = io.StringIO()
+        with patch.object(fast, "_watermark", return_value=("source-a", "engine-a")), \
+             patch.object(thematic, "independent_review", side_effect=review), redirect_stdout(output):
+            result = asyncio.run(fast._one(fixture.ns, fixture.item, asyncio.Semaphore(1)))
+            self.assertEqual(result[1:], ("retry", [], "LookupError"))
+            self.assertEqual(fast._persist(fixture.ns, [result]), 0)
+            fast._release_items(fixture.ns, [fixture.item])
+        events = records(output)
+        self.assertEqual([event["state"] for event in events], ["retry", "superseded"])
+        self.assertEqual(events[0]["trace"], events[1]["trace"])
+        self.assertEqual(events[0]["reasons"], {"analysis_failed": 1,
+            "analysis_exception_lookup": 1, "analysis_reservation_changed": 1})
+        self.assertEqual(events[1]["reasons"], {**events[0]["reasons"], "reservation_changed": 1})
+        self.assertFalse(events[1]["persist_applied"])
+        self.assertEqual(fixture.snapshot()[1], before)
+        with fixture.connection() as c:
+            self.assertEqual(tuple(c.execute("SELECT status,reservation_token FROM thematic_items").fetchone()),
+                             ("queued", "lease-b"))
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM unrelated_writer").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM retained_history").fetchone()[0], 1)
+        fresh = {**fixture.item, "reservation_token": "lease-b"}
+        later = {**fixture.finding, "evidence": "Запрос 08.10.2026; ответ 14.10.2026"}
+        output = io.StringIO()
+        with patch.object(fast, "_watermark", return_value=("source-a", "engine-a")), \
+             patch.object(thematic, "independent_review", new=AsyncMock(return_value=("completed", [later]))), \
+             redirect_stdout(output):
+            result = asyncio.run(fast._one(fixture.ns, fresh, asyncio.Semaphore(1)))
+            self.assertEqual(fast._persist(fixture.ns, [result]), 1)
+        self.assertEqual(fixture.snapshot()[0]["status"], "completed")
+        self.assertEqual(len(fixture.snapshot()[1]), 2)
+        self.assertNotEqual(records(output)[0]["trace"], events[0]["trace"])
+        self.assertEqual(records(output)[0]["reasons"], {})
+
+    def test_source_error_and_later_reservation_change_are_not_guard_failure(self):
+        fixture = self.thematic_fixture()
+        fixture.item["categories"] = ["dates"]
+        with fixture.connection() as c:
+            c.execute("UPDATE thematic_items SET status='queued'")
+        def watermark(*args):
+            with fixture.connection() as c:
+                c.execute("UPDATE thematic_items SET reservation_token='lease-b'")
+            raise SemanticSnapshotError("concurrent_file_change", "SECRET-PATH")
+        output = io.StringIO()
+        with patch.object(fast, "_watermark", side_effect=watermark), \
+             patch.object(thematic, "independent_review", side_effect=AssertionError("must not analyze")), \
+             redirect_stdout(output):
+            result = asyncio.run(fast._one(fixture.ns, fixture.item, asyncio.Semaphore(1)))
+            self.assertEqual(result[1:], ("retry", [], "source_snapshot_concurrent_file_change"))
+            self.assertEqual(fast._persist(fixture.ns, [result]), 0)
+        events = records(output)
+        self.assertEqual([event["state"] for event in events], ["retry", "superseded"])
+        self.assertEqual(events[0]["reasons"], {"analysis_failed": 1,
+            "analysis_exception_source_snapshot": 1, "analysis_source_changed": 1})
+        self.assertEqual(events[1]["reasons"], {**events[0]["reasons"], "reservation_changed": 1})
+        self.assertNotIn("SECRET", output.getvalue())
+
+    def test_owned_source_failure_keeps_retry_and_prior_watermarks(self):
+        fixture = self.thematic_fixture()
+        fast._persist(fixture.ns, fixture.results())
+        fixture.item["categories"] = ["dates"]
+        with fixture.connection() as c:
+            c.execute("UPDATE thematic_items SET status='queued',reservation_token='lease-a'")
+        before = fixture.snapshot()
+        output = io.StringIO()
+        with patch.object(fast, "_watermark", side_effect=SemanticSnapshotError("time_budget")), \
+             redirect_stdout(output):
+            result = asyncio.run(fast._one(fixture.ns, fixture.item, asyncio.Semaphore(1)))
+            self.assertEqual(fast._persist(fixture.ns, [result]), 1)
+        row, findings, _ = fixture.snapshot()
+        self.assertEqual(findings, before[1])
+        self.assertEqual((row["status"], row["reservation_token"], row["retry_attempts"]), ("retry", "", 1))
+        self.assertGreater(row["next_retry_at"], 0)
+        for key in ("last_source_version", "last_semantic_version", "last_engine_signature"):
+            self.assertEqual(row[key], before[0][key])
+        self.assertTrue(records(output)[1]["persist_applied"])
+        self.assertEqual(records(output)[1]["reasons"], {"analysis_failed": 1,
+            "analysis_exception_source_snapshot": 1, "analysis_source_budget": 1})
+
+    def test_unrelated_lookup_error_is_not_reported_as_reservation_guard_failure(self):
+        fixture = self.thematic_fixture()
+        fixture.item["categories"] = ["dates"]
+        with fixture.connection() as c:c.execute("UPDATE thematic_items SET status='queued'")
+        async def review(*args):
+            # The row may independently change after an unrelated failure;
+            # persist supersession alone does not identify its original cause.
+            with fixture.connection() as c:
+                c.execute("UPDATE thematic_items SET reservation_token='lease-b'")
+            raise LookupError("SECRET missing lookup data")
+        output = io.StringIO()
+        with patch.object(fast, "_watermark", return_value=("source-a", "engine-a")), \
+             patch.object(thematic, "independent_review", side_effect=review), redirect_stdout(output):
+            result = asyncio.run(fast._one(fixture.ns, fixture.item, asyncio.Semaphore(1)))
+            self.assertEqual(fast._persist(fixture.ns, [result]), 0)
+        events = records(output)
+        self.assertEqual(events[0]["reasons"], {"analysis_failed": 1, "analysis_exception_lookup": 1})
+        self.assertEqual(events[1]["reasons"], {**events[0]["reasons"], "reservation_changed": 1})
+        self.assertEqual(events[1]["state"], "superseded")
+        self.assertNotIn("SECRET", output.getvalue())
+
     def test_thematic_rollback_emits_no_committed_diagnostic(self):
         fixture = self.thematic_fixture()
         with fixture.connection() as c:
@@ -393,6 +512,109 @@ class FunnelRuntime(unittest.TestCase):
 
 
 class FunnelIsolation(unittest.TestCase):
+    def exception_event(self, exc):
+        event = funnel.new("thematic")
+        token = funnel.CURRENT.set(event)
+        try:funnel.observe("analysis_exception", exc)
+        finally:funnel.CURRENT.reset(token)
+        output = io.StringIO()
+        with redirect_stdout(output):funnel.emit(event, "analysis", "retry")
+        return records(output)[0], output.getvalue()
+
+    def test_exception_diagnostics_use_only_exact_fixed_classes_and_source_reasons(self):
+        for cls, reason in funnel.EXCEPTION_REASONS:
+            exc = cls("SECRET")
+            event, output = self.exception_event(exc)
+            self.assertEqual(event["reasons"].get(reason), 1)
+            self.assertNotIn("SECRET", output)
+        for label, reasons in funnel.SNAPSHOT_REASONS:
+            for reason in reasons:
+                with self.subTest(reason=reason):
+                    event, output = self.exception_event(SemanticSnapshotError(reason, "SECRET-PATH"))
+                    self.assertEqual(event["reasons"], {"analysis_exception_source_snapshot": 1, label: 1})
+                    self.assertNotIn("SECRET", output)
+        class HostileError(RuntimeError):
+            def __str__(self):raise AssertionError("must not read exception text")
+            def __getattribute__(self, key):raise AssertionError("must not inspect unknown exceptions")
+        HostileError.__name__ = "SECRET-EXCEPTION-NAME"
+        event, output = self.exception_event(HostileError("SECRET"))
+        self.assertEqual(event["reasons"], {"analysis_exception_unknown": 1})
+        self.assertNotIn("SECRET", output)
+        class HostileString(str):
+            def __hash__(self):raise AssertionError("must not hash custom reasons")
+        for reason in ("secret_machine_code", "x" * 100000, HostileString("time_budget"), {"SECRET": 1}):
+            exc = SemanticSnapshotError("unknown", "SECRET")
+            exc.reason = reason
+            event, output = self.exception_event(exc)
+            self.assertEqual(event["reasons"], {"analysis_exception_source_snapshot": 1, "analysis_source_unknown": 1})
+            self.assertNotIn("SECRET", output)
+
+    def test_sqlite_diagnostics_require_numeric_code_never_exception_text(self):
+        for code, expected in ((sqlite3.SQLITE_BUSY, "analysis_sqlite_busy"),
+                               (sqlite3.SQLITE_BUSY | (2 << 8), "analysis_sqlite_busy"),
+                               (sqlite3.SQLITE_LOCKED, "analysis_sqlite_locked"),
+                               (sqlite3.SQLITE_ERROR, None), (None, None),
+                               ("SQLITE_BUSY SECRET", None), (True, None)):
+            exc = sqlite3.OperationalError("database is locked SECRET")
+            if code is not None:exc.sqlite_errorcode = code
+            event, output = self.exception_event(exc)
+            self.assertEqual(event["reasons"], {"analysis_exception_sqlite_operational": 1,
+                             **({expected: 1} if expected else {})})
+            self.assertNotIn("SECRET", output)
+        # Confirm a native SQLite exception, without synthesizing its message/code.
+        fixture = thematic_fixture.ThematicPersistLockScope()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with fixture.connection() as owner, fixture.connection() as rival:
+            owner.execute("BEGIN IMMEDIATE")
+            try:rival.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                event, _ = self.exception_event(exc)
+            else:self.fail("expected actual SQLite contention")
+        self.assertEqual(event["reasons"], {"analysis_exception_sqlite_operational": 1, "analysis_sqlite_busy": 1})
+
+    def test_exception_diagnostics_are_bounded_and_reallowlisted_at_emit(self):
+        event = funnel.new("thematic")
+        token = funnel.CURRENT.set(event)
+        try:
+            for _ in range(10000):
+                funnel.observe("analysis_exception", RuntimeError("SECRET"))
+                funnel.observe("analysis_exception", SemanticSnapshotError("arbitrary_private_code"))
+        finally:funnel.CURRENT.reset(token)
+        event["reasons"]["SECRET-UNKNOWN-CODE"] = 1
+        output = io.StringIO()
+        with redirect_stdout(output):funnel.emit(event, "analysis", "retry")
+        self.assertEqual(records(output)[0]["reasons"], {"analysis_exception_runtime": 10000,
+            "analysis_exception_source_snapshot": 10000, "analysis_source_unknown": 10000})
+        self.assertLess(len(output.getvalue()), 1700)
+        self.assertNotIn("SECRET", output.getvalue())
+        self.assertNotIn("arbitrary_private_code", output.getvalue())
+        class HostileKey(str):
+            def __hash__(self):return hash("analysis_exception_runtime")
+            def __eq__(self, other):return other == "analysis_exception_runtime"
+        # A forged equal-to-allowlist key must never become the output key.
+        event["reasons"] = {HostileKey("SECRET-FORGED-KEY"): 3}
+        output = io.StringIO()
+        with redirect_stdout(output):funnel.emit(event, "analysis", "retry")
+        self.assertEqual(records(output)[0]["reasons"], {"analysis_exception_runtime": 3})
+        self.assertNotIn("SECRET", output.getvalue())
+
+    def test_broken_exception_classifier_does_not_change_retry(self):
+        fixture = thematic_fixture.ThematicPersistLockScope()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.item["categories"] = ["dates"]
+        with fixture.connection() as c:c.execute("UPDATE thematic_items SET status='queued'")
+        output = io.StringIO()
+        with patch.object(funnel, "EXCEPTION_REASONS", None), \
+             patch.object(fast, "_watermark", side_effect=ValueError("SECRET")), redirect_stdout(output):
+            result = asyncio.run(fast._one(fixture.ns, fixture.item, asyncio.Semaphore(1)))
+            self.assertEqual(result[1:], ("retry", [], "ValueError"))
+            self.assertEqual(fast._persist(fixture.ns, [result]), 1)
+        self.assertEqual(records(output)[0]["reasons"], {"analysis_failed": 1})
+        self.assertEqual(fixture.snapshot()[0]["status"], "retry")
+        self.assertNotIn("SECRET", output.getvalue())
+
     def test_analyzer_kind_counts_are_bounded_disjoint_and_do_not_mutate_outputs(self):
         rows = [{"kind": "violation"}, {"kind": "check"}, {"kind": "risk"},
                 {"kind": "PRIVATE-UNKNOWN", "evidence": "SECRET"}, {}, None, "SECRET"]

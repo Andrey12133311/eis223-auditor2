@@ -14,12 +14,14 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException, Request
+from starlette.requests import ClientDisconnect
 from v295_eis_originals import EXT, allowed_documents, root, saved_document, uid_from_url
 from v301_search_jobs import MAX_QUEUE, REG, _db, _enqueue, _utc
 
@@ -156,6 +158,51 @@ def _log_telemetry(event, **fields):
     print("EIS_WORKER_TELEMETRY "+json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
 
 
+# Match the deployed VPS client's existing site-503 backoff, below the 900s
+# lease. A pause never renews a lease: late requests still face normal fencing.
+_DATABASE_RETRY_SECONDS = 300
+_DATABASE_BUSY_DETAILS = {
+    "claim": "Worker claim database is busy; retry the same request",
+    "bootstrap": "Worker queue database is busy; retry the same request",
+    "report": "Worker report database is busy; retry the same report",
+    "inn_report": "Worker INN report database is busy; retry the same report",
+    "heartbeat": "Worker heartbeat database is busy; retry the same heartbeat",
+    "discovery": "Worker discovery database is busy; retry the same page",
+}
+_database_busy_logged_at = {}
+_database_busy_log_lock = threading.Lock()
+
+
+def _log_database_busy(operation):
+    # Fixed labels only; at most one line per operation per 300s per process.
+    # Never retain request IDs, tokens, source content, or exception text.
+    now = time.monotonic()
+    with _database_busy_log_lock:
+        previous = _database_busy_logged_at.get(operation)
+        if previous is not None and now-previous < _DATABASE_RETRY_SECONDS:
+            return
+        _database_busy_logged_at[operation] = now
+    try:
+        _log_telemetry(operation+"_busy", retry_after_seconds=_DATABASE_RETRY_SECONDS)
+    except (OSError, ValueError):
+        # A closed output stream must not replace expected backpressure with 500.
+        pass
+
+
+async def _database_call(operation, function, *args):
+    detail = _DATABASE_BUSY_DETAILS[operation]
+    try:
+        return await asyncio.to_thread(function, *args)
+    except sqlite3.OperationalError as exc:
+        from audit_db_retry import is_busy
+        if not is_busy(exc):
+            raise
+        # Transaction functions have rolled back/closed before returning here.
+        # No retry or acknowledgement: durable client payloads stay pending.
+        _log_database_busy(operation)
+        raise HTTPException(503, detail, headers={"Retry-After": str(_DATABASE_RETRY_SECONDS)}) from None
+
+
 def _heartbeat_telemetry(data):
     result = {}
     version = data.get("version")
@@ -239,11 +286,16 @@ def telemetry_snapshot(ns):
 async def body(request):
     pieces = []
     size = 0
-    async for piece in request.stream():
-        size += len(piece)
-        if size > MAX_REPORT_BYTES:
-            raise HTTPException(413, "Worker payload too large")
-        pieces.append(piece)
+    try:
+        async for piece in request.stream():
+            size += len(piece)
+            if size > MAX_REPORT_BYTES:
+                raise HTTPException(413, "Worker payload too large")
+            pieces.append(piece)
+    except ClientDisconnect:
+        # The authenticated request never delivered a complete payload. No
+        # transaction ran, and a disconnected client cannot receive an ack.
+        raise HTTPException(400, "Incomplete worker request body") from None
     try:
         result = json.loads(b"".join(pieces))
     except (ValueError, UnicodeError):
@@ -798,7 +850,7 @@ def install(ns):
         if not 1 <= limit <= 2:
             raise HTTPException(422, "Claim one or two jobs")
         supported = globals()["capabilities"](capabilities)
-        return {"jobs": await asyncio.to_thread(claim, ns, identity, limit, supported), "poll_seconds": 15}
+        return {"jobs": await _database_call("claim", claim, ns, identity, limit, supported), "poll_seconds": 15}
 
     @app.post("/api/eis-worker/jobs")
     async def enqueue(request: Request):
@@ -807,7 +859,7 @@ def install(ns):
         reg = registry(data.get("reg_number"))
         if data.get("source") != "worker_bootstrap":
             raise HTTPException(422, "Invalid bootstrap source")
-        row, created = await asyncio.to_thread(_enqueue, ns, "reg", reg, 1, 9, "worker-bootstrap", False)
+        row, created = await _database_call("bootstrap", _enqueue, ns, "reg", reg, 1, 9, "worker-bootstrap", False)
         return {"job": {"id": row["id"], "reg_number": reg, "status": row["status"]}, "created": created}
 
     @app.post("/api/eis-worker/jobs/{identifier}/report")
@@ -815,19 +867,7 @@ def install(ns):
         authenticate(request)
         if not re.fullmatch(r"[0-9a-f]{24}", identifier):
             raise HTTPException(422, "Invalid job identifier")
-        try:
-            result = await asyncio.to_thread(report, ns, identifier, await body(request))
-        except sqlite3.OperationalError as exc:
-            from audit_db_retry import is_busy
-            if not is_busy(exc):
-                raise
-            # report() has already rolled back/closed. Do not acknowledge an
-            # uncommitted report or flood middleware logs with its traceback.
-            # The existing VPS client keeps the report durable on HTTP 503 and
-            # applies its usual 300-second site backoff before the same replay.
-            _log_telemetry("report_busy", retry_after_seconds=300)
-            raise HTTPException(503, "Worker report database is busy; retry the same report",
-                                headers={"Retry-After": "300"}) from None
+        result = await _database_call("report", report, ns, identifier, await body(request))
         if not result.get("replayed") and result["originals_received"] > 0:
             enqueue_async = ns.get("_v295_enqueue_review_async")
             enqueue_review = ns.get("_v295_enqueue_review")
@@ -846,17 +886,17 @@ def install(ns):
         if not re.fullmatch(r"[0-9a-f]{24}", identifier):
             raise HTTPException(422, "Invalid job identifier")
         from eis_inn_search import report as inn_report
-        return await asyncio.to_thread(inn_report, ns, identifier, await body(request))
+        return await _database_call("inn_report", inn_report, ns, identifier, await body(request))
 
     @app.post("/api/eis-worker/heartbeat")
     async def receive_heartbeat(request: Request):
         authenticate(request)
-        return await asyncio.to_thread(heartbeat, ns, await body(request))
+        return await _database_call("heartbeat", heartbeat, ns, await body(request))
 
     @app.post("/api/eis-worker/discovered")
     async def receive_discovered(request: Request):
         authenticate(request)
-        return await asyncio.to_thread(discovered, ns, await body(request))
+        return await _database_call("discovery", discovered, ns, await body(request))
 
     @app.get("/api/eis-worker/status")
     async def status(request: Request):

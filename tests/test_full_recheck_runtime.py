@@ -245,14 +245,22 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         claimed = await general.claim_safely(self.ns)
         before = self.row(reg)
         self.activate()
-        await runtime.attach_general(self.ns, claimed)
+        with self.assertRaisesRegex(runtime.RequestOwnershipBusy, "request_claim_unavailable"):
+            await runtime.attach_general(self.ns, claimed)
         self.assertFalse(hasattr(claimed, "full_recheck_claim"))
         self.assertFalse(await runtime.run_one(self.ns, {}))
         self.assertEqual(self.row(reg), before)
-        await self.ordinary(claimed)
-        self.assertEqual(self.member(reg)["status"], "pending")
-        self.assertTrue(await runtime.run_one(self.ns, {}))
+        self.assertEqual(self.member(reg)["attempt_count"], 0)
+        self.assertEqual(self.findings(reg), 0)
+        self.assertEqual(general.defer_retry(self.ns, claimed, {}, "full_request_ownership_busy",
+                                            general.BUSY_RETRY_BASE_SECONDS), 60)
+        with patch.object(general.time, "time", return_value=self.row(reg)["next_retry_at"] + 1):
+            fresh = await general.claim_safely(self.ns)
+        self.assertNotEqual(fresh.reservation_token, claimed.reservation_token)
+        await self.ordinary(fresh)
+        await runtime.release(self.ns, fresh)
         self.assertEqual(self.member(reg)["status"], "completed")
+        self.assertEqual((self.member(reg)["attempt_count"], self.member(reg)["total_new_findings"]), (1, 1))
         self.assertEqual(self.findings(reg), 1)
         self.assertEqual(general.refresh_changed(self.ns), 0)
 
@@ -596,6 +604,97 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await general.release_reservation(self.ns, claimed)
         self.assertEqual(self.row(reg)["state"], "pending")
 
+    async def test_first_cancellation_during_successful_turn_cleanup_propagates(self):
+        await self.cleanup_cancellation_case(repeated=False)
+
+    async def test_repeated_cancellation_during_successful_turn_cleanup_propagates(self):
+        await self.cleanup_cancellation_case(repeated=True)
+
+    async def test_cancellation_survives_reported_cleanup_error(self):
+        await self.cleanup_cancellation_case(repeated=True, cleanup_error=True)
+
+    async def test_prior_analysis_cancellation_survives_cleanup_error(self):
+        await self.cleanup_cancellation_case(repeated=False, cleanup_error=True, prior_cancel=True)
+
+    async def cleanup_cancellation_case(self, *, repeated, cleanup_error=False, prior_cancel=False):
+        import threading
+        reg = self.purchase()
+        with self.connect() as c:
+            c.execute("UPDATE purchases SET customer='ГБУ Учреждение' WHERE reg_number=?", (reg,))
+        general.initialize(self.ns)
+        self.activate()
+        entered, allow_cleanup = threading.Event(), threading.Event()
+        real_release = runtime._release_member
+        calls = []
+        def held_release(ns, claimed):
+            calls.append(claimed)
+            entered.set()
+            if not allow_cleanup.wait(5):
+                raise AssertionError("cleanup barrier not released")
+            return real_release(ns, claimed)
+        def unlock_then_error(handle):
+            _release_execution_lock(handle)
+            raise OSError("private fixture detail must not be logged")
+        slot = {}
+        analysis_started = asyncio.Event()
+        async def held_analysis(*args):
+            analysis_started.set()
+            await asyncio.Event().wait()
+        if cleanup_error:
+            self.stack.enter_context(patch.object(originals, "_release_execution_lock", side_effect=unlock_then_error))
+        if prior_cancel:
+            self.stack.enter_context(patch.object(general, "inspect_one", side_effect=held_analysis))
+        with patch.object(runtime, "_release_member", side_effect=held_release):
+            task = asyncio.create_task(runtime.run_one(self.ns, slot))
+            try:
+                if prior_cancel:
+                    await asyncio.wait_for(analysis_started.wait(), 3)
+                    task.cancel()
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                # The actual analysis has already committed one durable receipt;
+                # cancellation must neither undo it nor abandon its file lock.
+                before = self.member(reg)
+                self.assertEqual(before["status"], "running" if prior_cancel else "completed")
+                self.assertEqual(self.findings(reg), 0 if prior_cancel else 1)
+                if not prior_cancel:
+                    task.cancel()
+                    await asyncio.sleep(0)
+                if repeated:
+                    task.cancel()
+                    await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertIsNone(_try_execution_lock(reg))
+                self.assertEqual(runtime._dispatch(self.ns)["active"], 1)
+                allow_cleanup.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 3)
+            finally:
+                allow_cleanup.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(task.cancelled())
+        if cleanup_error:
+            self.assertIn("FULL_RECHECK_RELEASE cleanup_failed=True type=OSError", self.output.getvalue())
+            self.assertNotIn("private fixture detail", self.output.getvalue())
+        self.assertEqual(len(calls), 1)
+        if prior_cancel:
+            self.assertEqual(self.member(reg)["status"], "retry")
+            self.assertEqual(self.member(reg)["reason"], "interrupted_attempt")
+            self.assertEqual(self.member(reg)["attempt_count"], 1)
+        else:
+            self.assertEqual(self.member(reg), before)
+        self.assertEqual(self.findings(reg), 0 if prior_cancel else 1)
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM full_recheck_receipts").fetchone()[0], 0 if prior_cancel else 1)
+        self.assertEqual(runtime._dispatch(self.ns)["active"], 0)
+        self.assertEqual(slot["phase"], "full_request_waiting")
+        self.assertIsNone(slot["reg"])
+        physical = _try_execution_lock(reg)
+        self.assertIsNotNone(physical)
+        _release_execution_lock(physical)
+        self.assertFalse(await runtime.run_one(self.ns, {}))
+
     async def test_disabled_without_recovery_is_connection_free(self):
         self.assertFalse(await runtime.run_one({}, {}))
 
@@ -617,6 +716,332 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         await runtime.finish_result(self.ns, claimed, state, detail)
         await runtime.release(self.ns, claimed)
         self.assertEqual(self.member(reg)["status"], "retry")
+
+    async def test_stale_page_rechecks_ordinary_owner_before_taking_flock(self):
+        import threading
+        reg = self.purchase()
+        general.initialize(self.ns)
+        self.activate()
+        ready, advance = threading.Event(), threading.Event()
+        locked, unlock = asyncio.Event(), asyncio.Event()
+        candidates, lock = runtime._candidates, runtime._lock
+        explicit = None
+        def page(ns):
+            result = candidates(ns)
+            ready.set()
+            if not advance.wait(5): raise TimeoutError('candidate barrier')
+            return result
+        async def tracked_lock(number):
+            result = await lock(number)
+            if asyncio.current_task() is explicit and result is not None:
+                locked.set()
+                try:
+                    await unlock.wait()
+                except BaseException:
+                    _release_execution_lock(result)
+                    raise
+            return result
+        async def selector_stopped_or_locked():
+            while not explicit.done() and not locked.is_set():
+                await asyncio.sleep(0)
+        with patch.object(runtime, '_candidates', side_effect=page), patch.object(runtime, '_lock', side_effect=tracked_lock):
+            explicit = asyncio.create_task(runtime.run_one(self.ns, {}))
+            try:
+                self.assertTrue(await asyncio.to_thread(ready.wait, 5))
+                ordinary = await general.claim_safely(self.ns)
+                advance.set()
+                await asyncio.wait_for(selector_stopped_or_locked(), 5)
+                await runtime.attach_general(self.ns, ordinary)
+                self.assertIsNotNone(getattr(ordinary, 'full_recheck_claim', None))
+                self.assertFalse(locked.is_set())
+                self.assertFalse(await explicit)
+            finally:
+                advance.set(); unlock.set()
+                if not explicit.done(): explicit.cancel()
+                await asyncio.gather(explicit, return_exceptions=True)
+        # A second attachment call is idempotent, including its renewal task.
+        renewal = ordinary.full_recheck_renew
+        _, state, detail = await self.ordinary(ordinary)
+        self.assertIs(ordinary.full_recheck_renew, renewal)
+        await runtime.release(self.ns, ordinary)
+        self.assertEqual((state, detail['new_findings']), ('completed', 1))
+        self.assertEqual((self.member(reg)['attempt_count'], self.member(reg)['total_new_findings']), (1, 1))
+        self.assertEqual(self.findings(reg), 1)
+
+    async def test_post_read_ordinary_claim_defers_without_unowned_analysis(self):
+        import threading
+        reg = self.purchase()
+        general.initialize(self.ns)
+        self.activate()
+        with self.connect() as c:
+            c.execute("UPDATE v332_audit_queue SET state='completed' WHERE reg=?", (reg,))
+        checked, proceed = threading.Event(), threading.Event()
+        locked, unlock = asyncio.Event(), asyncio.Event()
+        pending, lock = runtime._ordinary_pending, runtime._lock
+        explicit = None
+        def stale_check(ns, number):
+            result = pending(ns, number)
+            self.assertFalse(result[0])
+            checked.set()
+            if not proceed.wait(5): raise TimeoutError('ordinary-state barrier')
+            return result
+        async def held_lock(number):
+            result = await lock(number)
+            if asyncio.current_task() is explicit and result is not None:
+                locked.set()
+                try:
+                    await unlock.wait()
+                except BaseException:
+                    _release_execution_lock(result)
+                    raise
+            return result
+        with patch.object(runtime, '_ordinary_pending', side_effect=stale_check), patch.object(runtime, '_lock', side_effect=held_lock):
+            explicit = asyncio.create_task(runtime.run_one(self.ns, {}))
+            try:
+                self.assertTrue(await asyncio.to_thread(checked.wait, 5))
+                with self.connect() as c:
+                    c.execute("UPDATE v332_audit_queue SET state='pending' WHERE reg=?", (reg,))
+                ordinary = await general.claim_safely(self.ns)
+                proceed.set()
+                await asyncio.wait_for(locked.wait(), 5)
+                with self.assertRaisesRegex(runtime.RequestOwnershipBusy, 'request_execution_busy'):
+                    await runtime.attach_general(self.ns, ordinary)
+                self.assertEqual(self.findings(reg), 0)
+                self.assertEqual(self.member(reg)['attempt_count'], 0)
+                unlock.set()
+                self.assertFalse(await asyncio.wait_for(explicit, 5))
+            finally:
+                proceed.set(); unlock.set()
+                if not explicit.done(): explicit.cancel()
+                await asyncio.gather(explicit, return_exceptions=True)
+        delay = general.defer_retry(self.ns, ordinary, {}, 'full_request_ownership_busy', general.BUSY_RETRY_BASE_SECONDS)
+        self.assertEqual(delay, 60)
+        self.assertIsNone(general.claim_next(self.ns))
+        runtime.initialize(self.ns)
+        with patch.object(general.time, 'time', return_value=self.row(reg)['next_retry_at'] + 1):
+            fresh = await general.claim_safely(self.ns)
+        self.assertNotEqual(fresh.reservation_token, ordinary.reservation_token)
+        before = self.row(reg)
+        # A late old-owner deferral must not overwrite the fresh reservation.
+        general.defer_retry(self.ns, ordinary, {}, 'stale-owner', general.BUSY_RETRY_BASE_SECONDS)
+        self.assertEqual(self.row(reg), before)
+        _, state, detail = await self.ordinary(fresh)
+        await runtime.release(self.ns, fresh)
+        self.assertEqual((state, detail['new_findings'], self.findings(reg)), ('completed', 1, 1))
+        self.assertEqual((self.member(reg)['attempt_count'], self.member(reg)['total_new_findings']), (1, 1))
+        with self.assertRaisesRegex(LookupError, 'reservation superseded'):
+            general.persist(self.ns, ordinary, [], [], 'stale-ordinary-token')
+
+    async def test_active_foreign_member_never_becomes_unattached_ordinary_work(self):
+        reg = self.purchase()
+        general.initialize(self.ns)
+        self.activate()
+        ordinary = await general.claim_safely(self.ns)
+        held = _try_execution_lock(reg)
+        self.assertIsNotNone(held)
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            foreign = ledger.claim_member(c, runtime.AUTHORIZED_EPOCH, reg,
+                general_token=ordinary.reservation_token, **runtime._target_args(self.ns))
+        self.assertIsNotNone(foreign)
+        before = self.member(reg)
+        try:
+            with self.assertRaisesRegex(runtime.RequestOwnershipBusy, 'request_execution_busy'):
+                await runtime.attach_general(self.ns, ordinary)
+        finally:
+            _release_execution_lock(held)
+        # A durable active lease without a live local flock is still fenced.
+        with self.assertRaisesRegex(runtime.RequestOwnershipBusy, 'request_claim_unavailable'):
+            await runtime.attach_general(self.ns, ordinary)
+        runtime.initialize(self.ns)
+        self.assertEqual(self.member(reg), before)
+        self.assertEqual(self.findings(reg), 0)
+        self.assertIsNone(getattr(ordinary, 'full_recheck_claim', None))
+        available = _try_execution_lock(reg)
+        self.assertIsNotNone(available)
+        _release_execution_lock(available)
+
+    async def test_attachment_rechecks_completed_blocked_and_absent_members(self):
+        reg = self.purchase()
+        general.initialize(self.ns)
+        self.activate()
+        owned, _, _ = await self.ordinary()
+        await runtime.release(self.ns, owned)
+        completed = self.member(reg)
+        with self.connect() as c:
+            c.execute("UPDATE v332_audit_queue SET state='pending' WHERE reg=?", (reg,))
+        ordinary = await general.claim_safely(self.ns)
+        attachable = runtime._attachable
+        for terminal in ('completed', 'blocked', 'absent'):
+            with self.subTest(terminal=terminal):
+                with self.connect() as c:
+                    if terminal == 'absent': c.execute('DELETE FROM full_recheck_members WHERE reg=?', (reg,))
+                    else: c.execute('UPDATE full_recheck_members SET status=? WHERE reg=?', (terminal, reg))
+                calls = 0
+                def stale_read(ns, number):
+                    nonlocal calls
+                    calls += 1
+                    return True if calls == 1 else attachable(ns, number)
+                # Lost flock path and claim-None path both revalidate status.
+                for busy in (True, False):
+                    calls = 0
+                    held = _try_execution_lock(reg) if busy else None
+                    try:
+                        with patch.object(runtime, '_attachable', side_effect=stale_read):
+                            await runtime.attach_general(self.ns, ordinary)
+                        self.assertEqual(calls, 2)
+                        self.assertIsNone(getattr(ordinary, 'full_recheck_claim', None))
+                    finally:
+                        _release_execution_lock(held)
+                if terminal == 'completed':
+                    self.assertEqual(self.member(reg), completed)
+        self.assertEqual(self.findings(reg), 1)
+        with self.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM full_recheck_receipts').fetchone()[0], 1)
+        await general.release_reservation(self.ns, ordinary)
+
+    async def test_cancelled_attachment_settles_exact_claim_before_restart(self):
+        import threading
+        reg = self.purchase()
+        general.initialize(self.ns)
+        self.activate()
+        ordinary = await general.claim_safely(self.ns)
+        committed, finish = threading.Event(), threading.Event()
+        attach = runtime._attach
+        def delayed(ns, number):
+            result = attach(ns, number)
+            committed.set()
+            if not finish.wait(5): raise TimeoutError('attach commit barrier')
+            return result
+        with patch.object(runtime, '_attach', side_effect=delayed):
+            task = asyncio.create_task(runtime.attach_general(self.ns, ordinary))
+            try:
+                self.assertTrue(await asyncio.to_thread(committed.wait, 5))
+                before = self.member(reg)
+                task.cancel(); await asyncio.sleep(0); task.cancel(); await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertIsNone(_try_execution_lock(reg))
+                self.assertEqual(self.member(reg)['lease_token'], before['lease_token'])
+                finish.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 5)
+            finally:
+                finish.set()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual((self.member(reg)['status'], self.member(reg)['reason']), ('retry', 'interrupted_attempt'))
+        self.assertEqual(self.findings(reg), 0)
+        await general.release_reservation(self.ns, ordinary)
+        runtime.initialize(self.ns)
+        fresh, _, _ = await self.ordinary()
+        await runtime.release(self.ns, fresh)
+        self.assertEqual((self.member(reg)['attempt_count'], self.member(reg)['total_new_findings']), (2, 1))
+        self.assertEqual(self.findings(reg), 1)
+        with self.assertRaises(ledger.StaleClaim):
+            general.persist(self.ns, ordinary, [], [], 'cancelled-old-claim')
+        # An old attached object's attribute is not a fresh lease or a new
+        # lock. Repeated attachment keeps it fenced before the analyzer.
+        from unittest.mock import Mock
+        analyzer = self.ns['analyze']
+        watched = Mock(wraps=analyzer)
+        self.ns['analyze'] = watched
+        try:
+            await runtime.attach_general(self.ns, ordinary)
+            self.assertIsNone(ordinary.full_recheck_lock)
+            with self.assertRaises(ledger.StaleClaim):
+                await general.inspect_one(self.ns, ordinary)
+            watched.assert_not_called()
+        finally:
+            self.ns['analyze'] = analyzer
+
+    async def test_foreign_process_flock_defers_one_worker_and_preserves_other_progress(self):
+        import subprocess
+        import sys
+        from contextlib import ExitStack
+        regs = [self.purchase(i) for i in (1, 2)]
+        base = general.initialize(self.ns)
+        self.activate()
+        with self.connect() as c:
+            c.execute("INSERT INTO findings(reg_number,code,kind,title,evidence) VALUES(?,'old','violation','Historical fact','old evidence')", (regs[0],))
+            c.execute("UPDATE v332_audit_queue SET new_findings=5,new_checks=7,last_result_token='historical',last_counted_token='historical' WHERE reg=?", (regs[0],))
+            old_findings = [tuple(r) for r in c.execute('SELECT * FROM findings')]
+        before = self.member(regs[0])
+        code = ('import sys; from v295_eis_originals import _try_execution_lock, _release_execution_lock; '
+                'lock=_try_execution_lock(sys.argv[1]); assert lock is not None; '
+                'print("locked",flush=True); sys.stdin.readline(); _release_execution_lock(lock)')
+        child = subprocess.Popen([sys.executable, '-c', code, regs[0]], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, 'PYTHONPATH': str(Path(general.__file__).parent)})
+        campaign = None
+        calls = []
+        original = self.ns['analyze']
+        def analyze(p, docs):
+            calls.append(str(p['reg']))
+            return original(p, docs)
+        self.ns['analyze'] = analyze
+        class HostileOwnershipBusy(runtime.RequestOwnershipBusy):
+            def __str__(self):
+                return 'PRIVATE_OWNER_DIAGNOSTIC_SENTINEL /tmp/private/customer'
+        real_sleep = asyncio.sleep
+        async def start_now(seconds, *args, **kwargs):
+            return await real_sleep(0 if seconds == 14 else seconds, *args, **kwargs)
+        async def until(predicate):
+            while not predicate(): await real_sleep(.005)
+        try:
+            self.assertEqual(await asyncio.wait_for(asyncio.to_thread(child.stdout.readline), 5), 'locked\n')
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(runtime, 'RequestOwnershipBusy', HostileOwnershipBusy))
+                stack.enter_context(patch.object(general, 'initialize', return_value=base))
+                stack.enter_context(patch.object(runtime, 'initialize', return_value=None))
+                stack.enter_context(patch.object(runtime, 'run_one', return_value=False))
+                stack.enter_context(patch.object(general, 'refresh_changed', return_value=0))
+                stack.enter_context(patch.object(general, 'add_new_verified', return_value=0))
+                stack.enter_context(patch.object(general.asyncio, 'sleep', side_effect=start_now))
+                general.install(self.ns)
+                await self.ns['app'].startups[0]()
+                campaign = self.ns['_v332_campaign_worker']
+                await asyncio.wait_for(until(lambda: self.row(regs[0])['retry_count'] == 1
+                    and self.member(regs[1])['status'] == 'completed'
+                    and all(s['phase'] == 'waiting_for_documents' and s['reg'] is None
+                            for s in self.ns['_v332_runtime']['workers'].values())), 10)
+                deferred = self.row(regs[0])
+                self.assertEqual((deferred['state'], deferred['new_findings'], deferred['new_checks'],
+                    deferred['last_result_token'], deferred['last_counted_token']), ('pending', 5, 7, 'historical', 'historical'))
+                self.assertGreater(deferred['next_retry_at'], time.time() + 50)
+                self.assertIn('full_request_ownership_busy', deferred['error'])
+                self.assertEqual(self.member(regs[0]), before)
+                self.assertEqual(calls, [regs[1]])
+                with self.connect() as c:
+                    self.assertEqual([tuple(r) for r in c.execute('SELECT * FROM findings WHERE reg_number=?', (regs[0],))], old_findings)
+                self.assertIsNone(_try_execution_lock(regs[0]))
+                self.assertIn('V332 REQUEST_ATTACH_DEFERRED', self.output.getvalue())
+                self.assertNotIn('V332 SQLITE_RETRY', self.output.getvalue())
+                self.assertNotIn('PRIVATE_OWNER_DIAGNOSTIC_SENTINEL', self.output.getvalue())
+                self.assertEqual(deferred['error'], 'full_request_ownership_busy')
+                campaign.cancel()
+                await asyncio.wait_for(asyncio.gather(campaign, return_exceptions=True), 5)
+                campaign = None
+        finally:
+            if campaign is not None:
+                campaign.cancel()
+                await asyncio.wait_for(asyncio.gather(campaign, return_exceptions=True), 5)
+            if child.poll() is None:
+                child.stdin.write('\n'); child.stdin.flush()
+            await asyncio.wait_for(asyncio.to_thread(child.communicate), 5)
+        self.assertEqual(child.returncode, 0)
+        runtime.initialize(self.ns)
+        with patch.object(general.time, 'time', return_value=self.row(regs[0])['next_retry_at'] + 1):
+            fresh = await general.claim_safely(self.ns)
+        self.assertEqual(str(fresh), regs[0])
+        await self.ordinary(fresh)
+        await runtime.release(self.ns, fresh)
+        self.assertEqual(calls, [regs[1], regs[0]])
+        self.assertEqual([self.member(reg)['total_new_findings'] for reg in regs], [1, 1])
+        self.assertEqual([self.member(reg)['attempt_count'] for reg in regs], [1, 1])
+        self.assertEqual(self.row(regs[0])['new_findings'], 6)
+        for reg in regs:
+            lock = _try_execution_lock(reg)
+            self.assertIsNotNone(lock)
+            _release_execution_lock(lock)
 
     def restored_archive(self, number=1, *, members=None, copies=1, payload=None):
         reg = self.purchase(number)
