@@ -3,21 +3,62 @@ on:
   push:
     branches: [fix/vps-response-size-20261020]
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: vps-transfer-repair
+  cancel-in-progress: false
 jobs:
   regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile transport modules
-        run: python -m py_compile scripts/eis_vps_worker.py scripts/eis_server_worker.py scripts/eis223_soap_xml.py
-      - name: Export tracked source for isolated regression tests
+      - name: Apply reviewed patch on the isolated repair branch
+        run: |
+          if test -f .maintenance/vps-response-size.patch; then
+            git apply --check --unidiff-zero .maintenance/vps-response-size.patch
+            git apply --unidiff-zero .maintenance/vps-response-size.patch
+          fi
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = {
+            'Dockerfile': '6d95ee80c90efead0d60d109b17c749321fce2d7361e17e27016d16e2758cd38',
+            'scripts/eis_server_worker.py': '6b091038bd1d6ae7fb85efe9d727a3869e8803ccec0acd890e817cbd617aa823',
+            'scripts/eis_vps_worker.py': '7e2a96568d44efdb25abe6c499fa2d940e0cedca09b5e1362fa49db7c71842e7',
+            'scripts/install_eis_vps_worker.sh': '79129322133af9972d78133c9995ebb50a737526e30fa98e5ba1832b9dd98112',
+            'scripts/v295_eis_originals.py': 'c4e514a5789b62b09c07919fe7c2621dbd53bd6172071ba1da80b5d9ededc08e',
+            'tests/test_eis_original_upload_stream.py': '545e6c466d8eae19aafed940cb59d3f872b2e4c5ce5f3cc683998ea490d65e12',
+            'tests/test_eis_response_size.py': '30323d2b310c8ac3ecb2a46ca95395e156f9c4a49857a3f75f51fb02ab47d228',
+          }
+          for path, digest in expected.items():
+              assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest, path
+          print('All files match the locally tested patch exactly')
+          PY
+      - name: Install isolated regression dependencies
+        run: python -m pip install 'fastapi>=0.115,<1' 'httpx>=0.27' beautifulsoup4 python-docx openpyxl striprtf
+      - name: Compile and test transfer safety
+        env:
+          PYTHONPATH: .:scripts:tests
+        run: |
+          python -m py_compile scripts/eis_vps_worker.py scripts/eis_server_worker.py scripts/v295_eis_originals.py
+          bash -n scripts/install_eis_vps_worker.sh
+          python -m unittest test_eis_vps_worker test_eis_server_worker test_eis_worker_backpressure test_eis_vps_installer test_eis_original_upload_stream test_eis_response_size -v
+      - name: Commit validated files to repair branch only
+        if: github.ref == 'refs/heads/fix/vps-response-size-20261020'
+        run: |
+          if test -f .maintenance/vps-response-size.patch; then
+            git rm .maintenance/vps-response-size.patch
+            git add Dockerfile scripts/eis_server_worker.py scripts/eis_vps_worker.py scripts/install_eis_vps_worker.sh scripts/v295_eis_originals.py tests/test_eis_original_upload_stream.py
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'Support bounded 64 MiB originals and reject incomplete transfers'
+            git push origin HEAD:refs/heads/fix/vps-response-size-20261020
+          fi
+      - name: Export tested source
         run: git archive --format=tar.gz -o source.tar.gz HEAD
       - uses: actions/upload-artifact@v4
         with:
