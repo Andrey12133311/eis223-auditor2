@@ -77,6 +77,8 @@ COPY tests/test_protocol_date_label_recall.py tests/test_clarification_date_labe
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_protocol_date_label_recall test_clarification_date_label_recall test_amendment_date_label_recall test_date_label_pipeline_parity test_docx_event_separators
 COPY tests/test_local_numbered_event_recall.py tests/test_local_event_pipeline_parity.py tests/test_amendment_revised_deadline_evidence.py tests/test_sme_payment_clause_recall.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_local_numbered_event_recall test_local_event_pipeline_parity test_amendment_revised_deadline_evidence test_sme_payment_clause_recall
+COPY tests/test_intake_sqlite_pressure.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_intake_sqlite_pressure
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

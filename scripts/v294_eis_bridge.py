@@ -1,6 +1,7 @@
 """Safe official EIS 223-FZ ZIP/XML inbox; never count metadata as audited documents."""
 from __future__ import annotations
 import asyncio, hashlib, hmac, io, json, os, re, tempfile, zipfile
+from threading import RLock
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
@@ -14,6 +15,7 @@ MAX_UNCOMPRESSED = 50*1024*1024
 MAX_XML = 15*1024*1024
 ALLOWED_ORIGINS = frozenset(("https://int.zakupki.gov.ru","https://zakupki.gov.ru"))
 REG = re.compile(r"[0-9]{11,20}$")
+_INBOX_LOCKS=tuple(RLock() for _ in range(64))
 
 def _rejection_code(error):
     """Log a fixed code, never an XML name, URL, token or response excerpt."""
@@ -158,6 +160,50 @@ def _atomic(path, data):
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
 
+def _call_intake(function,args):
+    # A synchronous callback may explicitly raise CancelledError. Preserve that
+    # exception instead of confusing it with cancellation of the async waiter.
+    try:return function(*args),None
+    except asyncio.CancelledError as exc:return None,exc
+
+
+async def _intake_io(function,*args):
+    from v381_audit_scheduling import run_file_io
+    result,cancelled=await run_file_io(_call_intake,function,args)
+    if cancelled is not None:raise cancelled
+    return result
+
+
+def _store_archive(raw,notices,sha):
+    """Immutable inbox persistence; called only in a bounded I/O worker."""
+    reg=notices[0]["reg_number"]
+    data_root=Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
+    folder=data_root/"eis223_official_archive_inbox"/reg
+    folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+    zip_path=folder/(sha+".zip")
+    json_path=folder/(sha+".json")
+    with _INBOX_LOCKS[int(reg)%len(_INBOX_LOCKS)]:
+        was_new=not zip_path.exists()
+        if not was_new:
+            if (zip_path.is_symlink() or zip_path.stat().st_size>MAX_UPLOAD
+                    or hashlib.sha256(zip_path.read_bytes()).hexdigest()!=sha):
+                raise HTTPException(409,"Stored SOAP archive fails hash verification; existing evidence was not replaced")
+        if was_new:_atomic(zip_path,raw)
+        if not json_path.exists():
+            unsupported_xmls=sum(n["xml_family"]=="unsupported" for n in notices)
+            record={"source":"official_eis_soap_archive","reg_number":reg,
+               "archive_sha256":sha,"received_at":datetime.now(timezone.utc).isoformat(),
+               "notices":notices,"original_files_verified":0,
+               "total_attachment_count":sum(n["total_attachment_count"] for n in notices),
+               "unresolved_attachment_count":sum(n["unresolved_attachment_count"] for n in notices),
+               "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
+               "unsupported_xml_count":unsupported_xmls,
+               "audited_documents_increment":0,
+               "status":"metadata_partial" if unsupported_xmls else "metadata_only"}
+            _atomic(json_path,json.dumps(record,ensure_ascii=False).encode("utf-8"))
+    return was_new
+
+
 def _cors(origin):
     return {"Access-Control-Allow-Origin":origin,"Vary":"Origin"} if origin in ALLOWED_ORIGINS else {}
 
@@ -194,36 +240,20 @@ def install(ns):
             # authenticated upload arrives; a partial body cannot be accepted.
             raise HTTPException(400,"Incomplete archive request body") from None
         raw=b"".join(blocks)
-        try: notices=parse_notices(raw)
+        try: notices=await _intake_io(parse_notices,raw)
         except ValueError as exc:
             print(f"V294 ARCHIVE_REJECTED code={_rejection_code(exc)} bytes={total}",flush=True)
+            from eis223_soap_xml import IdentityMismatch
+            if isinstance(exc,IdentityMismatch):
+                print("V294 IDENTITY_DIAGNOSTIC "+json.dumps(exc.diagnostic,sort_keys=True),flush=True)
             raise HTTPException(422,str(exc)) from exc
         sha=hashlib.sha256(raw).hexdigest()
         reg=notices[0]["reg_number"]
         unsupported_xmls=sum(n["xml_family"]=="unsupported" for n in notices)
-        data_root=Path(os.environ.get("EIS223_DATA_DIR") or os.environ.get("DATA_DIR") or "/data")
-        folder=data_root/"eis223_official_archive_inbox"/reg
-        zip_path=folder/(sha+".zip")
-        json_path=folder/(sha+".json")
         from v295_eis_originals import _review_source_version
         enqueue=ns.get("_v295_enqueue_review")
-        before=await asyncio.to_thread(_review_source_version,reg) if callable(enqueue) else None
-        was_new=not zip_path.exists()
-        if not was_new:
-            if zip_path.stat().st_size>MAX_UPLOAD or hashlib.sha256(zip_path.read_bytes()).hexdigest()!=sha:
-                raise HTTPException(409,"Stored SOAP archive fails hash verification; existing evidence was not replaced")
-        if was_new: _atomic(zip_path,raw)
-        if not json_path.exists():
-            record={"source":"official_eis_soap_archive","reg_number":reg,
-               "archive_sha256":sha,"received_at":datetime.now(timezone.utc).isoformat(),
-               "notices":notices,"original_files_verified":0,
-               "total_attachment_count":sum(n["total_attachment_count"] for n in notices),
-               "unresolved_attachment_count":sum(n["unresolved_attachment_count"] for n in notices),
-               "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
-               "unsupported_xml_count":unsupported_xmls,
-               "audited_documents_increment":0,
-               "status":"metadata_partial" if unsupported_xmls else "metadata_only"}
-            _atomic(json_path,json.dumps(record,ensure_ascii=False).encode("utf-8"))
+        before=await _intake_io(_review_source_version,reg) if callable(enqueue) else None
+        was_new=await _intake_io(_store_archive,raw,notices,sha)
         metadata_import="pending"
         import_metadata=ns.get("_v379_import_soap_metadata")
         if callable(import_metadata):
@@ -235,7 +265,7 @@ def install(ns):
                 # card without losing bytes or claiming a completed audit.
                 print(f"V379 SOAP_METADATA_PENDING reg={reg} type={type(exc).__name__}",flush=True)
         if callable(enqueue):
-            after=await asyncio.to_thread(_review_source_version,reg)
+            after=await _intake_io(_review_source_version,reg)
             if before!=after:enqueue(reg,force=True)
         print(f"V294 EIS_INBOX reg={reg} metadata={len(notices)} links={sum(n['documents_referenced'] for n in notices)} duplicate={not was_new} verified_originals=0",flush=True)
         if unsupported_xmls:

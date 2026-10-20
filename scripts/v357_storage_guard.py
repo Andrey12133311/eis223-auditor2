@@ -87,6 +87,21 @@ def _storage_full_response(request, detail, free=None):
 
 def install(ns):
     app=ns["app"]
+    # Read-only boot evidence for database contention; do not guess or switch
+    # journal mode (WAL requires a patched SQLite and compatible local storage).
+    connector=ns.get("conn")
+    if callable(connector):
+        db=None
+        try:
+            db=connector()
+            mode=db.execute("PRAGMA journal_mode").fetchone()[0]
+            timeout=db.execute("PRAGMA busy_timeout").fetchone()[0]
+            version=db.execute("SELECT sqlite_version()").fetchone()[0]
+            print(f"SQLITE_RUNTIME version={version} journal_mode={mode} busy_timeout_ms={timeout} read_only_diagnostic=True",flush=True)
+        except sqlite3.Error as exc:
+            print("SQLITE_RUNTIME unavailable="+type(exc).__name__,flush=True)
+        finally:
+            if db is not None:db.close()
 
     async def storage_guard(request, call_next):
         route=request.url.path
