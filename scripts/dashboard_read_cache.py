@@ -86,18 +86,18 @@ class MembershipCache:
                 self._refreshed_at = datetime.now(timezone.utc).isoformat()
                 self._next_retry = 0.0
                 self._future = None
-            future.set_result(True)
             _emit("DASHBOARD_MEMBERSHIP_READY " + json.dumps({
                 "members": len(value), "elapsed_ms": round((self.clock()-started)*1000, 1),
                 "basis": "display_membership_only_not_audit_completion"}))
+            future.set_result(True)
         except Exception as exc:
             with self._lock:
                 self._next_retry = self.clock() + self.retry
                 self._future = None
             # Retrieve failure only as a fixed outcome; do not leak private
             # source paths, SQL, account data or credentials into the response.
-            future.set_result(False)
             _emit("DASHBOARD_MEMBERSHIP_DEFERRED type=" + type(exc).__name__)
+            future.set_result(False)
 
     def snapshot(self, *, wait_seconds=COLD_WAIT_SECONDS):
         future = self.refresh()
