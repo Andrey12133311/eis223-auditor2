@@ -228,6 +228,18 @@ def import_soap_metadata(ns,reg):
                 and source.port in (None,443) and not source.username and not source.password):
             values["url"]=source_url
     except ValueError:pass
+    # Duplicate SOAP deliveries and routine reg reports commonly reuse the
+    # same revision. Do not compete for SQLite's writer for a read-only no-op.
+    # Changed/new cards still recheck the revision in the transaction below.
+    db=ns["conn"]();db.row_factory=sqlite3.Row
+    try:
+        cached=db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+        try:cached_card=json.loads(dict(cached).get("card_fields_json") or "{}") if cached is not None else {}
+        except (ValueError,TypeError):cached_card={}
+        prior=cached_card.get("soap_metadata") if isinstance(cached_card,dict) else None
+        if isinstance(prior,dict) and revision_key(prior)>=revision_key(record):
+            return {"stored":True,"changed":False,"reg_number":reg}
+    finally:db.close()
     db=ns["conn"]();db.row_factory=sqlite3.Row
     try:
         db.execute("BEGIN IMMEDIATE")

@@ -161,6 +161,91 @@ def _atomic(path, data):
 def _cors(origin):
     return {"Access-Control-Allow-Origin":origin,"Vary":"Origin"} if origin in ALLOWED_ORIGINS else {}
 
+def _archive_operation(function, args):
+    # Returning worker exceptions preserves their identity across asyncio's
+    # cancellation boundary; a cancelled HTTP awaiter still propagates normally.
+    try:
+        return None, function(*args)
+    except BaseException as exc:
+        return exc, None
+
+
+async def _archive_io(function, *args):
+    from v381_audit_scheduling import run_file_io
+    error, result = await run_file_io(_archive_operation, function, args)
+    if error is not None:
+        raise error
+    return result
+
+
+def _store_archive(zip_path, json_path, raw, sha, reg, notices, unsupported_xmls):
+    """Disk hashing/fsync must not hold the request event loop."""
+    was_new=not zip_path.exists()
+    if not was_new:
+        if zip_path.stat().st_size>MAX_UPLOAD or hashlib.sha256(zip_path.read_bytes()).hexdigest()!=sha:
+            raise HTTPException(409,"Stored SOAP archive fails hash verification; existing evidence was not replaced")
+    if was_new: _atomic(zip_path,raw)
+    if not json_path.exists():
+        record={"source":"official_eis_soap_archive","reg_number":reg,
+           "archive_sha256":sha,"received_at":datetime.now(timezone.utc).isoformat(),
+           "notices":notices,"original_files_verified":0,
+           "total_attachment_count":sum(n["total_attachment_count"] for n in notices),
+           "unresolved_attachment_count":sum(n["unresolved_attachment_count"] for n in notices),
+           "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
+           "unsupported_xml_count":unsupported_xmls,
+           "audited_documents_increment":0,
+           "status":"metadata_partial" if unsupported_xmls else "metadata_only"}
+        _atomic(json_path,json.dumps(record,ensure_ascii=False).encode("utf-8"))
+    return was_new
+
+
+def _registry_diagnostics(raw):
+    """Bounded, non-payload diagnostics for a rejected official archive.
+
+    Only fixed type labels, digit-only registry identities and shape flags are
+    emitted. No filename, XML excerpt, URL, auth header or arbitrary tag text.
+    This never accepts/persists a rejected archive or changes the parser.
+    """
+    from eis223_soap_xml import safe_xml, direct, field, local_name, NOTICE_TYPES, PROTOCOL_TYPES
+    result = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            items = [item for item in archive.infolist() if not item.is_dir()]
+            if not 1 <= len(items) <= 100 or sum(item.file_size for item in items) > MAX_UNCOMPRESSED:
+                return result
+            for item in items:
+                if item.flag_bits & 1 or item.file_size > MAX_XML:
+                    continue
+                match = re.fullmatch(r"([A-Za-z0-9]+)_([0-9]{11,20})(?:-[0-9]{2})?_[A-Za-z0-9_-]{1,160}[.]xml", item.filename)
+                if not match:
+                    continue
+                xml = archive.read(item)
+                try:
+                    parse_document(xml, item.filename)
+                    continue
+                except ValueError as exc:
+                    if not isinstance(exc, UnsupportedXmlType) and _rejection_code(exc) != "xml_registry_mismatch":
+                        continue
+                root = safe_xml(xml)
+                kind = local_name(root)
+                nodes = [node for node in root.iter() if local_name(node) == kind + "Data"]
+                data = nodes[0] if len(nodes) == 1 else None
+                own = field(data, "registrationNumber")
+                parent = field(direct(data, "purchaseInfo"), "purchaseNoticeNumber")
+                clean = lambda value: value if re.fullmatch(r"[0-9]{11,20}(?:-[0-9]{2})?", value) else "missing_or_invalid"
+                result.append({"xml_type": kind if kind in NOTICE_TYPES | PROTOCOL_TYPES else "unsupported",
+                               "filename_reg": match[2], "own_reg": clean(own), "purchase_reg": clean(parent),
+                               "data_count": min(2, len(nodes)),
+                               "own_count": min(2, sum(local_name(node) == "registrationNumber" for node in data)) if data is not None else 0,
+                               "purchase_info_count": min(2, sum(local_name(node) == "purchaseInfo" for node in data)) if data is not None else 0})
+                if len(result) == 4:
+                    break
+    except (ValueError, OSError, RuntimeError, zipfile.BadZipFile, NotImplementedError):
+        # Optional diagnostics must not replace the original validation fault.
+        return []
+    return result
+
+
 def install(ns):
     app=ns["app"]
 
@@ -194,10 +279,21 @@ def install(ns):
             # authenticated upload arrives; a partial body cannot be accepted.
             raise HTTPException(400,"Incomplete archive request body") from None
         raw=b"".join(blocks)
-        try: notices=parse_notices(raw)
+        try: notices=await _archive_io(parse_notices,raw)
         except ValueError as exc:
-            print(f"V294 ARCHIVE_REJECTED code={_rejection_code(exc)} bytes={total}",flush=True)
-            raise HTTPException(422,str(exc)) from exc
+            code=_rejection_code(exc)
+            print(f"V294 ARCHIVE_REJECTED code={code} bytes={total}",flush=True)
+            headers={"X-EIS223-Rejection-Code":code}
+            if code=="xml_registry_mismatch":
+                # Invalid identity will not repair itself in the next five
+                # minutes. Defer this job only, keeping other intake running.
+                headers["Retry-After"]="1800"
+                diagnostic=await _archive_io(_registry_diagnostics,raw)
+                if diagnostic:
+                    print("V294 XML_IDENTITY_DIAGNOSTIC "+json.dumps({
+                        "archive_sha256":hashlib.sha256(raw).hexdigest(),
+                        "members":diagnostic},sort_keys=True),flush=True)
+            raise HTTPException(422,str(exc),headers=headers) from exc
         sha=hashlib.sha256(raw).hexdigest()
         reg=notices[0]["reg_number"]
         unsupported_xmls=sum(n["xml_family"]=="unsupported" for n in notices)
@@ -208,22 +304,7 @@ def install(ns):
         from v295_eis_originals import _review_source_version
         enqueue=ns.get("_v295_enqueue_review")
         before=await asyncio.to_thread(_review_source_version,reg) if callable(enqueue) else None
-        was_new=not zip_path.exists()
-        if not was_new:
-            if zip_path.stat().st_size>MAX_UPLOAD or hashlib.sha256(zip_path.read_bytes()).hexdigest()!=sha:
-                raise HTTPException(409,"Stored SOAP archive fails hash verification; existing evidence was not replaced")
-        if was_new: _atomic(zip_path,raw)
-        if not json_path.exists():
-            record={"source":"official_eis_soap_archive","reg_number":reg,
-               "archive_sha256":sha,"received_at":datetime.now(timezone.utc).isoformat(),
-               "notices":notices,"original_files_verified":0,
-               "total_attachment_count":sum(n["total_attachment_count"] for n in notices),
-               "unresolved_attachment_count":sum(n["unresolved_attachment_count"] for n in notices),
-               "unsupported_attachment_count":sum(n["unsupported_attachment_count"] for n in notices),
-               "unsupported_xml_count":unsupported_xmls,
-               "audited_documents_increment":0,
-               "status":"metadata_partial" if unsupported_xmls else "metadata_only"}
-            _atomic(json_path,json.dumps(record,ensure_ascii=False).encode("utf-8"))
+        was_new=await _archive_io(_store_archive,zip_path,json_path,raw,sha,reg,notices,unsupported_xmls)
         metadata_import="pending"
         import_metadata=ns.get("_v379_import_soap_metadata")
         if callable(import_metadata):

@@ -466,6 +466,18 @@ def _catch_up(ns):
     # Do not gate on legacy request.status: a rolling old worker can finish
     # after the previous scan. Target coverage, not that legacy flag, is final.
     from full_recheck_request import reopen_completed
+    # A late old-engine completion is handled on the next selector turn. The
+    # common empty case is read-only; the ledger revalidates target + rows in
+    # the writer transaction whenever preflight finds actual catch-up work.
+    c = ns["conn"]()
+    try:
+        pending = c.execute("""SELECT 1 FROM full_recheck_members
+            WHERE request_id=? AND status='completed' AND result_engine_signature<>? LIMIT 1""",
+            (request_id(ns), _target_args(ns)["engine_signature"])).fetchone()
+    finally:
+        c.close()
+    if pending is None:
+        return 0
     with transaction(ns) as c:
         return reopen_completed(c, request_id(ns), limit=CATCHUP_PAGE_SIZE, **_target_args(ns))
 
