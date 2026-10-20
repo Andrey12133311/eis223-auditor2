@@ -1,0 +1,26 @@
+name: Recheck concurrent base snapshot
+on:
+  push:
+    branches: [fix/recheck-4007-locks-20261020]
+    paths: [.github/workflows/recheck-base-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1e206d99b2577d7929ca6eb432ac648ebc6823d2
+          persist-credentials: false
+      - run: |
+          mkdir -p /tmp/eis-source
+          git archive --format=zip --output=/tmp/eis-source/source.zip HEAD
+          git rev-parse HEAD > /tmp/eis-source/COMMIT
+          sha256sum /tmp/eis-source/source.zip > /tmp/eis-source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: concurrent-base-source
+          path: /tmp/eis-source/
+          retention-days: 1
