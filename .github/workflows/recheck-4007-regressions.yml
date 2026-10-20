@@ -5,23 +5,61 @@ on:
     paths: [.github/workflows/recheck-4007-regressions.yml]
 permissions:
   contents: read
+concurrency:
+  group: recheck-4007-isolated-integration
+  cancel-in-progress: false
 jobs:
-  source-snapshot:
+  test-integration:
+    if: github.ref == 'refs/heads/fix/recheck-4007-locks-20261020'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - name: Export candidate metadata repair for isolated regression tests
-        run: |
-          mkdir -p /tmp/eis-source
-          git archive --format=zip --output=/tmp/eis-source/source.zip HEAD
-          git rev-parse HEAD > /tmp/eis-source/COMMIT
-          sha256sum /tmp/eis-source/source.zip > /tmp/eis-source/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
         with:
-          name: recheck-4007-test-source
-          path: /tmp/eis-source/
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.12'
+      - name: Verify exact integration patch before applying
+        run: |
+          cat maintenance/recheck-4007-patch.{0,1,2,3,4} > /tmp/recheck-4007.patch.gz
+          echo '26066698585ce8112402aab05e8530b722597b838e2ede6e56e12a4481ef1c8b  /tmp/recheck-4007.patch.gz' | sha256sum -c -
+          gzip -dc /tmp/recheck-4007.patch.gz > /tmp/recheck-4007.patch
+          echo '2f175672d8f2d8b569af9cf4e1d0c5c4a4bbf8353c181012a03dd2f632331bdb  /tmp/recheck-4007.patch' | sha256sum -c -
+          git apply --check /tmp/recheck-4007.patch
+          git apply /tmp/recheck-4007.patch
+          git diff --check
+      - name: Install isolated dependencies
+        run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+      - name: Verify fixed native SQLite
+        run: |
+          python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
+          echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
+      - name: No-op writer, actual cohort and verified clarification regressions
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3'"
+          python -m unittest test_fact_persistence_contention test_clarification_xml_evidence test_dashboard_4007_request test_explanation_quarantine_identity
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_originals
+          python -m unittest test_full_recheck_capacity
+          python -m unittest test_legal_audit_revision test_official_publication_evidence test_legal_date_label_archive_recall test_legal_event_coverage test_legal_event_recall test_local_numbered_event_recall
+          python -m unittest test_ingestion_metadata_contention test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain test_eis223_soap_archive test_eis_mixed_soap_quarantine test_eis_hard_failure_backoff test_automatic_review_scheduler
+          python -m pytest -q tests/test_v314_eis_metadata.py
+      - name: Commit only tested implementation and regression files to isolated branch
+        run: |
+          python - <<'PY'
+          import subprocess
+          expected = {'scripts/eis223_soap_xml.py','scripts/full_recheck_inventory.py','scripts/full_recheck_request.py','scripts/full_recheck_runtime.py','scripts/legal_audit_revision.py','scripts/official_publication_evidence.py','scripts/v314_eis_metadata.py','scripts/v341_eis_facts.py','scripts/v341_precise_legal.py','tests/test_full_recheck_runtime.py','tests/test_clarification_xml_evidence.py','tests/test_dashboard_4007_request.py','tests/test_fact_persistence_contention.py'}
+          modified = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          untracked = set(subprocess.check_output(['git','ls-files','--others','--exclude-standard'],text=True).splitlines())
+          assert modified | {p for p in untracked if p.endswith('.py')} == expected, (modified,untracked)
+          subprocess.run(['git','add','--',*sorted(expected)],check=True)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Avoid unchanged fact writes, authenticate clarification dates and support frozen full-dashboard recheck'
+          git push origin HEAD:refs/heads/fix/recheck-4007-locks-20261020
+          git rev-parse HEAD
