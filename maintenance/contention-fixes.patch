@@ -1,0 +1,131 @@
+diff --git a/Dockerfile b/Dockerfile
+index 53d3c4d..395849e 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,4 +1,13 @@
++FROM python:3.12-slim AS sqlite-runtime-build
++WORKDIR /build
++RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
++COPY scripts/build_sqlite_runtime.py /build/build_sqlite_runtime.py
++RUN python /build/build_sqlite_runtime.py /opt/eis-sqlite
++
+ FROM python:3.12-slim
++COPY --from=sqlite-runtime-build /opt/eis-sqlite /opt/eis-sqlite
++ENV LD_LIBRARY_PATH=/opt/eis-sqlite
++RUN python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3', sqlite3.sqlite_version"
+ WORKDIR /app
+ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8080 EIS223_DATA_DIR=/data SCAN_INTERVAL_SECONDS=300 GOSPLAN_DETAILS_PER_CYCLE=12 MAX_DOCS_PER_DETAIL=200 MAX_ATTACHMENT_DOWNLOADS=200 MAX_FILE_MB=50
+ COPY requirements.txt .
+diff --git a/scripts/eis223_soap_xml.py b/scripts/eis223_soap_xml.py
+index 04e86c1..de9e7f8 100644
+--- a/scripts/eis223_soap_xml.py
++++ b/scripts/eis223_soap_xml.py
+@@ -53,7 +53,7 @@ class IdentityMismatch(ValueError):
+             if not value:return "missing"
+             return value if re.fullmatch(r"[0-9]{11,20}(?:-[0-9]{2})?",value) else "invalid"
+         self.diagnostic={"stage":stage if stage in ("supported","quarantine") else "unknown",
+-            "xml_type":kind if kind in NOTICE_TYPES|PROTOCOL_TYPES else "unsupported",
++            "xml_type":kind if kind in NOTICE_TYPES|PROTOCOL_TYPES|{"explanation"} else "unsupported",
+             "filename_reg":number(filename_reg),"own_reg":number(own_number),
+             "parent_reg":number(parent_number)}
+ 
+@@ -198,7 +198,19 @@ def quarantine_document(raw, filename, expected_reg):
+     purchase_number = (parent_reg.text or "").strip() if parent_reg is not None else ""
+     # A protocol may have a document-specific suffix, but it must name the
+     # same procurement explicitly. A filename by itself never proves identity.
+-    if purchase_number:
++    if kind == "explanation":
++        # Official 223-FZ TFF 16.3, Appendix 1 pp.78-79: explanationData
++        # uses the direct required purchaseRegNum, not registrationNumber or
++        # purchaseInfo/purchaseNoticeNumber. This is an identity-only exception
++        # for this exact documented root; it does not support arbitrary XML or
++        # invent legal facts/attachment links from a quarantined document.
++        declared = unique_child(data, "purchaseRegNum")
++        declared_number = (declared.text or "").strip() if declared is not None else ""
++        valid = (declared_number == expected_reg
++                 and (own is None or own_number == expected_reg)
++                 and (parent_reg is None or purchase_number == expected_reg))
++        purchase_number = declared_number
++    elif purchase_number:
+         valid = purchase_number == expected_reg and (
+             own is None or re.fullmatch(re.escape(expected_reg) + r"(?:-[0-9]{2})?", own_number))
+     else:
+diff --git a/scripts/eis_server_worker.py b/scripts/eis_server_worker.py
+index b190540..4c741a6 100644
+--- a/scripts/eis_server_worker.py
++++ b/scripts/eis_server_worker.py
+@@ -739,6 +739,13 @@ def report(ns, identifier, data):
+                 db.execute("INSERT OR REPLACE INTO eis_server_backoff VALUES(?,?)", (identifier, deferrals+1))
+         state = "done" if complete else "queued" if attempt < MAX_ATTEMPTS else "partial"
+         delay = min(86400, max(60, retry or 900)) if state == "queued" else 0
++        if state == "queued" and not real_progress and error_code in (
++                "site_http_422", "response_size_limit", "unsupported_xml_type"):
++            # Unchanged invalid XML/oversized payloads cannot recover by
++            # hammering the same archive every five minutes. Preserve the job
++            # and attempt budget; retry later so other procurements get a turn.
++            # Never shorten a caller/source Retry-After or declare completion.
++            delay = max(delay, min(86400, 900 * 2 ** min(max(attempt - 1, 0), 6)))
+         if complete:
+             detail = ("Официальные XML ЕИС получены; сведения карточки обновлены" if metadata_only else
+                       "Все учтённые оригиналы ЕИС сохранены; переданы на проверку на сервере")
+diff --git a/scripts/full_recheck_runtime.py b/scripts/full_recheck_runtime.py
+index dbf4849..d5f576c 100644
+--- a/scripts/full_recheck_runtime.py
++++ b/scripts/full_recheck_runtime.py
+@@ -30,7 +30,7 @@ INVENTORY_SECONDS = 300
+ # Authorized semantic correction generation, not a deployment or legal quota.
+ # Future changed engines need an explicitly reviewed higher generation. Equal
+ # generation/different signature disables request claims; it never retargets.
+-TARGET_GENERATION = 7
++TARGET_GENERATION = 8
+ CATCHUP_PAGE_SIZE = 32
+ # Reuse two of the existing four general workers, leaving two ordinary-only.
+ # This is an in-process explicit-only budget, not a cross-process lease cap.
+diff --git a/scripts/railway_start_v282.py b/scripts/railway_start_v282.py
+index 3a4a66a..9c00ab6 100644
+--- a/scripts/railway_start_v282.py
++++ b/scripts/railway_start_v282.py
+@@ -196,6 +196,9 @@ def main():
+     sys.path.insert(0,str(path.parent))
+     import importlib
+     entry=importlib.import_module('entry')
++    # Back up and switch the existing DB before any background worker starts.
++    from sqlite_wal_startup import install as prepare_sqlite_wal
++    prepare_sqlite_wal(vars(entry))
+     v267_findings.install(vars(entry))
+     v267_card_ui.install(vars(entry))
+     v269_inline_card.install(vars(entry))
+diff --git a/tests/test_full_recheck_runtime.py b/tests/test_full_recheck_runtime.py
+index 6303176..092d545 100644
+--- a/tests/test_full_recheck_runtime.py
++++ b/tests/test_full_recheck_runtime.py
+@@ -105,8 +105,12 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
+             await self._assert_generation_transition(5, 6)
+ 
+     async def test_generation_seven_reconciles_generation_six_intake_receipt_once(self):
+-        self.assertEqual(runtime.TARGET_GENERATION, 7)
+-        await self._assert_generation_transition(6, 7)
++        with patch.object(runtime, "TARGET_GENERATION", 7):
++            await self._assert_generation_transition(6, 7)
++
++    async def test_generation_eight_reconciles_documented_explanation_identity_once(self):
++        self.assertEqual(runtime.TARGET_GENERATION, 8)
++        await self._assert_generation_transition(7, 8)
+ 
+     async def _assert_pending_and_active_generation_transition(self, previous, current):
+         regs = [self.purchase(number) for number in range(1, 4)]
+@@ -155,8 +159,12 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
+             await self._assert_pending_and_active_generation_transition(5, 6)
+ 
+     async def test_generation_seven_keeps_pending_member_and_active_generation_six_lease(self):
+-        self.assertEqual(runtime.TARGET_GENERATION, 7)
+-        await self._assert_pending_and_active_generation_transition(6, 7)
++        with patch.object(runtime, "TARGET_GENERATION", 7):
++            await self._assert_pending_and_active_generation_transition(6, 7)
++
++    async def test_generation_eight_keeps_pending_member_and_active_generation_seven_lease(self):
++        self.assertEqual(runtime.TARGET_GENERATION, 8)
++        await self._assert_pending_and_active_generation_transition(7, 8)
+ 
+     async def test_corrected_engine_catches_up_completed_noncompany_without_new_epoch(self):
+         reg = self.purchase()
