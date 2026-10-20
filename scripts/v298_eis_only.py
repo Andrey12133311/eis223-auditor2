@@ -228,6 +228,20 @@ def import_soap_metadata(ns,reg):
                 and source.port in (None,443) and not source.username and not source.password):
             values["url"]=source_url
     except ValueError:pass
+    def current_revision(row):
+        if row is None:return False
+        try:card=json.loads(dict(row).get("card_fields_json") or "{}")
+        except (ValueError,TypeError):return False
+        prior=card.get("soap_metadata") if isinstance(card,dict) else None
+        return isinstance(prior,dict) and revision_key(prior)>=revision_key(record)
+    # A repeated archive/report must not reserve SQLite's sole writer just to
+    # discover that this same revision was already stored. Close the read
+    # connection before opening the actual short, fenced write transaction.
+    db=ns["conn"]();db.row_factory=sqlite3.Row
+    try:
+        if current_revision(db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()):
+            return {"stored":True,"changed":False,"reg_number":reg}
+    finally:db.close()
     db=ns["conn"]();db.row_factory=sqlite3.Row
     try:
         db.execute("BEGIN IMMEDIATE")

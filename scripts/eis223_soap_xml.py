@@ -44,6 +44,20 @@ class UnsupportedXmlType(ValueError):
         super().__init__("Unsupported official EIS XML type: " + kind[:80])
 
 
+class IdentityMismatch(ValueError):
+    """A rejected identity, with bounded non-secret diagnostic fields only."""
+
+    def __init__(self,kind,filename_reg,own_number,parent_number,stage):
+        super().__init__("Registry number and ZIP filename differ")
+        def number(value):
+            if not value:return "missing"
+            return value if re.fullmatch(r"[0-9]{11,20}(?:-[0-9]{2})?",value) else "invalid"
+        self.diagnostic={"stage":stage if stage in ("supported","quarantine") else "unknown",
+            "xml_type":kind if kind in NOTICE_TYPES|PROTOCOL_TYPES else "unsupported",
+            "filename_reg":number(filename_reg),"own_reg":number(own_number),
+            "parent_reg":number(parent_number)}
+
+
 def local_name(element):
     return element.tag.rsplit("}", 1)[-1]
 
@@ -190,7 +204,7 @@ def quarantine_document(raw, filename, expected_reg):
     else:
         valid = parent_reg is None and own_number == expected_reg
     if not valid:
-        raise ValueError("Registry number and ZIP filename differ")
+        raise IdentityMismatch(kind,filename_reg,own_number,purchase_number,"quarantine")
     # Keep the existing external URL and attachment size validation even
     # though quarantined members never add downloadable references.
     _attachment_references(data, kind)
@@ -217,7 +231,8 @@ def parse_document(raw, filename):
     else:
         reg = field(direct(data, "purchaseInfo"), "purchaseNoticeNumber")
     if not REG.fullmatch(reg) or reg != filename_reg:
-        raise ValueError("Registry number and ZIP filename differ")
+        raise IdentityMismatch(kind,filename_reg,field(data,"registrationNumber"),
+                               field(direct(data,"purchaseInfo"),"purchaseNoticeNumber"),"supported")
     docs, unresolved, previous = _attachment_references(data, kind)
     version = field(data, "version")
     record = {

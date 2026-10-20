@@ -37,44 +37,66 @@ CREATE TABLE IF NOT EXISTS v334_recheck_changes (
 CREATE INDEX IF NOT EXISTS idx_v334_changes_reg ON v334_recheck_changes(reg_number);
 """
 
-def _records(db,reg=None):
+def _raw_records(db,reg=None):
     result=[]
-    for kind,table,where in (
-        ("finding","findings","kind='violation'"),
-        ("check","checks","status='violation'"),
-    ):
+    for kind,table,where in (("finding","findings","kind='violation'"),
+                             ("check","checks","status='violation'")):
         query="SELECT * FROM "+table+" WHERE "+where
         values=()
         if reg is not None:
             query+=" AND reg_number=?"
             values=(reg,)
-        for row in db.execute(query,values):
+        query+=" ORDER BY id"
+        for row in db.execute(query,values).fetchall():
             record={key:row[key] for key in row.keys() if key!="id"}
             number=str(record.get("reg_number") or "")
-            if not REG.fullmatch(number):
-                continue
-            payload=json.dumps(record,ensure_ascii=False,sort_keys=True,default=str)
-            fingerprint=hashlib.sha256(payload.encode("utf-8")).hexdigest()
-            result.append((number,kind,fingerprint,payload))
+            if REG.fullmatch(number):result.append((number,kind,record))
     return result
+
+
+def _encode_records(rows):
+    result=[]
+    for number,kind,record in rows:
+        payload=json.dumps(record,ensure_ascii=False,sort_keys=True,default=str)
+        fingerprint=hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        result.append((number,kind,fingerprint,payload))
+    return result
+
+
+def _records(db,reg=None):
+    return _encode_records(_raw_records(db,reg))
+
 
 def snapshot(connect,reg=None):
     db=connect()
     try:
         db.row_factory=sqlite3.Row
-        db.execute("BEGIN IMMEDIATE")
-        current=_records(db,reg)
-        db.executemany("""INSERT OR IGNORE INTO v334_violation_history
-            (reg_number,record_type,fingerprint,payload_json)
-            VALUES(?,?,?,?)""",current)
-        db.commit()
-        return {(kind,digest) for _,kind,digest,_ in current}
+        for attempt in range(4):
+            before=_raw_records(db,reg)
+            # JSON serialisation and hashing large evidence are not DB writes.
+            current=_encode_records(before)
+            query="SELECT reg_number,record_type,fingerprint FROM v334_violation_history"
+            values=()
+            if reg is not None:query+=" WHERE reg_number=?";values=(reg,)
+            known={tuple(row) for row in db.execute(query,values).fetchall()}
+            missing=[row for row in current if row[:3] not in known]
+            if not missing:return {(kind,digest) for _,kind,digest,_ in current}
+            db.execute("BEGIN IMMEDIATE")
+            # Never archive a stale plan if an analyzer changed this purchase
+            # while the evidence hashes were being prepared outside the writer.
+            if _raw_records(db,reg)!=before:
+                db.rollback()
+                continue
+            db.executemany("""INSERT OR IGNORE INTO v334_violation_history
+                (reg_number,record_type,fingerprint,payload_json)
+                VALUES(?,?,?,?)""",missing)
+            db.commit()
+            return {(kind,digest) for _,kind,digest,_ in current}
+        raise sqlite3.OperationalError("database is locked")
     except BaseException:
-        if db.in_transaction:
-            db.rollback()
+        if db.in_transaction:db.rollback()
         raise
-    finally:
-        db.close()
+    finally:db.close()
 
 def _track(connect,reg,before,after):
     disappeared=before-after
