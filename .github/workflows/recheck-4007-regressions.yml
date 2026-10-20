@@ -13,6 +13,8 @@ jobs:
     if: github.ref == 'refs/heads/fix/recheck-4007-write-contention-20261020'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     permissions:
       contents: write
     steps:
