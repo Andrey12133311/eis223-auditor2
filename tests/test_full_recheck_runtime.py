@@ -45,6 +45,25 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             return dict(c.execute("SELECT * FROM full_recheck_members WHERE request_id=? AND reg=?",
                                  (runtime.AUTHORIZED_EPOCH, reg)).fetchone())
 
+    async def test_explicit_all_saved_includes_off_dashboard_and_manual_without_reset(self):
+        regs = [self.purchase(i) for i in range(1, 4)]
+        general.initialize(self.ns)
+        with self.connect() as c:
+            c.execute("INSERT INTO v319_manual_inputs(reg) VALUES(?)", (regs[1],))
+            c.execute("DELETE FROM v332_audit_queue WHERE reg=?", (regs[2],))
+            original = [tuple(row) for row in c.execute("SELECT * FROM purchases ORDER BY reg_number")]
+        with patch.dict(os.environ, {runtime.REQUEST_ENV: runtime.ALL_SAVED_EPOCH}):
+            runtime.initialize(self.ns)
+        with self.connect() as c:
+            summary = ledger.inventory(c, runtime.ALL_SAVED_EPOCH)
+            self.assertEqual(summary["actual_count"], 3)
+            self.assertEqual(summary["expected_count"], 3)
+            self.assertEqual(summary["manual_excluded_count"], 0)
+            self.assertEqual(summary["current_completed"], 0)
+            self.assertEqual([tuple(row) for row in c.execute("SELECT * FROM purchases ORDER BY reg_number")], original)
+            self.assertEqual(c.execute("SELECT reg FROM v319_manual_inputs").fetchone()[0], regs[1])
+        self.assertEqual(runtime.request_id(self.ns), runtime.ALL_SAVED_EPOCH)
+
     async def ordinary(self, reg=None, *, finish=True):
         if reg is None:
             reg = await general.claim_safely(self.ns)
@@ -113,8 +132,12 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await self._assert_generation_transition(7, 8)
 
     async def test_generation_nine_reconciles_legal_fact_and_label_receipt_once(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 9)
-        await self._assert_generation_transition(8, 9)
+        with patch.object(runtime, "TARGET_GENERATION", 9):
+            await self._assert_generation_transition(8, 9)
+
+    async def test_generation_ten_reads_documented_explanation_attachments(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 10)
+        await self._assert_generation_transition(9, 10)
 
     async def _assert_pending_and_active_generation_transition(self, previous, current):
         regs = [self.purchase(number) for number in range(1, 4)]
@@ -171,8 +194,12 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
             await self._assert_pending_and_active_generation_transition(7, 8)
 
     async def test_generation_nine_preserves_existing_membership_receipts_and_active_lease(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 9)
-        await self._assert_pending_and_active_generation_transition(8, 9)
+        with patch.object(runtime, "TARGET_GENERATION", 9):
+            await self._assert_pending_and_active_generation_transition(8, 9)
+
+    async def test_generation_ten_preserves_old_pending_and_active_leases(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 10)
+        await self._assert_pending_and_active_generation_transition(9, 10)
 
     async def test_corrected_engine_catches_up_completed_noncompany_without_new_epoch(self):
         reg = self.purchase()

@@ -1,0 +1,31 @@
+name: Recheck contention and legal evidence regressions
+on:
+  pull_request:
+    paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-contention-investigation.yml']
+  push:
+    branches: [thematic-audit-20261015]
+    paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-contention-investigation.yml']
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+      - name: Verify lease fences, frozen all-saved scope and actual XML evidence
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -m unittest test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity
+          python -m unittest test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain
+          python -m pytest -q tests/test_v314_eis_metadata.py
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract test_full_recheck_originals
+          python -m unittest test_eis223_soap_archive test_eis_mixed_soap_quarantine test_legal_audit_revision test_eis_server_worker test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+          git diff --check
