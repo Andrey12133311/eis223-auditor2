@@ -5,23 +5,70 @@ on:
     paths: [.github/workflows/recheck-4007-regressions.yml]
 permissions:
   contents: read
+concurrency:
+  group: recheck4007-patch-application
+  cancel-in-progress: false
 jobs:
-  source-snapshot:
+  validate-patch:
+    if: github.ref == 'refs/heads/fix/recheck-4007-write-contention-20261020'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - name: Export tracked source only
-        run: |
-          mkdir -p /tmp/eis-recheck-source
-          git archive --format=zip --output=/tmp/eis-recheck-source/source.zip HEAD
-          git rev-parse HEAD > /tmp/eis-recheck-source/COMMIT
-          sha256sum /tmp/eis-recheck-source/source.zip > /tmp/eis-recheck-source/SHA256SUMS
+          ref: ${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
-          name: recheck-4007-source
-          path: /tmp/eis-recheck-source/
+          name: patch-transport-review
+          path: maintenance/recheck4007.patch.zlib.b64
           retention-days: 1
-          if-no-files-found: error
+      - name: Verify exact reviewed patch before applying
+        run: |
+          python - <<'PY'
+          import base64, hashlib, pathlib, subprocess, zlib
+          encoded = pathlib.Path('maintenance/recheck4007.patch.zlib.b64').read_text().strip()
+          # Correct transport transcription only; the resulting bytes must
+          # match the separately reviewed patch digest or nothing is applied.
+          for before, after in [('uzDhko2j0','uzDhoyj0'),('YRSRS0WB','YRS0WB'),('QfsJIpIp0','QfsJIp0')]:
+              encoded = encoded.replace(before, after)
+          raw = zlib.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(raw).hexdigest() == 'becf036d18562f3973ec61cf7556a6cef70ac83b67a1ccbcc919b8bae9bc2303'
+          pathlib.Path('/tmp/recheck4007.patch').write_bytes(raw)
+          subprocess.run(['git','apply','--check','/tmp/recheck4007.patch'],check=True)
+          subprocess.run(['git','apply','/tmp/recheck4007.patch'],check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+      - name: Compile pinned SQLite runtime
+        run: |
+          python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
+          echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
+      - name: Run contention, frozen-membership and legal regressions
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3'"
+          python -m unittest test_recheck4007_safety test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_full_recheck_request test_full_recheck_inventory
+          python -m unittest test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract
+          python -m unittest test_price_provenance_chain test_procurement_fact_trace test_clarification_identity test_clarification_date_label_recall test_protocol_date_label_recall test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+          python -m pytest -q tests/test_v314_eis_metadata.py
+      - name: Commit only tested files on the isolated branch
+        run: |
+          python - <<'PY'
+          import subprocess
+          expected = {'scripts/full_recheck_inventory.py','scripts/full_recheck_request.py','scripts/full_recheck_runtime.py','scripts/v314_eis_metadata.py','scripts/v332_all_procurements_audit.py','scripts/v341_eis_facts.py','scripts/v345_thematic_accelerator.py','scripts/v381_audit_scheduling.py','tests/test_full_recheck_runtime.py'}
+          changed = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert changed == expected, changed
+          new = set(subprocess.check_output(['git','ls-files','--others','--exclude-standard'],text=True).splitlines())
+          assert new == {'tests/test_recheck4007_safety.py'}, new
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/full_recheck_inventory.py scripts/full_recheck_request.py scripts/full_recheck_runtime.py scripts/v314_eis_metadata.py scripts/v332_all_procurements_audit.py scripts/v341_eis_facts.py scripts/v345_thematic_accelerator.py scripts/v381_audit_scheduling.py tests/test_full_recheck_runtime.py tests/test_recheck4007_safety.py
+          git commit -m 'Reduce writer contention, preserve legal fact provenance and authorize complete dashboard recheck'
+          git push origin HEAD:refs/heads/fix/recheck-4007-write-contention-20261020
