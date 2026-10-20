@@ -14,6 +14,8 @@ from scripts.account_api_v1 import router as auth
 from scripts.account_page_routes_v1 import router as pages
 from scripts.account_production_v1 import ProductionAccountGate
 from scripts.account_sessions_v1 import create_session
+from scripts.account_session_policy_v1 import SESSION_COOKIE
+from scripts.account_security_v1 import digest_session_token
 from test_account_session_lifecycle_v1 import FakeResult, SessionDB
 
 
@@ -96,7 +98,10 @@ class SiteEntryTests(unittest.TestCase):
     def test_one_cookie_opens_site_and_cabinet_without_another_login(self):
         response = self.login()
         self.assertEqual(response.status_code, 200)
-        cookie = response.headers["set-cookie"]
+        cookies = response.headers.get_list("set-cookie")
+        cookie = next(value for value in cookies if value.startswith(SESSION_COOKIE + "="))
+        self.assertNotIn("max-age", cookie.lower())
+        self.assertNotIn("expires=", cookie.lower())
         self.assertIn("HttpOnly", cookie)
         self.assertIn("Secure", cookie)
         self.assertIn("Path=/", cookie)
@@ -110,21 +115,39 @@ class SiteEntryTests(unittest.TestCase):
         for path in ("/account/home", "/account/thematic", "/account/memos", "/auth/me", "/api/dashboard"):
             self.assertEqual(self.client.get(path, follow_redirects=False).status_code, 200, path)
         for path in ("/account/login", "/account/register"):
-            self.assertEqual(self.client.get(path, follow_redirects=False).headers["location"], "/")
+            entry = self.client.get(path, follow_redirects=False)
+            self.assertEqual(entry.status_code, 200, path)
+            self.assertNotIn("location", entry.headers)
+            self.assertIn('role="dialog"', entry.text)
+            self.assertNotIn("Saved procurement evidence", entry.text)
+        # Visiting an explicit entry form does not revoke the working session.
+        self.assertEqual(self.client.get("/api/dashboard").status_code, 200)
 
     def test_logout_revokes_cookie_and_old_session(self):
         self.login()
-        old_token = self.client.cookies.get("eis223_session")
+        old_token = self.client.cookies.get(SESSION_COOKIE)
+        self.assertIsInstance(old_token, str)
+        self.assertGreaterEqual(len(old_token), 40)
+        self.assertEqual(self.client.get("/api/dashboard").status_code, 200)
         self.assertEqual(self.client.post("/auth/logout", headers={"Origin": "https://site.example"}).status_code, 200)
         self.assertEqual(self.client.get("/", follow_redirects=False).status_code, 303)
-        self.assertEqual(self.client.get("/api/dashboard", headers={"Cookie": "eis223_session=" + old_token}).status_code, 401)
+        self.assertIsNone(self.client.cookies.get(SESSION_COOKIE))
+        self.assertTrue(self.db.tokens[digest_session_token(old_token)][2])
+        self.assertEqual(self.client.get("/api/dashboard", headers={"Cookie": SESSION_COOKIE + "=" + old_token}).status_code, 401)
 
     def test_expired_and_blocked_sessions_cannot_open_program(self):
         for status, hours in (("approved", -1), ("blocked", 1), ("pending", 1)):
             self.db.users[self.db.uid] = ("user", status)
             token, _ = create_session(self.db, self.db.uid, hours=hours)
-            response = self.client.get("/", headers={"Cookie": "eis223_session=" + token}, follow_redirects=False)
+            response = self.client.get("/", headers={"Cookie": SESSION_COOKIE + "=" + token}, follow_redirects=False)
             self.assertEqual(response.status_code, 303, (status, hours))
+
+    def test_legacy_persistent_cookie_does_not_authenticate(self):
+        token, _ = create_session(self.db, self.db.uid)
+        self.assertEqual(self.client.get("/api/dashboard", headers={
+            "Cookie": "eis223_session=" + token}).status_code, 401)
+        self.assertEqual(self.client.get("/api/dashboard", headers={
+            "Cookie": SESSION_COOKIE + "=" + token}).status_code, 200)
 
     def test_identity_outage_never_exposes_dashboard(self):
         with patch("scripts.account_production_v1.user_session", side_effect=RuntimeError("offline")):

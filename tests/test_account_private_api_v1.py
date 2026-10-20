@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -49,7 +50,7 @@ class PrivateResourcesTests(unittest.TestCase):
             "scripts.account_private_api_v1.connect", return_value=DatabaseStub()
         ):
             with self.assertRaises(HTTPException) as raised:
-                memo_download(uuid4(), object(), ResponseStub())
+                asyncio.run(memo_download(uuid4(), object(), ResponseStub()))
             self.assertEqual(raised.exception.status_code, 404)
 
     def test_unknown_thematic_batch_returns_404(self):

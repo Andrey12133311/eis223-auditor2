@@ -1,49 +1,39 @@
 name: Live V257 read-only routes
 on:
-  push:
-    branches: [v257-manual-live-sync-20261010]
   pull_request:
     paths:
       - '.github/workflows/v257-live-routes.yml'
-      - 'scripts/v257_features.py'
+      - 'scripts/v257_readonly_smoke.py'
+      - 'tests/test_account_live_smoke_contract.py'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  smoke-live:
+  probe-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Inspect safe GET-only routes
-        run: |
-          python - <<'PY'
-          import json
-          import urllib.request
-          import urllib.error
-          BASE = 'https://web-production-1c2ea.up.railway.app'
-          paths = [
-              '/health','/','/manual-purchases',
-              '/api/v257/manual',
-              '/api/v257/violation-types',
-              '/api/v257/dashboard?limit=1',
-              '/api/v257/purchase-extra/32615969056',
-          ]
-          for path in paths:
-              req = urllib.request.Request(BASE+path,
-                  headers={'User-Agent':'EIS223-V257-readonly-smoke/1.0'})
-              with urllib.request.urlopen(req,timeout=25) as response:
-                  body=response.read(16*1024*1024)
-                  assert response.status==200, (path,response.status)
-                  assert body, path
-                  if path=='/':
-                      assert b'v257-ui' in body and b'v257/dashboard' in body, 'V257 HTML integration missing'
-                  elif path=='/manual-purchases':
-                      assert b'manual' in body and b'rows' in body
-                  elif '/api/' in path or path=='/health':
-                      result=json.loads(body)
-                      assert isinstance(result,dict)
-                      if path.startswith('/api/v257/dashboard'):assert 'stats' in result and 'purchases' in result
-                      if path.startswith('/api/v257/manual'):assert 'items' in result
-                  print('PASS',path,'http',response.status,'bytes',len(body))
-          print('LIVE_V257_SMOKE_OK',len(paths))
-          PY
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test probe contract with fake HTTP replies, no live traffic
+        run: python -m unittest discover -s tests -p 'test_account_live_smoke_contract.py' -v
+  smoke-live:
+    # Production can still run the previous image. A live probe is an explicit
+    # operational check, never proof that un-deployed PR code works.
+    if: github.event_name == 'workflow_dispatch'
+    needs: probe-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect public health and protected anonymous routes without logging in
+        run: python scripts/v257_readonly_smoke.py
