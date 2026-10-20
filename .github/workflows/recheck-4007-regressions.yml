@@ -35,16 +35,12 @@ jobs:
           path = pathlib.Path('scripts/v332_all_procurements_audit.py')
           text = path.read_text()
           before = '        if phase in ("existing", "reservation"):\n            return await thread_call(function,*args)'
-          after = '''        # Only short lease/bookkeeping stages participate. Legal persistence
-                  # and metadata planning may do substantial CPU/preflight work before
-                  # their transaction; serializing whole callbacks would hold up renewals.
-                  if phase not in ("full_request_ack", "full_request_renew",
-                                   "full_request_watermark", "request_watermark", "save", "save_partial"):
-                      return await thread_call(function,*args)'''
-          # YAML block indentation is removed; normalize the deliberate extra
-          # indentation in the Python multiline replacement below.
-          lines = after.splitlines()
-          after = lines[0] + '\n' + '\n'.join(line[10:] for line in lines[1:])
+          after = ('        # Only short lease/bookkeeping stages participate. Legal persistence\n'
+                   '        # and metadata planning may do substantial CPU/preflight work before\n'
+                   '        # their transaction; serializing whole callbacks would hold up renewals.\n'
+                   '        if phase not in ("full_request_ack", "full_request_renew",\n'
+                   '                         "full_request_watermark", "request_watermark", "save", "save_partial"):\n'
+                   '            return await thread_call(function,*args)')
           assert text.count(before) == 1
           path.write_text(text.replace(before,after))
           path = pathlib.Path('tests/test_recheck4007_safety.py')
