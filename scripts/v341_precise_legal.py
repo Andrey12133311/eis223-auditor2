@@ -80,9 +80,11 @@ COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:ко�
 CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+закупки|решение\s+об\s+отмене\s+закупки\s+принято)"
 CANCEL_POSTED = r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки(?:\s+в\s+ЕИС)?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+размещено)"
 SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\s+субъект[ыа-я\s]{0,35}малого\s+и\s+среднего\s+предпринимательства|участниками\s+которо[йго]+\s+могут\s+быть\s+только\s+субъект",re.I)
+_PAYMENT_SUBJECT = r"\b(?:срок\s+оплаты|оплата|расч[её]т[ыа]?|оплат[уы])\b"
 PAYMENT_DAYS = re.compile(
     r"(?:\bсрок\s+оплаты\s*(?P<label>составляет|[:：])|"
-    r"\b(?:оплата|расч[её]т[ыа]?|оплат[уы])\b[^.;!?]{0,280}?"
+    r"\b(?:оплата|расч[её]т[ыа]?|оплат[уы])\b"
+    r"(?:(?!" + _PAYMENT_SUBJECT + r")[^.;!?]){0,280}?"
     r"(?P<period>в\s+течение|не\s+позднее(?:\s+чем)?))"
     r"\s*(?P<days>\d{1,3})\s*(?:\((?P<spelling>[^)]{0,40})\)\s*)?"
     r"рабоч(?:их|его)\s+(?:дней|дня|дн\.?)(?!\w)", re.I)
@@ -95,6 +97,12 @@ _PAYMENT_ACCEPTANCE_BRIDGE = re.compile(
     r"(?:\s|[,–—-]|оказанных\b|услуг\b|выполненных\b|работ\b|"
     r"поставленн(?:ого|ых)\b|товар(?:а|ов)\b|продукции\b|заказчиком\b|"
     r"сторонами\b|производится\b|осуществляется\b|проводится\b)*", re.I)
+_PAYMENT_SEPARATE_ACTION = re.compile(
+    r"\s+(?:(?:оказанных\s+услуг|выполненных\s+работ|поставленн(?:ого|ых)\s+"
+    r"товар(?:а|ов)|товар(?:а|ов)|услуг|работ|продукции)\s+)?"
+    r"(?:заказчик|поставщик|исполнитель|комиссия|стороны)\s+"
+    r"(?:составля(?:ет|ют)|готов(?:ит|ят)|формиру(?:ет|ют)|"
+    r"подготавлива(?:ет|ют)|оформля(?:ет|ют))\b", re.I)
 _PAYMENT_EXAMPLE = re.compile(
     r"\b(?:например|справочно|цитата|пример\s+(?:условия|расч[её]та)|"
     r"образец\s+расч[её]та|для\s+справки)\b", re.I)
@@ -105,6 +113,13 @@ _PAYMENT_STATUTE_QUOTE = re.compile(
     r"\b(?:пунктом|положением|постановлением|законом)\b[^.;!?]{0,200}"
     r"(?:постановлени\w*|1352|223[-–]?\s*ФЗ)[^.;!?]{0,100}"
     r"\b(?:предусмотрено|установлено|определено)\b", re.I)
+_PAYMENT_OTHER_TERM = re.compile(
+    r"(?:[,\n]\s*(?:а\s+|при\s+этом\s+)?(?:срок\s+(?:поставки|доставки|"
+    r"при[её]мки|выполнения|оказания|оформления|подписания)|"
+    r"(?:поставка|доставка|при[её]мка|выполнение|оказание|оформление|подписание)\b)|"
+    r"\bсчет\w*\s*,\s*котор\w*[^,;.!?]{0,130}"
+    r"\b(?:выставлен\w*|предоставлен\w*|получен\w*|передан\w*|направлен\w*)"
+    r"(?:\s+(?:заказчиком|поставщиком|исполнителем))?\s*$)", re.I)
 _PAYMENT_NUMBER_WORDS = (
     (1, 'один одного'), (2, 'два двух'), (3, 'три трех'), (4, 'четыре четырех'),
     (5, 'пять пяти'), (6, 'шесть шести'), (7, 'семь семи'), (8, 'восемь восьми'),
@@ -160,24 +175,30 @@ def _payment_acceptance_clause(text, payment):
     end = min(ends) if ends else len(text)
     prefix = text[max(start, payment.start()-300):payment.start()]
     lead = prefix + payment.group(0)
+    period = payment.start('period') if payment['period'] else payment.start('label')
+    before = text[payment.start():period]
     if (_PAYMENT_EXAMPLE.search(lead) or _PAYMENT_STATUTE_QUOTE.search(lead)
-            or _PAYMENT_INACTIVE_CLAUSE.search(lead)):
+            or _PAYMENT_INACTIVE_CLAUSE.search(lead) or _PAYMENT_OTHER_TERM.search(before)):
         return None
     if (re.search(r"\b(?:авансов\w*|предварительн\w*|предлагаем\w*|планируем\w*|"
                   r"предполагаем\w*)\s*$", prefix, re.I)
             or re.match(r"оплат[ауы]\s+(?:аванса|предоплаты|авансового\s+платежа)\b",
                         payment.group(0), re.I)
-            or re.search(r"\b(?:авансом|в\s+виде\s+аванса)\b", payment.group(0), re.I)):
+            or re.search(r"\b(?:авансом|в\s+(?:виде|качестве)\s+"
+                         r"(?:аванса|авансового\s+платежа))\b", payment.group(0), re.I)):
         return None
     after = text[payment.end():min(end, payment.end()+350)]
     direct = re.match(r"[\s,:：–—-]*", after).end()
     acceptance = _PAYMENT_ACCEPTANCE.match(after, direct)
+    if (acceptance is not None and ',' in after[:direct]
+            and _PAYMENT_SEPARATE_ACTION.match(after, acceptance.end())):
+        # "..., после подписания акта приёмки заказчик составляет отчёт"
+        # introduces a separate action, rather than the payment's own clock.
+        return None
     if acceptance is None:
         # Preserve the ordinary inverse order: "Оплата после подписания акта
         # приёмки производится в течение ...". The closed bridge prevents an
         # invoice/supply clause between acceptance and the payment duration.
-        period = payment.start('period') if payment['period'] else payment.start('label')
-        before = text[payment.start():period]
         candidates = list(_PAYMENT_ACCEPTANCE.finditer(before))
         if not candidates or not _PAYMENT_ACCEPTANCE_BRIDGE.fullmatch(before[candidates[-1].end():]):
             return None
