@@ -258,7 +258,7 @@ class ArchiveDateChainRecall(unittest.TestCase):
                               submission_end) VALUES(?,?,?,?,?,?)""",
                            (P["reg"], "ООО Синтетический тест", "Синтетические материалы",
                             P["method"], P["published"], P["submission_end"]))
-            source = {"docs": docs, "unreadable": 0, "original_expected": 1,
+            source = {"docs": docs, "unreadable": 0, "_reconciled_rows": (), "original_expected": 1,
                       "original_received": 1, "source_incomplete": False,
                       "source_error": None, "p": {}, "card": {}, "detail": {}}
             ns = {"conn": connect, "analyze": lambda p, docs: [],

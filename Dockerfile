@@ -69,8 +69,8 @@ RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_audit_funnel
 COPY tests/test_legal_date_label_archive_recall.py tests/test_legal_price_recall.py tests/test_audit_persistence_lock_scope.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_date_label_archive_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_price_recall.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_audit_persistence_lock_scope.py'
 RUN mkdir -p /data/files /data/reports
-COPY tests/test_full_recheck_request.py tests/test_full_recheck_runtime.py tests/test_full_recheck_cohort_contract.py tests/test_full_recheck_capacity.py tests/
-RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_capacity
+COPY tests/test_full_recheck_request.py tests/test_full_recheck_runtime.py tests/test_full_recheck_cohort_contract.py tests/test_full_recheck_capacity.py tests/test_stale_original_completion.py tests/test_full_recheck_originals.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_capacity test_stale_original_completion test_full_recheck_originals
 COPY tests/test_audit_rule_counts.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_audit_rule_counts
 EXPOSE 8080

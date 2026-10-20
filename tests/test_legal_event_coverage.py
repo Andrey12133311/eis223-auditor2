@@ -255,7 +255,7 @@ class LegalEventCoverage(unittest.TestCase):
                          for i, (family, number) in enumerate((
                              ("protocol", "1"), ("protocol", "2"),
                              ("clarification", "1"), ("clarification", "2")))]
-            source = {"docs": originals, "unreadable": 0, "original_expected": 4,
+            source = {"docs": originals, "unreadable": 0, "_reconciled_rows": (), "original_expected": 4,
                       "original_received": 4, "source_incomplete": False,
                       "source_error": None, "p": {}, "card": {}, "detail": {}}
             ns = {"conn": connect, "analyze": lambda p, docs: [],
