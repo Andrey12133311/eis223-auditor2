@@ -133,19 +133,21 @@ def _owned_inn_search(owner, job_id):
 
 
 def _verified_inn_results(ns, inn):
-    from v301_search_jobs import _local_results
-    rows=_local_results(ns,"inn",inn)
-    # Buyer identity must come from stored procurement facts. An older bridge
-    # association or search-page filter alone cannot establish the buyer.
-    if not rows:
-        return []
-    db=ns["conn"]()
+    """Filter verified buyer facts before the limit, in one read-only query.
+
+    Legacy associations can otherwise fill all 250 positions before filtering,
+    hiding real matches. Search candidates never establish buyer identity.
+    """
+    from v301_search_jobs import _db
+    db=_db(ns)
     try:
-        verified={row[0] for row in db.execute(
-            "SELECT reg_number FROM purchases WHERE customer_inn=?",(inn,))}
+        rows=db.execute(
+            "SELECT reg_number,title,customer,price,price_num,violations,"
+            "documents_checked,documents_found FROM purchases WHERE customer_inn=? "
+            "ORDER BY last_seen DESC,reg_number DESC LIMIT 250",(inn,)).fetchall()
+        return [dict(row) for row in rows]
     finally:
         db.close()
-    return [row for row in rows if row["reg_number"] in verified]
 
 
 def _inn_namespace(request):
