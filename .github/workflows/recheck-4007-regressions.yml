@@ -1,24 +1,19 @@
 name: Recheck 4007 safety regressions
 on:
   pull_request:
-    paths:
-      - 'scripts/**'
-      - 'tests/**'
-      - '.github/workflows/recheck-4007-regressions.yml'
+    paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-4007-regressions.yml']
   push:
-    branches: [fix/recheck-4007-write-contention-20261020, thematic-audit-20261015]
-    paths:
-      - 'scripts/**'
-      - 'tests/**'
-      - '.github/workflows/recheck-4007-regressions.yml'
+    branches: [fix/recheck-4007-locks-20261020, thematic-audit-20261015]
+    paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-4007-regressions.yml']
 permissions:
   contents: read
+concurrency:
+  group: recheck-4007-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  safety-regressions:
+  frozen-cohort-and-evidence:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,18 +21,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
-      - name: Compile and verify pinned SQLite runtime
+      - name: Install isolated dependencies
+        run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+      - name: Verify fixed native SQLite
         run: |
           python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
           echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
-      - name: Check both frozen scopes and combined legal and contention safeguards
+      - name: Shared DB admission, frozen scope and verified legal evidence
         env:
           PYTHONPATH: '.:scripts:tests'
         run: |
           python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3'"
-          python -m unittest test_recheck4007_safety test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity
-          python -m unittest test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_full_recheck_request test_ingestion_metadata_contention test_legal_fact_write_contention test_parenthesized_event_date_labels
-          python -m unittest test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract test_full_recheck_originals
-          python -m unittest test_price_provenance_chain test_procurement_fact_trace test_clarification_identity test_clarification_date_label_recall test_protocol_date_label_recall test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+          python -m unittest test_fact_persistence_contention test_legal_fact_write_contention test_parenthesized_event_date_labels test_clarification_xml_evidence test_dashboard_4007_request test_explanation_quarantine_identity test_recheck_contention_improvements test_explanation_supported_format test_recheck4007_safety
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_originals
+          python -m unittest test_full_recheck_capacity
+          python -m unittest test_legal_audit_revision test_official_publication_evidence test_legal_date_label_archive_recall test_legal_event_coverage test_legal_event_recall test_local_numbered_event_recall
+          python -m unittest test_ingestion_metadata_contention test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain test_eis223_soap_archive test_eis_mixed_soap_quarantine test_eis_hard_failure_backoff test_automatic_review_scheduler
           python -m pytest -q tests/test_v314_eis_metadata.py
+          git diff --check

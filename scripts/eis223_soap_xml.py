@@ -1,7 +1,8 @@
 """Bounded reader for official RI223 purchase XML, not a legal-rule engine.
 
 Names and paths are from the user-supplied 223-FZ format requirements 16.3,
-appendices 2 (notices) and 3 (protocols). Preserve original bytes; this module
+appendix 1 pp.78-79 (clarifications), 2 (notices) and 3 (protocols).
+Preserve original bytes; this module
 only extracts procurement identity and explicit attachment references.
 """
 from __future__ import annotations
@@ -120,6 +121,24 @@ def _document_envelope(root, kind, filename):
     return match[1], data
 
 
+def _unique_child(parent, name):
+    if parent is None:
+        return None
+    nodes = [node for node in parent if local_name(node) == name]
+    if len(nodes) > 1:
+        raise ValueError("Missing or ambiguous official XML data")
+    if nodes and nodes[0].tag not in (name, "{" + PURCHASE_NS + "}" + name):
+        raise ValueError("Foreign official XML data namespace")
+    return nodes[0] if nodes else None
+
+
+def _unique_field(parent, name):
+    node = _unique_child(parent, name)
+    if node is not None and len(node):
+        raise ValueError("Missing or ambiguous official XML data")
+    return (node.text or "").strip() if node is not None else ""
+
+
 def _attachment_references(data, kind):
     docs = []
     seen = set()
@@ -127,10 +146,18 @@ def _attachment_references(data, kind):
     previous = []
     # Only attachment containers carry downloadable source documents. An
     # arbitrary hyperlink in a criterion/template is not an original file.
-    for attachments in (node for node in data.iter() if local_name(node) == "attachments"):
+    if kind == "explanation":
+        container = _unique_child(data, "attachments")
+        containers = [] if container is None else [container]
+    else:
+        containers = (node for node in data.iter() if local_name(node) == "attachments")
+    for attachments in containers:
         for document in attachments:
             doc_kind = local_name(document)
-            document_guid = field(document, "guid") or (document.get("guid") or "").strip()
+            read_field = _unique_field if kind == "explanation" else field
+            if kind == "explanation" and document.tag not in (doc_kind, "{" + PURCHASE_NS + "}" + doc_kind):
+                raise ValueError("Foreign official XML data namespace")
+            document_guid = read_field(document, "guid") or (document.get("guid") or "").strip()
             if doc_kind == "prevDocument":
                 if document_guid:
                     previous.append(document_guid)
@@ -140,10 +167,10 @@ def _attachment_references(data, kind):
                 continue
             if doc_kind not in ("document", "documentFS"):
                 continue
-            name, url = field(document, "fileName"), field(document, "url")
+            name, url = read_field(document, "fileName"), read_field(document, "url")
             if not url or not name:
                 unresolved.append({"kind": doc_kind, "guid": document_guid,
-                                   "content_uid": field(document, "contentUid"),
+                                   "content_uid": read_field(document, "contentUid"),
                                    "reason": "attachment_has_no_download_url_or_filename"})
                 continue
             try:
@@ -162,7 +189,8 @@ def _attachment_references(data, kind):
                 continue
             seen.add(url)
             docs.append({"name": name, "url": url, "guid": document_guid,
-                         "xml_type": kind, "published": field(data, "publicationDateTime")})
+                         "xml_type": kind, "published": (_unique_field(data, "publishDate") if kind == "explanation"
+                                                         else field(data, "publicationDateTime"))})
     return docs, unresolved, previous
 
 
@@ -274,7 +302,8 @@ def _parse_explanation(raw, filename, root):
         "xml_family": "explanation", "xml_guid": guid, "version": None,
         "publication": dates["publishDate"], "created": dates["creationDate"],
         "modified": dates["modificationDate"], "request_received": dates["requestDate"],
-        "decision": dates["decisionDate"], "documents_referenced": len(docs),
+        "decision": dates["decisionDate"], "publication_status": scalar("status"),
+        "documents_referenced": len(docs),
         "documents": docs, "unresolved_attachments": unresolved,
         "previous_document_guids": previous,
     }, data

@@ -29,7 +29,7 @@ ANALYZER_REGISTRY = {
 DEPENDENCY_REGISTRY = {
     "legal_applicability": ("competitive_scope", "competitive_rule_scope"),
     "official_publication_evidence": ("annotate_protocol_publications", "protocol_publication_verifier",
-                                      "verified_protocol_publication"),
+                                      "verified_protocol_publication", "clarification_publication_verifier"),
     "eis223_soap_xml": ("parse_document", "quarantine_document", "revision_key"),
     "v294_eis_bridge": ("parse_notices", "soap_metadata_incomplete"),
     "v295_eis_originals": ("saved_document", "uid_from_url", "allowed_documents", "_merge_source_metadata"),

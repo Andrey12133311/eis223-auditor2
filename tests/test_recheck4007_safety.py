@@ -225,7 +225,7 @@ class NewFrozenRequest(unittest.TestCase):
             runtime.initialize(ns)
             self.assertEqual(runtime.request_id(ns),runtime.DASHBOARD_EPOCH)
             new=ledger.inventory(self.c,runtime.DASHBOARD_EPOCH)
-            self.assertEqual((new['actual_count'],new['expected_count'],new['target_generation']),(3,4007,11))
+            self.assertEqual((new['actual_count'],new['expected_count'],new['target_generation']),(3,4007,12))
             runtime.initialize(ns)
             self.assertEqual(ledger.inventory(self.c,runtime.DASHBOARD_EPOCH),new)
 

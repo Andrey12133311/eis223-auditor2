@@ -34,7 +34,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 11
+TARGET_GENERATION = 12
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -76,7 +76,19 @@ def request_id(ns):
 def initialize(ns):
     from full_recheck_inventory import collect
     state = ns.setdefault("_full_recheck", {})
-    state["inventory"] = collect(ns)
+    epoch = os.environ.get(REQUEST_ENV, "").strip()
+    # On the first explicit activation, capture immutable membership first.
+    # Diagnostics may enumerate the same opaque source; do not do that twice.
+    c = ns["conn"]()
+    try:
+        tables = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        exists = bool("full_recheck_requests" in tables and c.execute(
+            "SELECT 1 FROM full_recheck_requests WHERE request_id=?", (epoch,)).fetchone())
+    finally:
+        c.close()
+    state["inventory"] = ({"status": "deferred", "reason": "explicit_snapshot_priority",
+                           "expected_requested_count": AUTHORIZED_REQUESTS.get(epoch)}
+                          if epoch in AUTHORIZED_REQUESTS and not exists else collect(ns))
     state["inventory_at"] = time.monotonic()
     print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
     epoch = os.environ.get(REQUEST_ENV, "").strip()

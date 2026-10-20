@@ -431,50 +431,68 @@ def enrich(ns, purchase, docs, card=None, detail=None):
 
 
 def _fact_updates(row, purchase, evidence):
-    """Plan derived cache writes without reserving SQLite's single writer."""
+    """Derive the small cache update outside SQLite's single-writer section.
+
+    Equal JSON with different formatting/order is not changed evidence. Keep
+    every existing source-precedence rule and unrelated card field intact.
+    """
     values = {}
     for key, item in evidence.items():
         column = "published_at" if key == "published" else key
+        # Official intake owns XML-labelled source scalars. A recheck must not
+        # mutate its own source version by writing the derived cache back.
         if item.get("source") == "official_eis_xml":
             continue
-        if column in row and (not row[column] or item.get("source") == "official_eis_card"):
+        if (column in row and
+                (not row[column] or item.get("source") == "official_eis_card") and
+                row[column] != item["value"]):
             values[column] = item["value"]
-    if values.get("submission_end") and "deadline" in row:
-        values["deadline"] = values["submission_end"]
+    end = evidence.get("submission_end") or {}
+    if (end.get("source") != "official_eis_xml" and end.get("value") and
+            "submission_end" in row and "deadline" in row and
+            (not row["submission_end"] or end.get("source") == "official_eis_card") and
+            row["deadline"] != end["value"]):
+        values["deadline"] = end["value"]
     try:
-        card = json.loads(row.get("card_fields_json") or "{}")
+        previous = json.loads(row.get("card_fields_json") or "{}")
     except (TypeError, ValueError):
-        card = {}
-    if not isinstance(card, dict):
-        card = {}
-    previous = json.dumps(card, ensure_ascii=False, sort_keys=True)
-    for key in ("fact_evidence", "summary"):
-        if not isinstance(card.get(key), dict):
-            card[key] = {}
+        previous = None
+    card = json.loads(json.dumps(previous)) if isinstance(previous, dict) else {}
+    if not isinstance(card.get("fact_evidence"), dict):
+        card["fact_evidence"] = {}
+    if not isinstance(card.get("summary"), dict):
+        card["summary"] = {}
     card["fact_evidence"].update(evidence)
     card["summary"].update({key: purchase.get(key) for key in evidence})
     if "price" in evidence:
         card["summary"].update({key: purchase.get(key) for key in ("price", "price_num", "price_kind")})
-    if ("card_fields_json" in row and
-            json.dumps(card, ensure_ascii=False, sort_keys=True) != previous):
+    if "card_fields_json" in row and previous != card:
         values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
-    return {key: value for key, value in values.items() if value != row[key]}
+    return values
 
 
 def persist_facts(ns, purchase):
-    reg = purchase.get("reg")
+    """Read-only no-op; short revalidated transaction for an actual repair.
+
+    Parsing/copying large card JSON while holding BEGIN IMMEDIATE previously
+    reserved the writer on every audit even when no fact changed. Materialize
+    and close a reader, compute outside the writer, then compare the source row
+    under the existing lease guard. Never upgrade a stale read snapshot.
+    """
     evidence = purchase.get("fact_evidence") or {}
     if not evidence:
         return
-    # A repeated analysis often produces identical facts. A read-only preflight
-    # lets it complete even while an unrelated writer holds the WAL database.
-    # Real changes retain the original transaction/lease fence and rebase check.
+    reg = purchase.get("reg")
+    # Caller-owned dictionaries must not change between planning and commit.
+    purchase = json.loads(json.dumps({key: purchase.get(key) for key in
+        set(evidence) | {"reg", "fact_evidence", "price", "price_num", "price_kind"}}, ensure_ascii=False))
+    evidence = purchase["fact_evidence"]
     from audit_write_guard import guarded_transaction
     for _ in range(4):
         db = ns["conn"](); db.row_factory = sqlite3.Row
         try:
-            row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-            snapshot = dict(row) if row else None
+            found = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+            snapshot = dict(found) if found is not None else None
         finally:
             db.close()
         if snapshot is None:
@@ -485,24 +503,28 @@ def persist_facts(ns, purchase):
         db = ns["conn"](); db.row_factory = sqlite3.Row
         try:
             with guarded_transaction(db):
-                row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-                if row is None or dict(row) != snapshot:
+                found = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+                current = dict(found) if found is not None else None
+                if current != snapshot:
                     db.rollback()
                     # Rebase a derived-cache-only update, but never overwrite
                     # a newer intake source column with an older audit's facts.
                     # Final audit source/lease fences remain authoritative.
-                    if row is not None and any(row[key] != value for key, value in snapshot.items()
+                    if current is not None and any(current[key] != value for key, value in snapshot.items()
                                                if key != "card_fields_json"):
                         print("FACT_CACHE_DEFERRED reason=concurrent_source_update", flush=True)
                         return
                     continue
-                db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in values)+" WHERE reg_number=?", (*values.values(), reg))
+                db.execute("UPDATE purchases SET " + ",".join(key + "=?" for key in values) +
+                           " WHERE reg_number=?", (*values.values(), reg))
                 db.commit()
                 return
         finally:
             if db.in_transaction:
                 db.rollback()
             db.close()
+    # Let the existing stage-only retry handle a continuously changing row.
+    # No success is recorded and legal analysis itself is not repeated here.
     raise sqlite3.OperationalError("database is locked")
 
 
