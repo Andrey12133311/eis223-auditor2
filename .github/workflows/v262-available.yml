@@ -3,7 +3,7 @@ on:
   push:
     branches: [v262-skip-unavailable-focus-accessible-20261010]
   pull_request:
-    paths: ['scripts/patch_v262.py','scripts/railway_start_v262.py','tests/test_v262.py','scripts/v257_features.py']
+    paths: ['.github/workflows/v262-available.yml','scripts/patch_v262.py','scripts/railway_start_v262.py','tests/test_v262.py','scripts/v257_features.py']
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,10 +13,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install current application imports for exact saved-event counts
+        run: python -m pip install --disable-pip-version-check -r requirements-accounts.txt
       - name: Compile patch
         run: python -m py_compile scripts/patch_v262.py scripts/railway_start_v262.py scripts/v257_features.py
-      - name: Test retry caps, manual queue and list counter
+      - name: Test retry caps, manual queue and exact filtered list counts
         run: python -m unittest discover -s tests -p 'test_v262.py' -v

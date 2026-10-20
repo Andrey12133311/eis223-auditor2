@@ -63,9 +63,42 @@ class V262Tests(unittest.TestCase):
     def test_existing_main_page_total_uses_exact_filtered_list(self):
         src=Path(__file__).resolve().parents[1]/'scripts'/'v257_features.py'
         content=src.read_text(encoding='utf-8')
-        self.assertIn("SELECT COUNT(*) purchases",content)
-        self.assertIn("records=c.execute('SELECT p.*'+sql",content)
-        self.assertIn("'stats':dict(result)",content)
+        # V352 replaced the historical inline count SQL. Verify the public
+        # behavior across full-filter counts and pages instead of obsolete
+        # source text anchors. Synthetic saved values must stay untouched.
+        from v352_dashboard_truth import dashboard_counts
+        con=sqlite3.connect(':memory:');con.row_factory=sqlite3.Row
+        self.addCleanup(con.close)
+        con.executescript("""
+          CREATE TABLE purchases(reg_number TEXT,customer TEXT,last_seen TEXT,
+            violations INTEGER,risks INTEGER,documents_found INTEGER,documents_checked INTEGER);
+          CREATE TABLE findings(reg_number TEXT,kind TEXT,code TEXT,title TEXT,
+            law TEXT,evidence TEXT,document TEXT,source_url TEXT);
+          CREATE TABLE checks(reg_number TEXT,status TEXT,field_path TEXT,item TEXT,
+            law TEXT,evidence TEXT,document TEXT,source_url TEXT);
+        """)
+        for i in range(3):
+            con.execute('INSERT INTO purchases VALUES(?,?,?,?,?,?,?)',
+                        (str(i),'АО Тест',str(i),7,0,2,2))
+            proof=('Порядок оплаты: расчет производится в течение 15 рабочих дней '
+                   'с даты подписания документов о приемке продукции заказчиком.')
+            con.execute('INSERT INTO findings VALUES(?,?,?,?,?,?,?,?)',
+                        (str(i),'violation','1352-28','Срок оплаты МСП превышен',
+                         'ПП РФ № 1352 п. 28',proof,'Договор.pdf','source'))
+            con.execute('INSERT INTO checks VALUES(?,?,?,?,?,?,?,?)',
+                        (str(i),'violation','1352-28','Срок оплаты МСП превышен',
+                         'ПП РФ № 1352 п. 28',proof,'Договор.pdf','source'))
+        con.commit();changes=con.total_changes
+        stats,first=dashboard_counts(con,' FROM purchases p WHERE 1=1',[],0,1)
+        second_stats,second=dashboard_counts(con,' FROM purchases p WHERE 1=1',[],1,1)
+        self.assertEqual((stats['purchases'],stats['violations']),(3,3))
+        self.assertEqual(stats,second_stats)
+        self.assertEqual((len(first),len(second)),(1,1))
+        self.assertNotEqual(first[0]['reg_number'],second[0]['reg_number'])
+        filtered,_=dashboard_counts(con,' FROM purchases p WHERE p.reg_number=?',['0'],0,1)
+        self.assertEqual((filtered['purchases'],filtered['violations']),(1,1))
+        self.assertEqual(con.total_changes,changes)
+        self.assertEqual(con.execute('SELECT SUM(violations) FROM purchases').fetchone()[0],21)
         self.assertIn("body=body.replace('<small>Закупок по фильтру</small>','<small>Закупки</small>')",content)
         self.assertNotIn('v262-progress',content)
 

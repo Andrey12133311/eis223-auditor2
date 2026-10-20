@@ -951,7 +951,7 @@ def install(ns):
     disabled=[]
     for fn in before:
         name=getattr(fn,"__name__",type(fn).__name__)
-        if name in ("resume_official_uploads","reconcile"):
+        if name in ("resume_official_uploads","reconcile","warm_dashboard_reads"):
             kept.append(fn)
         else:
             disabled.append(name)

@@ -21,8 +21,9 @@ class FeatureTests(unittest.TestCase):
             c.row_factory=sqlite3.Row
             return c
         with conn() as c:
-            c.executescript("""CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT,title TEXT,source TEXT,customer_inn TEXT,org_form TEXT,price_num REAL,method TEXT,published_at TEXT,card_source_status TEXT,last_seen TEXT,submission_start TEXT,submission_end TEXT,documents_found INT,documents_checked INT,violations INT,risks INT,clarifications INT,protocols INT,cancellations INT);
-            CREATE TABLE findings(reg_number TEXT,kind TEXT,code TEXT,title TEXT);
+            c.executescript("""CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,customer TEXT,title TEXT,source TEXT,customer_inn TEXT,org_form TEXT,price TEXT,price_num REAL,method TEXT,published_at TEXT,card_source_status TEXT,last_seen TEXT,submission_start TEXT,submission_end TEXT,documents_found INT,documents_checked INT,violations INT,risks INT,clarifications INT,protocols INT,cancellations INT);
+            CREATE TABLE findings(reg_number TEXT,kind TEXT,code TEXT,title TEXT,law TEXT,evidence TEXT,document TEXT,source_url TEXT);
+            CREATE TABLE checks(reg_number TEXT,status TEXT,field_path TEXT,item TEXT,law TEXT,evidence TEXT,document TEXT,source_url TEXT);
             CREATE TABLE requests_v233(reg TEXT PRIMARY KEY,lane TEXT,status TEXT,requested_at TEXT);
             CREATE TABLE document_priorities_v233(reg TEXT PRIMARY KEY,lane TEXT,requested_at TEXT);
             CREATE TABLE customer_purchases_v233(inn TEXT,reg TEXT);
@@ -31,7 +32,7 @@ class FeatureTests(unittest.TestCase):
               VALUES('32610000001','Auto','Automatic','api','1234567890','ООО',5000,'2026',2,2,1,0)""")
             c.execute("""INSERT INTO purchases(reg_number,customer,title,source,customer_inn,org_form,price_num,last_seen,documents_found,documents_checked,violations,risks)
               VALUES('32610000002','Manual','Manual','manual','1234567890','ООО',100,'2026',0,0,0,0)""")
-            c.execute("INSERT INTO findings VALUES('32610000001','violation','CLAR-LATE','Нарушение срока разъяснения')")
+            c.execute("INSERT INTO findings(reg_number,kind,code,title) VALUES('32610000001','violation','CLAR-LATE','Нарушение срока разъяснения')")
             c.execute("INSERT INTO requests_v233 VALUES('32610000002','manual','pending','2026-10-10')")
         self.app=FastAPI()
         features.install({'app':self.app,'conn':conn,'_verified_set235':lambda:{'32610000001','32610000002'}})

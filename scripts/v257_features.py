@@ -6,6 +6,9 @@ import asyncio
 import json
 import re
 import sqlite3
+import time
+from dashboard_read_cache import MembershipCache, MembershipUnavailable, ensure_read_indexes
+from dashboard_load_ui import inject as dashboard_load_state
 from contextlib import contextmanager
 from v295_eis_originals import root,allowed_documents,saved_document
 from fastapi import HTTPException, Request
@@ -75,6 +78,7 @@ OLD_DASHBOARD = "api('/api/v204/dashboard?'+filters())"
 NEW_DASHBOARD = "api('/api/v257/dashboard?'+filters())"
 
 def _html_patch(body: str) -> str:
+    body=dashboard_load_state(body)
     # This is the existing procurement total across all pages, not a new metric.
     body=body.replace('<small>Закупок по фильтру</small>','<small>Закупки</small>')
     if OLD_DASHBOARD in body: body=body.replace(OLD_DASHBOARD,NEW_DASHBOARD,1)
@@ -129,6 +133,7 @@ def manual_progress(reg,checked,search_status):
 
 def install(ns:dict)->None:
     app,connection=ns['app'],ns['conn']
+    membership=MembershipCache(lambda: ns['_verified_set235']())
     @contextmanager
     def db():
         c=connection();c.row_factory=sqlite3.Row
@@ -150,6 +155,13 @@ def install(ns:dict)->None:
     async def on_start():
         await asyncio.to_thread(setup)
         print('V257 INN TYPES MANUAL SEPARATE READY',flush=True)
+    @app.on_event('startup')
+    async def warm_dashboard_reads():
+        # Retained explicitly by EIS-only startup. This starts one read-only
+        # scan, not a collector or an audit. Only bounded index creation
+        # (up to five seconds) is awaited before HTTP readiness.
+        membership.refresh()
+        await asyncio.to_thread(ensure_read_indexes,connection)
     @app.get('/api/v257/violation-types',include_in_schema=False)
     def types():
         with db() as c:
@@ -167,7 +179,16 @@ def install(ns:dict)->None:
     def dashboard(request:Request):
         params=request.query_params
         inn=(params.get('inn') or '').strip()
-        verified=set(ns['_verified_set235']())
+        if inn and not re.fullmatch(r'\d{10}|\d{12}',inn):
+            raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
+        started=time.monotonic()
+        try:
+            snapshot,membership_info=membership.snapshot()
+        except MembershipUnavailable:
+            raise HTTPException(503,'Список закупок обновляется. Повторите загрузку через 10 секунд.',
+                                headers={'Retry-After':'10','Cache-Control':'no-store',
+                                         'X-EIS-Dashboard-State':'warming'})
+        verified=set(snapshot)
         # The current intake snapshot is volatile (it can shrink to a few
         # hundred after the collector rotates pages). Preserve ALL purchases
         # that already entered the verified automatic audit queue.
@@ -190,7 +211,7 @@ def install(ns:dict)->None:
                     (inn,inn)).fetchall()
                 verified.update(str(row[0]) for row in extra)
         verified=sorted(verified)
-        if not verified:return {'stats':{'purchases':0,'violations':0,'risks':0,'documents_found':0,'documents_checked':0},'purchases':[],'offset':0,'limit':100}
+        if not verified:return {'stats':{'purchases':0,'violations':0,'risks':0,'documents_found':0,'documents_checked':0},'purchases':[],'offset':0,'limit':100,**membership_info}
         # Use one reconciler for dashboard counts AND general card findings:
         # raw COUNT(findings)+COUNT(checks) counts the same violation twice.
         from v352_dashboard_truth import dashboard_counts
@@ -243,8 +264,14 @@ def install(ns:dict)->None:
         except ValueError:raise HTTPException(400,'Некорректная страница')
         sql=' FROM purchases p WHERE '+' AND '.join(conditions)
         with db() as c:
+            # One consistent read snapshot; no writer reservation or changes.
+            c.execute('PRAGMA query_only=ON')
+            c.execute('BEGIN')
             stats,items=dashboard_counts(c,sql,args,offset,limit)
-        return {'stats':stats,'purchases':items,'offset':offset,'limit':limit,
+        print('DASHBOARD_READ_READY elapsed_ms='+str(round((time.monotonic()-started)*1000,1))+
+              ' page_rows='+str(len(items))+' membership_age_seconds='+
+              str(membership_info['membership_age_seconds']),flush=True)
+        return {'stats':stats,'purchases':items,'offset':offset,'limit':limit,**membership_info,
                 'count_basis':'unique_saved_legal_episodes',
                 'list_basis':'verified_intake_and_persistent_automatic_queue',
                 'filter_scoped':True}
