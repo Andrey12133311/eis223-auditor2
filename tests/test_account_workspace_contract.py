@@ -1,6 +1,12 @@
 """Regression tests for account dashboard contracts."""
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from uuid import uuid4
+from fastapi import Response
+from scripts import account_workspace_v1 as workspace
+from scripts.account_pages_v1 import HOME, THEMATIC
+from scripts.account_site_ui_v1 import site_header
 ROOT = Path(__file__).resolve().parents[1]
 class WorkspaceContracts(unittest.TestCase):
     def test_no_duplicate_private_routes(self):
@@ -11,7 +17,8 @@ class WorkspaceContracts(unittest.TestCase):
             self.assertEqual(b.count('@router.get("'+route+'")'),1)
     def test_dashboard_api_fields(self):
         s=(ROOT/'scripts/account_pages_v1.py').read_text()
-        self.assertIn('item.batch_id',s)
+        self.assertIn('encodeURIComponent(check.id)', THEMATIC)
+        self.assertIn('data.batches', THEMATIC)
         self.assertIn('item.reg_number',s)
     def test_thematic_unlink_is_owner_scoped(self):
         api=(ROOT/'scripts/account_private_api_v1.py').read_text()
@@ -19,7 +26,9 @@ class WorkspaceContracts(unittest.TestCase):
         self.assertIn('WHERE user_id=%s AND batch_id=%s RETURNING batch_id',api)
         self.assertIn('require_origin(request)',api)
         pages=(ROOT/'scripts/account_pages_v1.py').read_text()
-        self.assertIn("Удалить из моих",pages)
+        self.assertIn("Удалить проверку", THEMATIC)
+        self.assertIn("if(!confirm(", THEMATIC)
+        self.assertIn("'/api/thematic/'+encodeURIComponent(check.id)", THEMATIC)
     def test_thematic_bookmark_requires_owner_and_origin(self):
         api=(ROOT/'scripts/account_private_api_v1.py').read_text()
         pages=(ROOT/'scripts/account_pages_v1.py').read_text()
@@ -32,8 +41,24 @@ class WorkspaceContracts(unittest.TestCase):
         page=(ROOT/'scripts/account_pages_v1.py').read_text()
         self.assertIn('@router.get("/summary")',api)
         self.assertIn('WHERE user_id=%s',api)
-        self.assertIn('(owner_id, owner_id, owner_id)',api)
-        self.assertIn("fetch('/me/summary'",page)
+        owner = uuid4()
+        class SummaryDB:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def execute(self, sql, params):
+                self.sql, self.params = sql, params
+                return self
+            def fetchone(self): return (2, 3, 5, 7)
+        db, response = SummaryDB(), Response()
+        with patch.object(workspace, "current_account", return_value=(owner, "user", "approved")), \
+             patch.object(workspace, "connect", return_value=db):
+            result = workspace.my_summary(object(), response)
+        self.assertEqual(db.params, (owner, owner, owner, owner))
+        self.assertEqual(db.sql.count("WHERE user_id=%s"), 4)
+        self.assertEqual(result, {"procurements": 2, "thematic_batches": 3,
+                                  "memos": 5, "manual_checks": 7})
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn(b"get('/me/summary')", site_header("user"))
     def test_procurement_list_disables_caching(self):
         api=(ROOT/'scripts/account_workspace_v1.py').read_text()
         self.assertIn('def my_procurements(request: Request, response: Response):',api)
@@ -42,17 +67,18 @@ class WorkspaceContracts(unittest.TestCase):
     def test_personal_thematic_queue_controls(self):
         page=(ROOT/'scripts/account_pages_v1.py').read_text()
         api=(ROOT/'scripts/account_private_api_v1.py').read_text()
-        self.assertIn("add.textContent='Добавить закупку'",page)
-        self.assertIn("show.textContent='Закупки'",page)
-        self.assertIn("remove.textContent='Убрать закупку'",page)
-        self.assertIn("queue.textContent='Поставить в очередь'",page)
-        self.assertIn("jobs.textContent='Статусы заданий'",page)
-        self.assertIn("findings.textContent='Нарушения'",page)
-        self.assertIn("'/findings'",page)
-        self.assertIn('finding.evidence_source',page)
-        self.assertIn("completed:'Завершено'",page)
-        self.assertIn("'/jobs/'+encodeURIComponent(procurement.reg_number)",page)
-        self.assertIn("method:'DELETE'",page)
+        # The current page uses real owned history, not the retired manual
+        # batch-ID widget. Keep backend legacy ownership assertions below.
+        self.assertIn("fetch('/api/thematic/history'", THEMATIC)
+        self.assertIn("credentials:'same-origin'", THEMATIC)
+        self.assertIn("cache:'no-store'", THEMATIC)
+        self.assertIn("response.status===401", THEMATIC)
+        self.assertIn("Новая тематическая проверка", THEMATIC)
+        self.assertIn("open.textContent='Открыть результаты'", THEMATIC)
+        self.assertIn("'/thematic#'+encodeURIComponent(check.id)", THEMATIC)
+        self.assertIn("method:'DELETE'", THEMATIC)
+        self.assertNotIn("prompt(", THEMATIC)
+        self.assertNotIn("fetch('/me/thematic-batches'", THEMATIC)
         self.assertIn('@router.delete("/thematic-batches/{batch_id}/procurements/{reg_number}")',api)
         self.assertIn('@router.get("/thematic-batches/{batch_id}/procurements")',api)
         self.assertIn('@router.post("/thematic-batches/{batch_id}/procurements/{reg_number}"',api)

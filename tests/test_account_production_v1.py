@@ -81,11 +81,21 @@ class ProductionLoginTests(unittest.TestCase):
                      "/account/register", "/auth/register", "/eis223/collector.js"):
             self.assertEqual(request(path)[0], 200)
 
-    def test_existing_session_skips_entry_forms(self):
+    def test_explicit_entry_forms_stay_visible_without_consulting_session(self):
         for path in ("/account/login", "/account/register"):
             code, headers = request(path, account=("id", "user", "approved"))
-            self.assertEqual(code, 303)
-            self.assertEqual(headers[b"location"], b"/")
+            self.assertEqual(code, 200)
+            self.assertNotIn(b"location", headers)
+            self.assertEqual(headers[b"cache-control"], b"no-store")
+            with patch("scripts.account_production_v1.user_session") as lookup:
+                async def receive():
+                    return {"type": "http.request", "body": b""}
+                async def send(message):
+                    pass
+                with patch.dict(os.environ, {"EIS223_AUTH_ENFORCE": "true"}):
+                    asyncio.run(ProductionAccountGate(fake_app)(
+                        {"type": "http", "path": path, "method": "GET", "headers": []}, receive, send))
+                lookup.assert_not_called()
 
     def test_every_audit_view_requires_prior_login(self):
         code,headers=request("/")

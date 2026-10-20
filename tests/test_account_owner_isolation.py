@@ -1,4 +1,5 @@
 """Behavioral tests for cross-account isolation without a live database."""
+import asyncio
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -114,7 +115,7 @@ class OwnerIsolationTests(unittest.TestCase):
         db = FakeDB()
         with patch.object(private, 'connect', return_value=db), patch.object(private, 'current_account', return_value=(OWNER_B, 'user', 'approved')), patch.object(private, 'owned_memo_key', return_value=None) as lookup:
             with self.assertRaises(HTTPException) as caught:
-                private.memo_download(uuid4(), object(), Response())
+                asyncio.run(private.memo_download(uuid4(), object(), Response()))
         self.assertEqual(caught.exception.status_code, 404)
         self.assertEqual(lookup.call_args.args[2], OWNER_B)
 
