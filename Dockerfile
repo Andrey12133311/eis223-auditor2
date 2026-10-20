@@ -60,6 +60,8 @@ COPY tests/test_semantic_audit_sources.py tests/test_legal_audit_revision.py tes
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_automatic_recheck_fairness test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
 COPY tests/test_legal_event_coverage.py tests/test_legal_security_clause_coverage.py tests/test_receipt_original_parity.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_event_coverage.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_legal_security_clause_coverage.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_receipt_original_parity.py'
+COPY tests/test_bid_security_price_basis.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_bid_security_price_basis
 COPY tests/test_archive_member_occurrences.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_member_occurrences
 COPY tests/test_audit_funnel.py tests/

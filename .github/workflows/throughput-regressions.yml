@@ -12,6 +12,7 @@ on:
       - 'tests/test_legal_audit_revision.py'
       - 'tests/test_legal_event_coverage.py'
       - 'tests/test_legal_security_clause_coverage.py'
+      - 'tests/test_bid_security_price_basis.py'
       - 'tests/test_receipt_original_parity.py'
       - 'tests/test_archive_member_occurrences.py'
       - 'tests/test_audit_funnel.py'
@@ -66,6 +67,7 @@ jobs:
           python scripts/v372_automatic_legal_selftest.py
           python -m unittest discover -s tests -p 'test_legal_event_coverage.py'
           python -m unittest discover -s tests -p 'test_legal_security_clause_coverage.py'
+          python -m unittest discover -s tests -p 'test_bid_security_price_basis.py'
           python -m unittest discover -s tests -p 'test_receipt_original_parity.py'
           python -m unittest discover -s tests -p 'test_archive_member_occurrences.py'
           python -m unittest discover -s tests -p 'test_audit_funnel.py'

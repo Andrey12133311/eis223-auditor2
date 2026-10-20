@@ -269,14 +269,19 @@ def reconcile_notice_context(purchase, direct):
             proof[key]=evidence(value)
     xml_price=context.get("price") or {}
     selected=chosen_price(direct.get("prices") or [])
-    if xml_price and selected and selected.get("price_kind")=="nmcd":
-        same=money(xml_price.get("price"))==money(selected.get("price"))
+    if xml_price and selected:
+        # The current SOAP starting-price field is NMCD. A unit-price sum or
+        # maximum-value card field cannot corroborate it merely because its
+        # number is equal, nor replace it without the same revision check.
+        same=(selected.get("price_kind")=="nmcd" and
+              money(xml_price.get("price"))==money(selected.get("price")))
         price_older=card_predates_notice(direct.get("price_captured_at",direct.get("captured_at")),record)
         if not same and not price_older:
             conflicts["price"]={"source":"official_eis_context_conflict","value":None,
-                "evidence":"Не установлена действующая редакция противоречащей НМЦД ЕИС",
-                "alternatives":[evidence(xml_price.get("price")),
+                "evidence":"Не установлена действующая редакция или вид противоречащей цены ЕИС",
+                "alternatives":[{**evidence(xml_price.get("price")),"price_kind":"nmcd"},
                     {"value":selected.get("price"),"source":"official_eis_card",
+                     "price_kind":selected.get("price_kind"),
                      "source_url":direct.get("source_page"),
                      "captured_at":direct.get("price_captured_at",direct.get("captured_at"))}]}
             purchase.update(price="",price_num=None)
