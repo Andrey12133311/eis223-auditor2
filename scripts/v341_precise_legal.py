@@ -48,12 +48,16 @@ _REQUEST_SUBJECT = (r"\s+(?:(?:на\s+)?(?:(?:дачу|предоставлен�
                     r"о\s+(?:(?:даче|предоставлении)\s+)?разъяснени[ийя])"
                     + _CLARIFICATION_SUBJECT)
 _EIS_LABEL = r"(?:ЕИС|единой\s+информационной\s+системе(?:\s+в\s+сфере\s+закупок)?)"
-REQUEST = (r"(?:дата\s+(?:и\s+время\s+)?(?:поступления|получения|регистрации)\s+"
+_RECEIPT_ACTION = (r"(?:поступления|получения|регистрации)"
+                   r"(?:\s*\(\s*(?:поступления|получения|регистрации)\s*\))?")
+_PUBLICATION_ACTION = (r"(?:размещения|публикации)"
+                       r"(?:\s*\(\s*(?:размещения|публикации)\s*\))?")
+REQUEST = (r"(?:дата\s+(?:и\s+время\s+)?" + _RECEIPT_ACTION + r"\s+"
            r"(?:заказчиком\s+)?запроса(?:" + _REQUEST_SUBJECT + r")?|"
            r"запрос" + _REQUEST_SUBJECT + r"\s+(?:поступил|получен|зарегистрирован))")
 _ANSWER_OBJECT = (r"(?:ответа(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
                   r"разъяснени[яй]" + _CLARIFICATION_SUBJECT + r"(?:\s+на\s+запрос)?)")
-ANSWER = (r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:"
+ANSWER = (r"(?:дата\s+(?:и\s+время\s+)?" + _PUBLICATION_ACTION + r"\s+(?:"
           + _ANSWER_OBJECT + r"(?:\s+в\s+" + _EIS_LABEL + r")?|"
           r"в\s+" + _EIS_LABEL + r"\s+" + _ANSWER_OBJECT + r")|"
           r"(?:ответ(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
@@ -71,7 +75,7 @@ _PROTOCOL_DATE_NOMINATIVE = (r"(?:итоговый\s+протокол|прото
 SIGNED = (r"(?:дата\s+(?:и\s+время\s+)?подписания\s+" + _PROTOCOL_DATE_GENITIVE
           + r"|" + _PROTOCOL_DATE_NOMINATIVE + r"\s+подписан)")
 PROTOCOL_PUBLISHED = (
-    r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:"
+    r"(?:дата\s+(?:и\s+время\s+)?" + _PUBLICATION_ACTION + r"\s+(?:"
     + _PROTOCOL_DATE_GENITIVE + r"(?:\s+в\s+" + _EIS_LABEL + r")?|в\s+"
     + _EIS_LABEL + r"\s+" + _PROTOCOL_DATE_GENITIVE + r")|"
     + _PROTOCOL_DATE_NOMINATIVE + r"\s+(?:размещ[её]н|опубликован)\s+в\s+"

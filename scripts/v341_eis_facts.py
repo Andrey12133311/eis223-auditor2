@@ -430,15 +430,13 @@ def enrich(ns, purchase, docs, card=None, detail=None):
     return purchase
 
 
-def _fact_plan(row, purchase, evidence):
-    """Compute the derived fact cache without reserving the database writer."""
+def _fact_updates(row, purchase, evidence):
+    """Plan derived cache writes without reserving SQLite's single writer."""
     values = {}
     for key, item in evidence.items():
         column = "published_at" if key == "published" else key
-        # Intake owns the source-labelled purchase row. Rechecks keep
-        # current XML provenance below without changing their own
-        # semantic source token merely by filling derived cache fields.
-        if item.get("source")=="official_eis_xml":continue
+        if item.get("source") == "official_eis_xml":
+            continue
         if column in row and (not row[column] or item.get("source") == "official_eis_card"):
             values[column] = item["value"]
     if values.get("submission_end") and "deadline" in row:
@@ -449,23 +447,18 @@ def _fact_plan(row, purchase, evidence):
         card = {}
     if not isinstance(card, dict):
         card = {}
-    # A malformed derived cache must not abort analysis of valid originals.
-    if not isinstance(card.get("fact_evidence"), dict):
-        card["fact_evidence"] = {}
-    if not isinstance(card.get("summary"), dict):
-        card["summary"] = {}
+    previous = json.dumps(card, ensure_ascii=False, sort_keys=True)
+    for key in ("fact_evidence", "summary"):
+        if not isinstance(card.get(key), dict):
+            card[key] = {}
     card["fact_evidence"].update(evidence)
-    card.setdefault("summary", {}).update({k: purchase.get(k) for k in evidence})
+    card["summary"].update({key: purchase.get(key) for key in evidence})
     if "price" in evidence:
-        card["summary"].update({key:purchase.get(key) for key in ("price","price_num","price_kind")})
-    if "card_fields_json" in row:
-        try:
-            same = json.loads(row.get("card_fields_json") or "{}") == card
-        except (TypeError, ValueError):
-            same = False
-        if not same:
-            values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
-    return {key: value for key, value in values.items() if row.get(key) != value}
+        card["summary"].update({key: purchase.get(key) for key in ("price", "price_num", "price_kind")})
+    if ("card_fields_json" in row and
+            json.dumps(card, ensure_ascii=False, sort_keys=True) != previous):
+        values["card_fields_json"] = json.dumps(card, ensure_ascii=False)
+    return {key: value for key, value in values.items() if value != row[key]}
 
 
 def persist_facts(ns, purchase):
@@ -473,38 +466,37 @@ def persist_facts(ns, purchase):
     evidence = purchase.get("fact_evidence") or {}
     if not evidence:
         return
+    # A repeated analysis often produces identical facts. A read-only preflight
+    # lets it complete even while an unrelated writer holds the WAL database.
+    # Real changes retain the original transaction/lease fence and rebase check.
     from audit_write_guard import guarded_transaction
-    from copy import deepcopy
-    purchase = deepcopy(purchase)
-    evidence = purchase["fact_evidence"]
     for _ in range(4):
         db = ns["conn"](); db.row_factory = sqlite3.Row
         try:
-            original = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-            if original is None:
-                return
-            original = dict(original)
+            row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+            snapshot = dict(row) if row else None
         finally:
             db.close()
-        values = _fact_plan(original, purchase, evidence)
+        if snapshot is None:
+            return
+        values = _fact_updates(snapshot, purchase, evidence)
         if not values:
             return
         db = ns["conn"](); db.row_factory = sqlite3.Row
         try:
             with guarded_transaction(db):
-                current = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-                if current is None:
-                    return
-                if dict(current) != original:
-                    # This plan belongs to an earlier evidence snapshot. Do
-                    # not reapply it over newly arrived official card facts.
-                    # The audit's final source-version fence decides whether
-                    # the analysis itself can be committed; this is only cache.
+                row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+                if row is None or dict(row) != snapshot:
                     db.rollback()
-                    print(f"FACT_CACHE_DEFERRED reg={reg} reason=concurrent_source_update", flush=True)
-                    return
-                db.execute("UPDATE purchases SET " + ",".join(k+"=?" for k in values) +
-                           " WHERE reg_number=?", (*values.values(), reg))
+                    # Rebase a derived-cache-only update, but never overwrite
+                    # a newer intake source column with an older audit's facts.
+                    # Final audit source/lease fences remain authoritative.
+                    if row is not None and any(row[key] != value for key, value in snapshot.items()
+                                               if key != "card_fields_json"):
+                        print("FACT_CACHE_DEFERRED reason=concurrent_source_update", flush=True)
+                        return
+                    continue
+                db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in values)+" WHERE reg_number=?", (*values.values(), reg))
                 db.commit()
                 return
         finally:

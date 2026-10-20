@@ -50,7 +50,7 @@ def price_changes(p,evidence=None):
 
 def sync_price_checks(db,reg,price,evidence):
     """Refresh only the two factual extraction checks, never legal conclusions."""
-    if not evidence or money(evidence.get("price"))!=money(price):return
+    if not evidence or not money(evidence.get("price")) or money(evidence.get("price"))!=money(price):return
     if evidence.get("price_kind") not in (None,"","nmcd"):return
     columns={r[1] for r in db.execute('PRAGMA table_info(checks)')}
     if not {'reg_number','item','status','evidence'}.issubset(columns):return
@@ -101,6 +101,22 @@ def update_price(db,reg,evidence=None):
     return True
 
 
+def _price_repair_needed(db, purchase, evidence):
+    if price_changes(purchase, evidence):
+        return True
+    if (not evidence or not money(evidence.get("price"))
+            or money(evidence.get("price")) != money(purchase.get("price"))
+            or evidence.get("price_kind") not in (None, "", "nmcd")):
+        return False
+    columns = {row[1] for row in db.execute("PRAGMA table_info(checks)")}
+    if not {"reg_number", "item", "status", "evidence"}.issubset(columns):
+        return False
+    return db.execute("SELECT 1 FROM checks WHERE reg_number=? "
+        "AND item IN ('НМЦД','НМЦД распознана как число') "
+        "AND status IN ('check','read','pending','unknown') LIMIT 1",
+        (purchase["reg_number"],)).fetchone() is not None
+
+
 def cached_evidence(p,verified):
     if verified:return {**verified,"source":"official_eis_card",
                         "source_url":verified.get("evidence_page","")}
@@ -135,6 +151,8 @@ def repair_cached(ns):
         evidence=cached_evidence(row,verified.get(reg))
         db=ns["conn"]();db.row_factory=sqlite3.Row
         try:
+            if not _price_repair_needed(db, row, evidence):
+                continue
             db.execute("BEGIN IMMEDIATE")
             current=db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
             try:
@@ -178,12 +196,27 @@ def recover_one(ns,reg):
     else:
         price=verified_xml_nmcd(official_notice(reg))
         evidence={"price":price,"source":"official_eis_xml"} if price else stored_metadata(ns,reg)
-    db=ns["conn"]()
-    try:
-        corrected=update_price(db,reg,evidence)
-        db.commit()
-        return corrected
-    finally:db.close()
+    def apply():
+        db=ns["conn"]();db.row_factory=sqlite3.Row
+        try:
+            row=db.execute("SELECT * FROM purchases WHERE reg_number=?",(reg,)).fetchone()
+            if row is None or not _price_repair_needed(db,dict(row),evidence):
+                return False
+        finally:db.close()
+        db=ns["conn"]()
+        try:
+            from audit_write_guard import guarded_transaction
+            with guarded_transaction(db):
+                corrected=update_price(db,reg,evidence)
+                db.commit()
+                return corrected
+        finally:
+            if db.in_transaction:db.rollback()
+            db.close()
+    # Only retry the database stage. Re-fetching and extracting the original
+    # on every BUSY would duplicate expensive work and hold up other purchases.
+    from audit_db_retry import run_db_sync
+    return run_db_sync(apply,stage="price_recovery")
 
 
 PRICE_JS=r'''<script id="v335-price-format">

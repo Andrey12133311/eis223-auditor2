@@ -114,13 +114,13 @@ class FactMetadataContention(unittest.TestCase):
         self.assertEqual(card['other'],'keep')
 
     def test_facts_computation_does_not_hold_writer_and_preserves_concurrent_update(self):
-        original=facts._fact_plan
+        original=facts._fact_updates
         def concurrent(*args):
             with closing(self.connect()) as c:
                 c.execute("UPDATE purchases SET deadline='2026-12-01',submission_end='2026-12-01'")
                 c.commit()
             return original(*args)
-        with patch.object(facts,'_fact_plan',side_effect=concurrent):
+        with patch.object(facts,'_fact_updates',side_effect=concurrent):
             facts.persist_facts(self.ns,self.purchase)
         self.assertEqual(self.row()['deadline'],'2026-12-01')
 
@@ -212,11 +212,11 @@ class NewFrozenRequest(unittest.TestCase):
         ns={'conn':lambda:sqlite3.connect(self.path),'_verified_set235':lambda:[A,B]}
         with patch.dict(os.environ,{runtime.REQUEST_ENV:runtime.DASHBOARD_EPOCH}), \
                 patch('full_recheck_inventory.collect',return_value={'status':'test'}), \
-                patch.object(general,'engine_signature',return_value='synthetic-generation-nine'):
+                patch.object(general,'engine_signature',return_value='synthetic-generation-ten'):
             runtime.initialize(ns)
             self.assertEqual(runtime.request_id(ns),runtime.DASHBOARD_EPOCH)
             new=ledger.inventory(self.c,runtime.DASHBOARD_EPOCH)
-            self.assertEqual((new['actual_count'],new['expected_count'],new['target_generation']),(3,4007,9))
+            self.assertEqual((new['actual_count'],new['expected_count'],new['target_generation']),(3,4007,10))
             runtime.initialize(ns)
             self.assertEqual(ledger.inventory(self.c,runtime.DASHBOARD_EPOCH),new)
 

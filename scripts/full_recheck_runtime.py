@@ -32,7 +32,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 9
+TARGET_GENERATION = 10
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.

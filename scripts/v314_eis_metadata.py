@@ -386,27 +386,28 @@ def from_documents(reg, documents, known_customer=""):
 
 
 def _metadata_snapshot(db, reg):
-    row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-    if row is None:
+    """Materialize only the three rows used by the repair; no writer reservation."""
+    purchase = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+    if purchase is None:
         return None
-    prior = db.execute("SELECT * FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
-    exists = bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v314_eis_metadata'").fetchone())
-    saved = (db.execute("SELECT metadata_json,captured_at FROM v314_eis_metadata WHERE reg=?", (reg,)).fetchone()
-             if exists else None)
-    return (dict(row), dict(prior) if prior is not None else None,
-            dict(saved) if saved is not None else None, exists)
+    buyer_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v311_verified_buyers'").fetchone()
+    buyer = (db.execute("SELECT * FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
+             if buyer_table else None)
+    table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v314_eis_metadata'").fetchone()
+    saved = (db.execute("SELECT metadata_json,captured_at FROM v314_eis_metadata WHERE reg=?",
+                        (reg,)).fetchone() if table else None)
+    return (dict(purchase), dict(buyer) if buyer is not None else None,
+            dict(saved) if saved is not None else None, bool(table))
 
 
 def _metadata_plan(ns, snapshot, metadata, stamp):
-    """Prepare JSON and identity comparisons without holding a write lock."""
-    p, _, saved, _ = snapshot
-    buyer_insert, buyer_changes = None, {}
-    changes = {}
+    """Parse identity/price/JSON before acquiring SQLite's single writer."""
+    p, prior, saved, _ = snapshot
+    changes, buyer_insert, buyer_changes = {}, None, {}
     name = company(metadata.get("customer")) or _name(metadata.get("customer"))
     current_name = _name(p.get("customer"))
     extension = (customer_name_extension(current_name, name) and
                  not metadata.get("customer_identity_conflict"))
-    prior = snapshot[1]
     if extension:
         incoming_inn = valid_inn(metadata.get("customer_inn"))
         existing_inns = {valid_inn(p.get("customer_inn"))}
@@ -430,7 +431,8 @@ def _metadata_plan(ns, snapshot, metadata, stamp):
         inn = valid_inn(metadata.get("customer_inn"))
         if inn and not valid_inn(p.get("customer_inn")):
             changes["customer_inn"] = inn
-        # No-op evidence must not acquire SQLite's single writer.
+        # Keep the existing official-card precedence and provenance. Only an
+        # actual missing-INN repair writes an already-known buyer again.
         if prior is None:
             buyer_insert = (name, inn, metadata.get("source_url", ""), "official_eis_document", stamp)
         elif prior["name"] == name and prior["inn"] == "" and inn:
@@ -441,11 +443,9 @@ def _metadata_plan(ns, snapshot, metadata, stamp):
     title = subject(metadata.get("title"))
     if title and not subject(p.get("title")):
         changes["title"] = title
-    # Only an explicit number extracted from an actual EIS original can
-    # fill a missing price; keep the earlier valid NMCD untouched.
-    from v335_price_recovery import price_changes,money
+    from v335_price_recovery import price_changes, money
     if money(metadata.get("price")):
-        changes.update(price_changes(p,metadata))
+        changes.update(price_changes(p, metadata))
     if changes:
         try:
             card = json.loads(p.get("card_fields_json") or "{}")
@@ -453,31 +453,36 @@ def _metadata_plan(ns, snapshot, metadata, stamp):
             for key in ("customer", "customer_inn", "title", "price", "price_num"):
                 if key in changes:
                     summary[key] = changes[key]
-            if "price" in changes and money(changes["price"])==money(metadata.get("price")):
-                summary["price_kind"]=metadata.get("price_kind") or "nmcd"
-            card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
-            changes["card_fields_json"] = json.dumps(card,ensure_ascii=False)
-        except (ValueError,TypeError,AttributeError):
+            if "price" in changes and money(changes["price"]) == money(metadata.get("price")):
+                summary["price_kind"] = metadata.get("price_kind") or "nmcd"
+            card["metadata_evidence"] = {"source": "official_eis_document", **metadata}
+            changes["card_fields_json"] = json.dumps(card, ensure_ascii=False)
+        except (ValueError, TypeError, AttributeError):
             pass
+    # Repeated audits must not reserve a writer just to refresh captured_at.
+    # A changed evidence payload is still durably saved even without a row repair.
+    payload = json.dumps(metadata, ensure_ascii=False)
     try:
-        same = saved is not None and json.loads(saved["metadata_json"]) == metadata
+        same_metadata = saved is not None and json.loads(saved["metadata_json"]) == metadata
     except (ValueError, TypeError):
-        same = False
-    return changes, buyer_insert, buyer_changes, None if same else json.dumps(metadata, ensure_ascii=False)
+        same_metadata = False
+    return changes, buyer_insert, buyer_changes, None if same_metadata else payload
 
 
 def apply_metadata(ns, reg, metadata):
     if not metadata or not REG.fullmatch(reg):
         return False
     from audit_write_guard import guarded_transaction
+    # Freeze caller-owned dictionaries before preflight/rebase work.
     metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
     for _ in range(4):
         db = ns["conn"](); db.row_factory = sqlite3.Row
         try:
-            db.execute("BEGIN")
+            db.execute("BEGIN")  # Short consistent read snapshot, never IMMEDIATE.
             snapshot = _metadata_snapshot(db, reg)
         finally:
-            db.rollback(); db.close()
+            db.rollback()
+            db.close()
         if snapshot is None:
             return False
         stamp = datetime.now(timezone.utc).isoformat()
@@ -487,32 +492,37 @@ def apply_metadata(ns, reg, metadata):
         db = ns["conn"](); db.row_factory = sqlite3.Row
         try:
             with guarded_transaction(db):
+                # Intake can win between the read and the writer. Recompute
+                # outside the writer, never overwrite its fresher correction.
                 if _metadata_snapshot(db, reg) != snapshot:
                     db.rollback()
                     continue
                 if not snapshot[3]:
-                    db.execute("""CREATE TABLE v314_eis_metadata(
+                    db.execute("""CREATE TABLE IF NOT EXISTS v314_eis_metadata(
                         reg TEXT PRIMARY KEY, metadata_json TEXT NOT NULL, captured_at TEXT NOT NULL)""")
                 if buyer_insert is not None:
                     db.execute("""INSERT INTO v311_verified_buyers
                         (reg,name,inn,evidence_page,evidence_source,captured_at) VALUES(?,?,?,?,?,?)""",
                         (reg, *buyer_insert))
                 if buyer_changes:
-                    db.execute("UPDATE v311_verified_buyers SET " + ",".join(k+"=?" for k in buyer_changes)
-                               + " WHERE reg=?", (*buyer_changes.values(), reg))
+                    db.execute("UPDATE v311_verified_buyers SET " +
+                               ",".join(k + "=?" for k in buyer_changes) + " WHERE reg=?",
+                               (*buyer_changes.values(), reg))
                 if changes:
-                    db.execute("UPDATE purchases SET " + ",".join(k+"=?" for k in changes)
-                               + " WHERE reg_number=?", (*changes.values(), reg))
+                    db.execute("UPDATE purchases SET " + ",".join(k + "=?" for k in changes) +
+                               " WHERE reg_number=?", (*changes.values(), reg))
                 if payload is not None:
-                    db.execute("""INSERT INTO v314_eis_metadata VALUES(?,?,?)
+                    db.execute("""INSERT INTO v314_eis_metadata(reg,metadata_json,captured_at) VALUES(?,?,?)
                         ON CONFLICT(reg) DO UPDATE SET metadata_json=excluded.metadata_json,
-                        captured_at=excluded.captured_at""", (reg, payload, stamp))
+                            captured_at=excluded.captured_at""", (reg, payload, stamp))
                 db.commit()
                 return bool(changes)
         finally:
             if db.in_transaction:
                 db.rollback()
             db.close()
+    # Existing stage-only retry handles an unusually hot row. Never record a
+    # successful repair from an uncommitted/stale plan or retry legal analysis.
     raise sqlite3.OperationalError("database is locked")
 
 
