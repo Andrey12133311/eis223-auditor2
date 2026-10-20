@@ -1,0 +1,27 @@
+name: Dashboard recovery regressions
+on:
+  push:
+    branches: [fix/dashboard-load-20261020]
+    paths: [.github/workflows/dashboard-recovery.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source only, no runtime data or credentials
+        run: |
+          mkdir -p /tmp/eis-dashboard-source
+          git archive --format=zip --output=/tmp/eis-dashboard-source/source.zip HEAD
+          git rev-parse HEAD > /tmp/eis-dashboard-source/COMMIT
+          sha256sum /tmp/eis-dashboard-source/source.zip > /tmp/eis-dashboard-source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-source
+          path: /tmp/eis-dashboard-source/
+          retention-days: 1
+          if-no-files-found: error
