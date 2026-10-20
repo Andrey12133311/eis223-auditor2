@@ -1,0 +1,152 @@
+diff --git a/Dockerfile b/Dockerfile
+index ad14eed..0b2c92b 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -19 +19 @@
+-COPY tests/test_eis223_soap_archive.py tests/test_eis_server_worker.py tests/test_eis_worker_backpressure.py tests/test_eis_inn_search.py tests/test_eis_vps_worker.py tests/test_eis_vps_pipeline.py tests/test_eis_vps_installer.py tests/test_eis_vps_only.py tests/test_eis_vps_only_offline.py tests/test_eis_vps_only_ui.py tests/test_eis_upload_rejection_logging.py tests/test_eis_original_upload_stream.py tests/test_eis_mixed_soap_quarantine.py tests/
++COPY tests/test_eis223_soap_archive.py tests/test_eis_server_worker.py tests/test_eis_worker_backpressure.py tests/test_eis_inn_search.py tests/test_eis_vps_worker.py tests/test_eis_vps_pipeline.py tests/test_eis_vps_installer.py tests/test_eis_vps_only.py tests/test_eis_vps_only_offline.py tests/test_eis_vps_only_ui.py tests/test_eis_upload_rejection_logging.py tests/test_eis_original_upload_stream.py tests/test_eis_mixed_soap_quarantine.py tests/test_eis_response_size.py tests/
+diff --git a/scripts/eis_server_worker.py b/scripts/eis_server_worker.py
+index 098ee87..12d0966 100644
+--- a/scripts/eis_server_worker.py
++++ b/scripts/eis_server_worker.py
+@@ -24,0 +25 @@
++import v295_eis_originals as original_intake
+@@ -139 +140 @@
+-    "response_deadline", "site_invalid_json", "site_upload_not_accepted", "site_report_not_accepted",
++    "response_deadline", "response_length_mismatch", "site_invalid_json", "site_upload_not_accepted", "site_report_not_accepted",
+@@ -229,0 +231,15 @@
++def _size_limit_context(value):
++    # Ignore arbitrary URLs/messages/secrets in client telemetry.
++    if not isinstance(value, dict) or value.get("kind") not in (
++            "eis_original", "eis_archive", "eis_soap", "eis_search", "site_response"):
++        return {}
++    if any(type(value.get(key)) is not int or not 0 < value[key] <= 2**50
++           for key in ("limit_bytes", "observed_bytes")):
++        return {}
++    result = {key: value[key] for key in ("kind", "limit_bytes", "observed_bytes")}
++    uid = value.get("uid")
++    if isinstance(uid, str) and re.fullmatch(r"[0-9A-F]{32}", uid):
++        result["uid"] = uid
++    return result
++
++
+@@ -241,0 +258,7 @@
++    if output["error_code"] == "response_size_limit":
++        context = _size_limit_context(result.get("size_limit"))
++        if context:
++            output["size_limit"] = context
++            reg = result.get("reg_number")
++            if isinstance(reg, str) and REG.fullmatch(reg):
++                output["reg_number"] = reg
+@@ -737,0 +761,3 @@
++        context = _size_limit_context(data.get("size_limit")) if error_code == "response_size_limit" else {}
++        if context:
++            result["size_limit"] = context
+@@ -848 +874,2 @@
+-                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES)}
++                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES),
++                "max_original_bytes": original_intake.MAX_BYTES}
+@@ -914 +941,2 @@
+-                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES)}
++                "supported_capabilities": sorted(SUPPORTED_CAPABILITIES),
++                "max_original_bytes": original_intake.MAX_BYTES}
+diff --git a/scripts/eis_vps_worker.py b/scripts/eis_vps_worker.py
+index 577326b..7ba3d9b 100755
+--- a/scripts/eis_vps_worker.py
++++ b/scripts/eis_vps_worker.py
+@@ -36 +36 @@
+-VERSION = "1.4.0"
++VERSION = "1.4.1"
+@@ -46 +46,2 @@
+-MAX_FILE = 25 * 1024 * 1024
++# Two originals at most are resident; keep this in sync with the server.
++MAX_FILE = 64 * 1024 * 1024
+@@ -250,0 +252,7 @@
++class ResponseSizeLimit(WorkerError):
++    """Non-secret diagnostics; sizes are observations, never delivery receipts."""
++    def __init__(self, kind, limit, observed):
++        super().__init__("response_size_limit")
++        self.context = {"kind": kind, "limit_bytes": limit, "observed_bytes": observed}
++
++
+@@ -440 +448 @@
+-    def request(self, url, method="GET", data=None, *, eis=False, headers=None, limit=MAX_XML, send_token=True):
++    def request(self, url, method="GET", data=None, *, eis=False, headers=None, limit=MAX_XML, send_token=True, response_kind=None):
+@@ -458,0 +467 @@
++                kind = response_kind or ("eis_soap" if eis else "site_response")
+@@ -461 +470 @@
+-                    raise WorkerError("response_size_limit")
++                    raise ResponseSizeLimit(kind, limit, int(advertised))
+@@ -463 +472,2 @@
+-                chunks, count = [], 0
++                # BytesIO avoids retaining a chunk list plus a second full copy.
++                output, count = io.BytesIO(), 0
+@@ -470,2 +480,2 @@
+-                        raise WorkerError("response_size_limit")
+-                    chunks.append(chunk)
++                        raise ResponseSizeLimit(kind, limit, count)
++                    output.write(chunk)
+@@ -474 +484,3 @@
+-                return b"".join(chunks)
++                if advertised.isdigit() and count != int(advertised):
++                    raise WorkerError("response_length_mismatch")
++                return output.getvalue()
+@@ -534 +546,2 @@
+-        return self.request(url, eis=True, limit=limit)
++        return self.request(url, eis=True, limit=limit,
++                            response_kind="eis_archive" if limit == MAX_ZIP else "eis_original")
+@@ -834 +847 @@
+-            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
++            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False, response_kind="eis_search")
+@@ -918 +931 @@
+-            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False)
++            raw = self.http.request(url, eis=True, limit=6 * 1024 * 1024, send_token=False, response_kind="eis_search")
+@@ -1003,0 +1017,2 @@
++                        if isinstance(exc, ResponseSizeLimit):
++                            report["size_limit"] = {**exc.context, "uid": transfer["uid"]}
+@@ -1040,0 +1056,2 @@
++            if isinstance(exc, ResponseSizeLimit):
++                report["size_limit"] = exc.context
+diff --git a/scripts/install_eis_vps_worker.sh b/scripts/install_eis_vps_worker.sh
+index 67cf3e3..b6031bd 100755
+--- a/scripts/install_eis_vps_worker.sh
++++ b/scripts/install_eis_vps_worker.sh
+@@ -184,0 +185,2 @@
++        if type(status.get('max_original_bytes')) is not int or status['max_original_bytes'] < module.MAX_FILE:
++            raise RuntimeError('Сначала обновите приёмник Railway: лимит оригинала ещё меньше лимита нового загрузчика')
+diff --git a/scripts/v295_eis_originals.py b/scripts/v295_eis_originals.py
+index 9a367d4..97cc891 100644
+--- a/scripts/v295_eis_originals.py
++++ b/scripts/v295_eis_originals.py
+@@ -12,0 +13 @@
++import io
+@@ -32 +33,2 @@
+-MAX_BYTES = 25*1024*1024
++# Matches the bounded VPS v1.4.1 original limit; XML/archive limits are unchanged.
++MAX_BYTES = 64*1024*1024
+@@ -1397,2 +1399,2 @@
+-            raise HTTPException(413,"Original exceeds 25 MiB")
+-        raw=[];size=0
++            raise HTTPException(413,"Original exceeds 64 MiB")
++        raw=io.BytesIO();size=0
+@@ -1402,2 +1404,2 @@
+-                if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 25 MiB")
+-                raw.append(part)
++                if size>MAX_BYTES:raise HTTPException(413,"Original exceeds 64 MiB")
++                raw.write(part)
+@@ -1408 +1410,4 @@
+-        data=b"".join(raw)
++        advertised=request.headers.get("content-length", "")
++        if advertised.isdigit() and int(advertised)!=size:
++            raise HTTPException(400,"Incomplete original request body")
++        data=raw.getvalue()
+@@ -1434 +1439 @@
+-                "counted_as_audited":False}
++                "counted_as_audited":False,"max_original_bytes":MAX_BYTES}
+diff --git a/tests/test_eis_original_upload_stream.py b/tests/test_eis_original_upload_stream.py
+index 836556b..d605de7 100644
+--- a/tests/test_eis_original_upload_stream.py
++++ b/tests/test_eis_original_upload_stream.py
+@@ -150 +150 @@
+-                             (413, {"detail": "Original exceeds 25 MiB"}, 2))
++                             (413, {"detail": "Original exceeds 64 MiB"}, 2))
