@@ -38,50 +38,60 @@ jobs:
               Path(name).write_bytes(subprocess.check_output(['git','show',upstream+':'+name]))
           def edit(name,before,after):
               p=Path(name);s=p.read_text();assert s.count(before)==1,(name,before);p.write_text(s.replace(before,after))
-          edit('scripts/full_recheck_request.py','max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False):','max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False, source_seconds=None):')
-          edit('scripts/full_recheck_request.py','    _token(campaign)\n    created = _time()\n    deadline = time.monotonic() + max_seconds',
+          request='scripts/full_recheck_request.py';runtime='scripts/full_recheck_runtime.py';test='tests/test_full_recheck_runtime.py';safety='tests/test_recheck4007_safety.py'
+          edit(request,'max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False):','max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False, source_seconds=None):')
+          edit(request,'    _token(campaign)\n    created = _time()\n    deadline = time.monotonic() + max_seconds',
                '    if source_seconds is not None and (isinstance(source_seconds, bool) or\n'
                '            not isinstance(source_seconds, (int, float)) or not 0 < source_seconds <= 60):\n'
                '        raise ValueError("Source capture budget is out of bounds")\n'
                '    _token(campaign)\n    created = _time()\n'
                '    deadline = time.monotonic() + (max_seconds if source_seconds is None else source_seconds)')
-          edit('scripts/full_recheck_request.py','    source_captured = _time()\n    previous_timeout',
-               '    source_captured = _time()\n'
-               '    # A separate source-capture budget never extends writer occupancy.\n'
-               '    if source_seconds is not None:\n        deadline = time.monotonic() + max_seconds\n'
-               '    previous_timeout')
-          edit('scripts/full_recheck_runtime.py','AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH)',
-               'DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"\nAUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH, DASHBOARD_EPOCH)')
-          edit('scripts/full_recheck_runtime.py','TARGET_GENERATION = 10','TARGET_GENERATION = 11')
-          edit('scripts/full_recheck_runtime.py',
-               '            expected_count=None if epoch == ALL_SAVED_EPOCH else 3058,\n            all_saved=epoch == ALL_SAVED_EPOCH)',
+          edit(request,'    source_captured = _time()\n    previous_timeout',
+               '    source_captured = _time()\n    # A separate source-capture budget never extends writer occupancy.\n'
+               '    if source_seconds is not None:\n        deadline = time.monotonic() + max_seconds\n    previous_timeout')
+          edit(runtime,'AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH)',
+               'DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"\n'
+               'AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH, DASHBOARD_EPOCH)\n'
+               'AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, ALL_SAVED_EPOCH: None, DASHBOARD_EPOCH: 4007}')
+          edit(runtime,'TARGET_GENERATION = 10','TARGET_GENERATION = 11')
+          edit(runtime,'            expected_count=None if epoch == ALL_SAVED_EPOCH else 3058,\n            all_saved=epoch == ALL_SAVED_EPOCH)',
                '            expected_count=None if epoch == ALL_SAVED_EPOCH else (4007 if epoch == DASHBOARD_EPOCH else 3058),\n'
                '            all_saved=epoch == ALL_SAVED_EPOCH,\n'
                '            **({"source_seconds": 60, "max_seconds": 10} if epoch == DASHBOARD_EPOCH else {}))')
-          edit('scripts/full_recheck_runtime.py','"scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else "legacy_dashboard"',
+          edit(runtime,'"scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else "legacy_dashboard"',
                '"scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else\n'
                '                 "current_dashboard" if epoch == DASHBOARD_EPOCH else "legacy_dashboard"')
-          edit('scripts/full_recheck_runtime.py','epoch = request_id(ns) or (AUTHORIZED_EPOCH if state.get("target_conflict") else None)',
+          edit(runtime,'epoch = request_id(ns) or (AUTHORIZED_EPOCH if state.get("target_conflict") else None)',
                'epoch = request_id(ns) or (os.environ.get(REQUEST_ENV, "").strip() if state.get("target_conflict") else None)')
-          edit('tests/test_full_recheck_runtime.py',
-               '    async def test_generation_ten_reads_documented_explanation_attachments(self):\n        self.assertEqual(runtime.TARGET_GENERATION, 10)\n        await self._assert_generation_transition(9, 10)\n',
+          edit('scripts/full_recheck_inventory.py','counts["dashboard_expected_difference"] = len(dashboard) - expected',
+               'counts["dashboard_expected_difference"] = len(dashboard) - expected if expected is not None else None')
+          edit(test,'    async def test_generation_ten_reads_documented_explanation_attachments(self):\n        self.assertEqual(runtime.TARGET_GENERATION, 10)\n        await self._assert_generation_transition(9, 10)\n',
                '    async def test_generation_ten_reads_documented_explanation_attachments(self):\n'
                '        with patch.object(runtime, "TARGET_GENERATION", 10):\n            await self._assert_generation_transition(9, 10)\n\n'
                '    async def test_generation_eleven_preserves_concurrent_source_guard(self):\n'
                '        self.assertEqual(runtime.TARGET_GENERATION, 11)\n        await self._assert_generation_transition(10, 11)\n')
-          edit('tests/test_full_recheck_runtime.py',
-               '    async def test_generation_ten_preserves_old_pending_and_active_leases(self):\n        self.assertEqual(runtime.TARGET_GENERATION, 10)\n        await self._assert_pending_and_active_generation_transition(9, 10)\n',
+          edit(test,'    async def test_generation_ten_preserves_old_pending_and_active_leases(self):\n        self.assertEqual(runtime.TARGET_GENERATION, 10)\n        await self._assert_pending_and_active_generation_transition(9, 10)\n',
                '    async def test_generation_ten_preserves_old_pending_and_active_leases(self):\n'
                '        with patch.object(runtime, "TARGET_GENERATION", 10):\n            await self._assert_pending_and_active_generation_transition(9, 10)\n\n'
                '    async def test_generation_eleven_preserves_generation_ten_membership_and_live_lease(self):\n'
                '        self.assertEqual(runtime.TARGET_GENERATION, 11)\n        await self._assert_pending_and_active_generation_transition(10, 11)\n')
-          edit('tests/test_recheck4007_safety.py','(3,4007,10)','(3,4007,11)')
-          edit('tests/test_recheck4007_safety.py','synthetic-generation-ten','synthetic-generation-eleven')
-          p=Path('docs/recheck-4007-rollout.md');s=p.read_text().replace('advances from 9 to 10','advances from 10 to 11').replace('target generation 10','target generation 11');s+='\nThe subsequent upstream revision dc95372 is also retained: its strict explanation parser, low-write lease renewal and all-saved epoch stay supported. This release additionally supports the specifically requested dashboard snapshot; activate only one scope for the user instruction, never both as duplicate jobs. Historical generation 10 stays tested; combined interpretation uses generation 11.\n';p.write_text(s)
-          expected={'scripts/full_recheck_request.py':'cbf6c39f1bf11619139b4120f9f0126bf2ba6d73','scripts/full_recheck_runtime.py':'e8fa77b1dff3fe61474383de5a44a02fe844e271','tests/test_full_recheck_runtime.py':'d0932fd99ab9fe37825cc8efdaf12961b0cb0456','tests/test_recheck4007_safety.py':'6cfb31f7b05230ccff4decbdceccaad5cb42338a'}
+          edit(safety,'(3,4007,10)','(3,4007,11)')
+          edit(safety,'synthetic-generation-ten','synthetic-generation-eleven')
+          anchor='    def test_4007_expected_is_not_a_fabricated_population_limit(self):'
+          edit(safety,anchor,
+               '    def test_all_saved_inventory_does_not_invent_dashboard_expected_count(self):\n'
+               '        from full_recheck_inventory import collect\n'
+               '        ns={"conn":lambda:sqlite3.connect(self.path),"_verified_set235":lambda:[A,B]}\n'
+               '        with patch.dict(os.environ,{runtime.REQUEST_ENV:runtime.ALL_SAVED_EPOCH}):\n'
+               '            result=collect(ns)\n'
+               '        self.assertEqual(result["status"],"complete",result)\n'
+               '        self.assertIsNone(result["expected_requested_count"])\n'
+               '        self.assertIsNone(result["counts"]["dashboard_expected_difference"])\n\n'+anchor)
+          p=Path('docs/recheck-4007-rollout.md');s=p.read_text().replace('advances from 9 to 10','advances from 10 to 11').replace('target generation 10','target generation 11');s+='\nThe subsequent upstream revision dc95372 is retained: strict explanation parsing, low-write lease renewal and the all-saved epoch stay supported. Activate only one scope for a user instruction, never both as duplicate jobs. Historical generation 10 remains tested; this combination uses generation 11.\n';p.write_text(s)
+          expected={request:'cbf6c39f1bf11619139b4120f9f0126bf2ba6d73',runtime:'64678d22b67b781dde5af9bad6e56ab1c45f648c','scripts/full_recheck_inventory.py':'c7cfa868f88f5bd7262e329161b20b65acafeee2',test:'d0932fd99ab9fe37825cc8efdaf12961b0cb0456'}
           for name,sha in expected.items():
               actual=subprocess.check_output(['git','hash-object',name],text=True).strip();assert actual==sha,(name,actual,sha)
-          subprocess.run(['git','add',*sorted(allowed),'tests/test_recheck4007_safety.py','docs/recheck-4007-rollout.md'],check=True)
+          subprocess.run(['git','add',*sorted(allowed),'scripts/full_recheck_inventory.py',safety,'docs/recheck-4007-rollout.md'],check=True)
           subprocess.run(['git','diff','--cached','--check'],check=True)
           PY
       - uses: actions/setup-python@v5
