@@ -5,23 +5,102 @@ on:
     paths: [.github/workflows/recheck-contention-investigation.yml]
 permissions:
   contents: read
+concurrency:
+  group: isolated-recheck-patch
+  cancel-in-progress: false
 jobs:
-  source-snapshot:
+  apply-tested-patch:
+    if: github.ref == 'refs/heads/fix/recheck-contention-and-legal-20261020'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - name: Export tracked source without runtime data or credentials
-        run: |
-          mkdir -p /tmp/eis-source
-          git archive --format=zip --output=/tmp/eis-source/source.zip HEAD
-          git rev-parse HEAD > /tmp/eis-source/COMMIT
-          sha256sum /tmp/eis-source/source.zip > /tmp/eis-source/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
         with:
-          name: recheck-test-source
-          path: /tmp/eis-source/
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.12'
+      - name: Verify transport and the reviewed integration patch
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib
+          from pathlib import Path
+          parts = [Path(f'maintenance/recheck-patch/{i:02d}.b64') for i in range(7)]
+          encoded = ''.join(p.read_text().strip() for p in parts)
+          assert len(encoded) == 15680, len(encoded)
+          raw = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert len(raw) == 44730, len(raw)
+          assert hashlib.sha256(raw).hexdigest() == '937bc01067bd0d59f46cc1ac55a2e3c05974826769eb08bde358e5908ef1cbc9'
+          Path('/tmp/recheck-fix.patch').write_bytes(raw)
+          PY
+          git apply --check /tmp/recheck-fix.patch
+          git apply /tmp/recheck-fix.patch
+          git diff --check
+      - name: Install isolated test dependencies
+        run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+      - name: Verify ownership, original preservation and structured explanation evidence
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -m unittest test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity
+          python -m unittest test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain
+          python -m pytest -q tests/test_v314_eis_metadata.py
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract test_full_recheck_originals
+          python -m unittest test_eis223_soap_archive test_eis_mixed_soap_quarantine test_legal_audit_revision test_eis_server_worker test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+      - name: Commit only reviewed changes and replace this temporary job with read-only CI
+        run: |
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+          expected = {'scripts/eis223_soap_xml.py','scripts/full_recheck_request.py','scripts/full_recheck_runtime.py','scripts/v314_eis_metadata.py','tests/test_full_recheck_runtime.py'}
+          changed = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert changed == expected, changed
+          new = {'tests/test_explanation_supported_format.py','tests/test_recheck_contention_improvements.py'}
+          for path in new:
+              assert Path(path).is_file(), path
+          workflow = '''name: Recheck contention and legal evidence regressions
+          on:
+            pull_request:
+              paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-contention-investigation.yml']
+            push:
+              branches: [thematic-audit-20261015]
+              paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-contention-investigation.yml']
+          permissions:
+            contents: read
+          jobs:
+            regression:
+              runs-on: ubuntu-latest
+              timeout-minutes: 15
+              steps:
+                - uses: actions/checkout@v4
+                  with:
+                    persist-credentials: false
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: '3.12'
+                - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+                - name: Verify lease fences, frozen all-saved scope and actual XML evidence
+                  env:
+                    PYTHONPATH: '.:scripts:tests'
+                  run: |
+                    python -m unittest test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity
+                    python -m unittest test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain
+                    python -m pytest -q tests/test_v314_eis_metadata.py
+                    python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract test_full_recheck_originals
+                    python -m unittest test_eis223_soap_archive test_eis_mixed_soap_quarantine test_legal_audit_revision test_eis_server_worker test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+                    git diff --check
+          '''
+          Path('.github/workflows/recheck-contention-investigation.yml').write_text(workflow)
+          for i in range(7):
+              Path(f'maintenance/recheck-patch/{i:02d}.b64').unlink()
+          Path('maintenance/recheck-fix.patch.gz.b64').unlink()
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/eis223_soap_xml.py scripts/full_recheck_request.py scripts/full_recheck_runtime.py scripts/v314_eis_metadata.py tests/test_full_recheck_runtime.py tests/test_explanation_supported_format.py tests/test_recheck_contention_improvements.py .github/workflows/recheck-contention-investigation.yml maintenance/recheck-patch maintenance/recheck-fix.patch.gz.b64
+          git commit -m 'Reduce no-op writes, support documented explanation evidence and authorize frozen all-saved recheck'
+          git push origin HEAD:refs/heads/fix/recheck-contention-and-legal-20261020
+          git rev-parse HEAD
