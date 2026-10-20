@@ -19,25 +19,52 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: patch-transport-review
-          path: maintenance/recheck4007.patch.zlib.b64
-          retention-days: 1
-      - name: Verify exact reviewed patch before applying
+      - name: Verify exact reviewed patch and final file hashes
         run: |
           python - <<'PY'
           import base64, hashlib, pathlib, subprocess, zlib
           encoded = pathlib.Path('maintenance/recheck4007.patch.zlib.b64').read_text().strip()
-          # Correct transport transcription only; the resulting bytes must
-          # match the separately reviewed patch digest or nothing is applied.
-          for before, after in [('uzDhko2j0','uzDhoyj0'),('YRSRS0WB','YRS0WB'),('QfsJIpIp0','QfsJIp0')]:
+          for before, after in [('uzDhko2j0','uzDhoyj0'),('YRSRS0WB','YRS0WB'),('QfsJIpIp0','QfsJIp0'),('HwxPDkZHlC1yYUf43','HwxPDkZHlC1yUf43')]:
+              assert encoded.count(before) == 1
               encoded = encoded.replace(before, after)
           raw = zlib.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(raw).hexdigest() == 'becf036d18562f3973ec61cf7556a6cef70ac83b67a1ccbcc919b8bae9bc2303'
           pathlib.Path('/tmp/recheck4007.patch').write_bytes(raw)
           subprocess.run(['git','apply','--check','/tmp/recheck4007.patch'],check=True)
           subprocess.run(['git','apply','/tmp/recheck4007.patch'],check=True)
+          path = pathlib.Path('scripts/v332_all_procurements_audit.py')
+          text = path.read_text()
+          before = '        if phase in ("existing", "reservation"):\n            return await thread_call(function,*args)'
+          after = '''        # Only short lease/bookkeeping stages participate. Legal persistence
+                  # and metadata planning may do substantial CPU/preflight work before
+                  # their transaction; serializing whole callbacks would hold up renewals.
+                  if phase not in ("full_request_ack", "full_request_renew",
+                                   "full_request_watermark", "request_watermark", "save", "save_partial"):
+                      return await thread_call(function,*args)'''
+          # YAML block indentation is removed; normalize the deliberate extra
+          # indentation in the Python multiline replacement below.
+          lines = after.splitlines()
+          after = lines[0] + '\n' + '\n'.join(line[10:] for line in lines[1:])
+          assert text.count(before) == 1
+          path.write_text(text.replace(before,after))
+          path = pathlib.Path('tests/test_recheck4007_safety.py')
+          text = path.read_text()
+          assert text.count("general.db_stage({},'persist',first)") == 1
+          path.write_text(text.replace("general.db_stage({},'persist',first)","general.db_stage({},'full_request_ack',first)"))
+          expected = {
+            'scripts/full_recheck_inventory.py':'aaa7d3881ccab54a986171508d4e69d16d48b28b',
+            'scripts/full_recheck_request.py':'32615e6aa98a938584a4d37a84e850e423084cd5',
+            'scripts/full_recheck_runtime.py':'534124a741f3f0db9593c03997b1a1580fce391b',
+            'scripts/v314_eis_metadata.py':'1b0e053521fab86293e00a400dcf4522fd0f2d38',
+            'scripts/v332_all_procurements_audit.py':'f219a58ba3e76785849044a7004e75e6127d103e',
+            'scripts/v341_eis_facts.py':'6511934cac184ca1263ef3b328a4bbb85a2c0afc',
+            'scripts/v345_thematic_accelerator.py':'6419b930ee2cc9b9e549ac5ecc59ee3ca615c0b0',
+            'scripts/v381_audit_scheduling.py':'7583631753b1c8e09d2d476bb196b157ea09b971',
+            'tests/test_full_recheck_runtime.py':'48679d41466ff71d9d2d072777d17eeea4631721',
+            'tests/test_recheck4007_safety.py':'3e78dd7cd2f13b3125a15bf7db8f8ac93b6d5e1d'}
+          for path,digest in expected.items():
+              actual = subprocess.check_output(['git','hash-object',path],text=True).strip()
+              assert actual == digest, (path,actual,digest)
           subprocess.run(['git','diff','--check'],check=True)
           PY
       - uses: actions/setup-python@v5
