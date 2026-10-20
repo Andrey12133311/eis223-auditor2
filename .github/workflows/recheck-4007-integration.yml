@@ -5,23 +5,106 @@ on:
     paths: [.github/workflows/recheck-4007-integration.yml]
 permissions:
   contents: read
+concurrency:
+  group: recheck4007-integration
+  cancel-in-progress: false
 jobs:
-  snapshot:
+  integrate:
+    if: github.ref == 'refs/heads/fix/recheck-4007-write-contention-20261020'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Export concurrent revision for local integration tests
+      - name: Preserve exact latest upstream and verify conflict resolution
         run: |
-          mkdir -p /tmp/recheck-integration
-          git archive --format=zip --output=/tmp/recheck-integration/upstream.zip dc95372b03e9b44cfeb1b8c88ec5f7f0f71152b7
-          git archive --format=zip --output=/tmp/recheck-integration/ours.zip HEAD
-      - uses: actions/upload-artifact@v4
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          upstream='dc95372b03e9b44cfeb1b8c88ec5f7f0f71152b7'
+          result=subprocess.run(['git','merge','--no-commit',upstream])
+          allowed={'scripts/full_recheck_request.py','scripts/full_recheck_runtime.py','tests/test_full_recheck_runtime.py'}
+          conflicts=set(subprocess.check_output(['git','diff','--name-only','--diff-filter=U'],text=True).splitlines())
+          assert result.returncode in (0,1) and conflicts<=allowed,conflicts
+          for name in allowed:
+              Path(name).write_bytes(subprocess.check_output(['git','show',upstream+':'+name]))
+          def edit(name,before,after):
+              p=Path(name);s=p.read_text();assert s.count(before)==1,(name,before);p.write_text(s.replace(before,after))
+          edit('scripts/full_recheck_request.py','max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False):','max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False, source_seconds=None):')
+          edit('scripts/full_recheck_request.py','    _token(campaign)\n    created = _time()\n    deadline = time.monotonic() + max_seconds',
+               '    if source_seconds is not None and (isinstance(source_seconds, bool) or\n'
+               '            not isinstance(source_seconds, (int, float)) or not 0 < source_seconds <= 60):\n'
+               '        raise ValueError("Source capture budget is out of bounds")\n'
+               '    _token(campaign)\n    created = _time()\n'
+               '    deadline = time.monotonic() + (max_seconds if source_seconds is None else source_seconds)')
+          edit('scripts/full_recheck_request.py','    source_captured = _time()\n    previous_timeout',
+               '    source_captured = _time()\n'
+               '    # A separate source-capture budget never extends writer occupancy.\n'
+               '    if source_seconds is not None:\n        deadline = time.monotonic() + max_seconds\n'
+               '    previous_timeout')
+          edit('scripts/full_recheck_runtime.py','AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH)',
+               'DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"\nAUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH, DASHBOARD_EPOCH)')
+          edit('scripts/full_recheck_runtime.py','TARGET_GENERATION = 10','TARGET_GENERATION = 11')
+          edit('scripts/full_recheck_runtime.py',
+               '            expected_count=None if epoch == ALL_SAVED_EPOCH else 3058,\n            all_saved=epoch == ALL_SAVED_EPOCH)',
+               '            expected_count=None if epoch == ALL_SAVED_EPOCH else (4007 if epoch == DASHBOARD_EPOCH else 3058),\n'
+               '            all_saved=epoch == ALL_SAVED_EPOCH,\n'
+               '            **({"source_seconds": 60, "max_seconds": 10} if epoch == DASHBOARD_EPOCH else {}))')
+          edit('scripts/full_recheck_runtime.py','"scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else "legacy_dashboard"',
+               '"scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else\n'
+               '                 "current_dashboard" if epoch == DASHBOARD_EPOCH else "legacy_dashboard"')
+          edit('scripts/full_recheck_runtime.py','epoch = request_id(ns) or (AUTHORIZED_EPOCH if state.get("target_conflict") else None)',
+               'epoch = request_id(ns) or (os.environ.get(REQUEST_ENV, "").strip() if state.get("target_conflict") else None)')
+          edit('tests/test_full_recheck_runtime.py',
+               '    async def test_generation_ten_reads_documented_explanation_attachments(self):\n        self.assertEqual(runtime.TARGET_GENERATION, 10)\n        await self._assert_generation_transition(9, 10)\n',
+               '    async def test_generation_ten_reads_documented_explanation_attachments(self):\n'
+               '        with patch.object(runtime, "TARGET_GENERATION", 10):\n            await self._assert_generation_transition(9, 10)\n\n'
+               '    async def test_generation_eleven_preserves_concurrent_source_guard(self):\n'
+               '        self.assertEqual(runtime.TARGET_GENERATION, 11)\n        await self._assert_generation_transition(10, 11)\n')
+          edit('tests/test_full_recheck_runtime.py',
+               '    async def test_generation_ten_preserves_old_pending_and_active_leases(self):\n        self.assertEqual(runtime.TARGET_GENERATION, 10)\n        await self._assert_pending_and_active_generation_transition(9, 10)\n',
+               '    async def test_generation_ten_preserves_old_pending_and_active_leases(self):\n'
+               '        with patch.object(runtime, "TARGET_GENERATION", 10):\n            await self._assert_pending_and_active_generation_transition(9, 10)\n\n'
+               '    async def test_generation_eleven_preserves_generation_ten_membership_and_live_lease(self):\n'
+               '        self.assertEqual(runtime.TARGET_GENERATION, 11)\n        await self._assert_pending_and_active_generation_transition(10, 11)\n')
+          edit('tests/test_recheck4007_safety.py','(3,4007,10)','(3,4007,11)')
+          edit('tests/test_recheck4007_safety.py','synthetic-generation-ten','synthetic-generation-eleven')
+          p=Path('docs/recheck-4007-rollout.md');s=p.read_text().replace('advances from 9 to 10','advances from 10 to 11').replace('target generation 10','target generation 11');s+='\nThe subsequent upstream revision dc95372 is also retained: its strict explanation parser, low-write lease renewal and all-saved epoch stay supported. This release additionally supports the specifically requested dashboard snapshot; activate only one scope for the user instruction, never both as duplicate jobs. Historical generation 10 stays tested; combined interpretation uses generation 11.\n';p.write_text(s)
+          expected={'scripts/full_recheck_request.py':'cbf6c39f1bf11619139b4120f9f0126bf2ba6d73','scripts/full_recheck_runtime.py':'e8fa77b1dff3fe61474383de5a44a02fe844e271','tests/test_full_recheck_runtime.py':'d0932fd99ab9fe37825cc8efdaf12961b0cb0456','tests/test_recheck4007_safety.py':'6cfb31f7b05230ccff4decbdceccaad5cb42338a'}
+          for name,sha in expected.items():
+              actual=subprocess.check_output(['git','hash-object',name],text=True).strip();assert actual==sha,(name,actual,sha)
+          subprocess.run(['git','add',*sorted(allowed),'tests/test_recheck4007_safety.py','docs/recheck-4007-rollout.md'],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          PY
+      - uses: actions/setup-python@v5
         with:
-          name: recheck4007-latest-integration
-          path: /tmp/recheck-integration/
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1,<2' 'openpyxl>=3.1,<4' pytest
+      - name: Compile pinned fixed SQLite
+        run: |
+          python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
+          echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
+      - name: Check both frozen scopes and combined legal and contention safeguards
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3'"
+          python -m unittest test_recheck4007_safety test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity
+          python -m unittest test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_full_recheck_request test_ingestion_metadata_contention test_legal_fact_write_contention test_parenthesized_event_date_labels
+          python -m unittest test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract test_full_recheck_originals
+          python -m unittest test_price_provenance_chain test_procurement_fact_trace test_clarification_identity test_clarification_date_label_recall test_protocol_date_label_recall test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+          python -m pytest -q tests/test_v314_eis_metadata.py
+      - name: Commit only tested integration on isolated branch
+        run: |
+          test -z "$(git ls-files --others --exclude-standard)"
+          test -z "$(git diff --name-only)"
+          git commit -m 'Preserve concurrent explanation and low-write renewal fixes in full dashboard recheck'
+          git push origin HEAD:refs/heads/fix/recheck-4007-write-contention-20261020
