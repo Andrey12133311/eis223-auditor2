@@ -2,7 +2,7 @@ name: Mobile clients Android and iOS
 on:
   push:
     branches: [mobile-clients-20261020]
-    paths: ['mobile/**', '.github/workflows/build-mobile-clients.yml']
+    paths: ['mobile/ios/**', '.github/workflows/build-mobile-clients.yml']
   workflow_dispatch:
 permissions:
   contents: read
