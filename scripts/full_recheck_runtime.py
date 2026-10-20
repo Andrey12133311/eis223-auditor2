@@ -466,6 +466,26 @@ def _catch_up(ns):
     # Do not gate on legacy request.status: a rolling old worker can finish
     # after the previous scan. Target coverage, not that legacy flag, is final.
     from full_recheck_request import reopen_completed
+    epoch = request_id(ns)
+    signature = _target_args(ns).get("engine_signature")
+    # Idle selector turns must not reserve SQLite's sole writer. This SELECT
+    # is only a negative preflight: reopen_completed remains the authoritative
+    # target/eligibility check under BEGIN IMMEDIATE. Close the read connection
+    # first, avoiding a read-snapshot upgrade. A completion racing a negative
+    # preflight is discovered on the next turn; no member or receipt is reset.
+    # Preserve the existing validation path for an incomplete configuration.
+    if isinstance(epoch, str) and epoch and isinstance(signature, str) and signature:
+        c = ns["conn"]()
+        try:
+            needed = c.execute(
+                "SELECT 1 FROM full_recheck_members WHERE request_id=? "
+                "AND status='completed' AND result_engine_signature<>? LIMIT 1",
+                (epoch, signature),
+            ).fetchone() is not None
+        finally:
+            c.close()
+        if not needed:
+            return 0
     with transaction(ns) as c:
         return reopen_completed(c, request_id(ns), limit=CATCHUP_PAGE_SIZE, **_target_args(ns))
 
