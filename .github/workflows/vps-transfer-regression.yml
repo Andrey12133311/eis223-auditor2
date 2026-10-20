@@ -1,0 +1,27 @@
+name: VPS transfer regression
+on:
+  push:
+    branches: [fix/vps-response-size-20261020]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile transport modules
+        run: python -m py_compile scripts/eis_vps_worker.py scripts/eis_server_worker.py scripts/eis223_soap_xml.py
+      - name: Export tracked source for isolated regression tests
+        run: git archive --format=tar.gz -o source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vps-transfer-source
+          path: source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
