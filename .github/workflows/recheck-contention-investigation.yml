@@ -1,0 +1,27 @@
+name: Recheck contention investigation
+on:
+  push:
+    branches: [fix/recheck-contention-and-legal-20261020]
+    paths: [.github/workflows/recheck-contention-investigation.yml]
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source without runtime data or credentials
+        run: |
+          mkdir -p /tmp/eis-source
+          git archive --format=zip --output=/tmp/eis-source/source.zip HEAD
+          git rev-parse HEAD > /tmp/eis-source/COMMIT
+          sha256sum /tmp/eis-source/source.zip > /tmp/eis-source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recheck-test-source
+          path: /tmp/eis-source/
+          retention-days: 1
+          if-no-files-found: error
