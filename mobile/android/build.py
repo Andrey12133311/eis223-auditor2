@@ -9,6 +9,7 @@ import secrets
 import shutil
 import subprocess
 import zipfile
+import xml.etree.ElementTree as ET
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--toolchain', type=Path, required=True)
@@ -72,7 +73,8 @@ aligned = build / 'aligned.apk'
 run(bt / 'zipalign', '-f', '-p', '4', unsigned, aligned)
 deliver = source.parent.parent / 'deliverables'
 deliver.mkdir(exist_ok=True)
-apk = deliver / 'EIS223-Auditor-Android-1.0.0.apk'
+version = ET.parse(source / 'AndroidManifest.xml').getroot().get('{http://schemas.android.com/apk/res/android}versionName')
+apk = deliver / f'EIS223-Auditor-Android-{version}.apk'
 run(bt / 'apksigner', 'sign', '--ks', key, '--ks-key-alias', 'eisauditor',
     '--ks-pass', f'file:{password}',
     '--v4-signing-enabled', 'false', '--out', apk, aligned)

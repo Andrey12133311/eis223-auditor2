@@ -21,8 +21,43 @@ if [ ! -s "$result_dir/pid.txt" ]; then
   echo 'FAIL: application process exited during startup'
   exit 1
 fi
-if rg -q 'FATAL EXCEPTION|Process: ru.eis223.auditor' "$result_dir/crash.txt"; then
+if rg -q 'Process: ru.eis223.auditor' "$result_dir/crash.txt"; then
   echo 'FAIL: Android Runtime recorded a startup crash'
   exit 1
 fi
-echo 'PASS: application stayed alive after startup'
+python3 - "$result_dir/ui.xml" <<'PY'
+import sys,xml.etree.ElementTree as E
+root=E.parse(sys.argv[1]).getroot()
+assert any(n.get('class')=='android.webkit.WebView' for n in root.iter('node')), 'WebView is not visible'
+assert any(n.get('text')=='ЕИС Аудитор' for n in root.iter('node')), 'Application toolbar is not visible'
+print('PASS: native toolbar and WebView are visible')
+PY
+python3 - "$result_dir/ui.xml" <<'PY'
+import sys,xml.etree.ElementTree as E,re,subprocess
+root=E.parse(sys.argv[1]).getroot()
+nodes=[n for n in root.iter('node') if n.get('content-desc')=='Меню приложения']
+assert len(nodes)==1, 'Application menu button is missing'
+x1,y1,x2,y2=map(int,re.findall(r'\d+',nodes[0].get('bounds')))
+subprocess.run(['adb','shell','input','tap',str((x1+x2)//2),str((y1+y2)//2)],check=True)
+PY
+adb shell uiautomator dump /sdcard/eis-menu.xml > /dev/null
+adb pull /sdcard/eis-menu.xml "$result_dir/menu.xml" > /dev/null
+python3 - "$result_dir/menu.xml" <<'PY'
+import sys,xml.etree.ElementTree as E
+root=E.parse(sys.argv[1]).getroot()
+assert any(n.get('text')=='Личный кабинет' for n in root.iter('node')), 'Account menu did not open'
+print('PASS: application menu opens')
+PY
+adb shell input keyevent 4
+adb shell pidof ru.eis223.auditor > "$result_dir/pid-after-menu.txt"
+adb shell am force-stop ru.eis223.auditor
+adb shell am start -W -n ru.eis223.auditor/.MainActivity > "$result_dir/relaunch.txt" 2>&1
+sleep 8
+adb shell pidof ru.eis223.auditor > "$result_dir/pid-after-relaunch.txt"
+adb logcat -d -b crash > "$result_dir/crash-after-relaunch.txt"
+if rg -q 'Process: ru.eis223.auditor' "$result_dir/crash-after-relaunch.txt"; then
+  cat "$result_dir/crash-after-relaunch.txt"
+  exit 1
+fi
+adb exec-out screencap -p > "$result_dir/relaunch.png"
+echo 'PASS: APK starts, displays the page, opens its menu and survives a force-stop/relaunch'

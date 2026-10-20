@@ -79,12 +79,14 @@ public final class MainActivity extends Activity {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
                 int ime = insets.getInsets(WindowInsets.Type.ime()).bottom;
                 v.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime));
+                // Insets arrive only after this view is attached to its window.
+                // PhoneWindow.getInsetsController() before setContentView crashes on Android 15.
+                WindowInsetsController c = v.getWindowInsetsController();
+                if (c != null) c.setSystemBarsAppearance(
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
                 return insets;
             });
-            WindowInsetsController c = getWindow().getInsetsController();
-            if (c != null) c.setSystemBarsAppearance(
-                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
         }
 
         LinearLayout toolbar = new LinearLayout(this);
@@ -166,7 +168,7 @@ public final class MainActivity extends Activity {
         s.setSafeBrowsingEnabled(true);
         s.setSupportMultipleWindows(true); s.setJavaScriptCanOpenWindowsAutomatically(false);
         s.setMediaPlaybackRequiresUserGesture(true);
-        s.setUserAgentString(s.getUserAgentString() + " EIS223Mobile/1.0.0");
+        s.setUserAgentString(s.getUserAgentString() + " EIS223Mobile/1.0.1");
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
         web.addJavascriptInterface(new BlobReceiver(), "EisDocumentExport");
@@ -272,7 +274,7 @@ public final class MainActivity extends Activity {
                 case 4:
                     Intent share = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, currentUrl());
                     startActivity(Intent.createChooser(share,"Поделиться ссылкой")); break;
-                default: new AlertDialog.Builder(this).setTitle("ЕИС Аудитор 1.0.0")
+                default: new AlertDialog.Builder(this).setTitle("ЕИС Аудитор 1.0.1")
                     .setMessage("Мобильное приложение вашей программы проверки закупок по 223-ФЗ.\n\nВходите с той же учётной записью, что и на сайте. Для работы нужен интернет.\n\nДокументы сохраняются в выбранную вами папку через системное окно Android.")
                     .setPositiveButton("Понятно",null).show();
             }
