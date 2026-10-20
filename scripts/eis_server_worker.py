@@ -905,7 +905,7 @@ def install(ns):
             if callable(enqueue_async) or callable(enqueue_review):
                 try:
                     admission = (await enqueue_async(result["reg_number"]) if callable(enqueue_async)
-                                 else enqueue_review(result["reg_number"]))
+                                 else await asyncio.to_thread(enqueue_review, result["reg_number"]))
                     result["review_status"] = admission.get("status")
                 except Exception:
                     result["review_status"] = "pending_retry"
@@ -929,9 +929,8 @@ def install(ns):
         authenticate(request)
         return await _database_call("discovery", discovered, ns, await body(request))
 
-    @app.get("/api/eis-worker/status")
-    async def status(request: Request):
-        authenticate(request)
+    def status_snapshot():
+        # DB connections are opened and closed in the same off-loop thread.
         db = _db(ns)
         try:
             counts = {row[0]: row[1] for row in db.execute("SELECT status,COUNT(*) FROM v301_search_jobs GROUP BY status")}
@@ -940,5 +939,10 @@ def install(ns):
         return {"feature": FEATURE, "protocol_version": 1, "server": health(ns), "queue": counts,
                 "supported_capabilities": sorted(SUPPORTED_CAPABILITIES),
                 "max_original_bytes": original_intake.MAX_BYTES}
+
+    @app.get("/api/eis-worker/status")
+    async def status(request: Request):
+        authenticate(request)
+        return await asyncio.to_thread(status_snapshot)
 
     print("EIS_SERVER_WORKER_READY token_auth=True browser_origin_required=False leased_queue=True", flush=True)
