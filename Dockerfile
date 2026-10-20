@@ -73,5 +73,8 @@ COPY tests/test_full_recheck_request.py tests/test_full_recheck_runtime.py tests
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_capacity test_stale_original_completion test_full_recheck_originals
 COPY tests/test_audit_rule_counts.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_audit_rule_counts
+COPY tests/test_protocol_date_label_recall.py tests/test_clarification_date_label_recall.py tests/test_amendment_date_label_recall.py tests/test_date_label_pipeline_parity.py tests/test_docx_event_separators.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_protocol_date_label_recall test_clarification_date_label_recall test_amendment_date_label_recall test_date_label_pipeline_parity test_docx_event_separators
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
+

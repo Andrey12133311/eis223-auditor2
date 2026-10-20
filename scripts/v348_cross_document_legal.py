@@ -428,11 +428,62 @@ def _local_identity_number(item, family):
     numbers, invalid = parser(label + value)
     return next(iter(numbers)) if not invalid and len(numbers) == 1 else ""
 
+def _protocol_kinds(name,matched):
+    """Read explicit kinds, retaining conflicts instead of choosing one."""
+    label=str(name or "")+" "+str(matched or "")
+    # Consideration and evaluation is one combined event type. It must not
+    # be confused with either independently named interim protocol.
+    combined=re.compile(r"рассмотрени\w*\s+и\s+оценк\w*",re.I)
+    found={"рассмотрения и оценки"} if combined.search(label) else set()
+    label=combined.sub(" ",label)
+    found.update(tag for tag,pattern in PROTOCOL_KINDS if pattern.search(label))
+    return found
+
+
 def _protocol_kind(name,matched):
     """Don't pair the final protocol with a different interim protocol."""
-    label=str(name or "")+" "+str(matched or "")
-    found=[tag for tag,pattern in PROTOCOL_KINDS if pattern.search(label)]
-    return found[0] if len(found)==1 else ""
+    found=_protocol_kinds(name,matched)
+    return next(iter(found)) if len(found)==1 else ""
+
+
+_PROTOCOL_TEMPLATE_TITLE=re.compile(
+    r"\b(?:образец|шаблон)\b|\bпример\s+(?:заполнени\w*|протокол\w*)|"
+    r"\bпроект\s+(?:итогов\w*\s+)?протокол\w*|"
+    r"\bинструкци[яи]\s+(?:по\s+)?(?:заполнени\w*|составлени\w*)",re.I)
+_PROTOCOL_TEMPLATE_CONTEXT=re.compile(
+    r"(?:^|[\n\f])[ \t]*(?:\d+[.)][ \t]*)?(?:"
+    r"(?:образец|шаблон)\s*(?:[:：.]|(?:заполнени\w*|форм\w*|протокол\w*)\b)|"
+    r"пример\s*(?:[:：.]|(?:заполнени\w*|форм\w*|протокол\w*)\b)|"
+    r"проект\s+(?:итогов\w*\s+)?протокол\w*\b|"
+    r"например\s*[:：])",re.I)
+def protocol_template_title(name):
+    """A draft protocol is a template; procurement subject 'проектирование' is not."""
+    return bool(_PROTOCOL_TEMPLATE_TITLE.search(str(name or "")))
+
+
+def protocol_date_context(doc,event,events):
+    """Qualify an event's own bounded section and explicit protocol identity.
+
+    A heading belongs to following dates up to the next explicit protocol
+    heading. Earlier protocol events bound its introductory context, so an
+    example elsewhere in a compilation does not suppress a later actual act.
+    """
+    text=str(doc.get("text") or "")[:750000].replace("\xa0"," ")
+    headings=list(ANY_PROTOCOL_NUMBER_LABEL.finditer(text,0,event.start()))
+    heading=headings[-1] if headings else None
+    anchor=heading.start() if heading else event.start()
+    previous=max((item.end() for item in events if item.end()<=anchor),default=0)
+    context_start=max(0,anchor-500,previous)
+    context=text[context_start:event.start()]
+    if _PROTOCOL_TEMPLATE_CONTEXT.search(context):return {"valid":False,"number":""}
+    local=text[heading.start():event.start()] if heading else ""
+    numbers,invalid=_number_identity(local)
+    # Unparseable identifiers retain the established unresolved-event path;
+    # they cannot supply a number or defeat copy/episode deduplication. Only
+    # different independently readable local headings prevent a date pair.
+    number=next(iter(numbers)) if not invalid and len(numbers)==1 else ""
+    return {"valid":True,"number":number}
+
 
 def cross_doc_protocols(p,docs):
     """Find a late EIS publication when signing and posting are in distinct,
@@ -449,7 +500,7 @@ def cross_doc_protocols(p,docs):
     for index,doc in enumerate(docs):
         if not isinstance(doc,dict) or not verified(doc):continue
         title=str(doc.get("name") or "")
-        if not PROTOCOL_DOC.search(title) or EXCLUDE.search(title):continue
+        if not PROTOCOL_DOC.search(title) or protocol_template_title(title):continue
         body=str(doc.get("text") or "")[:750000].replace("\xa0"," ")
         title_numbers,title_invalid=_number_identity(title,title=True)
         body_numbers,body_invalid=_number_identity(body)
@@ -468,11 +519,16 @@ def cross_doc_protocols(p,docs):
             number=None
         # Keep the strict existing event-date grammar. In particular, a date
         # embedded in a protocol number is never a signing/publication date.
-        for m in matches(SIGNED,body):
+        signatures=matches(SIGNED,body)
+        publications=matches(PROTOCOL_PUBLISHED,body)
+        date_events=signatures+publications
+        for m in signatures:
+            if not protocol_date_context(doc,m,date_events)["valid"]:continue
             at=day(m["date"])
             label=_protocol_kind(title,m.group(0))
             if at and label:signed.append((index,doc,m,at,label,number))
-        for m in matches(PROTOCOL_PUBLISHED,body):
+        for m in publications:
+            if not protocol_date_context(doc,m,date_events)["valid"]:continue
             at=day(m["date"])
             label=_protocol_kind(title,m.group(0))
             if at and label:published.append((index,doc,m,at,label,number))
@@ -581,3 +637,4 @@ def install(ns):
     with_cross_originals.__v348__=True
     ns["analyze"]=with_cross_originals
     print("V348_CROSS_DOCUMENT_CLARIFICATION_READY verified_pair_only=True",flush=True)
+

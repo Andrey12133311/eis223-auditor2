@@ -265,7 +265,7 @@ def document_text(path, extractor):
     if Path(path).suffix.lower() == ".docx":
         from v347_text_cache import cached_extract
         return cached_extract(path, lambda p: _document_text_uncached(p, extractor),
-                              namespace="eis223-docx-evidence-order-v381")
+                              namespace="eis223-docx-evidence-separators-20261020")
     return str(extractor(path) or "")
 
 
@@ -286,9 +286,28 @@ def _document_text_uncached(path, extractor):
                         Path(path).name, compact(exc)[:240])
         except (etree.XMLSyntaxError, zipfile.BadZipFile) as exc:
             raise ValueError("DOCX package contains invalid XML or ZIP data") from exc
-        value = lambda el: "\n".join(
-            "".join(t.text or "" for t in p.iter(qn("w:t")))
-            for p in el.iter(qn("w:p")))
+        def value(el):
+            # A manual break/tab is an actual field boundary in OOXML. Joining
+            # only w:t nodes turns "№ 1<break/>Дата..." into "№ 1Дата...",
+            # destroying an otherwise explicit event identity/date label.
+            # Traverse each token once, including text inside nested content;
+            # iterating each paragraph's descendants separately repeats the
+            # nested paragraph text in text boxes.
+            parts = []
+            paragraph = qn("w:p")
+            whitespace = {qn("w:br"): "\n", qn("w:cr"): "\n", qn("w:tab"): "\t"}
+            for event, token in etree.iterwalk(el, events=("start", "end")):
+                if event == "end":
+                    if token.tag == paragraph:
+                        parts.append("\n")
+                elif token.tag == paragraph:
+                    if parts and not parts[-1].endswith("\n"):
+                        parts.append("\n")
+                elif token.tag == qn("w:t"):
+                    parts.append(token.text or "")
+                elif token.tag in whitespace:
+                    parts.append(whitespace[token.tag])
+            return "".join(parts).removesuffix("\n")
         for node in content:
             if node.tag == qn("w:p"):
                 lines.append(value(node))
@@ -607,3 +626,4 @@ def install(ns):
                              "extracted":parse_text(body),"labelled_excerpts":excerpts})
         return {"reg_number":reg,"current":{k:purchase.get(k) for k in ("customer","customer_inn","title")},
                 "documents":evidence,"unreadable":unreadable,"source":"receipt_verified_EIS_originals"}
+

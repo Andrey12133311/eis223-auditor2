@@ -24,9 +24,14 @@ MONTHS={"января":1,"февраля":2,"марта":3,"апреля":4,"м�
 DATE_RX=(r"(?P<day>(?:[0-3]?\d[.][01]?\d[.]20\d{2})|(?:20\d{2}-[01]\d-[0-3]\d)|"
          r"(?:[«\"]?[0-3]?\d[»\"]?\s+(?:"+"|".join(MONTHS)+r")\s+20\d{2}))")
 SEPARATOR=r"\s*[:：|=№–—\-\s]{0,20}"
+# These are parts of the labelled amendment fact, not arbitrary words or a
+# nearby notice date. Both the abbreviation and the full EIS name identify
+# the same explicit place of publication.
+_AMENDMENT_TARGET=r"(?:\s+в\s+(?:извещени\w*|документаци\w*))?"
+_EIS_LABEL=r"(?:ЕИС|единой\s+информационной\s+системе(?:\s+в\s+сфере\s+закупок)?)"
 DECISION=re.compile(
-    r"(?:дата\s+(?:принятия\s+)?решения\s+о\s+внесении\s+изменени\w*|"
-    r"решени\w*\s+о\s+внесении\s+изменени\w*\s+(?:от|принят\w*)|"
+    r"(?:дата\s+(?:принятия\s+)?решения\s+о\s+внесении\s+изменени\w*"+_AMENDMENT_TARGET+r"|"
+    r"решени\w*\s+о\s+внесении\s+изменени\w*"+_AMENDMENT_TARGET+r"\s+(?:от|принят\w*)|"
     r"(?:изменени\w*|редакци\w*)\s+документаци\w*\s+(?:от|утвержден\w*\s*))"
     +SEPARATOR+DATE_RX,re.I)
 # Real originals often identify the act first, with the amendment subject
@@ -38,9 +43,9 @@ DECISION_ACT=re.compile(
     r"[«\"“]?\s*о\s+внесении\s+изменени\w*\s+в\s+(?:извещени\w*|документаци\w*)",re.I)
 PUBLISHED=re.compile(
     r"(?:дата\s+(?:и\s+время\s+)?(?:публикации|размещения)\s+"
-    r"(?:изменени\w*|новой\s+редакци\w*)(?:\s+(?:в\s+)?(?:извещени\w*|документаци\w*))?\s+(?:в\s+)?ЕИС|"
-    r"дата\s+(?:и\s+время\s+)?(?:публикации|размещения)\s+в\s+ЕИС\s+изменени\w*|"
-    r"(?:изменени\w*|редакци\w*)\s+(?:размещ[её]н\w*|опубликован\w*)\s+(?:в\s+)?ЕИС)"
+    r"(?:изменени\w*|новой\s+редакци\w*)(?:\s+(?:в\s+)?(?:извещени\w*|документаци\w*))?\s+(?:в\s+)?"+_EIS_LABEL+r"|"
+    r"дата\s+(?:и\s+время\s+)?(?:публикации|размещения)\s+в\s+"+_EIS_LABEL+r"\s+изменени\w*"+_AMENDMENT_TARGET+r"|"
+    r"(?:изменени\w*|редакци\w*)\s+(?:размещ[её]н\w*|опубликован\w*)\s+(?:в\s+)?"+_EIS_LABEL+r")"
     +SEPARATOR+DATE_RX,re.I)
 # Separate clues: a document dated Aug 10 is NOT proof of formal adoption;
 # a publication date of a general notice is NOT an amendment's publication.
@@ -375,3 +380,4 @@ def install(ns):
     ns["analyze"]=wrapped_analyze
     ns["build_checks"]=wrapped_checks
     print("V330_ART4_11_READY verified_eis_only=True date_only=True minimum_half_term_requires_regulation=True",flush=True)
+
