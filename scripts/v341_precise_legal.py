@@ -44,26 +44,46 @@ LAW4 = "https://www.consultant.ru/document/cons_doc_LAW_116964/441d00be62e3224cd
 # publication is not a substitute for receipt or EIS placement evidence.
 _CLARIFICATION_SUBJECT = (r"(?:\s+(?:положени[йя]\s+)?документации"
                           r"(?:\s+о\s+(?:конкурентной\s+)?закупке)?)?")
-_REQUEST_SUBJECT = (r"\s+(?:(?:на\s+)?разъяснени[еяй]|о\s+разъяснении)"
+_REQUEST_SUBJECT = (r"\s+(?:(?:на\s+)?(?:(?:дачу|предоставление)\s+)?разъяснени[еяй]|"
+                    r"о\s+(?:(?:даче|предоставлении)\s+)?разъяснени[ийя])"
                     + _CLARIFICATION_SUBJECT)
 _EIS_LABEL = r"(?:ЕИС|единой\s+информационной\s+системе(?:\s+в\s+сфере\s+закупок)?)"
 REQUEST = (r"(?:дата\s+(?:и\s+время\s+)?(?:поступления|получения|регистрации)\s+"
            r"(?:заказчиком\s+)?запроса(?:" + _REQUEST_SUBJECT + r")?|"
            r"запрос" + _REQUEST_SUBJECT + r"\s+(?:поступил|получен|зарегистрирован))")
-ANSWER = (r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+"
-          r"(?:ответа(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
-          r"разъяснени[яй]" + _CLARIFICATION_SUBJECT + r"(?:\s+на\s+запрос)?)"
-          r"(?:\s+в\s+" + _EIS_LABEL + r")?|"
+_ANSWER_OBJECT = (r"(?:ответа(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
+                  r"разъяснени[яй]" + _CLARIFICATION_SUBJECT + r"(?:\s+на\s+запрос)?)")
+ANSWER = (r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:"
+          + _ANSWER_OBJECT + r"(?:\s+в\s+" + _EIS_LABEL + r")?|"
+          r"в\s+" + _EIS_LABEL + r"\s+" + _ANSWER_OBJECT + r")|"
           r"(?:ответ(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
           r"разъяснени[ея]" + _CLARIFICATION_SUBJECT + r")\s+"
           r"(?:размещ[её]н[оы]?|опубликован[оы]?)\s+в\s+" + _EIS_LABEL + r")")
-SIGNED = r"(?:дата\s+подписания\s+(?:итогового\s+)?протокола|протокол\s+подписан)"
-PROTOCOL_PUBLISHED = r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:итогового\s+)?протокола(?:\s+в\s+ЕИС)?|протокол\s+(?:размещ[её]н|опубликован)\s+в\s+ЕИС)"
+# A protocol's ordinary event-kind suffix is part of its field label. Keep
+# the vocabulary closed: arbitrary prose between the field and its date
+# must not become a signing or EIS-publication event.
+_PROTOCOL_DATE_KIND = (r"(?:подведения\s+итогов|рассмотрения(?:\s+и\s+оценки)?"
+                       r"(?:\s+заявок)?|оценки(?:\s+заявок)?|допуска(?:\s+к\s+участию)?)")
+_PROTOCOL_DATE_GENITIVE = (r"(?:итогового\s+протокола|протокола"
+                           r"(?:\s+" + _PROTOCOL_DATE_KIND + r")?)")
+_PROTOCOL_DATE_NOMINATIVE = (r"(?:итоговый\s+протокол|протокол"
+                             r"(?:\s+" + _PROTOCOL_DATE_KIND + r")?)")
+SIGNED = (r"(?:дата\s+(?:и\s+время\s+)?подписания\s+" + _PROTOCOL_DATE_GENITIVE
+          + r"|" + _PROTOCOL_DATE_NOMINATIVE + r"\s+подписан)")
+PROTOCOL_PUBLISHED = (
+    r"(?:дата\s+(?:и\s+время\s+)?(?:размещения|публикации)\s+(?:"
+    + _PROTOCOL_DATE_GENITIVE + r"(?:\s+в\s+" + _EIS_LABEL + r")?|в\s+"
+    + _EIS_LABEL + r"\s+" + _PROTOCOL_DATE_GENITIVE + r")|"
+    + _PROTOCOL_DATE_NOMINATIVE + r"\s+(?:размещ[её]н|опубликован)\s+в\s+"
+    + _EIS_LABEL + r")")
 COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)", re.I)
 CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+закупки|решение\s+об\s+отмене\s+закупки\s+принято)"
 CANCEL_POSTED = r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки(?:\s+в\s+ЕИС)?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+размещено)"
 SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\s+субъект[ыа-я\s]{0,35}малого\s+и\s+среднего\s+предпринимательства|участниками\s+которо[йго]+\s+могут\s+быть\s+только\s+субъект",re.I)
 PAYMENT_DAYS = re.compile(r"(?:оплата|расч[её]т[ыа]?|оплат[уы])[^.;]{0,280}?(?:в\s+течение|не\s+позднее|срок\s+оплаты\s+составляет)\s*(?P<days>\d{1,3})\s*(?:\([^)]{0,40}\)\s*)?рабочих\s+дн",re.I)
+_PLANNED_EVENT_PREFIX=re.compile(
+    r"\b(?:планов\w*|планируем\w*|предполагаем\w*|ориентировочн\w*|"
+    r"ожидаем\w*|предварительн\w*|расч[её]тн\w*)\s*$",re.I)
 
 
 def shifted(date, count):
@@ -85,7 +105,16 @@ def shifted(date, count):
 
 
 def matches(pattern, text):
-    return list(re.finditer(pattern+r"\s*[:：|=–—\-\s]{0,15}(?P<date>"+DATE_TOKEN+r")", text, re.I))[:40]
+    found=[]
+    for event in re.finditer(pattern+r"\s*[:：|=–—\-\s]{0,15}(?P<date>"+DATE_TOKEN+r")", text, re.I):
+        # Do not match the actual-event substring inside a planned/estimated
+        # field. The qualifier belongs immediately to this label, including
+        # an ordinary table-cell line break; unrelated prose is not a veto.
+        if _PLANNED_EVENT_PREFIX.search(text[max(0,event.start()-120):event.start()]):
+            continue
+        found.append(event)
+        if len(found)>=40:break
+    return found
 
 
 def _event_dates(item):
@@ -174,7 +203,9 @@ def evaluate(p, docs):
     findings, checks = [], []
     from v348_cross_document_legal import (ambiguous_original_documents,
                                            document_event_number,
-                                           _document_event_identity, EXCLUDE)
+                                           _document_event_identity, EXCLUDE,
+                                           _protocol_kinds,protocol_template_title,
+                                           protocol_date_context)
     from official_publication_evidence import protocol_publication_verifier
     official_publication = protocol_publication_verifier(p)
     ambiguous = ambiguous_original_documents(docs[:650])
@@ -270,10 +301,29 @@ def evaluate(p, docs):
                         f"Условие об оплате: {days} рабочих дней. {snippet}",payment,
                         "https://www.consultant.ru/document/cons_doc_LAW_172683/"))
         # Protocol signing and EIS publication must each be explicitly named.
+        # Templates and draft/sample originals do not establish actual event
+        # dates, even when their fields contain concrete example values.
+        if protocol_template_title(doc.get("name")):
+            continue
         signed, published = matches(SIGNED, text), matches(PROTOCOL_PUBLISHED, text)
+        date_events=signed+published
+        contexts={id(event):protocol_date_context(doc,event,date_events) for event in date_events}
+        def compatible_protocol_dates(signature, publication=None):
+            before=contexts[id(signature)]
+            if not before["valid"]:return False
+            first=_protocol_kinds(doc.get("name"),signature.group(0))
+            if len(first)>1:return False
+            if publication is None:return True
+            after=contexts[id(publication)]
+            if not after["valid"]:return False
+            if before["number"] and after["number"] and before["number"]!=after["number"]:
+                return False
+            second=_protocol_kinds(doc.get("name"),publication.group(0))
+            return len(second)<=1 and (not first or not second or first==second)
         official = {}
         protocol_conflict = False
-        if competitive and len(signed) == 1 and number(doc, "PROTOCOL"):
+        if (competitive and len(signed) == 1 and number(doc, "PROTOCOL")
+                and compatible_protocol_dates(signed[0])):
             official = official_publication(doc)
             official_day = day(official.get("publication_date"))
             protocol_conflict = (official.get("state") == "conflict" or
@@ -292,6 +342,7 @@ def evaluate(p, docs):
         for signature in signed:
             candidates = [publication for publication in published
                           if 0 <= publication.start()-signature.end() <= 900
+                          and compatible_protocol_dates(signature,publication)
                           and not any(signature.end() < other.start() < publication.start()
                                       for other in signed if other is not signature)
                           and not any(signature.end() < other.start() < publication.start()
@@ -299,7 +350,8 @@ def evaluate(p, docs):
             if len(candidates) == 1 and candidates[0].start() not in used:
                 pairs.append((signature, candidates[0]))
                 used.add(candidates[0].start())
-        if len(signed) == len(published) == 1 and not pairs:
+        if (len(signed) == len(published) == 1 and not pairs
+                and compatible_protocol_dates(signed[0],published[0])):
             # One pair can be distant within a single verified document.
             pairs = [(signed[0], published[0])]
             used.add(published[0].start())
@@ -383,3 +435,4 @@ def install(ns):
     enriched_analyze.__v341__ = True
     ns["analyze"], ns["build_checks"] = enriched_analyze, enriched_checks
     print("V341 LEGAL_FACTS_READY clarification_workdays=True protocols=True source_metadata=True", flush=True)
+

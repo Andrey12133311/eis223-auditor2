@@ -22,6 +22,11 @@ on:
       - 'tests/test_legal_event_recall.py'
       - 'tests/test_procurement_fact_trace.py'
       - 'tests/test_legal_date_label_archive_recall.py'
+      - 'tests/test_protocol_date_label_recall.py'
+      - 'tests/test_clarification_date_label_recall.py'
+      - 'tests/test_amendment_date_label_recall.py'
+      - 'tests/test_date_label_pipeline_parity.py'
+      - 'tests/test_docx_event_separators.py'
       - 'tests/test_legal_price_recall.py'
       - 'tests/test_audit_persistence_lock_scope.py'
       - 'tests/test_general_db_stage_retry.py'
@@ -80,6 +85,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_legal_event_recall.py'
           python -m unittest discover -s tests -p 'test_procurement_fact_trace.py'
           python -m unittest discover -s tests -p 'test_legal_date_label_archive_recall.py'
+          python -m unittest test_protocol_date_label_recall test_clarification_date_label_recall test_amendment_date_label_recall test_date_label_pipeline_parity test_docx_event_separators
           python -m unittest discover -s tests -p 'test_legal_price_recall.py'
           python -m unittest discover -s tests -p 'test_audit_persistence_lock_scope.py'
           python -m unittest discover -s tests -p 'test_general_db_stage_retry.py'
@@ -103,3 +109,4 @@ jobs:
           python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_automatic_recheck_fairness test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
           python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_capacity test_stale_original_completion test_full_recheck_originals
           node tests/test_account_frontend_requests.cjs
+
