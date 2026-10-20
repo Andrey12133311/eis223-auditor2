@@ -24,7 +24,9 @@ from contextlib import contextmanager
 REQUEST_ENV = "EIS223_FULL_RECHECK_REQUEST"
 AUTHORIZED_EPOCH = "2026-10-19-all-saved-214328"
 ALL_SAVED_EPOCH = "2026-10-20-all-saved-explicit-2100"
-AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH)
+DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"
+AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH, DASHBOARD_EPOCH)
+AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, ALL_SAVED_EPOCH: None, DASHBOARD_EPOCH: 4007}
 LEASE_SECONDS = 300
 RENEW_SECONDS = 30
 PAGE_SIZE = 8
@@ -32,7 +34,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 10
+TARGET_GENERATION = 11
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -100,8 +102,9 @@ def initialize(ns):
     c = ns["conn"]()
     try:
         summary = ledger.create_request(c, epoch, ns.get("_verified_set235"),
-            expected_count=None if epoch == ALL_SAVED_EPOCH else 3058,
-            all_saved=epoch == ALL_SAVED_EPOCH)
+            expected_count=None if epoch == ALL_SAVED_EPOCH else (4007 if epoch == DASHBOARD_EPOCH else 3058),
+            all_saved=epoch == ALL_SAVED_EPOCH,
+            **({"source_seconds": 60, "max_seconds": 10} if epoch == DASHBOARD_EPOCH else {}))
     finally:
         c.close()
     from v332_all_procurements_audit import engine_signature
@@ -128,7 +131,8 @@ def initialize(ns):
     state["request_id"] = epoch
     state["cursor"] = ""
     print("FULL_RECHECK_REQUEST " + json.dumps({**summary,
-        "scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else "legacy_dashboard"}, ensure_ascii=False), flush=True)
+        "scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else
+                 "current_dashboard" if epoch == DASHBOARD_EPOCH else "legacy_dashboard"}, ensure_ascii=False), flush=True)
 
 
 def heartbeat(ns):
@@ -141,7 +145,7 @@ def heartbeat(ns):
         state["inventory"] = collect(ns)
         state["inventory_at"] = time.monotonic()
         print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
-    epoch = request_id(ns) or (AUTHORIZED_EPOCH if state.get("target_conflict") else None)
+    epoch = request_id(ns) or (os.environ.get(REQUEST_ENV, "").strip() if state.get("target_conflict") else None)
     if not epoch:
         return
     import full_recheck_request as ledger

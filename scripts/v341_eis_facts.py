@@ -488,6 +488,13 @@ def persist_facts(ns, purchase):
                 row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
                 if row is None or dict(row) != snapshot:
                     db.rollback()
+                    # Rebase a derived-cache-only update, but never overwrite
+                    # a newer intake source column with an older audit's facts.
+                    # Final audit source/lease fences remain authoritative.
+                    if row is not None and any(row[key] != value for key, value in snapshot.items()
+                                               if key != "card_fields_json"):
+                        print("FACT_CACHE_DEFERRED reason=concurrent_source_update", flush=True)
+                        return
                     continue
                 db.execute("UPDATE purchases SET "+",".join(k+"=?" for k in values)+" WHERE reg_number=?", (*values.values(), reg))
                 db.commit()

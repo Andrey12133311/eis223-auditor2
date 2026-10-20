@@ -143,6 +143,22 @@ def is_manual_review(ns, reg):
         connection.close()
 
 
+@asynccontextmanager
+async def database_write_slot():
+    """Serialize short local write stages, never reads, extraction or HTTP.
+
+    Callers MUST settle their physical executor thread before leaving this
+    scope, even when cancelled. SQLite transactions/lease fences still protect
+    other processes; this gate is admission control, not a replacement lock.
+    """
+    gate = _gate("database-writes")
+    permit = await gate.acquire()
+    try:
+        yield
+    finally:
+        gate.release(permit)
+
+
 async def run_file_io(function, *args, timeout=None):
     """Run blocking file/extraction work with a physical (not awaiter) cap."""
     gate = _gate()
