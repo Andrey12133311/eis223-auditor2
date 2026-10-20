@@ -1,6 +1,6 @@
 """Retry only DB stages, preserving legal evidence and recoverable queue work."""
 import asyncio
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from pathlib import Path
 import sqlite3
 import sys
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import v332_all_procurements_audit as general
 import v314_eis_metadata as metadata
 import v341_precise_legal as legal
-from audit_db_retry import run_db_sync
+from audit_db_retry import is_busy, run_db_sync
 from test_general_thematic_parity import P, REG, docs
 import test_general_company_claim as company_fixture
 import test_general_audit_counters as counter_fixture
@@ -22,6 +22,47 @@ import test_general_audit_counters as counter_fixture
 # guarantee. Shared builders can spend seconds on SQLite's durable writes.
 # Keep the semantic wait bounded while leaving real cooldowns/commits intact.
 WORKER_STATE_TIMEOUT_SECONDS = 10
+
+
+async def committed_state(read, predicate):
+    """Observe concurrent durable writes without treating transient BUSY as failure.
+
+    The caller still enforces WORKER_STATE_TIMEOUT_SECONDS. Every read creates
+    and closes its own connection in the I/O thread; no writer lock or result
+    assertion is weakened, and non-contention SQL errors propagate unchanged.
+    """
+    while True:
+        try:
+            value = await asyncio.to_thread(read)
+        except sqlite3.OperationalError as exc:
+            if not is_busy(exc):
+                raise
+        else:
+            if predicate(value):
+                return value
+        await asyncio.sleep(.005)
+
+
+class ObserverRetries(unittest.IsolatedAsyncioTestCase):
+    async def test_observer_retries_only_busy_and_checks_committed_predicate(self):
+        read = Mock(side_effect=[sqlite3.OperationalError('database is locked'),
+                                 {'state':'running'}, {'state':'completed'}])
+        result = await asyncio.wait_for(committed_state(
+            read, lambda row: row['state'] == 'completed'), 1)
+        self.assertEqual(result, {'state':'completed'})
+        self.assertEqual(read.call_count, 3)
+
+    async def test_observer_does_not_hide_schema_errors(self):
+        read = Mock(side_effect=sqlite3.OperationalError('no such table: evidence'))
+        with self.assertRaisesRegex(sqlite3.OperationalError, 'no such table'):
+            await committed_state(read, lambda row: True)
+        self.assertEqual(read.call_count, 1)
+
+    async def test_observer_remains_bounded_when_busy_never_clears(self):
+        read = Mock(side_effect=sqlite3.OperationalError('database is locked'))
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(committed_state(read, lambda row: True), .05)
+        self.assertGreaterEqual(read.call_count, 1)
 
 
 class StageRetries(unittest.IsolatedAsyncioTestCase):
@@ -84,15 +125,12 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
              patch.object(general.asyncio, 'sleep', side_effect=sleep):
             general.install(ns); await ns['app'].startups[0]()
             try:
-                async def settled():
-                    while True:
-                        c = fixture.connect()
-                        rows = {r['reg']: dict(r) for r in c.execute('SELECT * FROM v332_audit_queue')}
-                        c.close()
-                        if rows[first]['state'] == 'pending' and rows[first]['error'] and rows[second]['state'] == 'completed':
-                            return rows
-                        await real_sleep(.01)
-                rows = await asyncio.wait_for(settled(), WORKER_STATE_TIMEOUT_SECONDS)
+                def rows_snapshot():
+                    with closing(fixture.connect()) as c:
+                        return {r['reg']: dict(r) for r in c.execute('SELECT * FROM v332_audit_queue')}
+                rows = await asyncio.wait_for(committed_state(rows_snapshot,
+                    lambda rows: rows[first]['state'] == 'pending' and rows[first]['error']
+                                 and rows[second]['state'] == 'completed'), WORKER_STATE_TIMEOUT_SECONDS)
                 self.assertEqual(rows[first]['audit_revision'], '')
                 self.assertEqual(rows[first]['retry_count'], 1)
                 self.assertGreater(rows[first]['next_retry_at'], time.time())
@@ -152,10 +190,7 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
         real_sleep = asyncio.sleep
         async def sleep(seconds): await real_sleep(0 if seconds == 14 else seconds)
         async def wait_for_row(predicate):
-            while True:
-                value = row()
-                if predicate(value): return value
-                await real_sleep(.005)
+            return await committed_state(row, predicate)
         with patch.object(general, 'inspect_one', side_effect=inspect), \
              patch.object(general, 'mark', side_effect=mark), \
              patch.object(general, 'DB_STAGE_RETRY_SECONDS', .025), \
