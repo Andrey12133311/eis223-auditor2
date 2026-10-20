@@ -5,23 +5,54 @@ on:
     paths: [.github/workflows/contention-regressions.yml]
 permissions:
   contents: read
+concurrency:
+  group: contention-patch-application
+  cancel-in-progress: false
 jobs:
-  source-snapshot:
+  apply-tested-patch:
+    if: github.ref == 'refs/heads/fix/contention-and-archive-retry-20261020'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - name: Export tracked source for isolated reproduction
-        run: |
-          mkdir -p /tmp/eis-source
-          git archive --format=zip --output=/tmp/eis-source/source.zip HEAD app.py scripts tests requirements.txt Dockerfile .github/workflows
-          git rev-parse HEAD > /tmp/eis-source/COMMIT
-          sha256sum /tmp/eis-source/source.zip > /tmp/eis-source/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
         with:
-          name: contention-test-source
-          path: /tmp/eis-source/
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.12'
+      - name: Verify and apply the reviewed integration patch
+        run: |
+          echo '233f36fd236cee895c485386c2c13b6a07431afbadb7601d19834f6ae18710ac  maintenance/contention-fixes.patch' | sha256sum -c -
+          git apply --check maintenance/contention-fixes.patch
+          git apply maintenance/contention-fixes.patch
+          git diff --check
+      - name: Install isolated test dependencies
+        run: python -m pip install -r requirements-accounts.txt 'python-docx>=1.1' 'openpyxl>=3.1,<4'
+      - name: Compile and verify the pinned WAL-reset-fixed runtime
+        run: |
+          python scripts/build_sqlite_runtime.py /tmp/eis-sqlite
+          echo 'LD_LIBRARY_PATH=/tmp/eis-sqlite' >> "$GITHUB_ENV"
+      - name: Verify native runtime and safety regressions
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: |
+          python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3', sqlite3.sqlite_version"
+          python -m unittest test_sqlite_wal_startup test_explanation_quarantine_identity test_eis_hard_failure_backoff test_eis_mixed_soap_quarantine test_eis_worker_backpressure
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_cohort_contract
+          python -m unittest test_eis_server_worker test_eis_vps_worker test_legal_audit_revision test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+      - name: Commit only the tested files to this isolated branch
+        run: |
+          python - <<'PY'
+          import subprocess
+          expected = {'Dockerfile', 'scripts/eis223_soap_xml.py', 'scripts/eis_server_worker.py', 'scripts/full_recheck_runtime.py', 'scripts/railway_start_v282.py', 'tests/test_full_recheck_runtime.py'}
+          changed = set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines())
+          assert changed == expected, changed
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Dockerfile scripts/eis223_soap_xml.py scripts/eis_server_worker.py scripts/full_recheck_runtime.py scripts/railway_start_v282.py tests/test_full_recheck_runtime.py
+          git commit -m 'Enable verified backup-first WAL, documented explanation identity and bounded failure retries'
+          git push origin HEAD:refs/heads/fix/contention-and-archive-retry-20261020
+          git rev-parse HEAD
