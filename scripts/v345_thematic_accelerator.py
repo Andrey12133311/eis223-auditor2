@@ -350,6 +350,7 @@ def _require_item_reservation(c,item):
         "AND status='running' AND reservation_token=?",(item["batch"],item["reg"],item["reservation_token"])).fetchone()
     campaign=c.execute("SELECT * FROM thematic_batches WHERE id=?",(item["batch"],)).fetchone()
     if not row or not _campaign_guard(c,campaign,item["reg"],item):
+        audit_funnel.observe("gate","analysis_reservation_changed")
         raise LookupError("Thematic audit reservation superseded")
 
 
@@ -405,6 +406,7 @@ async def _one(ns,item,sem,pending=None):
             return item,"retry",[],"Превышено время проверки оригиналов; запланирован повтор"
         except Exception as exc:
             audit_funnel.observe("gate","analysis_failed")
+            audit_funnel.observe("analysis_exception",exc)
             for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
             return item,"retry",[],exc.diagnostic_code if isinstance(exc,SemanticSnapshotError) else type(exc).__name__
 

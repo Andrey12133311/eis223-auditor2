@@ -1557,35 +1557,26 @@ def install(ns):
                     await asyncio.sleep(retry_delay(attempts))
             async def worker(worker_id):
                 index=0
-                request_turn=True
-                request_progress=False
                 signals=audit_signals(ns)
                 slot=runtime["workers"][str(worker_id)]
                 reg=None
                 try:
                     while True:
                         version=signals.version("general")
-                        if worker_id==1 and request_turn:
-                            request_turn=False
-                            request_progress=await full_recheck_runtime.run_one(ns,slot)
-                            if request_progress:continue
-                        reg=await retry_operation(ns,"claim",lambda:claim_safely(ns),slot)
-                        request_turn=True
-                        slot["reg"]=reg
-                        if reg is None:
-                            # An empty ordinary turn preserves fairness but
-                            # should not add a 30-second delay to every forced
-                            # item once the ordinary backlog has drained.
-                            if request_progress:
-                                request_progress=False
+                        # Two explicit-first slots, two ordinary-only slots.
+                        # No new task pool; an empty/busy request falls through.
+                        if worker_id<=full_recheck_runtime.EXPLICIT_WORKERS:
+                            if await full_recheck_runtime.run_one(ns,slot):
                                 await asyncio.sleep(.05)
                                 continue
+                        reg=await retry_operation(ns,"claim",lambda:claim_safely(ns),slot)
+                        slot["reg"]=reg
+                        if reg is None:
                             slot["phase"]="waiting_for_documents"
                             await signals.wait("general",version,QUEUE_POLL_SECONDS)
                             continue
                         snapshot=None
                         result=None
-                        request_progress=False
                         try:
                             await full_recheck_runtime.attach_general(ns,reg)
                             started=time.monotonic()

@@ -32,6 +32,18 @@ INVENTORY_SECONDS = 300
 # generation/different signature disables request claims; it never retargets.
 TARGET_GENERATION = 1
 CATCHUP_PAGE_SIZE = 32
+# Reuse two of the existing four general workers, leaving two ordinary-only.
+# This is an in-process explicit-only budget, not a cross-process lease cap.
+EXPLICIT_WORKERS = 2
+
+
+def _dispatch(ns):
+    loop = asyncio.get_running_loop()
+    state = ns.get("_full_recheck_dispatch")
+    if state is None or state["loop"] is not loop:
+        state = {"loop": loop, "active": 0, "selector": asyncio.Lock()}
+        ns["_full_recheck_dispatch"] = state
+    return state
 
 
 @contextmanager
@@ -536,73 +548,103 @@ def _note_waiting(ns, reg):
 
 
 async def run_one(ns, slot):
-    """An optional request must not stop the existing ordinary worker."""
-    try:
-        return await _run_one(ns, slot)
-    except Exception as exc:
-        print("FULL_RECHECK_TURN deferred=True type=" + type(exc).__name__, flush=True)
+    """Use a free explicit slot or immediately return to ordinary work.
+
+    Admission is event-loop atomic before the first await. Keep the permit
+    through real claim-thread settlement, receipt cleanup and lock release.
+    Ordinary-attached receipts already use ordinary slots and need no extra
+    explicit permit. Rolling processes retain their existing per-reg fencing.
+    """
+    dispatch = _dispatch(ns)
+    if dispatch["active"] >= EXPLICIT_WORKERS:
         return False
+    dispatch["active"] += 1
+    try:
+        try:
+            return await _run_one(ns, slot)
+        except Exception as exc:
+            print("FULL_RECHECK_TURN deferred=True type=" + type(exc).__name__, flush=True)
+            return False
+    finally:
+        dispatch["active"] -= 1
+
+
+async def _claim_next(ns):
+    """One cursor owner through a settled claim; never serialize analysis.
+
+    A second worker must not read the same page then rewind this cursor after
+    its peer has advanced/wrapped it. All cursor reads/writes and bounded
+    preflight work share this selector; thread_call settles on cancellation.
+    """
+    from v332_all_procurements_audit import thread_call, file_stage, settle_task
+    from v295_eis_originals import _release_execution_lock
+    async with _dispatch(ns)["selector"]:
+        await recover(ns)
+        if not request_id(ns):
+            return None
+        await thread_call(_catch_up, ns)
+        for number in await thread_call(_candidates, ns):
+            # Advance only a visited row, not the unused remainder of a page.
+            ns["_full_recheck"]["cursor"] = number
+            ordinary, ready = await thread_call(_ordinary_pending, ns, number)
+            if ordinary:
+                if not ready:
+                    from v332_all_procurements_audit import receipt_readiness
+                    originals, error = await file_stage(ns, "full_request_availability", receipt_readiness, number)
+                    if not originals and not error:
+                        await thread_call(_note_waiting, ns, number)
+                continue
+            lock = await _lock(number)
+            if lock is None:
+                continue
+            reg = None
+            handed_off = False
+            try:
+                claim_task = asyncio.create_task(thread_call(_claim, ns, number))
+                try:
+                    reg = await asyncio.shield(claim_task)
+                except asyncio.CancelledError:
+                    reg = await settle_task(claim_task)
+                    if reg is not None:
+                        reg.full_recheck_lock = lock
+                        lock = None
+                    raise
+                if reg is None:
+                    continue
+                reg.full_recheck_lock = lock
+                lock = None
+                reg.full_recheck_renew = asyncio.create_task(_renew_loop(ns, reg))
+                handed_off = True
+                return reg
+            finally:
+                if reg is not None and not handed_off:
+                    await settle_task(asyncio.create_task(release(ns, reg)))
+                if lock is not None:
+                    _release_execution_lock(lock)
+        return None
 
 
 async def _run_one(ns, slot):
-    """One optional turn inside worker 1, never a separately launched pool."""
-    from v332_all_procurements_audit import (thread_call, file_stage, db_stage,
-                                           inspect_one, settle_task)
+    """One explicit-first turn inside the unchanged general worker pool."""
+    from v332_all_procurements_audit import file_stage, db_stage, inspect_one, settle_task
     from v381_audit_scheduling import background_audit
-    from v295_eis_originals import _release_execution_lock
-    await recover(ns)
-    if not request_id(ns):
+    reg = await _claim_next(ns)
+    if reg is None:
         return False
-    await thread_call(_catch_up, ns)
-    for number in await thread_call(_candidates, ns):
-        # Advance only a visited row. A turn can return after its first attempt;
-        # advancing to the page end would repeatedly skip fresh members when
-        # leading retries become due again before the full rotation finishes.
-        ns["_full_recheck"]["cursor"] = number
-        ordinary, ready = await thread_call(_ordinary_pending, ns, number)
-        if ordinary:
-            if not ready:
-                from v332_all_procurements_audit import receipt_readiness
-                originals, error = await file_stage(ns, "full_request_availability", receipt_readiness, number)
-                if not originals and not error:
-                    await thread_call(_note_waiting, ns, number)
-            continue
-        lock = await _lock(number)
-        if lock is None:
-            continue
-        reg = None
-        try:
-            claim_task = asyncio.create_task(thread_call(_claim, ns, number))
-            try:
-                reg = await asyncio.shield(claim_task)
-            except asyncio.CancelledError:
-                reg = await settle_task(claim_task)
-                if reg is not None:
-                    reg.full_recheck_lock = lock
-                    lock = None
-                raise
-            if reg is None:
-                continue
-            reg.full_recheck_lock = lock
-            lock = None
-            reg.full_recheck_renew = asyncio.create_task(_renew_loop(ns, reg))
-            slot.update(reg=reg, phase="full_request_source")
-            snapshot = await file_stage(ns, "full_request_source", _snapshot, ns, reg, worker=slot)
-            await db_stage(ns, "full_request_watermark", note_snapshot, ns, reg, snapshot, worker=slot)
-            slot["phase"] = "full_request_inspect"
-            with background_audit():
-                state, detail = await asyncio.wait_for(inspect_one(ns, reg), timeout=600)
-            await finish_result(ns, reg, state, detail)
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print("FULL_RECHECK_ATTEMPT deferred=True type=" + type(exc).__name__, flush=True)
-            return reg is not None
-        finally:
-            if reg is not None:
-                await settle_task(asyncio.create_task(release(ns, reg)))
-            if lock is not None:
-                _release_execution_lock(lock)
-            slot.update(reg=None, phase="full_request_waiting")
-    return False
+    try:
+        slot.update(reg=reg, phase="full_request_source")
+        snapshot = await file_stage(ns, "full_request_source", _snapshot, ns, reg, worker=slot)
+        await db_stage(ns, "full_request_watermark", note_snapshot, ns, reg, snapshot, worker=slot)
+        slot["phase"] = "full_request_inspect"
+        with background_audit():
+            state, detail = await asyncio.wait_for(inspect_one(ns, reg), timeout=600)
+        await finish_result(ns, reg, state, detail)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print("FULL_RECHECK_ATTEMPT deferred=True type=" + type(exc).__name__, flush=True)
+        return True
+    finally:
+        await settle_task(asyncio.create_task(release(ns, reg)))
+        slot.update(reg=None, phase="full_request_waiting")

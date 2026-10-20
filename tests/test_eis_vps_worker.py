@@ -531,6 +531,94 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(self.state.pending_reports())
         self.assertFalse(any(c[0] == 'site' and c[1].endswith('/report') for c in self.http.calls))
 
+    def test_heartbeat_503_persists_site_pause_and_both_report_payloads_across_restart(self):
+        reports = [
+            ('job-1', {'worker_id': self.state.worker_id, 'lease_token': 'reg-lease',
+                       'reg_number': REG, 'status': 'completed'}),
+            ('inn-job', {'worker_id': self.state.worker_id, 'lease_token': 'inn-lease',
+                         'kind': 'inn', 'inn': INN, 'page': 1, 'status': 'completed',
+                         'reg_numbers': [REG]}),
+        ]
+        for identifier, payload in reports:
+            self.state.save_report(identifier, payload)
+        # Exercise the real HTTPError -> WorkerError transport path, offline.
+        transport = w.Transport.__new__(w.Transport)
+        transport.config = {'site_url': 'https://example.test', 'site_token': 'fixture-site-secret',
+                            'timeout_seconds': 10}
+        transport.site_opener = Mock()
+        transport.site_opener.open.side_effect = urllib.error.HTTPError(
+            'https://example.test/api/eis-worker/heartbeat', 503, 'busy', {'Retry-After': '300'}, None)
+        self.worker.http = transport
+        with patch.object(w.time, 'time', return_value=1800000000):
+            with self.assertRaises(w.WorkerError) as error:
+                self.worker.heartbeat(self.job, force=True)
+        self.assertEqual((error.exception.code, error.exception.retry_after), ('site_http_503', 300))
+        self.assertEqual(transport.site_opener.open.call_count, 1)
+        self.assertEqual(float(self.state.get('site_backoff_until')), 1800000300)
+        self.assertEqual(float(self.state.get('backoff_until')), 1800000300)
+        self.assertEqual(dict(self.state.pending_reports()), dict(reports))
+        restarted = w.State(self.temp.name)
+        try:
+            other = w.Worker({'interval_seconds': 300}, restarted, self.http)
+            with patch.object(w.time, 'time', return_value=1800000299):
+                other.cycle()
+                other.heartbeat(self.job, force=True)
+            self.assertEqual(self.http.calls, [])
+            self.assertEqual(dict(restarted.pending_reports()), dict(reports))
+            with patch.object(w.time, 'time', return_value=1800000301), contextlib.redirect_stdout(io.StringIO()):
+                other.retry_reports()
+                other.heartbeat(self.job, force=True)
+            self.assertEqual(restarted.pending_reports(), [])
+            sent = [(path, payload) for kind, path, payload in self.http.calls if kind == 'site']
+            self.assertEqual(sent[0], ('/api/eis-worker/jobs/job-1/report', reports[0][1]))
+            self.assertEqual(sent[1], ('/api/eis-worker/inn-jobs/inn-job/report', reports[1][1]))
+            self.assertEqual(sent[2][0], '/api/eis-worker/heartbeat')
+            self.assertEqual(sent[2][1]['lease_token'], self.job['lease_token'])
+        finally:
+            restarted.db.close()
+
+    def test_disconnected_heartbeat_keeps_reports_for_normal_retry_without_fake_ack(self):
+        reports = [
+            ('job-1', {'worker_id': self.state.worker_id, 'lease_token': 'reg-lease',
+                       'reg_number': REG, 'status': 'completed'}),
+            ('inn-job', {'worker_id': self.state.worker_id, 'lease_token': 'inn-lease',
+                         'kind': 'inn', 'inn': INN, 'page': 1, 'status': 'completed', 'reg_numbers': [REG]}),
+        ]
+        for network_error, expected_code in (
+                (urllib.error.URLError('fixture connection closed before response'), 'site_connection_error'),
+                (urllib.error.HTTPError('https://example.test/api/eis-worker/heartbeat',
+                                       400, 'incomplete request', {}, None), 'site_http_400')):
+            with self.subTest(code=expected_code):
+                for identifier, payload in reports:
+                    self.state.save_report(identifier, payload)
+                transport = w.Transport.__new__(w.Transport)
+                transport.config = {'site_url': 'https://example.test', 'site_token': 'fixture-site-secret',
+                                    'timeout_seconds': 10}
+                transport.site_opener = Mock()
+                transport.site_opener.open.side_effect = network_error
+                self.worker.http = transport
+                with self.assertRaises(w.WorkerError) as error:
+                    self.worker.heartbeat(self.job, force=True)
+                self.assertEqual(error.exception.code, expected_code)
+                self.assertEqual(transport.site_opener.open.call_count, 1)
+                self.assertEqual(dict(self.state.pending_reports()), dict(reports))
+                # Existing client uses its normal cadence for these errors, not
+                # the persisted site-wide cooldown reserved for HTTP 503/429.
+                self.assertEqual(float(self.state.get('site_backoff_until', '0')), 0)
+                restarted = w.State(self.temp.name)
+                try:
+                    other = w.Worker({'interval_seconds': 300}, restarted, self.http)
+                    self.http.calls.clear()
+                    self.assertEqual(dict(restarted.pending_reports()), dict(reports))
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        other.retry_reports()
+                    self.assertEqual(restarted.pending_reports(), [])
+                    sent = [(path, payload) for kind, path, payload in self.http.calls if kind == 'site']
+                    self.assertEqual(sent, [('/api/eis-worker/jobs/job-1/report', reports[0][1]),
+                                            ('/api/eis-worker/inn-jobs/inn-job/report', reports[1][1])])
+                finally:
+                    restarted.db.close()
+
     def test_site_retry_after_defers_reports_and_heartbeats_across_restart(self):
         self.http.jobs = [self.job]
         original_upload = self.http.upload

@@ -16,8 +16,11 @@ import asyncio
 from contextvars import ContextVar
 from functools import wraps
 import json
+import sqlite3
 import uuid
 import audit_rule_counts
+from audit_source_version import SemanticSnapshotError
+from legal_audit_revision import EngineSignatureError
 
 CURRENT = ContextVar("audit_funnel", default=None)
 COUNTS = frozenset(("documents", "unreadable", "readable_input_documents", "verified_documents", "analysis_documents",
@@ -30,7 +33,37 @@ REASONS = frozenset(("no_readable_documents", "no_verified_documents", "source_i
     "company_excluded", "review_only", "msp_scope_unknown", "msp_scope_conflict",
     "verified_nmcd_missing", "applicability_review", "date_pair_review", "publication_conflict",
     "fact_comparison_review", "duplicate", "invalid_record", "campaign_inactive", "reservation_changed",
-    "outside_period", "company_scope_changed", "not_persistable", "analysis_failed", "analysis_cancelled", "analysis_timeout"))
+    "outside_period", "company_scope_changed", "not_persistable", "analysis_failed", "analysis_cancelled", "analysis_timeout",
+    "analysis_reservation_changed", "analysis_sqlite_busy", "analysis_sqlite_locked"))
+# Exact known classes only: exception names/messages and arbitrary machine codes
+# are never log labels. Unknown subclasses stay unknown, without stringifying.
+EXCEPTION_REASONS = (
+    (SemanticSnapshotError, "analysis_exception_source_snapshot"),
+    (EngineSignatureError, "analysis_exception_engine_signature"),
+    (sqlite3.OperationalError, "analysis_exception_sqlite_operational"),
+    (sqlite3.IntegrityError, "analysis_exception_sqlite_integrity"),
+    (sqlite3.DatabaseError, "analysis_exception_sqlite_database"),
+    (LookupError, "analysis_exception_lookup"), (KeyError, "analysis_exception_key"),
+    (IndexError, "analysis_exception_index"), (ValueError, "analysis_exception_value"),
+    (TypeError, "analysis_exception_type"), (RuntimeError, "analysis_exception_runtime"),
+    (OSError, "analysis_exception_io"), (FileNotFoundError, "analysis_exception_io"),
+    (PermissionError, "analysis_exception_io"),
+)
+SNAPSHOT_REASONS = (
+    ("analysis_source_changed", frozenset(("concurrent_file_change",))),
+    ("analysis_source_budget", frozenset(("byte_budget", "time_budget", "file_budget", "row_limit",
+        "resume_capacity", "archive_expansion_limit", "archive_record_limit", "directory_entry_limit",
+        "entry_limit", "file_size", "metadata_size", "database_metadata_size", "manifest_document_limit",
+        "manifest_event_limit", "xml_member_size"))),
+    ("analysis_source_unavailable", frozenset(("file_missing", "file_unreadable", "directory_unreadable",
+        "original_path_unavailable", "xml_member_unavailable", "xml_unreadable"))),
+    ("analysis_source_invalid", frozenset(("invalid_archive_receipt", "invalid_original_receipt",
+        "invalid_card_evidence", "invalid_card_fields", "invalid_card_prices", "invalid_metadata",
+        "invalid_registry_number", "invalid_semantic_value", "not_regular_file", "xml_receipt_hash_mismatch"))),
+    ("analysis_source_transaction", frozenset(("active_sql_transaction",))),
+)
+REASONS = REASONS | frozenset(reason for _, reason in EXCEPTION_REASONS) | frozenset(
+    reason for reason, _ in SNAPSHOT_REASONS) | {"analysis_exception_unknown", "analysis_source_unknown"}
 STATES = frozenset(("completed", "retry", "waiting_originals", "waiting_engine", "excluded_company",
                     "no_readable_documents", "superseded", "outside_period", "failed", "cancelled", "unknown"))
 MAX_COUNT = 2**63 - 1
@@ -106,6 +139,24 @@ def observe(kind, *values):
     if event is None:return
     if kind == "gate":
         _add(event, "reasons", values[0])
+    elif kind == "analysis_exception":
+        exc = values[0]
+        label = next((reason for cls, reason in EXCEPTION_REASONS if type(exc) is cls),
+                     "analysis_exception_unknown")
+        _add(event, "reasons", label)
+        if type(exc) is SemanticSnapshotError:
+            reason = exc.reason
+            label = next((label for label, reasons in SNAPSHOT_REASONS
+                          if type(reason) is str and len(reason) <= 48 and reason in reasons),
+                         "analysis_source_unknown")
+            _add(event, "reasons", label)
+        elif type(exc) is sqlite3.OperationalError:
+            code = getattr(exc, "sqlite_errorcode", None)
+            # Extended codes retain the low-byte SQLite primary result code.
+            # Never fall back to parsing an exception message.
+            if type(code) is int and code >= 0:
+                if code & 255 == sqlite3.SQLITE_BUSY:_add(event, "reasons", "analysis_sqlite_busy")
+                elif code & 255 == sqlite3.SQLITE_LOCKED:_add(event, "reasons", "analysis_sqlite_locked")
     elif kind == "documents_general":
         docs, unreadable, verified, readable = values
         event["analysis_observed"] = True
@@ -221,7 +272,8 @@ def emit(event, stage, state="unknown"):
         "analysis_observed": event.get("analysis_observed") is True, "committed": event.get("committed") is True,
         "persist_applied": event.get("persist_applied") is True,
         "counts": {k: min(MAX_COUNT, event["counts"].get(k, 0)) for k in sorted(COUNTS) if type(event["counts"].get(k, 0)) is int and event["counts"].get(k, 0) >= 0},
-        "reasons": {k: min(MAX_COUNT, v) for k, v in event["reasons"].items() if k in REASONS and type(v) is int and v >= 0},
+        "reasons": {k: min(MAX_COUNT, event["reasons"][k]) for k in sorted(REASONS)
+                    if type(event["reasons"].get(k)) is int and event["reasons"][k] >= 0},
         "persisted_rules": audit_rule_counts.clean(event.get("persisted_rules"))
             if event.get("committed") is True and event.get("persist_applied") is True else {}}
     reg = valid_registration(event.get("reg"))
