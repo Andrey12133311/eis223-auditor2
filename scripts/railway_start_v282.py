@@ -196,6 +196,9 @@ def main():
     sys.path.insert(0,str(path.parent))
     import importlib
     entry=importlib.import_module('entry')
+    # Back up and switch the existing DB before any background worker starts.
+    from sqlite_wal_startup import install as prepare_sqlite_wal
+    prepare_sqlite_wal(vars(entry))
     v267_findings.install(vars(entry))
     v267_card_ui.install(vars(entry))
     v269_inline_card.install(vars(entry))

@@ -739,6 +739,13 @@ def report(ns, identifier, data):
                 db.execute("INSERT OR REPLACE INTO eis_server_backoff VALUES(?,?)", (identifier, deferrals+1))
         state = "done" if complete else "queued" if attempt < MAX_ATTEMPTS else "partial"
         delay = min(86400, max(60, retry or 900)) if state == "queued" else 0
+        if state == "queued" and not real_progress and error_code in (
+                "site_http_422", "response_size_limit", "unsupported_xml_type"):
+            # Unchanged invalid XML/oversized payloads cannot recover by
+            # hammering the same archive every five minutes. Preserve the job
+            # and attempt budget; retry later so other procurements get a turn.
+            # Never shorten a caller/source Retry-After or declare completion.
+            delay = max(delay, min(86400, 900 * 2 ** min(max(attempt - 1, 0), 6)))
         if complete:
             detail = ("Официальные XML ЕИС получены; сведения карточки обновлены" if metadata_only else
                       "Все учтённые оригиналы ЕИС сохранены; переданы на проверку на сервере")

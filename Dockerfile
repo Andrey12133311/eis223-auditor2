@@ -1,4 +1,13 @@
+FROM python:3.12-slim AS sqlite-runtime-build
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+COPY scripts/build_sqlite_runtime.py /build/build_sqlite_runtime.py
+RUN python /build/build_sqlite_runtime.py /opt/eis-sqlite
+
 FROM python:3.12-slim
+COPY --from=sqlite-runtime-build /opt/eis-sqlite /opt/eis-sqlite
+ENV LD_LIBRARY_PATH=/opt/eis-sqlite
+RUN python -c "import sqlite3; assert sqlite3.sqlite_version == '3.51.3', sqlite3.sqlite_version"
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8080 EIS223_DATA_DIR=/data SCAN_INTERVAL_SECONDS=300 GOSPLAN_DETAILS_PER_CYCLE=12 MAX_DOCS_PER_DETAIL=200 MAX_ATTACHMENT_DOWNLOADS=200 MAX_FILE_MB=50
 COPY requirements.txt .
