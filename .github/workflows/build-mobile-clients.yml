@@ -1,0 +1,33 @@
+name: Mobile clients Android and iOS
+on:
+  push:
+    branches: [mobile-clients-20261020]
+    paths: ['mobile/**', '.github/workflows/build-mobile-clients.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mobile-clients-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ios-device:
+    name: iOS ARM64 device build
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: command -v xcodegen || brew install xcodegen
+      - name: Build unsigned IPA for a real iPhone
+        run: bash mobile/ios/build-unsigned.sh
+      - name: Package Xcode project
+        run: |
+          cp mobile/README.md mobile/ios/README.md
+          cd mobile/ios
+          zip -qry ../../deliverables/EIS223-iOS-Xcode-project.zip EISAuditor.xcodeproj EISAuditor project.yml build-unsigned.sh README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EIS223-iOS-device
+          path: deliverables/*
+          retention-days: 30
+          if-no-files-found: error

@@ -1,0 +1,7 @@
+android/build/
+ios/build/
+ios/EISAuditor.xcodeproj/
+*.p12
+*.jks
+password.txt
+.DS_Store
