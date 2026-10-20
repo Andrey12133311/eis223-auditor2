@@ -106,6 +106,113 @@ class RequestedCapacity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ns['_full_recheck']['cursor'], regs[0])
         self.assertEqual(runtime._dispatch(self.ns)['active'], 0)
 
+    async def test_cancelled_late_claim_preserves_cancel_and_fence_on_unlock_failure(self):
+        await self.claim_cancel_unlock_case(unlocked=False)
+
+    async def test_cancelled_late_claim_preserves_cancel_after_unlock_error(self):
+        await self.claim_cancel_unlock_case(unlocked=True)
+
+    async def claim_cancel_unlock_case(self, *, unlocked):
+        import v295_eis_originals as originals
+        regs = self.cohort(2)
+        committed, allow_claim = threading.Event(), threading.Event()
+        cleanup_started, allow_cleanup = threading.Event(), threading.Event()
+        claimed = []
+        original_claim, original_release = runtime._claim, runtime._release_member
+        def held_claim(ns, number):
+            result = original_claim(ns, number)
+            claimed.append(result)
+            committed.set()
+            if not allow_claim.wait(5): raise TimeoutError('claim fixture barrier')
+            return result
+        def held_cleanup(ns, reg):
+            cleanup_started.set()
+            if not allow_cleanup.wait(5): raise TimeoutError('cleanup fixture barrier')
+            return original_release(ns, reg)
+        def failed_unlock(handle):
+            if unlocked:
+                _release_execution_lock(handle)
+            raise OSError('PRIVATE_UNLOCK_SENTINEL /tmp/private/source')
+        task = None
+        outcome = None
+        cancelled = False
+        with patch.object(runtime, '_claim', side_effect=held_claim), \
+                patch.object(runtime, '_release_member', side_effect=held_cleanup), \
+                patch.object(originals, '_release_execution_lock', side_effect=failed_unlock):
+            try:
+                task = asyncio.create_task(runtime.run_one(self.ns, {}))
+                self.assertTrue(await asyncio.to_thread(committed.wait, 5))
+                self.assertIsNotNone(claimed[0])
+                before = self.member(regs[0])
+                self.assertEqual((before['status'], before['attempt_count'], before['result_token']), ('running', 1, ''))
+                task.cancel(); await asyncio.sleep(0); task.cancel(); await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertEqual(runtime._dispatch(self.ns)['active'], 1)
+                self.assertTrue(runtime._dispatch(self.ns)['selector'].locked())
+                self.assertIsNone(_try_execution_lock(regs[0]))
+                allow_claim.set()
+                self.assertTrue(await asyncio.to_thread(cleanup_started.wait, 5))
+                task.cancel(); await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertEqual(self.member(regs[0])['lease_token'], before['lease_token'])
+                self.assertIsNone(_try_execution_lock(regs[0]))
+                allow_cleanup.set()
+                try:
+                    outcome = await asyncio.wait_for(task, 5)
+                except asyncio.CancelledError:
+                    cancelled = True
+            finally:
+                allow_claim.set(); allow_cleanup.set()
+                if task is not None:
+                    if not task.done(): task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        try:
+            # The database cleanup committed; neither a result nor a receipt
+            # was invented by an interrupted claim before analysis started.
+            after = self.member(regs[0])
+            self.assertEqual((after['status'], after['reason'], after['attempt_count']), ('retry', 'interrupted_attempt', 1))
+            self.assertEqual((after['result_token'], after['total_new_findings'], self.findings(regs[0])), ('', 0, 0))
+            with self.connect() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM full_recheck_receipts').fetchone()[0], 0)
+            self.assertEqual(runtime._dispatch(self.ns)['active'], 0)
+            self.assertFalse(runtime._dispatch(self.ns)['selector'].locked())
+            handle = claimed[0].full_recheck_lock
+            self.assertEqual(handle.closed, unlocked)
+            lock = _try_execution_lock(regs[0])
+            if unlocked:
+                self.assertIsNotNone(lock)
+                _release_execution_lock(lock)
+            else:
+                self.assertIsNone(lock)
+            self.assertNotIn('PRIVATE_UNLOCK_SENTINEL', self.output.getvalue())
+            self.assertTrue(cancelled, f'claim cancellation replaced by cleanup error; returned {outcome!r}')
+            self.assertTrue(task.cancelled())
+            self.assertIn('FULL_RECHECK_CLAIM cleanup_failed=True type=OSError', self.output.getvalue())
+            runtime.initialize(self.ns)
+            self.assertEqual(self.member(regs[0]), after)
+            with patch.object(ledger.time, 'time', return_value=time.time() + 100):
+                self.assertTrue(await runtime.run_one(self.ns, {}))
+            if not unlocked:
+                # A failure before real unlock stays fail-closed even when
+                # the member becomes due. A different member can progress.
+                self.assertEqual(self.member(regs[0]), after)
+                self.assertEqual(self.member(regs[1])['status'], 'completed')
+            else:
+                self.assertEqual(self.member(regs[0])['status'], 'completed')
+        finally:
+            # Only the synthetic test owner closes this retained handle, after
+            # both the real claim and cleanup threads and their task settled.
+            for reg in claimed:
+                handle = getattr(reg, 'full_recheck_lock', None)
+                if handle is not None and not handle.closed:
+                    _release_execution_lock(handle)
+        with patch.object(ledger.time, 'time', return_value=time.time() + 100):
+            self.assertTrue(await runtime.run_one(self.ns, {}))
+        self.assertEqual([self.member(reg)['status'] for reg in regs], ['completed', 'completed'])
+        self.assertEqual([self.member(reg)['attempt_count'] for reg in regs], [2, 1])
+        self.assertEqual([self.member(reg)['total_new_findings'] for reg in regs], [1, 1])
+        self.assertEqual([self.findings(reg) for reg in regs], [1, 1])
+
     async def test_cancelled_committed_claim_keeps_selector_and_permit_until_cleanup(self):
         regs = self.cohort(3)
         committed, allow_return = threading.Event(), threading.Event()
