@@ -1,22 +1,14 @@
 name: SQLite contention validation
 on:
-  push:
-    branches: ['fix/sqlite-intake-contention-20261020']
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Package tracked source only, without credentials or runtime data
-        run: git archive --format=tar.gz --output=source.tar.gz HEAD app.py scripts tests requirements.txt requirements-accounts.txt Dockerfile
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-contention-source
-          path: source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+      - run: git diff --check
