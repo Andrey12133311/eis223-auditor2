@@ -621,6 +621,7 @@ async def _claim_next(ns):
                 continue
             reg = None
             handed_off = False
+            cancelled = False
             try:
                 claim_task = asyncio.create_task(thread_call(_claim, ns, number))
                 try:
@@ -638,11 +639,22 @@ async def _claim_next(ns):
                 reg.full_recheck_renew = asyncio.create_task(_renew_loop(ns, reg))
                 handed_off = True
                 return reg
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             finally:
-                if reg is not None and not handed_off:
-                    await settle_task(asyncio.create_task(release(ns, reg)))
-                if lock is not None:
-                    _release_execution_lock(lock)
+                try:
+                    if reg is not None and not handed_off:
+                        await settle_task(asyncio.create_task(release(ns, reg)))
+                    if lock is not None:
+                        _release_execution_lock(lock)
+                except Exception as exc:
+                    if not cancelled:
+                        raise
+                    # Cleanup may commit a retry before physical unlock fails.
+                    # Preserve shutdown without changing that lock's lifetime
+                    # or letting a cleanup error become a normal False turn.
+                    print("FULL_RECHECK_CLAIM cleanup_failed=True type=" + type(exc).__name__, flush=True)
         return None
 
 
