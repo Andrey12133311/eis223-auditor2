@@ -201,7 +201,7 @@ def clarification_publication_verifier(purchase):
             from v298_eis_only import official_xml_documents
             index = {}
             for record, _ in official_xml_documents(reg):
-                if record.get("xml_family") != "clarification" or record.get("reg_number") != reg:
+                if record.get("xml_family") != "explanation" or record.get("reg_number") != reg:
                     continue
                 if not all(HEX.fullmatch(str(record.get(key) or "")) for key in ("xml_sha256", "archive_sha256")):
                     continue
@@ -214,7 +214,7 @@ def clarification_publication_verifier(purchase):
                     item.update(attachment_uid=attachment_uid, source_url=attachment["url"],
                                 publication_date=_publication_day(record.get("publication")),
                                 request_date=_publication_day(record.get("request_received")),
-                                decision_date=_publication_day(record.get("decision_date")),
+                                decision_date=_publication_day(record.get("decision")),
                                 publication_status=record.get("publication_status"))
                     index.setdefault(attachment_uid, {})[item["xml_sha256"]] = item
         candidates = list(index.get(uid, {}).values())

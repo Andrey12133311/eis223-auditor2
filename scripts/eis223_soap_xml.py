@@ -139,35 +139,6 @@ def _unique_field(parent, name):
     return (node.text or "").strip() if node is not None else ""
 
 
-def _explanation_record(raw, filename, filename_reg, data):
-    """Only the documented direct explanationData fields are event facts.
-
-    A partial identity-only sibling remains quarantined. Creation/decision/
-    modification dates never replace publishDate, and status F is not P.
-    """
-    reg = _unique_field(data, "purchaseRegNum")
-    own = _unique_field(data, "registrationNumber")
-    parent = _unique_field(_unique_child(data, "purchaseInfo"), "purchaseNoticeNumber")
-    if not REG.fullmatch(reg) or reg != filename_reg or (own and own != reg) or (parent and parent != reg):
-        raise IdentityMismatch("explanation", filename_reg, own, reg, "supported")
-    fields = {name: _unique_field(data, name) for name in (
-        "guid", "requestDate", "publishDate", "decisionDate", "creationDate", "modificationDate", "status")}
-    # The minimal dated identity required by Appendix 1 must be present. Do
-    # not change an old identity-only quarantine fixture into verified facts.
-    if not all(fields[name] for name in ("guid", "requestDate", "publishDate", "decisionDate", "creationDate")):
-        raise UnsupportedXmlType("explanation")
-    if len(fields["guid"]) > 128 or any(len(value) > 128 for value in fields.values()):
-        raise ValueError("Attachment metadata exceeds limit")
-    docs, unresolved, previous = _attachment_references(data, "explanation")
-    return {"reg_number": reg, "xml_filename": filename, "xml_sha256": hashlib.sha256(raw).hexdigest(),
-            "xml_type": "explanation", "xml_family": "clarification", "xml_guid": fields["guid"],
-            "version": None, "publication": fields["publishDate"], "created": fields["creationDate"],
-            "modified": fields["modificationDate"], "request_received": fields["requestDate"],
-            "decision_date": fields["decisionDate"], "publication_status": fields["status"],
-            "documents_referenced": len(docs), "documents": docs,
-            "unresolved_attachments": unresolved, "previous_document_guids": previous}, data
-
-
 def _attachment_references(data, kind):
     docs = []
     seen = set()
@@ -286,16 +257,68 @@ def quarantine_document(raw, filename, expected_reg):
     }
 
 
+def _parse_explanation(raw, filename, root):
+    """TFF223 16.3 Appendix 1 pp.78-80, not a generic unknown-XML fallback.
+
+    Interpret documented fields only. Incomplete/edited exports remain in the
+    existing quarantine path; duplicate/foreign identities are rejected. The
+    dates retain separate meanings: creation is NOT receipt or publication.
+    Supporting the format exposes real attachment references to the existing
+    download and legal pipeline, not synthetic text or confirmed violations.
+    """
+    kind = "explanation"
+    reg, data = _document_envelope(root, kind, filename)
+    quarantine_document(raw, filename, reg)  # independent strict binding
+
+    def scalar(name):
+        nodes = [n for n in data if local_name(n) == name]
+        if len(nodes) > 1 or (nodes and nodes[0].tag not in (name, "{" + PURCHASE_NS + "}" + name)):
+            raise ValueError("Missing or ambiguous official XML data")
+        if nodes and list(nodes[0]):
+            raise ValueError("Missing or ambiguous official XML data")
+        return (nodes[0].text or "").strip() if nodes else ""
+
+    guid = scalar("guid")
+    if not re.fullmatch(r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", guid):
+        raise UnsupportedXmlType(kind)
+    if scalar("status") not in ("", "P"):
+        raise UnsupportedXmlType(kind)
+    dates = {name: scalar(name) for name in ("requestDate", "creationDate", "decisionDate", "publishDate", "modificationDate")}
+    for name, value in dates.items():
+        if not value and name == "modificationDate":
+            continue
+        try:
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?", value):
+                raise ValueError("Missing explicit timestamp")
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise UnsupportedXmlType(kind) from None
+    docs, unresolved, previous = _attachment_references(data, kind)
+    for doc in docs:
+        doc["published"] = dates["publishDate"]
+    return {
+        "reg_number": reg, "xml_filename": filename,
+        "xml_sha256": hashlib.sha256(raw).hexdigest(), "xml_type": kind,
+        "xml_family": "explanation", "xml_guid": guid, "version": None,
+        "publication": dates["publishDate"], "created": dates["creationDate"],
+        "modified": dates["modificationDate"], "request_received": dates["requestDate"],
+        "decision": dates["decisionDate"], "publication_status": scalar("status"),
+        "documents_referenced": len(docs),
+        "documents": docs, "unresolved_attachments": unresolved,
+        "previous_document_guids": previous,
+    }, data
+
+
 def parse_document(raw, filename):
     root = safe_xml(raw)
     kind = local_name(root)
     if root.tag != "{" + PURCHASE_NS + "}" + kind:
         raise ValueError("Not an EIS 223-FZ purchase XML namespace")
-    if kind not in NOTICE_TYPES | PROTOCOL_TYPES | {"explanation"}:
+    if kind == "explanation":
+        return _parse_explanation(raw, filename, root)
+    if kind not in NOTICE_TYPES | PROTOCOL_TYPES:
         raise UnsupportedXmlType(kind)
     filename_reg, data = _document_envelope(root, kind, filename)
-    if kind == "explanation":
-        return _explanation_record(raw, filename, filename_reg, data)
     family = "notice" if kind in NOTICE_TYPES else "protocol"
     if family == "notice":
         reg = field(data, "registrationNumber")

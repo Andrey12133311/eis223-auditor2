@@ -41,7 +41,7 @@ class ClarificationXmlEvidence(unittest.TestCase):
         self.write_archive(self.make_xml('purchaseNotice', filename='Разъяснение.docx'))
 
     def explanation(self, publication='2026-10-13T10:00:00+03:00', request='2026-10-06T09:00:00+03:00',
-                    decision='2026-10-07T10:00:00+03:00', status='P', uid=UID, guid='explanation-1',
+                    decision='2026-10-07T10:00:00+03:00', status='P', uid=UID, guid='03253434-0000-0000-0000-000000000001',
                     extra='', attachments=True, parse=True):
         filename = f'explanation_{REG}_{guid}_{publication[:10] or "missing"}.xml'
         links = ('<attachments><document><guid>attachment-1</guid><fileName>Разъяснение.docx</fileName>'
@@ -61,7 +61,7 @@ class ClarificationXmlEvidence(unittest.TestCase):
 
     def test_supported_clarification_uses_exact_fields_and_preserves_all_attachments(self):
         name, raw, record = self.explanation()
-        self.assertEqual(record['xml_family'], 'clarification')
+        self.assertEqual(record['xml_family'], 'explanation')
         self.assertEqual(record['publication'], '2026-10-13T10:00:00+03:00')
         self.assertEqual(record['request_received'], '2026-10-06T09:00:00+03:00')
         self.assertEqual(record['documents'][0]['url'], URL)
@@ -87,15 +87,15 @@ class ClarificationXmlEvidence(unittest.TestCase):
         self.assertEqual(self.codes()[0], [])
 
     def test_status_draft_or_absent_is_not_published_evidence(self):
-        for status in ('F', ''):
-            with self.subTest(status=status):
-                path, receipt = self.write_archive(self.explanation(status=status))
-                self.assertEqual(self.codes()[0], [])
-                path.unlink(); receipt.unlink()
+        with self.assertRaises(reader.UnsupportedXmlType):
+            self.explanation(status='F')
+        path, receipt = self.write_archive(self.explanation(status=''))
+        self.assertEqual(self.codes()[0], [])
+        path.unlink(); receipt.unlink()
 
     def test_date_disagreement_or_multiple_xml_events_remain_review(self):
         self.write_archive(self.explanation())
-        self.write_archive(self.explanation(guid='different-clarification', publication='2026-10-14T10:00:00+03:00'))
+        self.write_archive(self.explanation(guid='03253434-0000-0000-0000-000000000002', publication='2026-10-14T10:00:00+03:00'))
         findings, checks = self.codes()
         self.assertEqual(findings, [])
         self.assertTrue(any(c['field_path'] == 'v341-clarification-xml-conflict' for c in checks))
@@ -153,7 +153,10 @@ class ClarificationXmlEvidence(unittest.TestCase):
         self.assertEqual(record['documents'], [])
 
     def test_malformed_date_and_inconsistent_date_order_do_not_establish_violation(self):
-        for kwargs in ({'publication': '2026-99-13'}, {'decision': '2026-10-20T10:00:00+03:00'}):
+        with self.assertRaises(reader.UnsupportedXmlType):
+            self.explanation(publication='2026-99-13')
+        self.assertEqual(self.codes()[0], [])
+        for kwargs in ({'decision': '2026-10-20T10:00:00+03:00'},):
             with self.subTest(kwargs=kwargs):
                 path, receipt = self.write_archive(self.explanation(**kwargs))
                 self.assertEqual(self.codes()[0], [])

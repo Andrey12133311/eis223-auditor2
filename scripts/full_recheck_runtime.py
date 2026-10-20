@@ -24,9 +24,12 @@ from contextlib import contextmanager
 REQUEST_ENV = "EIS223_FULL_RECHECK_REQUEST"
 AUTHORIZED_EPOCH = "2026-10-19-all-saved-214328"
 DASHBOARD_4007_EPOCH = "2026-10-20-all-dashboard-4007"
-# Two explicit user instructions, never deployment-derived recurring epochs.
-# Expected counts are observations, not row limits or completion quotas.
-AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, DASHBOARD_4007_EPOCH: 4007}
+ALL_SAVED_EPOCH = "2026-10-20-all-saved-explicit-2100"
+# Preserve each explicitly authorized scope and its original immutable ledger.
+# These are not deployment-derived or periodically repeated full scans.
+AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, DASHBOARD_4007_EPOCH: 4007,
+                       ALL_SAVED_EPOCH: None}
+AUTHORIZED_EPOCHS = tuple(AUTHORIZED_REQUESTS)
 LEASE_SECONDS = 300
 RENEW_SECONDS = 30
 PAGE_SIZE = 8
@@ -34,7 +37,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 10
+TARGET_GENERATION = 11
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -93,7 +96,7 @@ def initialize(ns):
     # aggregate diagnostic resumes after its normal interval.
     state["inventory"] = ({"status": "deferred", "reason": "explicit_snapshot_priority",
                            "expected_requested_count": expected} if epoch and not exists else
-                          collect(ns, expected_count=expected))
+                          collect(ns, expected_count=expected if expected is not None else 4007))
     state["inventory_at"] = time.monotonic()
     print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
     if not epoch:
@@ -112,7 +115,8 @@ def initialize(ns):
     c = ns["conn"]()
     try:
         summary = ledger.create_request(c, epoch, ns.get("_verified_set235"),
-                                        expected_count=expected, source_seconds=60.0)
+            expected_count=expected, source_seconds=60.0,
+            all_saved=epoch == ALL_SAVED_EPOCH)
     finally:
         c.close()
     from v332_all_procurements_audit import engine_signature
@@ -140,7 +144,9 @@ def initialize(ns):
     # Publication to the workers follows the committed complete snapshot only.
     state["request_id"] = epoch
     state["cursor"] = ""
-    print("FULL_RECHECK_REQUEST " + json.dumps(summary, ensure_ascii=False), flush=True)
+    print("FULL_RECHECK_REQUEST " + json.dumps({**summary,
+        "scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else
+                 "full_dashboard" if epoch == DASHBOARD_4007_EPOCH else "legacy_dashboard"}, ensure_ascii=False), flush=True)
 
 
 def heartbeat(ns):
@@ -151,7 +157,7 @@ def heartbeat(ns):
     if time.monotonic() - state.get("inventory_at", 0) >= INVENTORY_SECONDS:
         from full_recheck_inventory import collect
         epoch = request_id(ns) or os.environ.get(REQUEST_ENV, "").strip()
-        state["inventory"] = collect(ns, expected_count=AUTHORIZED_REQUESTS.get(epoch, 3058))
+        state["inventory"] = collect(ns, expected_count=AUTHORIZED_REQUESTS.get(epoch, 3058) if epoch != ALL_SAVED_EPOCH else 4007)
         state["inventory_at"] = time.monotonic()
         print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
     epoch = request_id(ns) or (state.get("target_conflict_request_id", AUTHORIZED_EPOCH)
@@ -331,7 +337,28 @@ async def finish_result(ns, reg, state, detail):
     await db_stage(ns, "full_request_ack", _finish, ns, reg, state, detail)
 
 
+def _renew_if_due(ns, reg):
+    from full_recheck_request import require_claim, renew_lease
+    # The 30s liveness check need not write a 300s lease every time. Keep at
+    # least half its duration in reserve; retain exact ownership checks and
+    # close the read snapshot before any attempt to acquire the writer.
+    c = ns["conn"]()
+    try:
+        row = require_claim(c, reg.full_recheck_claim)
+        if row["lease_until"] - time.time() > LEASE_SECONDS / 2:
+            return False
+    finally:
+        c.close()
+    with transaction(ns) as c:
+        row = require_claim(c, reg.full_recheck_claim)
+        if row["lease_until"] - time.time() <= LEASE_SECONDS / 2:
+            renew_lease(c, reg.full_recheck_claim, lease_seconds=LEASE_SECONDS)
+            return True
+    return False
+
+
 def _renew(ns, reg):
+    """Explicit forced renewal; periodic heartbeats use the read-only preflight."""
     from full_recheck_request import renew_lease
     with transaction(ns) as c:
         renew_lease(c, reg.full_recheck_claim, lease_seconds=LEASE_SECONDS)
@@ -341,7 +368,7 @@ async def _renew_loop(ns, reg):
     from v332_all_procurements_audit import db_stage
     while True:
         await asyncio.sleep(RENEW_SECONDS)
-        await db_stage(ns, "full_request_renew", _renew, ns, reg)
+        await db_stage(ns, "full_request_renew", _renew_if_due, ns, reg)
 
 
 async def _lock(reg):
@@ -559,7 +586,7 @@ def _snapshot(ns, reg):
 def _expired(ns):
     # Switching explicit requests must not strand an old running lease, which
     # correctly blocks all newer requests until execution-lock-safe recovery.
-    # Read only the two authorized epochs, in one globally bounded oldest-first
+    # Read only the explicit authorized epochs, in one globally bounded oldest-first
     # page. Recovery still proves the exact token and exclusive physical lock.
     from full_recheck_request import Claim
     state = ns.get("_full_recheck") or {}
