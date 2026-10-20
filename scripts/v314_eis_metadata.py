@@ -390,7 +390,9 @@ def _metadata_snapshot(db, reg):
     purchase = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
     if purchase is None:
         return None
-    buyer = db.execute("SELECT * FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
+    buyer_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v311_verified_buyers'").fetchone()
+    buyer = (db.execute("SELECT * FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
+             if buyer_table else None)
     table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v314_eis_metadata'").fetchone()
     saved = (db.execute("SELECT metadata_json,captured_at FROM v314_eis_metadata WHERE reg=?",
                         (reg,)).fetchone() if table else None)

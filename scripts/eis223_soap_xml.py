@@ -1,7 +1,8 @@
 """Bounded reader for official RI223 purchase XML, not a legal-rule engine.
 
 Names and paths are from the user-supplied 223-FZ format requirements 16.3,
-appendices 2 (notices) and 3 (protocols). Preserve original bytes; this module
+appendix 1 pp.78-79 (clarifications), 2 (notices) and 3 (protocols).
+Preserve original bytes; this module
 only extracts procurement identity and explicit attachment references.
 """
 from __future__ import annotations
@@ -120,6 +121,53 @@ def _document_envelope(root, kind, filename):
     return match[1], data
 
 
+def _unique_child(parent, name):
+    if parent is None:
+        return None
+    nodes = [node for node in parent if local_name(node) == name]
+    if len(nodes) > 1:
+        raise ValueError("Missing or ambiguous official XML data")
+    if nodes and nodes[0].tag not in (name, "{" + PURCHASE_NS + "}" + name):
+        raise ValueError("Foreign official XML data namespace")
+    return nodes[0] if nodes else None
+
+
+def _unique_field(parent, name):
+    node = _unique_child(parent, name)
+    if node is not None and len(node):
+        raise ValueError("Missing or ambiguous official XML data")
+    return (node.text or "").strip() if node is not None else ""
+
+
+def _explanation_record(raw, filename, filename_reg, data):
+    """Only the documented direct explanationData fields are event facts.
+
+    A partial identity-only sibling remains quarantined. Creation/decision/
+    modification dates never replace publishDate, and status F is not P.
+    """
+    reg = _unique_field(data, "purchaseRegNum")
+    own = _unique_field(data, "registrationNumber")
+    parent = _unique_field(_unique_child(data, "purchaseInfo"), "purchaseNoticeNumber")
+    if not REG.fullmatch(reg) or reg != filename_reg or (own and own != reg) or (parent and parent != reg):
+        raise IdentityMismatch("explanation", filename_reg, own, reg, "supported")
+    fields = {name: _unique_field(data, name) for name in (
+        "guid", "requestDate", "publishDate", "decisionDate", "creationDate", "modificationDate", "status")}
+    # The minimal dated identity required by Appendix 1 must be present. Do
+    # not change an old identity-only quarantine fixture into verified facts.
+    if not all(fields[name] for name in ("guid", "requestDate", "publishDate", "decisionDate", "creationDate")):
+        raise UnsupportedXmlType("explanation")
+    if len(fields["guid"]) > 128 or any(len(value) > 128 for value in fields.values()):
+        raise ValueError("Attachment metadata exceeds limit")
+    docs, unresolved, previous = _attachment_references(data, "explanation")
+    return {"reg_number": reg, "xml_filename": filename, "xml_sha256": hashlib.sha256(raw).hexdigest(),
+            "xml_type": "explanation", "xml_family": "clarification", "xml_guid": fields["guid"],
+            "version": None, "publication": fields["publishDate"], "created": fields["creationDate"],
+            "modified": fields["modificationDate"], "request_received": fields["requestDate"],
+            "decision_date": fields["decisionDate"], "publication_status": fields["status"],
+            "documents_referenced": len(docs), "documents": docs,
+            "unresolved_attachments": unresolved, "previous_document_guids": previous}, data
+
+
 def _attachment_references(data, kind):
     docs = []
     seen = set()
@@ -127,10 +175,18 @@ def _attachment_references(data, kind):
     previous = []
     # Only attachment containers carry downloadable source documents. An
     # arbitrary hyperlink in a criterion/template is not an original file.
-    for attachments in (node for node in data.iter() if local_name(node) == "attachments"):
+    if kind == "explanation":
+        container = _unique_child(data, "attachments")
+        containers = [] if container is None else [container]
+    else:
+        containers = (node for node in data.iter() if local_name(node) == "attachments")
+    for attachments in containers:
         for document in attachments:
             doc_kind = local_name(document)
-            document_guid = field(document, "guid") or (document.get("guid") or "").strip()
+            read_field = _unique_field if kind == "explanation" else field
+            if kind == "explanation" and document.tag not in (doc_kind, "{" + PURCHASE_NS + "}" + doc_kind):
+                raise ValueError("Foreign official XML data namespace")
+            document_guid = read_field(document, "guid") or (document.get("guid") or "").strip()
             if doc_kind == "prevDocument":
                 if document_guid:
                     previous.append(document_guid)
@@ -140,10 +196,10 @@ def _attachment_references(data, kind):
                 continue
             if doc_kind not in ("document", "documentFS"):
                 continue
-            name, url = field(document, "fileName"), field(document, "url")
+            name, url = read_field(document, "fileName"), read_field(document, "url")
             if not url or not name:
                 unresolved.append({"kind": doc_kind, "guid": document_guid,
-                                   "content_uid": field(document, "contentUid"),
+                                   "content_uid": read_field(document, "contentUid"),
                                    "reason": "attachment_has_no_download_url_or_filename"})
                 continue
             try:
@@ -162,7 +218,8 @@ def _attachment_references(data, kind):
                 continue
             seen.add(url)
             docs.append({"name": name, "url": url, "guid": document_guid,
-                         "xml_type": kind, "published": field(data, "publicationDateTime")})
+                         "xml_type": kind, "published": (_unique_field(data, "publishDate") if kind == "explanation"
+                                                         else field(data, "publicationDateTime"))})
     return docs, unresolved, previous
 
 
@@ -234,9 +291,11 @@ def parse_document(raw, filename):
     kind = local_name(root)
     if root.tag != "{" + PURCHASE_NS + "}" + kind:
         raise ValueError("Not an EIS 223-FZ purchase XML namespace")
-    if kind not in NOTICE_TYPES | PROTOCOL_TYPES:
+    if kind not in NOTICE_TYPES | PROTOCOL_TYPES | {"explanation"}:
         raise UnsupportedXmlType(kind)
     filename_reg, data = _document_envelope(root, kind, filename)
+    if kind == "explanation":
+        return _explanation_record(raw, filename, filename_reg, data)
     family = "notice" if kind in NOTICE_TYPES else "protocol"
     if family == "notice":
         reg = field(data, "registrationNumber")

@@ -172,3 +172,70 @@ def protocol_publication_verifier(purchase):
 def verified_protocol_publication(purchase, doc):
     """Standalone accessor; never trust caller-supplied publication metadata."""
     return protocol_publication_verifier(purchase)(doc)
+
+
+def clarification_publication_verifier(purchase):
+    """Bind one original to one published clarification/request date chain.
+
+    Reverify the immutable SOAP ZIP/XML and original bytes on every evaluation.
+    Unknown/draft status, multiple event identities, conflicting versions and
+    malformed/missing dates cannot establish a legal deadline. In particular,
+    creationDate/decisionDate never stand in for requestDate/publishDate.
+    """
+    reg = str(purchase.get("reg") or purchase.get("reg_number") or "")
+    index = None
+    originals = {}
+
+    def verify(doc):
+        nonlocal index
+        meta = doc.get("meta") or {}
+        key = (str(doc.get("local") or ""), str(meta.get("source") or ""),
+               str(meta.get("source_url") or ""), str(meta.get("sha256") or ""),
+               str(meta.get("uid") or ""), str(doc.get("status") or ""))
+        if key not in originals:
+            originals[key] = _verified_original_uid(reg, doc)
+        uid = originals[key]
+        if not isinstance(uid, str):
+            return {**uid, "family": "clarification"}
+        if index is None:
+            from v298_eis_only import official_xml_documents
+            index = {}
+            for record, _ in official_xml_documents(reg):
+                if record.get("xml_family") != "clarification" or record.get("reg_number") != reg:
+                    continue
+                if not all(HEX.fullmatch(str(record.get(key) or "")) for key in ("xml_sha256", "archive_sha256")):
+                    continue
+                for attachment in record.get("documents") or []:
+                    attachment_uid = uid_from_url(attachment.get("url") or "")
+                    if not attachment_uid:
+                        continue
+                    item = {key: record.get(key) for key in (
+                        "xml_type", "xml_guid", "version", "xml_sha256", "xml_filename", "archive_sha256")}
+                    item.update(attachment_uid=attachment_uid, source_url=attachment["url"],
+                                publication_date=_publication_day(record.get("publication")),
+                                request_date=_publication_day(record.get("request_received")),
+                                decision_date=_publication_day(record.get("decision_date")),
+                                publication_status=record.get("publication_status"))
+                    index.setdefault(attachment_uid, {})[item["xml_sha256"]] = item
+        candidates = list(index.get(uid, {}).values())
+        base = {"family": "clarification", "attachment_uid": uid, "candidates": candidates}
+        if not candidates:
+            return {**base, "state": "unknown", "reason": "no_verified_clarification_xml"}
+        if any(not item["xml_guid"] or item["publication_status"] != "P" or
+               not all(item[key] for key in ("request_date", "publication_date", "decision_date"))
+               for item in candidates):
+            return {**base, "state": "unknown", "reason": "published_clarification_dates_not_explicit"}
+        identities = {(item["xml_guid"], item["request_date"], item["publication_date"], item["decision_date"])
+                      for item in candidates}
+        if len(identities) != 1:
+            return {**base, "state": "conflict", "reason": "conflicting_clarification_xml_events_or_dates"}
+        chosen = candidates[0]
+        if not chosen["request_date"] <= chosen["decision_date"] <= chosen["publication_date"]:
+            return {**base, "state": "conflict", "reason": "inconsistent_clarification_date_chain"}
+        evidence = ("Запрос разъяснений получен: " + chosen["request_date"] +
+                    "; разъяснение опубликовано в ЕИС: " + chosen["publication_date"] +
+                    "; официальный XML " + chosen["xml_filename"] +
+                    "; GUID разъяснения " + chosen["xml_guid"] + "; UID вложения " + uid +
+                    "; SHA256 XML " + chosen["xml_sha256"] + "; SHA256 архива " + chosen["archive_sha256"] + ".")
+        return {**base, **chosen, "state": "confirmed", "evidence": evidence}
+    return verify

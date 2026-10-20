@@ -353,8 +353,9 @@ def evaluate(p, docs):
                                            _document_event_identity, EXCLUDE,
                                            _protocol_kinds,protocol_template_title,
                                            protocol_date_context,local_protocol_cohort)
-    from official_publication_evidence import protocol_publication_verifier
+    from official_publication_evidence import protocol_publication_verifier, clarification_publication_verifier
     official_publication = protocol_publication_verifier(p)
+    official_clarification = clarification_publication_verifier(p)
     ambiguous = ambiguous_original_documents(docs[:650])
     identities = {}
     def number(doc, family):
@@ -371,7 +372,28 @@ def evaluate(p, docs):
         text = str(doc.get("text") or "")[:750000].replace("\xa0", " ")
         requests = matches(REQUEST, text)
         answers = matches(ANSWER, text)
+        clarification_proof = {}
+        clarification_conflict = False
+        if (competitive and len(requests) == 1 and id(doc) not in ambiguous
+                and not _document_event_identity(doc, "CLARIFICATION")[1]
+                and not EXCLUDE.search(str(doc.get("name") or ""))):
+            clarification_proof = official_clarification(doc)
+            if clarification_proof.get("state") == "confirmed":
+                received_xml = day(clarification_proof.get("request_date"))
+                published_xml = day(clarification_proof.get("publication_date"))
+                clarification_conflict = (day(requests[0]["date"]) != received_xml or
+                    any(day(answer["date"]) != published_xml for answer in answers))
+            else:
+                clarification_conflict = clarification_proof.get("state") == "conflict"
+            if clarification_conflict:
+                checks.append(review(doc, "v341-clarification-xml-conflict",
+                    "Сверить противоречивые даты запроса и публикации разъяснений",
+                    "Подтверждённый XML ЕИС и оригинал или несколько событий XML содержат "
+                    "противоречивые сведения; дата не используется для установленного нарушения.",
+                    "223-ФЗ, ст. 3.2 ч. 3", requests[0]))
         for index, request in enumerate(requests):
+            if clarification_conflict:
+                continue
             # Resolve repeated clarification events automatically when each
             # request owns a single reply before the next request begins.
             # A reply after another request is ambiguous. A unique reversed
@@ -386,14 +408,25 @@ def evaluate(p, docs):
                     and not _document_event_identity(doc, "CLARIFICATION")[1]
                     and not EXCLUDE.search(str(doc.get("name") or ""))):
                 peers = [answers[0]]
-            if len(peers) != 1:
+            # A reply's publication date is often absent from the binary
+            # original. Use only the exact attachment's hash-verified published
+            # XML, and only when its request date agrees with the one original
+            # event. Multiple textual replies/requests are never guessed.
+            xml_reply = (not answers and len(requests) == 1 and
+                         clarification_proof.get("state") == "confirmed")
+            if len(peers) != 1 and not xml_reply:
                 checks.append(review(doc, "v341-clarification-pair", "Сопоставить запрос разъяснений с публикацией ответа",
                                      request[0], "223-ФЗ, ст. 3.2 ч. 3", request))
                 continue
-            received, published = day(request["date"]), day(peers[0]["date"])
+            received = day(request["date"])
+            published = day(clarification_proof["publication_date"] if xml_reply else peers[0]["date"])
             deadline = day(p.get("submission_end") or p.get("deadline"))
             due, latest = shifted(received, 3), shifted(deadline, -3)
-            snippet = " ".join(text[max(0, min(request.start(), peers[0].start())-60):max(request.end(), peers[0].end())+70].split())
+            if xml_reply:
+                snippet = " ".join(text[max(0, request.start()-60):request.end()+70].split())
+                snippet += " " + clarification_proof["evidence"]
+            else:
+                snippet = " ".join(text[max(0, min(request.start(), peers[0].start())-60):max(request.end(), peers[0].end())+70].split())
             if not competitive or not received or not published or not deadline or not due or not latest or received > latest or published < received:
                 checks.append(review(doc, "v341-clarification-applicability", "Проверить обязанность и срок ответа на запрос разъяснений",
                                      snippet, "223-ФЗ, ст. 3.2 ч. 3", request))
