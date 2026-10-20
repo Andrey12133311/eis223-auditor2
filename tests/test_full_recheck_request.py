@@ -999,5 +999,142 @@ os._exit(73)
         self.assertEqual(self.c.execute("SELECT DISTINCT request_id FROM full_recheck_receipts").fetchall(), [(REQUEST,)])
 
 
+class InterleavedReader:
+    """Commit on another connection at an exact boundary between SELECTs."""
+    def __init__(self, connection, callback):
+        self.connection = connection
+        self.callback = callback
+        self.triggered = False
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def execute(self, sql, parameters=()):
+        if "AND status='completed' AND full_verified_read=1" in sql and not self.triggered:
+            self.triggered = True
+            self.callback()
+        return self.connection.execute(sql, parameters)
+
+
+class InventorySnapshots(unittest.TestCase):
+    create = FullRecheckRequestTests.create
+    write = FullRecheckRequestTests.write
+
+    def setUp(self):
+        FullRecheckRequestTests.setUp(self)
+        self.assertEqual(self.c.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        self.reader = sqlite3.connect(self.path, isolation_level=None, timeout=.2)
+        self.addCleanup(self.reader.close)
+        self.reader.execute("PRAGMA query_only=ON")
+        self.statements = []
+        self.reader.set_trace_callback(self.statements.append)
+        self.c.execute("DELETE FROM v332_audit_queue")
+
+    def prepare(self, count=1):
+        regs = [str(32617000000 + i) for i in range(count)]
+        self.c.executemany("INSERT INTO purchases VALUES(?,'ООО Fixture','Fixture')", ((reg,) for reg in regs))
+        self.create(regs, expected_count=count)
+        with self.write():
+            ledger.activate_target(self.c, REQUEST, generation=2, engine_signature="fixed-engine", now=1000)
+            for index, reg in enumerate(regs):
+                claim = ledger.claim_member(self.c, REQUEST, reg, now=1001,
+                    engine_signature="fixed-engine", generation=2)
+                ledger.set_review_watermark(self.c, claim, source_version="fixed-source",
+                    engine_signature="fixed-engine", now=1002)
+                ledger.record_receipt(self.c, claim, source_version="fixed-source",
+                    engine_signature="fixed-engine", result_token="result", full_verified_read=True,
+                    metrics={"documents_read":1,"verified_original_documents":1}, now=1003)
+                if index < count - 1:
+                    ledger.finish_member(self.c, claim, result_token="result")
+        return claim
+
+    def finish(self, claim):
+        with self.write():
+            ledger.finish_member(self.c, claim, result_token="result")
+
+    def test_wal_writer_finishes_between_queries_without_mixed_snapshot(self):
+        claim = self.prepare(90)
+        before = tuple(self.c.execute("SELECT generation,engine_signature FROM full_recheck_targets").fetchone())
+        mutations = self.reader.total_changes
+        interleaved = InterleavedReader(self.reader, lambda:self.finish(claim))
+        first = ledger.inventory(interleaved, REQUEST)
+        self.assertTrue(interleaved.triggered)
+        self.assertEqual((first["states"]["completed"], first["current_completed"], first["stale_completed"]), (89,89,0))
+        self.assertEqual((first["states"]["running"], first["current_pending"]), (1,1))
+        self.assertEqual(first["legacy_status"], "active")
+        self.assertFalse(self.reader.in_transaction)
+        self.assertEqual(self.reader.total_changes, mutations)
+        self.assertEqual(tuple(self.c.execute("SELECT generation,engine_signature FROM full_recheck_targets").fetchone()), before)
+        # The callback committed despite the open read snapshot. A fresh read
+        # sees that completion, including the corresponding request status.
+        second = ledger.inventory(self.reader, REQUEST)
+        self.assertEqual((second["states"]["completed"], second["current_completed"], second["stale_completed"]), (90,90,0))
+        self.assertEqual((second["legacy_status"], second["status"]), ("completed","completed"))
+        control = [statement.upper() for statement in self.statements if statement.upper().startswith(("BEGIN","COMMIT","ROLLBACK"))]
+        self.assertEqual(control, ["BEGIN","ROLLBACK","BEGIN","ROLLBACK"])
+
+    def test_caller_owned_read_snapshot_remains_open_until_caller_ends_it(self):
+        claim = self.prepare()
+        self.reader.execute("BEGIN")
+        ledger.inventory(self.reader, REQUEST)
+        self.statements.clear()
+        interleaved = InterleavedReader(self.reader, lambda:self.finish(claim))
+        first = ledger.inventory(interleaved, REQUEST)
+        self.assertTrue(self.reader.in_transaction)
+        self.assertEqual(first["current_completed"], 0)
+        self.assertEqual(ledger.inventory(self.reader, REQUEST)["current_completed"], 0)
+        self.assertFalse(any(sql.upper().startswith(("BEGIN","COMMIT","ROLLBACK")) for sql in self.statements))
+        self.reader.rollback()
+        self.assertEqual(ledger.inventory(self.reader, REQUEST)["current_completed"], 1)
+
+    def test_caller_owned_write_is_neither_committed_rolled_back_nor_mutated(self):
+        self.prepare()
+        self.c.execute("BEGIN")
+        self.c.execute("UPDATE full_recheck_requests SET expected_count=77 WHERE request_id=?", (REQUEST,))
+        changes = self.c.total_changes
+        first = ledger.inventory(self.c, REQUEST)
+        self.assertEqual(first["expected_count"], 77)
+        self.assertTrue(self.c.in_transaction)
+        self.assertEqual(self.c.total_changes, changes)
+        self.assertEqual(ledger.inventory(self.reader, REQUEST)["expected_count"], 1)
+        self.c.rollback()
+        self.assertEqual(ledger.inventory(self.reader, REQUEST)["expected_count"], 1)
+
+    def test_owned_snapshot_is_closed_when_a_later_query_raises(self):
+        self.prepare()
+        class FailedReader(InterleavedReader):
+            def execute(self, sql, parameters=()):
+                if sql.startswith("SELECT reason,"):
+                    raise sqlite3.OperationalError("synthetic interrupted read")
+                return super().execute(sql, parameters)
+        with self.assertRaisesRegex(sqlite3.OperationalError,"synthetic interrupted read"):
+            ledger.inventory(FailedReader(self.reader, lambda:None), REQUEST)
+        self.assertFalse(self.reader.in_transaction)
+        self.assertEqual(ledger.inventory(self.reader, REQUEST)["actual_count"], 1)
+
+    def test_caller_owned_transaction_survives_read_exception(self):
+        self.prepare()
+        self.c.execute("BEGIN")
+        self.c.execute("UPDATE full_recheck_requests SET expected_count=88 WHERE request_id=?", (REQUEST,))
+        class FailedReader(InterleavedReader):
+            def execute(self, sql, parameters=()):
+                if sql.startswith("SELECT reason,"):
+                    raise sqlite3.OperationalError("synthetic interrupted read")
+                return super().execute(sql, parameters)
+        with self.assertRaisesRegex(sqlite3.OperationalError,"synthetic interrupted read"):
+            ledger.inventory(FailedReader(self.c, lambda:None), REQUEST)
+        self.assertTrue(self.c.in_transaction)
+        self.assertEqual(self.c.execute("SELECT expected_count FROM full_recheck_requests").fetchone()[0], 88)
+        self.assertEqual(ledger.inventory(self.reader, REQUEST)["expected_count"], 1)
+        self.c.rollback()
+
+    def test_missing_request_and_invalid_request_leave_no_owned_transaction(self):
+        self.assertIsNone(ledger.inventory(self.reader, REQUEST))
+        self.assertFalse(self.reader.in_transaction)
+        with self.assertRaises(ValueError):
+            ledger.inventory(self.reader, "")
+        self.assertFalse(self.reader.in_transaction)
+
+
 if __name__ == "__main__":
     unittest.main()

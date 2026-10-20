@@ -3,6 +3,8 @@
 These are NOT captured production procurement XML. They reproduce the actual
 KESMBO/protocol envelope and scoped registry fields that the old parser lost.
 """
+import asyncio
+from contextlib import contextmanager, redirect_stdout
 import hashlib
 import io
 import json
@@ -12,11 +14,12 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 import eis223_soap_xml as xml_reader
@@ -236,6 +239,174 @@ class OfficialSoapArchiveTests(unittest.TestCase):
         self.assertTrue(active["vps_eis_requests"])
         self.assertEqual(active["mode"],"official_eis_server_and_browser")
         self.assertFalse(active["direct_eis_server_requests"])
+
+
+class ArchiveStreamTests(unittest.TestCase):
+    setUp = OfficialSoapArchiveTests.setUp
+    connect = OfficialSoapArchiveTests.connect
+
+    def snapshot(self):
+        with self.connect() as db:
+            rows = list(db.iterdump())
+        files = {str(path.relative_to(self.root)): path.read_bytes()
+                 for path in self.root.rglob("*") if path.is_file()}
+        return rows, files
+
+    @contextmanager
+    def untouched_intake(self):
+        before = self.snapshot()
+        with patch.object(bridge, "parse_notices", wraps=bridge.parse_notices) as parse, \
+                patch.object(bridge, "_atomic") as write, \
+                patch.object(originals, "_review_source_version") as source, \
+                patch.dict(self.ns, {"_v379_import_soap_metadata": Mock(), "_v295_enqueue_review": Mock()}):
+            yield parse
+            write.assert_not_called()
+            source.assert_not_called()
+            self.ns["_v379_import_soap_metadata"].assert_not_called()
+            self.ns["_v295_enqueue_review"].assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+    def asgi_post(self, events, *, headers=None, before_read=None):
+        messages, reads = [], []
+        pending = list(events)
+        async def receive():
+            if before_read is not None:
+                before_read()
+            reads.append(True)
+            event = pending.pop(0)
+            if isinstance(event, BaseException):
+                raise event
+            return event
+        async def send(message):
+            messages.append(message)
+        path = "/api/v294/eis223/archive"
+        headers = {"x-eis223-upload-token": TOKEN} if headers is None else headers
+        scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+                 "http_version": "1.1", "method": "POST", "scheme": "http", "path": path,
+                 "raw_path": path.encode(), "query_string": b"", "root_path": "",
+                 "headers": [(key.encode(), value.encode()) for key, value in headers.items()],
+                 "server": ("testserver", 80), "client": ("fixture", 1234)}
+        asyncio.run(self.ns["app"](scope, receive, send))
+        start = next(message for message in messages if message["type"] == "http.response.start")
+        content = b"".join(message.get("body", b"") for message in messages if message["type"] == "http.response.body")
+        return start, json.loads(content), len(reads)
+
+    def test_disconnect_before_or_during_body_never_starts_archive_intake(self):
+        raw = archive(fixture())
+        cases = ([{"type": "http.disconnect"}],
+                 [{"type": "http.request", "body": raw[:20], "more_body": True},
+                  {"type": "http.request", "body": b"PRIVATE_PARTIAL_BODY", "more_body": True},
+                  {"type": "http.disconnect"}],
+                 [{"type": "http.request", "body": raw, "more_body": True},
+                  {"type": "http.disconnect"}])
+        for events in cases:
+            with self.subTest(events=len(events)), self.untouched_intake() as parse, \
+                    redirect_stdout(io.StringIO()) as output:
+                start, body, reads = self.asgi_post(events)
+                self.assertEqual(start["status"], 400)
+                self.assertEqual(body, {"detail": "Incomplete archive request body"})
+                self.assertEqual(reads, len(events))
+                self.assertNotIn(b"retry-after", dict(start["headers"]))
+                self.assertEqual(output.getvalue(), "")
+                parse.assert_not_called()
+
+    def test_auth_origin_and_declared_size_guards_precede_body_read(self):
+        token = {"x-eis223-upload-token": TOKEN}
+        cases = (({}, 401), ({"x-eis223-upload-token": "wrong"}, 401),
+                 ({**token, "origin": "https://attacker.invalid"}, 403),
+                 ({**token, "origin": "https://zakupki.gov.ru.attacker.invalid"}, 403),
+                 ({**token, "content-length": str(bridge.MAX_UPLOAD + 1)}, 413),
+                 ({"content-length": str(bridge.MAX_UPLOAD + 1)}, 401))
+        for headers, expected in cases:
+            with self.subTest(headers=headers), self.untouched_intake() as parse:
+                start, _body, reads = self.asgi_post([{ "type": "http.disconnect"}], headers=headers)
+                self.assertEqual((start["status"], reads), (expected, 0))
+                parse.assert_not_called()
+        with patch.dict(os.environ, {"EIS223_UPLOAD_TOKEN": ""}), self.untouched_intake() as parse:
+            start, _body, reads = self.asgi_post([{"type": "http.disconnect"}])
+            self.assertEqual((start["status"], reads), (503, 0))
+            parse.assert_not_called()
+
+    def test_stream_size_and_complete_invalid_archive_keep_413_and_422(self):
+        # A small fixture bound exercises the exact streaming guard without
+        # allocating a production-size upload in each test process.
+        with patch.object(bridge, "MAX_UPLOAD", 8), self.untouched_intake() as parse:
+            events = [{"type": "http.request", "body": b"x" * 8, "more_body": True},
+                      {"type": "http.request", "body": b"x", "more_body": True},
+                      {"type": "http.disconnect"}]
+            start, body, reads = self.asgi_post(events)
+            self.assertEqual((start["status"], body, reads), (413, {"detail": "Too large"}, 2))
+            parse.assert_not_called()
+        with self.untouched_intake() as parse:
+            start, body, reads = self.asgi_post([
+                {"type": "http.request", "body": b"not a zip", "more_body": False}])
+            self.assertEqual((start["status"], body, reads), (422, {"detail": "Invalid ZIP"}, 1))
+            parse.assert_called_once_with(b"not a zip")
+
+    def test_complete_stream_keeps_archive_hash_import_and_idempotent_queue(self):
+        raw = archive(fixture())
+        sha = hashlib.sha256(raw).hexdigest()
+        enqueue = Mock()
+        self.ns["_v295_enqueue_review"] = enqueue
+        for index, origin in enumerate((None, *sorted(bridge.ALLOWED_ORIGINS))):
+            with self.subTest(origin=origin):
+                before = self.snapshot()
+                queue_before = enqueue.call_count
+                headers = {"x-eis223-upload-token": TOKEN}
+                if origin is not None:
+                    headers["origin"] = origin
+                with patch.object(bridge, "parse_notices", wraps=bridge.parse_notices) as parse, \
+                        patch.object(bridge, "_atomic", wraps=bridge._atomic) as write, \
+                        patch.object(originals, "_review_source_version", wraps=originals._review_source_version) as source, \
+                        patch.dict(self.ns, {"_v379_import_soap_metadata": Mock(wraps=self.ns["_v379_import_soap_metadata"])}):
+                    def before_read():
+                        self.assertEqual(self.snapshot(), before)
+                        self.assertEqual(enqueue.call_count, queue_before)
+                        for action in (parse, write, source, self.ns["_v379_import_soap_metadata"]):
+                            action.assert_not_called()
+                    events = [{"type": "http.request", "body": raw[:20], "more_body": True},
+                              {"type": "http.request", "body": raw[20:], "more_body": True},
+                              {"type": "http.request", "body": b"", "more_body": False}]
+                    start, body, reads = self.asgi_post(events, headers=headers, before_read=before_read)
+                self.assertEqual((start["status"], reads), (200, 3))
+                self.assertEqual(body["archive_sha256"], sha)
+                self.assertEqual(body["already_received"], index > 0)
+                self.assertEqual(body["metadata_import"], "stored")
+                self.assertEqual((body["original_files_verified"], body["audited_documents_increment"]), (0, 0))
+                response_headers = dict(start["headers"])
+                self.assertEqual(response_headers.get(b"access-control-allow-origin"), origin.encode() if origin else None)
+                folder = self.root / "eis223_official_archive_inbox" / REG
+                self.assertEqual((folder / (sha + ".zip")).read_bytes(), raw)
+                self.assertEqual(json.loads((folder / (sha + ".json")).read_text())["archive_sha256"], sha)
+        enqueue.assert_called_once_with(REG, force=True)
+        with self.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM purchases").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM findings").fetchone()[0], 0)
+
+    def test_stream_cancellation_and_unexpected_errors_propagate(self):
+        for error in (asyncio.CancelledError(), RuntimeError("PRIVATE_STREAM_ERROR"),
+                      sqlite3.OperationalError("database is locked")):
+            with self.subTest(error=type(error).__name__), self.untouched_intake() as parse:
+                with self.assertRaises(type(error)) as caught:
+                    self.asgi_post([{"type": "http.request", "body": b"PK", "more_body": True}, error])
+                self.assertIs(caught.exception, error)
+                parse.assert_not_called()
+
+    def test_disconnect_and_other_errors_outside_stream_are_not_hidden(self):
+        raw = archive(fixture())
+        events = [{"type": "http.request", "body": raw, "more_body": False}]
+        for function in ("_authorize", "parse_notices", "_atomic"):
+            for error in (ClientDisconnect(), asyncio.CancelledError(), RuntimeError("PRIVATE_INTAKE_ERROR")):
+                with self.subTest(function=function, error=type(error).__name__):
+                    before = self.snapshot()
+                    with patch.object(bridge, function, side_effect=error), \
+                            patch.dict(self.ns, {"_v379_import_soap_metadata": Mock(), "_v295_enqueue_review": Mock()}):
+                        with self.assertRaises(type(error)) as caught:
+                            self.asgi_post(events)
+                        self.assertIs(caught.exception, error)
+                        self.ns["_v379_import_soap_metadata"].assert_not_called()
+                        self.ns["_v295_enqueue_review"].assert_not_called()
+                    self.assertEqual(self.snapshot(), before)
 
 
 if __name__=="__main__":unittest.main()
