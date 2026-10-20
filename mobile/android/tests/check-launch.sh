@@ -4,6 +4,9 @@ apk_path="$1"
 result_dir="$PWD/android-runtime-results"
 mkdir -p "$result_dir"
 adb shell input keyevent 82
+# The launcher can still be starting when the emulator reports boot completion.
+# It is not needed while our activity is in the foreground.
+adb shell am force-stop com.google.android.apps.nexuslauncher || true
 adb logcat -c
 adb install -r "$apk_path" > "$result_dir/install.txt"
 adb shell am start -W -n ru.eis223.auditor/.MainActivity > "$result_dir/start.txt" 2>&1 || true
@@ -14,6 +17,25 @@ adb logcat -d -s AndroidRuntime chromium WebViewFactory > "$result_dir/startup-l
 adb shell dumpsys activity activities > "$result_dir/activities.txt"
 adb shell uiautomator dump /sdcard/eis-startup.xml > /dev/null 2>&1 || true
 adb pull /sdcard/eis-startup.xml "$result_dir/ui.xml" > /dev/null 2>&1 || true
+if python3 - "$result_dir/ui.xml" <<'PY'
+import sys,xml.etree.ElementTree as E
+root=E.parse(sys.argv[1]).getroot()
+sys.exit(0 if any(n.get('text')=="Pixel Launcher isn't responding" for n in root.iter('node')) else 1)
+PY
+then
+  # Dismiss only this observed, unrelated launcher ANR. App ANRs still fail the test.
+  python3 - "$result_dir/ui.xml" <<'PY'
+import sys,xml.etree.ElementTree as E,re,subprocess
+root=E.parse(sys.argv[1]).getroot()
+button=next(n for n in root.iter('node') if n.get('resource-id')=='android:id/aerr_close')
+x1,y1,x2,y2=map(int,re.findall(r'\d+',button.get('bounds')))
+subprocess.run(['adb','shell','input','tap',str((x1+x2)//2),str((y1+y2)//2)],check=True)
+PY
+  adb shell am start -W -n ru.eis223.auditor/.MainActivity >> "$result_dir/start.txt"
+  sleep 3
+  adb shell uiautomator dump /sdcard/eis-startup.xml > /dev/null
+  adb pull /sdcard/eis-startup.xml "$result_dir/ui.xml" > /dev/null
+fi
 adb exec-out screencap -p > "$result_dir/screen.png"
 cat "$result_dir/start.txt"
 cat "$result_dir/crash.txt"
@@ -21,7 +43,7 @@ if [ ! -s "$result_dir/pid.txt" ]; then
   echo 'FAIL: application process exited during startup'
   exit 1
 fi
-if rg -q 'Process: ru.eis223.auditor' "$result_dir/crash.txt"; then
+if grep -q 'Process: ru.eis223.auditor' "$result_dir/crash.txt"; then
   echo 'FAIL: Android Runtime recorded a startup crash'
   exit 1
 fi
@@ -55,7 +77,7 @@ adb shell am start -W -n ru.eis223.auditor/.MainActivity > "$result_dir/relaunch
 sleep 8
 adb shell pidof ru.eis223.auditor > "$result_dir/pid-after-relaunch.txt"
 adb logcat -d -b crash > "$result_dir/crash-after-relaunch.txt"
-if rg -q 'Process: ru.eis223.auditor' "$result_dir/crash-after-relaunch.txt"; then
+if grep -q 'Process: ru.eis223.auditor' "$result_dir/crash-after-relaunch.txt"; then
   cat "$result_dir/crash-after-relaunch.txt"
   exit 1
 fi
