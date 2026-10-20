@@ -18,6 +18,11 @@ from test_general_thematic_parity import P, REG, docs
 import test_general_company_claim as company_fixture
 import test_general_audit_counters as counter_fixture
 
+# These tests wait for committed queue states, not a two-second throughput
+# guarantee. Shared builders can spend seconds on SQLite's durable writes.
+# Keep the semantic wait bounded while leaving real cooldowns/commits intact.
+WORKER_STATE_TIMEOUT_SECONDS = 10
+
 
 class StageRetries(unittest.IsolatedAsyncioTestCase):
     async def test_existing_and_metadata_retry_without_reextracting_or_reanalyzing(self):
@@ -87,7 +92,7 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
                         if rows[first]['state'] == 'pending' and rows[first]['error'] and rows[second]['state'] == 'completed':
                             return rows
                         await real_sleep(.01)
-                rows = await asyncio.wait_for(settled(), 2)
+                rows = await asyncio.wait_for(settled(), WORKER_STATE_TIMEOUT_SECONDS)
                 self.assertEqual(rows[first]['audit_revision'], '')
                 self.assertEqual(rows[first]['retry_count'], 1)
                 self.assertGreater(rows[first]['next_retry_at'], time.time())
@@ -160,7 +165,7 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
             general.install(ns); await ns['app'].startups[0]()
             try:
                 deferred = await asyncio.wait_for(wait_for_row(
-                    lambda value:value['state']=='pending' and value['retry_count']==1), 2)
+                    lambda value:value['state']=='pending' and value['retry_count']==1), WORKER_STATE_TIMEOUT_SECONDS)
                 self.assertFalse(ns['_v332_campaign_worker'].done())
                 self.assertEqual(general.runtime_snapshot(ns)['live_workers'], 4)
                 self.assertEqual(tokens, ['save-budget-1'])
@@ -179,7 +184,7 @@ class StageRetries(unittest.IsolatedAsyncioTestCase):
                 with fixture.connection() as db:
                     db.execute('UPDATE v332_audit_queue SET next_retry_at=0 WHERE reg=?', (reg,))
                 general.audit_signals(ns).notify('general')
-                completed = await asyncio.wait_for(wait_for_row(lambda value:value['state']=='completed'), 2)
+                completed = await asyncio.wait_for(wait_for_row(lambda value:value['state']=='completed'), WORKER_STATE_TIMEOUT_SECONDS)
                 self.assertEqual(tokens, ['save-budget-1', 'save-budget-2'])
                 self.assertEqual(completed['retry_count'], 0)
                 self.assertEqual(completed['next_retry_at'], 0)
@@ -215,3 +220,4 @@ class SynchronousStageRetries(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
