@@ -93,6 +93,7 @@ jobs:
           python -m unittest test_local_numbered_event_recall test_local_event_pipeline_parity test_amendment_revised_deadline_evidence test_sme_payment_clause_recall
           python -m unittest discover -s tests -p 'test_legal_price_recall.py'
           python -m unittest discover -s tests -p 'test_audit_persistence_lock_scope.py'
+          python -m unittest test_legal_fact_write_contention test_parenthesized_event_date_labels
           python -m unittest discover -s tests -p 'test_general_db_stage_retry.py'
           python -m unittest discover -s tests -p 'test_official_publication_evidence.py'
           python -m unittest discover -s tests -p 'test_ingestion_*.py'
