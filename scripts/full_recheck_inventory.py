@@ -93,7 +93,7 @@ def collect(ns):
         counts["general_queue_positions"] = c.execute(
             "SELECT COUNT(*) FROM v332_audit_queue WHERE campaign=?", (CAMPAIGN,)).fetchone()[0]
         counts["general_orphan_positions"] = counts["general_queue_positions"] - len(general)
-        counts["dashboard_expected_difference"] = len(dashboard) - expected
+        counts["dashboard_expected_difference"] = len(dashboard) - expected if expected is not None else None
         counts["verified_not_saved"] = len(verified - saved)
         if {"thematic_items", "thematic_batches"} <= tables:
             positions = c.execute("""SELECT t.reg FROM thematic_items t

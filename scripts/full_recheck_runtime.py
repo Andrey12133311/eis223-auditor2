@@ -23,8 +23,10 @@ from contextlib import contextmanager
 
 REQUEST_ENV = "EIS223_FULL_RECHECK_REQUEST"
 AUTHORIZED_EPOCH = "2026-10-19-all-saved-214328"
+ALL_SAVED_EPOCH = "2026-10-20-all-saved-explicit-2100"
 DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"
-AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, DASHBOARD_EPOCH: 4007}
+AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH, DASHBOARD_EPOCH)
+AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, ALL_SAVED_EPOCH: None, DASHBOARD_EPOCH: 4007}
 LEASE_SECONDS = 300
 RENEW_SECONDS = 30
 PAGE_SIZE = 8
@@ -32,7 +34,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 10
+TARGET_GENERATION = 11
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -88,9 +90,9 @@ def initialize(ns):
         state.pop("target_conflict", None)
         state.pop("request_id", None)
         return
-    # Only explicit user instructions authorize a new frozen population.
-    # Repeated messages or restarts reuse their existing request ID.
-    if epoch not in AUTHORIZED_REQUESTS:
+    # This release authorizes exactly one user instruction, not a mechanism
+    # for inventing recurring full scans or treating deployment SHAs as epochs.
+    if epoch not in AUTHORIZED_EPOCHS:
         raise ValueError("Unrecognized explicit full-recheck request epoch")
     import full_recheck_request as ledger
     with transaction(ns) as c:
@@ -100,7 +102,8 @@ def initialize(ns):
     c = ns["conn"]()
     try:
         summary = ledger.create_request(c, epoch, ns.get("_verified_set235"),
-            expected_count=AUTHORIZED_REQUESTS[epoch],
+            expected_count=None if epoch == ALL_SAVED_EPOCH else (4007 if epoch == DASHBOARD_EPOCH else 3058),
+            all_saved=epoch == ALL_SAVED_EPOCH,
             **({"source_seconds": 60, "max_seconds": 10} if epoch == DASHBOARD_EPOCH else {}))
     finally:
         c.close()
@@ -126,9 +129,10 @@ def initialize(ns):
         c.close()
     # Publication to the workers follows the committed complete snapshot only.
     state["request_id"] = epoch
-    state["expected_count"] = AUTHORIZED_REQUESTS[epoch]
     state["cursor"] = ""
-    print("FULL_RECHECK_REQUEST " + json.dumps(summary, ensure_ascii=False), flush=True)
+    print("FULL_RECHECK_REQUEST " + json.dumps({**summary,
+        "scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else
+                 "current_dashboard" if epoch == DASHBOARD_EPOCH else "legacy_dashboard"}, ensure_ascii=False), flush=True)
 
 
 def heartbeat(ns):
@@ -317,7 +321,28 @@ async def finish_result(ns, reg, state, detail):
     await db_stage(ns, "full_request_ack", _finish, ns, reg, state, detail)
 
 
+def _renew_if_due(ns, reg):
+    from full_recheck_request import require_claim, renew_lease
+    # The 30s liveness check need not write a 300s lease every time. Keep at
+    # least half its duration in reserve; retain exact ownership checks and
+    # close the read snapshot before any attempt to acquire the writer.
+    c = ns["conn"]()
+    try:
+        row = require_claim(c, reg.full_recheck_claim)
+        if row["lease_until"] - time.time() > LEASE_SECONDS / 2:
+            return False
+    finally:
+        c.close()
+    with transaction(ns) as c:
+        row = require_claim(c, reg.full_recheck_claim)
+        if row["lease_until"] - time.time() <= LEASE_SECONDS / 2:
+            renew_lease(c, reg.full_recheck_claim, lease_seconds=LEASE_SECONDS)
+            return True
+    return False
+
+
 def _renew(ns, reg):
+    """Explicit forced renewal; periodic heartbeats use the read-only preflight."""
     from full_recheck_request import renew_lease
     with transaction(ns) as c:
         renew_lease(c, reg.full_recheck_claim, lease_seconds=LEASE_SECONDS)
@@ -327,7 +352,7 @@ async def _renew_loop(ns, reg):
     from v332_all_procurements_audit import db_stage
     while True:
         await asyncio.sleep(RENEW_SECONDS)
-        await db_stage(ns, "full_request_renew", _renew, ns, reg)
+        await db_stage(ns, "full_request_renew", _renew_if_due, ns, reg)
 
 
 async def _lock(reg):
@@ -549,14 +574,15 @@ def _expired(ns):
         return []
     c = ns["conn"]()
     try:
-        # A new authorized snapshot must not strand old expired cross-request
-        # reservations. Recovery still requires the same physical per-reg lock;
-        # live executors and immutable receipts are never reset here.
+        # A previous explicit request can retain a crashed owner's lease.
+        # Recover only exact expired claims under the existing per-reg flock;
+        # no historical pending/completed rows are reset or imported as success.
+        epochs = (epoch,) + tuple(value for value in AUTHORIZED_EPOCHS if value != epoch)
         claims = []
-        for candidate in dict.fromkeys([AUTHORIZED_EPOCH, epoch]):
-            claims.extend(expired_members(c, candidate, limit=PAGE_SIZE-len(claims)))
+        for value in epochs:
             if len(claims) >= PAGE_SIZE:
                 break
+            claims.extend(expired_members(c, value, limit=PAGE_SIZE - len(claims)))
         return claims
     finally:
         c.close()

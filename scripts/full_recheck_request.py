@@ -280,8 +280,12 @@ def _inventory(c, request_id):
 
 
 def create_request(c, request_id, verified_getter, *, expected_count=3058, campaign=CAMPAIGN,
-                   max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, source_seconds=None):
-    """Freeze (getter ∪ current-campaign queue) ∩ saved purchases − manual inputs.
+                   max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False, source_seconds=None):
+    """Freeze one explicitly selected population, never extend it on replay.
+
+    Default: (getter union current queue) intersect saved purchases, minus manual.
+    all_saved=True: every saved row at the atomic snapshot, including manual
+    entries; noncanonical registrations remain visibly blocked, never "checked".
 
     ``max_rows`` bounds total materialized source rows (duplicates included).
     The trusted getter must return/iterate promptly; an elapsed deadline aborts
@@ -296,9 +300,12 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
     existing = inventory(c, request_id)
     if existing is not None:
         return existing
-    if not callable(verified_getter):
+    if not isinstance(all_saved, bool):
+        raise ValueError("Explicit all-saved scope must be boolean")
+    if not all_saved and not callable(verified_getter):
         raise SnapshotError("Dashboard membership getter unavailable")
-    if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count < 0:
+    infer_expected = all_saved and expected_count is None
+    if not infer_expected and (isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count < 0):
         raise ValueError("Expected count must be a nonnegative integer")
     if isinstance(max_rows, bool) or not isinstance(max_rows, int) or not 1 <= max_rows <= MAX_SNAPSHOT_ROWS:
         raise ValueError("Snapshot row budget is out of bounds")
@@ -331,21 +338,22 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
         check()
         return result
 
-    # An opaque restored getter can open its own database connection. Never
-    # invoke it under a writer lock, and do not imply an atomic cross-getter read.
-    try:
-        raw = verified_getter()
-        if raw is None or isinstance(raw, (str, bytes, dict)):
-            raise SnapshotError("Dashboard getter did not return a complete collection")
-        verified = consume(raw)
-    except SnapshotError:
-        raise
-    except Exception as exc:
-        raise SnapshotError("Dashboard membership capture failed") from exc
+    # The new explicit ALL-SAVED request is captured directly from purchases,
+    # including saved manual EIS entries. The old dashboard scope is unchanged.
+    if all_saved:
+        verified = set()
+    else:
+        try:
+            raw = verified_getter()
+            if raw is None or isinstance(raw, (str, bytes, dict)):
+                raise SnapshotError("Dashboard getter did not return a complete collection")
+            verified = consume(raw)
+        except SnapshotError:
+            raise
+        except Exception as exc:
+            raise SnapshotError("Dashboard membership capture failed") from exc
     source_captured = _time()
-    # A slow restored getter must never extend SQLite writer occupancy. The
-    # new explicitly authorized snapshot has a separate bounded source budget.
-    # Default behavior for existing callers/epochs stays unchanged.
+    # A separate source-capture budget never extends writer occupancy.
     if source_seconds is not None:
         deadline = time.monotonic() + max_seconds
     previous_timeout = c.execute("PRAGMA busy_timeout").fetchone()[0]
@@ -360,21 +368,27 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
             c.rollback()
             return existing
         _columns(c, "purchases", ("reg_number",))
-        _columns(c, "v332_audit_queue", ("campaign", "reg"))
-        _columns(c, "v319_manual_inputs", ("reg",))
         snapshot_at = _time()
-        queue = consume(row[0] for row in c.execute("""SELECT q.reg FROM v332_audit_queue q
-            JOIN purchases p ON p.reg_number=q.reg WHERE q.campaign=? ORDER BY q.reg LIMIT ?""",
-            (campaign, max_rows + 1)))
-        manual = consume(row[0] for row in c.execute("SELECT reg FROM v319_manual_inputs WHERE reg IS NOT NULL LIMIT ?", (max_rows + 1,)))
-        union = sorted(verified | queue)
-        # The actual dashboard enumerates saved purchases, not source-only IDs.
-        present = set()
-        for offset in range(0, len(union), 400):
-            chunk = union[offset:offset + 400]
-            present.update(consume(row[0] for row in c.execute("SELECT reg_number FROM purchases WHERE reg_number IN ("
-                + ",".join("?" for _ in chunk) + ")", chunk)))
+        if all_saved:
+            present = consume(row[0] for row in c.execute(
+                "SELECT reg_number FROM purchases ORDER BY reg_number LIMIT ?", (max_rows + 1,)))
+            manual = set()  # Explicitly included; their original section is unchanged.
+        else:
+            _columns(c, "v332_audit_queue", ("campaign", "reg"))
+            _columns(c, "v319_manual_inputs", ("reg",))
+            queue = consume(row[0] for row in c.execute("""SELECT q.reg FROM v332_audit_queue q
+                JOIN purchases p ON p.reg_number=q.reg WHERE q.campaign=? ORDER BY q.reg LIMIT ?""",
+                (campaign, max_rows + 1)))
+            manual = consume(row[0] for row in c.execute("SELECT reg FROM v319_manual_inputs WHERE reg IS NOT NULL LIMIT ?", (max_rows + 1,)))
+            union = sorted(verified | queue)
+            present = set()
+            for offset in range(0, len(union), 400):
+                chunk = union[offset:offset + 400]
+                present.update(consume(row[0] for row in c.execute("SELECT reg_number FROM purchases WHERE reg_number IN ("
+                    + ",".join("?" for _ in chunk) + ")", chunk)))
         members = sorted(present - manual)
+        if infer_expected:
+            expected_count = len(members)
         digest = hashlib.sha256(json.dumps(members, ensure_ascii=True, separators=(",", ":")).encode("ascii")).hexdigest()
         c.execute("""INSERT INTO full_recheck_requests(request_id,created_at,source_captured_at,db_snapshot_at,
             expected_count,actual_count,manual_excluded_count,verified_not_saved_count,membership_digest,campaign,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",

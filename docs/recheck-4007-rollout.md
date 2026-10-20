@@ -18,14 +18,16 @@ A shared event-loop admission gate sequences short recheck acknowledgement, rene
 
 Malformed derived summary/fact-evidence containers no longer crash otherwise valid date/price evidence processing. Original source provenance and official XML precedence remain unchanged. Official source rows are not rewritten into their own derived evidence. A concurrent source update invalidates the stale cache update; final audit source-version checks still apply. This is a technical reliability/provenance change, not a new legal interpretation or permission to count uncertain findings as confirmed.
 
-The reviewed semantic generation advances from 9 to 10. Historical generation receipts remain stored. Completion requires a committed receipt for the target engine and the actual verified readable evidence; missing, partial and unreadable originals cannot be called completed or violation-free.
+The reviewed semantic generation advances from 10 to 11. Historical generation receipts remain stored. Completion requires a committed receipt for the target engine and the actual verified readable evidence; missing, partial and unreadable originals cannot be called completed or violation-free.
 
 ## Validation and deployment
 
 The dedicated read-only CI uses native SQLite 3.51.3 and runs 320 tests covering real held-writer no-op behavior, cancellation, changed-source preservation, request population/snapshot budgets, old-lease recovery, full-recheck contention and legal evidence regressions. Existing PR and Railway checks remain enabled. Synthetic CI findings are not production results.
 
-Deploy code only after all checks pass, then activate the new request via the single service variable. Verify `FULL_RECHECK_REQUEST` and `FULL_RECHECK_PROGRESS` for the new ID, actual membership and target generation 10. Monitor successful heartbeat requests, unique accepted `(reg, uid)` files, actual committed findings and retries in equal time windows. A successful deployment or queued request does not prove all procurements have been checked.
+Deploy code only after all checks pass, then activate the new request via the single service variable. Verify `FULL_RECHECK_REQUEST` and `FULL_RECHECK_PROGRESS` for the new ID, actual membership and target generation 11. Monitor successful heartbeat requests, unique accepted `(reg, uid)` files, actual committed findings and retries in equal time windows. A successful deployment or queued request does not prove all procurements have been checked.
 
 Keep the patched SQLite runtime and existing persistent WAL during any functional rollback. Do not delete WAL/SHM files or restore a historical backup over a live database. No VPS upgrade is performed by this server change; worker 1.4.0 file-size limitations remain a separate rollout.
 
 Concurrent production changes through `1e206d99b2577d7929ca6eb432ac648ebc6823d2` are retained, including parenthesized event-date labels, price-recovery retries and ingestion metadata safety. Generation 9 remains a historical tested transition; this combined change uses generation 10.
+
+The subsequent upstream revision dc95372 is retained: strict explanation parsing, low-write lease renewal and the all-saved epoch stay supported. Activate only one scope for a user instruction, never both as duplicate jobs. Historical generation 10 remains tested; this combination uses generation 11.

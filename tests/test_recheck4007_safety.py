@@ -187,6 +187,15 @@ class SharedWriterAdmission(unittest.IsolatedAsyncioTestCase):
 
 class NewFrozenRequest(unittest.TestCase):
     setUp=request_fixtures.FullRecheckRequestTests.setUp
+    def test_all_saved_inventory_does_not_invent_dashboard_expected_count(self):
+        from full_recheck_inventory import collect
+        ns={"conn":lambda:sqlite3.connect(self.path),"_verified_set235":lambda:[A,B]}
+        with patch.dict(os.environ,{runtime.REQUEST_ENV:runtime.ALL_SAVED_EPOCH}):
+            result=collect(ns)
+        self.assertEqual(result["status"],"complete",result)
+        self.assertIsNone(result["expected_requested_count"])
+        self.assertIsNone(result["counts"]["dashboard_expected_difference"])
+
     def test_4007_expected_is_not_a_fabricated_population_limit(self):
         old=ledger.create_request(self.c,runtime.AUTHORIZED_EPOCH,lambda:[A],expected_count=3058)
         many=[str(32618000000+i) for i in range(4007)]
@@ -212,11 +221,11 @@ class NewFrozenRequest(unittest.TestCase):
         ns={'conn':lambda:sqlite3.connect(self.path),'_verified_set235':lambda:[A,B]}
         with patch.dict(os.environ,{runtime.REQUEST_ENV:runtime.DASHBOARD_EPOCH}), \
                 patch('full_recheck_inventory.collect',return_value={'status':'test'}), \
-                patch.object(general,'engine_signature',return_value='synthetic-generation-ten'):
+                patch.object(general,'engine_signature',return_value='synthetic-generation-eleven'):
             runtime.initialize(ns)
             self.assertEqual(runtime.request_id(ns),runtime.DASHBOARD_EPOCH)
             new=ledger.inventory(self.c,runtime.DASHBOARD_EPOCH)
-            self.assertEqual((new['actual_count'],new['expected_count'],new['target_generation']),(3,4007,10))
+            self.assertEqual((new['actual_count'],new['expected_count'],new['target_generation']),(3,4007,11))
             runtime.initialize(ns)
             self.assertEqual(ledger.inventory(self.c,runtime.DASHBOARD_EPOCH),new)
 
