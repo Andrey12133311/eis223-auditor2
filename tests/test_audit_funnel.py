@@ -31,7 +31,7 @@ def records(output):
 
 
 def source(docs):
-    return {"docs": docs, "unreadable": 0, "original_expected": len(docs),
+    return {"docs": docs, "unreadable": 0, "_reconciled_rows": (), "original_expected": len(docs),
             "original_received": len(docs), "source_incomplete": False,
             "source_error": "", "p": {}, "card": {}, "detail": {}}
 

@@ -14,6 +14,7 @@ on:
       - 'tests/test_legal_security_clause_coverage.py'
       - 'tests/test_bid_security_price_basis.py'
       - 'tests/test_receipt_original_parity.py'
+      - 'tests/test_stale_original_completion.py'
       - 'tests/test_archive_member_occurrences.py'
       - 'tests/test_audit_funnel.py'
       - 'tests/test_audit_rule_counts.py'
@@ -95,5 +96,5 @@ jobs:
           python -m unittest discover -s tests -p 'test_thematic_index_lock_scope.py'
           python -m unittest discover -s tests -p 'test_v343_card_presentation.py'
           python -m unittest test_semantic_audit_sources test_legal_audit_revision test_automatic_review_scheduler test_automatic_recheck_fairness test_intake_automatic_rechecks test_automatic_card_handoff test_automatic_legal_status_ui test_automatic_legal_outcomes
-          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_capacity
+          python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_cohort_contract test_full_recheck_capacity test_stale_original_completion test_full_recheck_originals
           node tests/test_account_frontend_requests.cjs

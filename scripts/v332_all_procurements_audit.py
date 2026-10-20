@@ -856,7 +856,7 @@ def source_verified(reg,path,digest,meta):
     # archive receipt and the child's own SHA256.
     return info["sha256"]==meta.get("archive_sha256") and digest==meta.get("sha256")
 
-async def stored_docs(ns,reg,rows):
+async def stored_docs(ns,reg,rows,*,missing_rows=None):
     """Authenticate every file and extract with bounded, rolling workers.
 
     Results keep source order. Manual checks retain reserved physical capacity;
@@ -865,6 +865,7 @@ async def stored_docs(ns,reg,rows):
     extractor=ns.get("extract_text")
     if not callable(extractor):raise RuntimeError("Document extractor unavailable")
     data_root=root().resolve()
+    missing_path=object()
 
     def read_one(row):
         raw=row.get("local_path")
@@ -908,10 +909,10 @@ async def stored_docs(ns,reg,rows):
                 "error":None if readable else "Текст не удалось извлечь",
                 "final_url":row.get("final_url") or row.get("url") or ""
             }
-        except (FileNotFoundError,NotADirectoryError):
+        except (FileNotFoundError,NotADirectoryError) as exc:
             # Old stale file paths cannot be audited: skip instead of
             # producing thousands of repeated exception logs.
-            return None
+            return missing_path if stage=="path" and isinstance(exc,FileNotFoundError) else None
         except Exception as exc:
             reason=" ".join(str(exc).split())[:240]
             print(f"V351 DOC_SKIP reg={reg} type={type(exc).__name__} "
@@ -926,6 +927,11 @@ async def stored_docs(ns,reg,rows):
             return None
 
     results=await ordered_map(one,rows,limit=FILE_BATCH_SIZE)
+    if missing_rows is not None:
+        # Only settled path failures qualify. A timed-out physical read can
+        # finish later but cannot add proof or cancel another row's failure.
+        missing_rows.extend(row for row,doc in zip(rows,results) if doc is missing_path)
+    results=[None if doc is missing_path else doc for doc in results]
     output=[doc for doc in results if doc is not None]
     unreadable=sum(doc is None or doc["status"]!="checked" for doc in results)
     return output,unreadable
@@ -981,13 +987,13 @@ def check_reservation(ns,reg):
 
 
 @audit_funnel.trace_sync("general",registration="reg")
-def persist(ns,reg,findings,checks,progress_token=None):
+def persist(ns,reg,findings,checks,progress_token=None,reconciled_rows=()):
     """Append only under the caller's exact general or intake reservation."""
     guard=ns.get("_v295_persist_guard")
     # Intake's token/file lock is acquired before SQLite's writer transaction.
     # Its short guard contains no source hashing, downloads or analysis.
     with guard(reg) if callable(guard) else nullcontext():
-        return _persist_reserved(ns,reg,findings,checks,progress_token)
+        return _persist_reserved(ns,reg,findings,checks,progress_token,reconciled_rows)
 
 
 def _audit_result_snapshot(c,reg):
@@ -1064,7 +1070,28 @@ def _merge_committed_audit_diagnostics(diagnostic):
             audit_funnel.current_increment(group,key,value)
 
 
-def _persist_reserved(ns,reg,findings,checks,progress_token=None):
+# Exact DB snapshots of only the stale rows whose failure is being credited.
+# Values are copied before persistence; no JSON parsing or file work is done
+# under SQLite's writer. This proof is not a replacement for source verification.
+_RECONCILED_ROW_FIELDS=("id","name","url","doc_type","published_at",
+                        "local_path","status","metadata_json","final_url")
+
+
+def _require_reconciled_rows(c,reg,rows):
+    """Fence new coverage credit in the same transaction as its durable receipt."""
+    if not rows:return
+    ids=tuple(row[0] for row in rows)
+    if (not c.in_transaction or len(rows)>MAX_DOC_ROWS or len(set(ids))!=len(ids)
+        or any(not isinstance(value,int) or value<=0 for value in ids)):
+        raise SemanticSnapshotError("concurrent_file_change")
+    current=tuple(tuple(row) for row in c.execute(
+        "SELECT "+",".join(_RECONCILED_ROW_FIELDS)+" FROM docs WHERE reg_number=? AND id IN ("+
+        ",".join("?" for _ in ids)+") ORDER BY id",(str(reg),*ids)).fetchall())
+    if current!=rows:
+        raise SemanticSnapshotError("concurrent_file_change")
+
+
+def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows=()):
     """Append unseen results atomically without holding the writer for regex work."""
     c=connect(ns)
     try:
@@ -1076,6 +1103,7 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None):
             insert_findings,insert_checks,confirmed_checks=_plan_audit_results(reg,findings,checks,snapshot,diagnostic)
             c.execute("BEGIN IMMEDIATE")
             require_reservation(c,reg)
+            _require_reconciled_rows(c,reg,reconciled_rows)
             # Another analyzer may have committed this same procurement while
             # matching episodes. Rebase outside the writer before inserting;
             # otherwise two correct independent reviews could create duplicates.
@@ -1128,13 +1156,71 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None):
         raise
     finally:c.close()
 
-async def collect_saved_evidence(ns,reg,rows):
+def _recovered_stale_original_rows(reg,rows,docs,allowed,received):
+    """Snapshot only missing pointers whose exact original was read this time.
+
+    Call before merge_docs imports stored aliases. These candidate documents
+    came from this invocation's byte-authenticated readers; a name, alias,
+    other readable document or a newer version never replaces missing proof.
+    """
+    data_root=root().resolve()
+    recovered=set()
+    for doc in docs:
+        meta=doc.get("meta") or {}
+        uid=uid_from_url(meta.get("source_url") or "")
+        sha=meta.get("sha256")
+        if (meta.get("source")!="official_eis_original" or not is_official(doc)
+            or len(str(doc.get("text") or "").strip())<3 or meta.get("uid")!=uid
+            or uid not in allowed or uid not in received
+            or (doc.get("url") and uid_from_url(doc["url"])!=uid)):
+            continue
+        try:
+            saved=saved_document(reg,uid)
+            if saved is None or saved[1]["sha256"]!=sha:continue
+            path=saved[0].resolve(strict=True)
+            if (not path.is_relative_to(data_root) or not path.is_file()
+                or path.suffix.lower() not in FILE_EXT
+                or path.suffix.lower()!=allowed[uid]["ext"]
+                or not 0<path.stat().st_size<=MAX_BYTES
+                or path!=Path(doc.get("local") or "").resolve(strict=True)):
+                continue
+            recovered.add((uid,sha,path.suffix.lower()))
+        except (OSError,ValueError,TypeError,KeyError,RuntimeError):
+            continue
+    snapshots=[]
+    for row in rows:
+        try:
+            meta=json.loads(row.get("metadata_json") or "{}")
+            if not isinstance(meta,dict) or meta.get("source")!="official_eis_original":continue
+            uid=uid_from_url(meta.get("source_url") or "")
+            sha=meta.get("sha256")
+            if (not uid or meta.get("uid")!=uid or not HEX.fullmatch(str(sha or ""))
+                or (row.get("url") and uid_from_url(row["url"])!=uid)
+                or not row.get("local_path")):
+                continue
+            old=Path(row["local_path"]).absolute()
+            # Do not forgive broken symlinks, external paths, malformed
+            # ancestors or a file which appeared after the settled failure.
+            canonical=old.resolve(strict=False)
+            if (old!=canonical or not canonical.is_relative_to(data_root)
+                or old.is_symlink() or old.exists()
+                or (uid,sha,old.suffix.lower()) not in recovered):
+                continue
+            snapshots.append(tuple(row[key] for key in _RECONCILED_ROW_FIELDS))
+        except (OSError,ValueError,TypeError,KeyError,RuntimeError):
+            continue
+    return tuple(snapshots)
+
+
+async def collect_saved_evidence(ns,reg,rows,*,reconcile_stale=False):
     """Collect the same receipt-authenticated local inputs for both audits.
 
     Incoming originals can precede their docs rows. One persisted archive
     member also cannot establish that every other member has been read, so
     received archives are expanded through the existing bounded collector.
     No database evidence rows are replaced and no network download is made.
+    Stale-pointer credit is opt-in: callers must fence _reconciled_rows in
+    the same writer transaction as their durable legal result and receipt.
     """
     source_error=None
     try:
@@ -1148,7 +1234,8 @@ async def collect_saved_evidence(ns,reg,rows):
     received_uids=await run_file_io(
         lambda:{uid for uid in allowed if saved_document(reg,uid) is not None})
     received=len(received_uids) if not source_error else None
-    other,unreadable=await stored_docs(ns,reg,rows)
+    missing_rows=[]
+    other,unreadable=await stored_docs(ns,reg,rows,missing_rows=missing_rows if reconcile_stale else None)
     represented={uid_from_url((d.get("meta") or {}).get("source_url") or "")
                  for d in other if (d.get("meta") or {}).get("source")==
                  "official_eis_original"}
@@ -1259,6 +1346,11 @@ async def collect_saved_evidence(ns,reg,rows):
 
     if unreadable and official:
         unreadable-=await run_file_io(expanded_archive_parent_count)
+    reconciled_rows=()
+    if unreadable and missing_rows:
+        reconciled_rows=await run_file_io(_recovered_stale_original_rows,reg,missing_rows,
+                                         [*official,*other],allowed,received_uids)
+        unreadable-=len(reconciled_rows)
     # Merging may import stored aliases; reconciliation above uses only fresh proof.
     docs=merge_docs(official,other)
     # Collection may return an unreadable original instead of raising. Inspect
@@ -1268,7 +1360,7 @@ async def collect_saved_evidence(ns,reg,rows):
         d.get("status") in ("downloaded_no_text","archive_unreadable") or
         bool((d.get("meta") or {}).get("archive_warnings")) for d in docs)
 
-    return {"docs":docs,"unreadable":unreadable,
+    return {"docs":docs,"unreadable":unreadable,"_reconciled_rows":reconciled_rows,
             "original_expected":expected,"original_received":received,
             "source_incomplete":source_incomplete,
             "source_error":source_error,
@@ -1295,7 +1387,7 @@ async def _inspect_one(ns,reg):
             "publicationDate":purchase["published"],
             "submissionStart":purchase["submission_start"],
             "submissionEnd":purchase["submission_end"]}
-    source=await collect_saved_evidence(ns,reg,rows)
+    source=await collect_saved_evidence(ns,reg,rows,reconcile_stale=True)
     docs,unreadable=source["docs"],source["unreadable"]
     expected,received=source["original_expected"],source["original_received"]
     source_incomplete=source["source_incomplete"]
@@ -1386,7 +1478,7 @@ async def _inspect_one(ns,reg):
         "original_expected":expected,"original_received":received,"source_incomplete":source_incomplete})
     # Keep the computed evidence and token while a short write lock clears.
     # Retrying the whole inspection would needlessly rerun legal analyzers.
-    new_f,new_c=await db_stage(ns,"persist",persist,ns,reg,accepted,checks,token)
+    new_f,new_c=await db_stage(ns,"persist",persist,ns,reg,accepted,checks,token,source["_reconciled_rows"])
     return ("completed",{
         "documents_found":len(docs)+unreadable,
         "documents_read":counted,"documents_unreadable":unreadable,

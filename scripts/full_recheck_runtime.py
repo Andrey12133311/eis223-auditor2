@@ -30,7 +30,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 2
+TARGET_GENERATION = 3
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -93,6 +93,8 @@ def initialize(ns):
     import full_recheck_request as ledger
     with transaction(ns) as c:
         ledger.initialize(c)
+        from full_recheck_originals import initialize as initialize_originals
+        initialize_originals(c)
     c = ns["conn"]()
     try:
         summary = ledger.create_request(c, epoch, ns.get("_verified_set235"), expected_count=3058)
@@ -605,6 +607,12 @@ async def _claim_next(ns):
         if not request_id(ns):
             return None
         await thread_call(_catch_up, ns)
+        from full_recheck_originals import pump as pump_originals
+        try:
+            await pump_originals(ns)
+        except Exception as exc:
+            # Ingestion backpressure never blocks local evidence analysis.
+            print("FULL_RECHECK_ORIGINALS deferred=True type=" + type(exc).__name__, flush=True)
         for number in await thread_call(_candidates, ns):
             # Advance only a visited row, not the unused remainder of a page.
             ns["_full_recheck"]["cursor"] = number
