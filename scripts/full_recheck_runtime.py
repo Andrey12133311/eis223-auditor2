@@ -23,6 +23,8 @@ from contextlib import contextmanager
 
 REQUEST_ENV = "EIS223_FULL_RECHECK_REQUEST"
 AUTHORIZED_EPOCH = "2026-10-19-all-saved-214328"
+DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"
+AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, DASHBOARD_EPOCH: 4007}
 LEASE_SECONDS = 300
 RENEW_SECONDS = 30
 PAGE_SIZE = 8
@@ -30,7 +32,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 8
+TARGET_GENERATION = 9
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -86,9 +88,9 @@ def initialize(ns):
         state.pop("target_conflict", None)
         state.pop("request_id", None)
         return
-    # This release authorizes exactly one user instruction, not a mechanism
-    # for inventing recurring full scans or treating deployment SHAs as epochs.
-    if epoch != AUTHORIZED_EPOCH:
+    # Only explicit user instructions authorize a new frozen population.
+    # Repeated messages or restarts reuse their existing request ID.
+    if epoch not in AUTHORIZED_REQUESTS:
         raise ValueError("Unrecognized explicit full-recheck request epoch")
     import full_recheck_request as ledger
     with transaction(ns) as c:
@@ -97,7 +99,9 @@ def initialize(ns):
         initialize_originals(c)
     c = ns["conn"]()
     try:
-        summary = ledger.create_request(c, epoch, ns.get("_verified_set235"), expected_count=3058)
+        summary = ledger.create_request(c, epoch, ns.get("_verified_set235"),
+            expected_count=AUTHORIZED_REQUESTS[epoch],
+            **({"source_seconds": 60, "max_seconds": 10} if epoch == DASHBOARD_EPOCH else {}))
     finally:
         c.close()
     from v332_all_procurements_audit import engine_signature
@@ -122,6 +126,7 @@ def initialize(ns):
         c.close()
     # Publication to the workers follows the committed complete snapshot only.
     state["request_id"] = epoch
+    state["expected_count"] = AUTHORIZED_REQUESTS[epoch]
     state["cursor"] = ""
     print("FULL_RECHECK_REQUEST " + json.dumps(summary, ensure_ascii=False), flush=True)
 
@@ -136,7 +141,7 @@ def heartbeat(ns):
         state["inventory"] = collect(ns)
         state["inventory_at"] = time.monotonic()
         print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
-    epoch = request_id(ns) or (AUTHORIZED_EPOCH if state.get("target_conflict") else None)
+    epoch = request_id(ns) or (os.environ.get(REQUEST_ENV, "").strip() if state.get("target_conflict") else None)
     if not epoch:
         return
     import full_recheck_request as ledger
@@ -544,7 +549,15 @@ def _expired(ns):
         return []
     c = ns["conn"]()
     try:
-        return expired_members(c, epoch, limit=PAGE_SIZE)
+        # A new authorized snapshot must not strand old expired cross-request
+        # reservations. Recovery still requires the same physical per-reg lock;
+        # live executors and immutable receipts are never reset here.
+        claims = []
+        for candidate in dict.fromkeys([AUTHORIZED_EPOCH, epoch]):
+            claims.extend(expired_members(c, candidate, limit=PAGE_SIZE-len(claims)))
+            if len(claims) >= PAGE_SIZE:
+                break
+        return claims
     finally:
         c.close()
 

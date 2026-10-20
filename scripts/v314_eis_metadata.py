@@ -385,96 +385,135 @@ def from_documents(reg, documents, known_customer=""):
     return chosen
 
 
+def _metadata_snapshot(db, reg):
+    row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
+    if row is None:
+        return None
+    prior = db.execute("SELECT * FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
+    exists = bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v314_eis_metadata'").fetchone())
+    saved = (db.execute("SELECT metadata_json,captured_at FROM v314_eis_metadata WHERE reg=?", (reg,)).fetchone()
+             if exists else None)
+    return (dict(row), dict(prior) if prior is not None else None,
+            dict(saved) if saved is not None else None, exists)
+
+
+def _metadata_plan(ns, snapshot, metadata, stamp):
+    """Prepare JSON and identity comparisons without holding a write lock."""
+    p, _, saved, _ = snapshot
+    buyer_insert, buyer_changes = None, {}
+    changes = {}
+    name = company(metadata.get("customer")) or _name(metadata.get("customer"))
+    current_name = _name(p.get("customer"))
+    extension = (customer_name_extension(current_name, name) and
+                 not metadata.get("customer_identity_conflict"))
+    prior = snapshot[1]
+    if extension:
+        incoming_inn = valid_inn(metadata.get("customer_inn"))
+        existing_inns = {valid_inn(p.get("customer_inn"))}
+        if prior:
+            existing_inns.add(valid_inn(prior["inn"]))
+            if not (customer_name_extension(prior["name"], name) or
+                    compact(prior["name"]).casefold() == compact(name).casefold()):
+                extension = False
+        existing_inns.discard("")
+        if len(existing_inns) > 1 or (incoming_inn and existing_inns and incoming_inn not in existing_inns):
+            extension = False
+    if name and (not current_name or extension or (
+            current_name != compact(p.get("customer")) and name == current_name)):
+        changes["customer"] = name
+        if callable(ns.get("org_form")):
+            changes["org_form"] = ns["org_form"](name)
+    identity = lambda value: re.sub(r"[^а-яёa-z0-9]", "", re.sub(
+        r"\s*\([^)]*\)\s*$", "", _name(value)).casefold())
+    same = bool(name and identity(current_name) == identity(name))
+    if name and ("customer" in changes or same):
+        inn = valid_inn(metadata.get("customer_inn"))
+        if inn and not valid_inn(p.get("customer_inn")):
+            changes["customer_inn"] = inn
+        # No-op evidence must not acquire SQLite's single writer.
+        if prior is None:
+            buyer_insert = (name, inn, metadata.get("source_url", ""), "official_eis_document", stamp)
+        elif prior["name"] == name and prior["inn"] == "" and inn:
+            buyer_changes["inn"] = inn
+    if extension and "customer" in changes and prior:
+        buyer_changes.update(name=name, evidence_page=metadata.get("source_url", ""),
+                             evidence_source="official_eis_document", captured_at=stamp)
+    title = subject(metadata.get("title"))
+    if title and not subject(p.get("title")):
+        changes["title"] = title
+    # Only an explicit number extracted from an actual EIS original can
+    # fill a missing price; keep the earlier valid NMCD untouched.
+    from v335_price_recovery import price_changes,money
+    if money(metadata.get("price")):
+        changes.update(price_changes(p,metadata))
+    if changes:
+        try:
+            card = json.loads(p.get("card_fields_json") or "{}")
+            summary = card.setdefault("summary", {})
+            for key in ("customer", "customer_inn", "title", "price", "price_num"):
+                if key in changes:
+                    summary[key] = changes[key]
+            if "price" in changes and money(changes["price"])==money(metadata.get("price")):
+                summary["price_kind"]=metadata.get("price_kind") or "nmcd"
+            card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
+            changes["card_fields_json"] = json.dumps(card,ensure_ascii=False)
+        except (ValueError,TypeError,AttributeError):
+            pass
+    try:
+        same = saved is not None and json.loads(saved["metadata_json"]) == metadata
+    except (ValueError, TypeError):
+        same = False
+    return changes, buyer_insert, buyer_changes, None if same else json.dumps(metadata, ensure_ascii=False)
+
+
 def apply_metadata(ns, reg, metadata):
     if not metadata or not REG.fullmatch(reg):
         return False
-    db = ns["conn"]()
-    db.row_factory = sqlite3.Row
-    try:
-        from audit_write_guard import guarded_transaction
-        with guarded_transaction(db):
-            db.execute("""CREATE TABLE IF NOT EXISTS v314_eis_metadata(
-                reg TEXT PRIMARY KEY, metadata_json TEXT NOT NULL, captured_at TEXT NOT NULL)""")
-            stamp = datetime.now(timezone.utc).isoformat()
-            row = db.execute("SELECT * FROM purchases WHERE reg_number=?", (reg,)).fetchone()
-            if row is None:
+    from audit_write_guard import guarded_transaction
+    metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
+    for _ in range(4):
+        db = ns["conn"](); db.row_factory = sqlite3.Row
+        try:
+            db.execute("BEGIN")
+            snapshot = _metadata_snapshot(db, reg)
+        finally:
+            db.rollback(); db.close()
+        if snapshot is None:
+            return False
+        stamp = datetime.now(timezone.utc).isoformat()
+        changes, buyer_insert, buyer_changes, payload = _metadata_plan(ns, snapshot, metadata, stamp)
+        if not changes and buyer_insert is None and not buyer_changes and payload is None:
+            return False
+        db = ns["conn"](); db.row_factory = sqlite3.Row
+        try:
+            with guarded_transaction(db):
+                if _metadata_snapshot(db, reg) != snapshot:
+                    db.rollback()
+                    continue
+                if not snapshot[3]:
+                    db.execute("""CREATE TABLE v314_eis_metadata(
+                        reg TEXT PRIMARY KEY, metadata_json TEXT NOT NULL, captured_at TEXT NOT NULL)""")
+                if buyer_insert is not None:
+                    db.execute("""INSERT INTO v311_verified_buyers
+                        (reg,name,inn,evidence_page,evidence_source,captured_at) VALUES(?,?,?,?,?,?)""",
+                        (reg, *buyer_insert))
+                if buyer_changes:
+                    db.execute("UPDATE v311_verified_buyers SET " + ",".join(k+"=?" for k in buyer_changes)
+                               + " WHERE reg=?", (*buyer_changes.values(), reg))
+                if changes:
+                    db.execute("UPDATE purchases SET " + ",".join(k+"=?" for k in changes)
+                               + " WHERE reg_number=?", (*changes.values(), reg))
+                if payload is not None:
+                    db.execute("""INSERT INTO v314_eis_metadata VALUES(?,?,?)
+                        ON CONFLICT(reg) DO UPDATE SET metadata_json=excluded.metadata_json,
+                        captured_at=excluded.captured_at""", (reg, payload, stamp))
                 db.commit()
-                return False
-            p = dict(row)
-            changes = {}
-            name = company(metadata.get("customer")) or _name(metadata.get("customer"))
-            current_name = _name(p.get("customer"))
-            extension = (customer_name_extension(current_name, name) and
-                         not metadata.get("customer_identity_conflict"))
-            prior = db.execute("SELECT name,inn FROM v311_verified_buyers WHERE reg=?", (reg,)).fetchone()
-            if extension:
-                incoming_inn = valid_inn(metadata.get("customer_inn"))
-                existing_inns = {valid_inn(p.get("customer_inn"))}
-                if prior:
-                    existing_inns.add(valid_inn(prior["inn"]))
-                    if not (customer_name_extension(prior["name"], name) or
-                            compact(prior["name"]).casefold() == compact(name).casefold()):
-                        extension = False
-                existing_inns.discard("")
-                if len(existing_inns) > 1 or (incoming_inn and existing_inns and incoming_inn not in existing_inns):
-                    extension = False
-            if name and (not current_name or extension or (
-                    current_name != compact(p.get("customer")) and name == current_name)):
-                changes["customer"] = name
-                if callable(ns.get("org_form")):
-                    changes["org_form"] = ns["org_form"](name)
-            identity = lambda value: re.sub(r"[^а-яёa-z0-9]", "", re.sub(
-                r"\s*\([^)]*\)\s*$", "", _name(value)).casefold())
-            same = bool(name and identity(current_name) == identity(name))
-            if name and ("customer" in changes or same):
-                inn = valid_inn(metadata.get("customer_inn"))
-                if inn and not valid_inn(p.get("customer_inn")):
-                    changes["customer_inn"] = inn
-                # Official card evidence remains authoritative; keep document provenance.
-                db.execute("""INSERT INTO v311_verified_buyers
-                    (reg,name,inn,evidence_page,evidence_source,captured_at) VALUES(?,?,?,?,?,?)
-                    ON CONFLICT(reg) DO UPDATE SET
-                        inn=CASE WHEN v311_verified_buyers.inn='' THEN excluded.inn
-                                 ELSE v311_verified_buyers.inn END
-                    WHERE v311_verified_buyers.name=excluded.name""",
-                    (reg,name,inn,metadata.get("source_url", ""),"official_eis_document",stamp))
-            if extension and "customer" in changes and prior:
-                db.execute("""UPDATE v311_verified_buyers SET name=?,evidence_page=?,
-                    evidence_source='official_eis_document',captured_at=? WHERE reg=?""",
-                    (name, metadata.get("source_url", ""), stamp, reg))
-            title = subject(metadata.get("title"))
-            if title and not subject(p.get("title")):
-                changes["title"] = title
-            # Only an explicit number extracted from an actual EIS original can
-            # fill a missing price; keep the earlier valid NMCD untouched.
-            from v335_price_recovery import price_changes,money
-            if money(metadata.get("price")):
-                changes.update(price_changes(p,metadata))
-            if changes:
-                try:
-                    card = json.loads(p.get("card_fields_json") or "{}")
-                    summary = card.setdefault("summary", {})
-                    for key in ("customer", "customer_inn", "title", "price", "price_num"):
-                        if key in changes:
-                            summary[key] = changes[key]
-                    if "price" in changes and money(changes["price"])==money(metadata.get("price")):
-                        summary["price_kind"]=metadata.get("price_kind") or "nmcd"
-                    card["metadata_evidence"] = {"source":"official_eis_document", **metadata}
-                    changes["card_fields_json"] = json.dumps(card,ensure_ascii=False)
-                except (ValueError,TypeError,AttributeError):
-                    pass
-                db.execute("UPDATE purchases SET " + ",".join(k+"=?" for k in changes) +
-                           " WHERE reg_number=?", (*changes.values(),reg))
-            db.execute("""INSERT INTO v314_eis_metadata(reg,metadata_json,captured_at) VALUES(?,?,?)
-                ON CONFLICT(reg) DO UPDATE SET metadata_json=excluded.metadata_json,
-                    captured_at=excluded.captured_at""",(reg,json.dumps(metadata,ensure_ascii=False),stamp))
-            db.commit()
-            return bool(changes)
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+                return bool(changes)
+        finally:
+            if db.in_transaction:
+                db.rollback()
+            db.close()
+    raise sqlite3.OperationalError("database is locked")
 
 
 def stored_metadata(ns, reg):

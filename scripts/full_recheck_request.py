@@ -280,7 +280,7 @@ def _inventory(c, request_id):
 
 
 def create_request(c, request_id, verified_getter, *, expected_count=3058, campaign=CAMPAIGN,
-                   max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0):
+                   max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, source_seconds=None):
     """Freeze (getter ∪ current-campaign queue) ∩ saved purchases − manual inputs.
 
     ``max_rows`` bounds total materialized source rows (duplicates included).
@@ -304,9 +304,12 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
         raise ValueError("Snapshot row budget is out of bounds")
     if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not 0 < max_seconds <= MAX_SNAPSHOT_SECONDS:
         raise ValueError("Snapshot time budget is out of bounds")
+    if source_seconds is not None and (isinstance(source_seconds, bool) or
+            not isinstance(source_seconds, (int, float)) or not 0 < source_seconds <= 60):
+        raise ValueError("Source capture budget is out of bounds")
     _token(campaign)
     created = _time()
-    deadline = time.monotonic() + max_seconds
+    deadline = time.monotonic() + (max_seconds if source_seconds is None else source_seconds)
     scanned = 0
 
     def check():
@@ -340,6 +343,11 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
     except Exception as exc:
         raise SnapshotError("Dashboard membership capture failed") from exc
     source_captured = _time()
+    # A slow restored getter must never extend SQLite writer occupancy. The
+    # new explicitly authorized snapshot has a separate bounded source budget.
+    # Default behavior for existing callers/epochs stays unchanged.
+    if source_seconds is not None:
+        deadline = time.monotonic() + max_seconds
     previous_timeout = c.execute("PRAGMA busy_timeout").fetchone()[0]
     c.execute("PRAGMA busy_timeout=" + str(max(1, int((deadline - time.monotonic()) * 1000))))
     c.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
