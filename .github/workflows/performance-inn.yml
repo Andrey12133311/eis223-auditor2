@@ -1,0 +1,34 @@
+name: Performance and INN regressions
+on:
+  push:
+    branches: [fix/performance-inn-20261020]
+  pull_request:
+    branches: [thematic-audit-20261015]
+    paths:
+      - '.github/workflows/performance-inn.yml'
+      - 'scripts/eis_inn_search.py'
+      - 'scripts/eis_server_worker.py'
+      - 'scripts/v301_search_jobs.py'
+      - 'scripts/v366_account_manual.py'
+      - 'tests/test_performance_inn*.py'
+permissions:
+  contents: read
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-accounts.txt python-docx openpyxl
+      - name: Check syntax without importing application
+        run: python -m compileall -q scripts
+      - name: Verify INN ownership, pagination and event-loop safety
+        env:
+          PYTHONPATH: '.:scripts:tests'
+        run: python -m unittest tests.test_eis_server_worker tests.test_eis_worker_backpressure tests.test_personal_inn_search tests.test_eis_inn_search tests.test_performance_inn_regressions

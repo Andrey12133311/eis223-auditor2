@@ -50,6 +50,10 @@ def _init(ns):
             );
             CREATE INDEX IF NOT EXISTS idx_v301_ready
               ON v301_search_jobs(status,not_before,priority,created_at);
+            CREATE INDEX IF NOT EXISTS idx_v301_target_page
+              ON v301_search_jobs(kind,target,page,status,created_at);
+            CREATE INDEX IF NOT EXISTS idx_v301_parent_status
+              ON v301_search_jobs(parent_id,kind,target,status);
             CREATE TABLE IF NOT EXISTS v301_inn_purchases(
                 inn TEXT NOT NULL,
                 reg TEXT NOT NULL,
@@ -140,15 +144,37 @@ def _local_results(ns,kind,target):
         return [dict(r) for r in rows]
     finally:db.close()
 
+def _active_job(db,kind,target,page,parent_id):
+    if kind=="inn" and page==1 and not parent_id:
+        # Page one can be done while later pages are still waiting for EIS.
+        # Reuse that root, not a new search that would duplicate its downloads.
+        return db.execute("""SELECT root.* FROM v301_search_jobs root
+          WHERE root.kind='inn' AND root.target=? AND root.page=1 AND root.parent_id=''
+          AND (root.status IN ('queued','leased','deferred') OR EXISTS(
+            SELECT 1 FROM v301_search_jobs child WHERE child.parent_id=root.id
+            AND child.kind='inn' AND child.target=root.target
+            AND child.status IN ('queued','leased','deferred')))
+          ORDER BY root.created_at DESC LIMIT 1""",(target,)).fetchone()
+    return db.execute(
+        "SELECT * FROM v301_search_jobs WHERE kind=? AND target=? AND page=? "
+        "AND status IN ('queued','leased','deferred') ORDER BY created_at DESC LIMIT 1",
+        (kind,target,page)).fetchone()
+
+
 def _enqueue(ns,kind,target,page=1,priority=10,parent_id="",user_input=False):
     now=_utc()
     db=_db(ns)
     try:
+        # A duplicate submission that needs no manual-history write is a read.
+        # This works while another operation holds SQLite's reserved writer lock.
+        if not (user_input and kind=="reg"):
+            old=_active_job(db,kind,target,page,parent_id)
+            if old:
+                return dict(old),False
         db.execute("BEGIN IMMEDIATE")
-        old=db.execute(
-            "SELECT * FROM v301_search_jobs WHERE kind=? AND target=? AND page=? "
-            "AND status IN ('queued','leased','deferred') ORDER BY created_at DESC LIMIT 1",
-            (kind,target,page)).fetchone()
+        # Recheck under the writer lock: concurrent first submissions must still
+        # create exactly one job. Do not skip explicit manual-input recording.
+        old=_active_job(db,kind,target,page,parent_id)
         if old:
             # The user may enter a number already queued by an INN search.
             # Reuse the download work, but retain this explicit submission.
