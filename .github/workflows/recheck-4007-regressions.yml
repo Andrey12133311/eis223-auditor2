@@ -7,6 +7,9 @@ on:
     paths: ['scripts/**', 'tests/**', '.github/workflows/recheck-4007-regressions.yml']
 permissions:
   contents: read
+concurrency:
+  group: recheck-4007-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   frozen-cohort-and-evidence:
     runs-on: ubuntu-latest
