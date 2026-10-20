@@ -139,9 +139,13 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with patch.object(runtime, "TARGET_GENERATION", 10):
             await self._assert_generation_transition(9, 10)
 
-    async def test_generation_eleven_binds_verified_clarification_dates(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 11)
-        await self._assert_generation_transition(10, 11)
+    async def test_generation_eleven_preserves_concurrent_source_guard(self):
+        with patch.object(runtime, "TARGET_GENERATION", 11):
+            await self._assert_generation_transition(10, 11)
+
+    async def test_generation_twelve_verifies_clarification_publication_once(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 12)
+        await self._assert_generation_transition(11, 12)
 
     async def _assert_pending_and_active_generation_transition(self, previous, current):
         regs = [self.purchase(number) for number in range(1, 4)]
@@ -205,9 +209,13 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         with patch.object(runtime, "TARGET_GENERATION", 10):
             await self._assert_pending_and_active_generation_transition(9, 10)
 
-    async def test_generation_eleven_preserves_generation_ten_leases_and_receipts(self):
-        self.assertEqual(runtime.TARGET_GENERATION, 11)
-        await self._assert_pending_and_active_generation_transition(10, 11)
+    async def test_generation_eleven_preserves_generation_ten_membership_and_live_lease(self):
+        with patch.object(runtime, "TARGET_GENERATION", 11):
+            await self._assert_pending_and_active_generation_transition(10, 11)
+
+    async def test_generation_twelve_keeps_pending_and_live_generation_eleven(self):
+        self.assertEqual(runtime.TARGET_GENERATION, 12)
+        await self._assert_pending_and_active_generation_transition(11, 12)
 
     async def test_corrected_engine_catches_up_completed_noncompany_without_new_epoch(self):
         reg = self.purchase()

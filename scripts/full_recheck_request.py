@@ -25,7 +25,6 @@ from datetime import datetime
 CAMPAIGN = "2026-10-15-main-1253-identity-and-legal-v342"
 MAX_SNAPSHOT_ROWS = 20000
 MAX_SNAPSHOT_SECONDS = 10.0
-MAX_SOURCE_CAPTURE_SECONDS = 60.0
 MAX_CANDIDATES = 128
 STATES = ("pending", "running", "completed", "waiting_originals", "retry", "blocked")
 METRICS = ("documents_found", "documents_read", "documents_unreadable", "verified_original_documents",
@@ -281,7 +280,7 @@ def _inventory(c, request_id):
 
 
 def create_request(c, request_id, verified_getter, *, expected_count=3058, campaign=CAMPAIGN,
-                   max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, source_seconds=None, all_saved=False):
+                   max_rows=MAX_SNAPSHOT_ROWS, max_seconds=5.0, all_saved=False, source_seconds=None):
     """Freeze one explicitly selected population, never extend it on replay.
 
     Default: (getter union current queue) intersect saved purchases, minus manual.
@@ -293,9 +292,6 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
     after return and is never mistaken for a partial success. SQL execution is
     additionally interrupted by a progress handler. Use a dedicated connection.
     A repeated request ID returns its original membership without re-enumerating.
-    An explicit source_seconds gives the opaque getter its own bounded capture
-    budget before opening the short SQL transaction. It never extends the writer
-    budget or accepts a partial result. The default preserves the combined budget.
     """
     _request_id(request_id)
     if c.in_transaction:
@@ -316,12 +312,11 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
     if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not 0 < max_seconds <= MAX_SNAPSHOT_SECONDS:
         raise ValueError("Snapshot time budget is out of bounds")
     if source_seconds is not None and (isinstance(source_seconds, bool) or
-            not isinstance(source_seconds, (int, float)) or
-            not 0 < source_seconds <= MAX_SOURCE_CAPTURE_SECONDS):
-        raise ValueError("Source capture time budget is out of bounds")
+            not isinstance(source_seconds, (int, float)) or not 0 < source_seconds <= 60):
+        raise ValueError("Source capture budget is out of bounds")
     _token(campaign)
     created = _time()
-    deadline = time.monotonic() + (source_seconds if source_seconds is not None else max_seconds)
+    deadline = time.monotonic() + (max_seconds if source_seconds is None else source_seconds)
     scanned = 0
 
     def check():
@@ -358,9 +353,8 @@ def create_request(c, request_id, verified_getter, *, expected_count=3058, campa
         except Exception as exc:
             raise SnapshotError("Dashboard membership capture failed") from exc
     source_captured = _time()
+    # A separate source-capture budget never extends writer occupancy.
     if source_seconds is not None:
-        # No SQLite writer has been acquired while the getter runs. Give the
-        # subsequent atomic SQL capture its original, separate short budget.
         deadline = time.monotonic() + max_seconds
     previous_timeout = c.execute("PRAGMA busy_timeout").fetchone()[0]
     c.execute("PRAGMA busy_timeout=" + str(max(1, int((deadline - time.monotonic()) * 1000))))

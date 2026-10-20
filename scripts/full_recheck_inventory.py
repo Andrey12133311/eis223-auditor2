@@ -19,15 +19,17 @@ def timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
-def collect(ns, *, expected_count=3058):
+def collect(ns):
     from v332_all_procurements_audit import CAMPAIGN
     from v342_thematic_queue import business_company
-    if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count < 0:
-        raise ValueError("Expected count must be a nonnegative integer")
+    from full_recheck_runtime import AUTHORIZED_REQUESTS, REQUEST_ENV, AUTHORIZED_EPOCH
+    import os
+    expected = AUTHORIZED_REQUESTS.get(os.environ.get(REQUEST_ENV, "").strip(),
+                                       AUTHORIZED_REQUESTS[AUTHORIZED_EPOCH])
     started = time.monotonic()
     result = {"status": "unavailable", "captured_at": timestamp(),
               "basis": "saved_db_and_separately_captured_verified_intake",
-              "expected_requested_count": expected_count}
+              "expected_requested_count": expected}
     c = None
     try:
         getter = ns.get("_verified_set235")
@@ -91,7 +93,7 @@ def collect(ns, *, expected_count=3058):
         counts["general_queue_positions"] = c.execute(
             "SELECT COUNT(*) FROM v332_audit_queue WHERE campaign=?", (CAMPAIGN,)).fetchone()[0]
         counts["general_orphan_positions"] = counts["general_queue_positions"] - len(general)
-        counts["dashboard_expected_difference"] = len(dashboard) - expected_count
+        counts["dashboard_expected_difference"] = len(dashboard) - expected if expected is not None else None
         counts["verified_not_saved"] = len(verified - saved)
         if {"thematic_items", "thematic_batches"} <= tables:
             positions = c.execute("""SELECT t.reg FROM thematic_items t

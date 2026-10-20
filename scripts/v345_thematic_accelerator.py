@@ -14,7 +14,7 @@ import uuid
 import full_recheck_runtime
 from datetime import datetime,timezone
 import v342_thematic_queue as original
-from v381_audit_scheduling import background_audit, run_file_io
+from v381_audit_scheduling import background_audit, run_file_io, database_write_slot
 from thematic_period import index_campaign, selection_sql, joined_selection_sql, contains, period_fields
 from audit_source_version import source_version, semantic_source_version, SemanticSnapshotError
 from legal_audit_revision import engine_signature
@@ -51,7 +51,8 @@ async def _retry_db(operation,*args):
         try:
             # A cancelled asyncio.to_thread future does not stop its SQLite
             # thread. Settle any actual commit before ending this worker cycle.
-            return await thread_call(operation,*args)
+            async with database_write_slot():
+                return await thread_call(operation,*args)
         except sqlite3.OperationalError as exc:
             if not original.sqlite_busy(exc) or attempt==len(DB_RETRY_DELAYS):
                 raise

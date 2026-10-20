@@ -128,7 +128,7 @@ class FactPersistenceContention(unittest.TestCase):
         def racing(row, purchase, evidence):
             count.append(1)
             with closing(self.connect()) as c:
-                c.execute('UPDATE purchases SET price=?', (str(len(count)),))
+                c.execute('UPDATE purchases SET card_fields_json=?', (json.dumps({'concurrent_derived_cache': len(count)}),))
                 c.commit()
             return original(row, purchase, evidence)
         with patch.object(facts, '_fact_updates', side_effect=racing):
@@ -136,7 +136,7 @@ class FactPersistenceContention(unittest.TestCase):
                 facts.persist_facts(self.ns, self.purchase)
         self.assertEqual(len(count), 4)
         self.assertEqual(self.row()['method'], '')
-        self.assertEqual(self.row()['price'], '4')
+        self.assertEqual(json.loads(self.row()['card_fields_json']), {'concurrent_derived_cache': 4})
 
     def test_malformed_optional_cache_is_repaired_without_overwriting_other_scalars(self):
         with closing(self.connect()) as c:

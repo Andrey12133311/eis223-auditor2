@@ -23,13 +23,10 @@ from contextlib import contextmanager
 
 REQUEST_ENV = "EIS223_FULL_RECHECK_REQUEST"
 AUTHORIZED_EPOCH = "2026-10-19-all-saved-214328"
-DASHBOARD_4007_EPOCH = "2026-10-20-all-dashboard-4007"
 ALL_SAVED_EPOCH = "2026-10-20-all-saved-explicit-2100"
-# Preserve each explicitly authorized scope and its original immutable ledger.
-# These are not deployment-derived or periodically repeated full scans.
-AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, DASHBOARD_4007_EPOCH: 4007,
-                       ALL_SAVED_EPOCH: None}
-AUTHORIZED_EPOCHS = tuple(AUTHORIZED_REQUESTS)
+DASHBOARD_EPOCH = "2026-10-20-dashboard-4007"
+AUTHORIZED_EPOCHS = (AUTHORIZED_EPOCH, ALL_SAVED_EPOCH, DASHBOARD_EPOCH)
+AUTHORIZED_REQUESTS = {AUTHORIZED_EPOCH: 3058, ALL_SAVED_EPOCH: None, DASHBOARD_EPOCH: 4007}
 LEASE_SECONDS = 300
 RENEW_SECONDS = 30
 PAGE_SIZE = 8
@@ -37,7 +34,7 @@ INVENTORY_SECONDS = 300
 # Authorized semantic correction generation, not a deployment or legal quota.
 # Future changed engines need an explicitly reviewed higher generation. Equal
 # generation/different signature disables request claims; it never retargets.
-TARGET_GENERATION = 11
+TARGET_GENERATION = 12
 CATCHUP_PAGE_SIZE = 32
 # Reuse two of the existing four general workers, leaving two ordinary-only.
 # This is an in-process explicit-only budget, not a cross-process lease cap.
@@ -80,32 +77,34 @@ def initialize(ns):
     from full_recheck_inventory import collect
     state = ns.setdefault("_full_recheck", {})
     epoch = os.environ.get(REQUEST_ENV, "").strip()
-    expected = AUTHORIZED_REQUESTS.get(epoch, 3058)
-    if epoch and epoch not in AUTHORIZED_REQUESTS:
-        raise ValueError("Unrecognized explicit full-recheck request epoch")
+    # On the first explicit activation, capture immutable membership first.
+    # Diagnostics may enumerate the same opaque source; do not do that twice.
     c = ns["conn"]()
     try:
         tables = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        state["recovery_request_id"] = AUTHORIZED_EPOCH if "full_recheck_members" in tables else None
         exists = bool("full_recheck_requests" in tables and c.execute(
             "SELECT 1 FROM full_recheck_requests WHERE request_id=?", (epoch,)).fetchone())
     finally:
         c.close()
-    # Do not call the opaque dashboard getter twice before activating a new
-    # request. The atomic membership capture below has priority; the ordinary
-    # aggregate diagnostic resumes after its normal interval.
     state["inventory"] = ({"status": "deferred", "reason": "explicit_snapshot_priority",
-                           "expected_requested_count": expected} if epoch and not exists else
-                          collect(ns, expected_count=expected if expected is not None else 4007))
+                           "expected_requested_count": AUTHORIZED_REQUESTS.get(epoch)}
+                          if epoch in AUTHORIZED_REQUESTS and not exists else collect(ns))
     state["inventory_at"] = time.monotonic()
     print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
+    epoch = os.environ.get(REQUEST_ENV, "").strip()
+    c = ns["conn"]()
+    try:
+        state["recovery_request_id"] = (AUTHORIZED_EPOCH if c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='full_recheck_members'").fetchone() else None)
+    finally:
+        c.close()
     if not epoch:
         state.pop("target_conflict", None)
         state.pop("request_id", None)
         return
-    # Preserve the older frozen request and authorize the user's new full
-    # dashboard instruction. A repeated instruction reuses the same epoch.
-    if epoch not in AUTHORIZED_REQUESTS:
+    # This release authorizes exactly one user instruction, not a mechanism
+    # for inventing recurring full scans or treating deployment SHAs as epochs.
+    if epoch not in AUTHORIZED_EPOCHS:
         raise ValueError("Unrecognized explicit full-recheck request epoch")
     import full_recheck_request as ledger
     with transaction(ns) as c:
@@ -115,8 +114,9 @@ def initialize(ns):
     c = ns["conn"]()
     try:
         summary = ledger.create_request(c, epoch, ns.get("_verified_set235"),
-            expected_count=expected, source_seconds=60.0,
-            all_saved=epoch == ALL_SAVED_EPOCH)
+            expected_count=None if epoch == ALL_SAVED_EPOCH else (4007 if epoch == DASHBOARD_EPOCH else 3058),
+            all_saved=epoch == ALL_SAVED_EPOCH,
+            **({"source_seconds": 60, "max_seconds": 10} if epoch == DASHBOARD_EPOCH else {}))
     finally:
         c.close()
     from v332_all_procurements_audit import engine_signature
@@ -129,13 +129,11 @@ def initialize(ns):
     except ledger.TargetConflict:
         state.pop("request_id", None)
         state["target_conflict"] = True
-        state["target_conflict_request_id"] = epoch
         print("FULL_RECHECK_TARGET conflict=True generation=" + str(TARGET_GENERATION), flush=True)
         return
     state["engine_signature"] = signature
     state["target_generation"] = TARGET_GENERATION
     state.pop("target_conflict", None)
-    state.pop("target_conflict_request_id", None)
     c = ns["conn"]()
     try:
         summary = ledger.inventory(c, epoch)
@@ -146,7 +144,7 @@ def initialize(ns):
     state["cursor"] = ""
     print("FULL_RECHECK_REQUEST " + json.dumps({**summary,
         "scope": "all_saved_including_manual" if epoch == ALL_SAVED_EPOCH else
-                 "full_dashboard" if epoch == DASHBOARD_4007_EPOCH else "legacy_dashboard"}, ensure_ascii=False), flush=True)
+                 "current_dashboard" if epoch == DASHBOARD_EPOCH else "legacy_dashboard"}, ensure_ascii=False), flush=True)
 
 
 def heartbeat(ns):
@@ -156,12 +154,10 @@ def heartbeat(ns):
         return
     if time.monotonic() - state.get("inventory_at", 0) >= INVENTORY_SECONDS:
         from full_recheck_inventory import collect
-        epoch = request_id(ns) or os.environ.get(REQUEST_ENV, "").strip()
-        state["inventory"] = collect(ns, expected_count=AUTHORIZED_REQUESTS.get(epoch, 3058) if epoch != ALL_SAVED_EPOCH else 4007)
+        state["inventory"] = collect(ns)
         state["inventory_at"] = time.monotonic()
         print("FULL_RECHECK_INVENTORY " + json.dumps(state["inventory"], ensure_ascii=False), flush=True)
-    epoch = request_id(ns) or (state.get("target_conflict_request_id", AUTHORIZED_EPOCH)
-                               if state.get("target_conflict") else None)
+    epoch = request_id(ns) or (os.environ.get(REQUEST_ENV, "").strip() if state.get("target_conflict") else None)
     if not epoch:
         return
     import full_recheck_request as ledger
@@ -584,24 +580,22 @@ def _snapshot(ns, reg):
 
 
 def _expired(ns):
-    # Switching explicit requests must not strand an old running lease, which
-    # correctly blocks all newer requests until execution-lock-safe recovery.
-    # Read only the explicit authorized epochs, in one globally bounded oldest-first
-    # page. Recovery still proves the exact token and exclusive physical lock.
-    from full_recheck_request import Claim
-    state = ns.get("_full_recheck") or {}
-    if not (request_id(ns) or state.get("recovery_request_id")):
+    from full_recheck_request import expired_members
+    epoch = request_id(ns) or (ns.get("_full_recheck") or {}).get("recovery_request_id")
+    if not epoch:
         return []
     c = ns["conn"]()
     try:
-        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='full_recheck_members'").fetchone():
-            return []
-        epochs = tuple(AUTHORIZED_REQUESTS)
-        rows = c.execute("""SELECT reg,request_id,attempt_id,lease_token,general_token
-            FROM full_recheck_members WHERE request_id IN (""" + ",".join("?" for _ in epochs) + """ )
-            AND status='running' AND lease_until<=? ORDER BY lease_until,reg LIMIT ?""",
-            (*epochs, time.time(), PAGE_SIZE)).fetchall()
-        return [Claim(*tuple(row)) for row in rows]
+        # A previous explicit request can retain a crashed owner's lease.
+        # Recover only exact expired claims under the existing per-reg flock;
+        # no historical pending/completed rows are reset or imported as success.
+        epochs = (epoch,) + tuple(value for value in AUTHORIZED_EPOCHS if value != epoch)
+        claims = []
+        for value in epochs:
+            if len(claims) >= PAGE_SIZE:
+                break
+            claims.extend(expired_members(c, value, limit=PAGE_SIZE - len(claims)))
+        return claims
     finally:
         c.close()
 

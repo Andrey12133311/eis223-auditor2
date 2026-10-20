@@ -1594,8 +1594,18 @@ async def retry_operation(ns,phase,operation,worker=None,*,retry_seconds=None):
 
 
 async def db_stage(ns,phase,function,*args,worker=None):
-    """Retry just this DB stage, settling writes before cancellation/defer."""
-    return await retry_operation(ns,phase,lambda:thread_call(function,*args),worker,
+    """Retry only this DB stage; serialize writes until the real thread settles."""
+    from v381_audit_scheduling import database_write_slot
+    async def execute():
+        # Only short lease/bookkeeping stages participate. Legal persistence
+        # and metadata planning may do substantial CPU/preflight work before
+        # their transaction; serializing whole callbacks would hold up renewals.
+        if phase not in ("full_request_ack", "full_request_renew",
+                         "full_request_watermark", "request_watermark", "save", "save_partial"):
+            return await thread_call(function,*args)
+        async with database_write_slot():
+            return await thread_call(function,*args)
+    return await retry_operation(ns,phase,execute,worker,
                                  retry_seconds=DB_STAGE_RETRY_SECONDS)
 
 
