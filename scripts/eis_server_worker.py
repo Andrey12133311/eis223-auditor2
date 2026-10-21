@@ -476,14 +476,25 @@ def claim(ns, identity, limit=2, supported=()):
         # One public INN search page at a time, including across multiple VPSs.
         inn_busy = db.execute("SELECT 1 FROM v301_search_jobs WHERE kind='inn' AND status='leased' AND lease_until>=? LIMIT 1", (now,)).fetchone()
         if len(rows) < limit:
-            # Reserve one available slot for a due INN page. Otherwise page
-            # priority 12 would starve behind its own priority-8 candidates.
-            # The loop skips a second INN so the remaining slot serves a reg.
-            ready = db.execute("""SELECT * FROM v301_search_jobs
-              WHERE (kind='reg' OR (? AND kind='inn' AND page BETWEEN 1 AND ?))
-              AND status='queued' AND not_before<=?
-              ORDER BY CASE WHEN kind='inn' THEN 0 ELSE 1 END,priority,created_at LIMIT ?""",
-              (capable and not inn_busy, MAX_PAGES, now, MAX_QUEUE)).fetchall()
+            # INN receives first refusal, but at most one global lease. Fetch
+            # only the rows that can actually be claimed while holding the
+            # SQLite writer lock: never materialize the entire 350-row queue.
+            # A second due INN must not displace the remaining registry slot.
+            ready = []
+            if capable and not inn_busy and not inn_claimed:
+                inn = db.execute("""SELECT * FROM v301_search_jobs
+                  WHERE kind='inn' AND page BETWEEN 1 AND ?
+                  AND status='queued' AND not_before<=?
+                  ORDER BY priority,created_at LIMIT 1""",
+                  (MAX_PAGES, now)).fetchone()
+                if inn is not None:
+                    ready.append(inn)
+            free = limit - len(rows) - len(ready)
+            if free > 0:
+                ready.extend(db.execute("""SELECT * FROM v301_search_jobs
+                  WHERE kind='reg' AND status='queued' AND not_before<=?
+                  ORDER BY priority,created_at LIMIT ?""",
+                  (now, free)).fetchall())
             for row in ready:
                 if len(rows) >= limit:
                     break
