@@ -447,8 +447,31 @@ el('manual-inn-search').addEventListener('submit',async event=>{
  }catch(error){if(sequence===innSearchSequence)el('manual-inn-message').textContent=error.message}
  finally{if(sequence===innSearchSequence)button.disabled=false}
 });
+// Resume the owner's saved request after a reload. Viewing history must
+// never start another EIS search or increment the shared discovery queue.
+async function resumeInnSearch(){
+ try{
+  const recent=await innRequest('/me/inn-search');
+  if(innSearchSequence!==0)return;
+  const last=Array.isArray(recent.searches)?recent.searches[0]:null;
+  if(!last||!(/^(?:[0-9]{10}|[0-9]{12})$/.test(last.inn))||
+     !/^[0-9a-f]{24}$/.test(last.id)){
+   el('manual-inn-message').textContent='Укажите ИНН и нажмите «Проверить по ИНН», чтобы создать задание для VPS.';
+   return;
+  }
+  el('manual-inn').value=last.inn;
+  const sequence=++innSearchSequence;
+  const snapshot=await innRequest('/me/inn-search/'+encodeURIComponent(last.id));
+  if(sequence!==innSearchSequence)return;
+  if(!innStatus(snapshot))pollInn(last.id,sequence);
+ }catch(error){
+  if(error.status!==401&&innSearchSequence===0)
+   el('manual-inn-message').textContent='Не удалось восстановить предыдущий поиск: '+error.message;
+ }
+}
 const requestedInn=new URLSearchParams(location.search||'').get('inn')||'';
 if(/^(?:[0-9]{10}|[0-9]{12})$/.test(requestedInn))el('manual-inn').value=requestedInn;
+else resumeInnSearch();
 el('manual-add').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
  const number=String(new FormData(form).get('reg')||'').trim();
