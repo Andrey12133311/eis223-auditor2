@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import threading
 import time
 import sqlite3
+from pathlib import Path
 
 
 class DashboardWarming(RuntimeError):
@@ -31,7 +32,18 @@ class SQLiteDataVersion:
     def __call__(self):
         with self._guard:
             if self._db is None:
-                db = self.connect()
+                probe = self.connect()
+                try:
+                    filename = probe.execute("PRAGMA database_list").fetchone()[2]
+                finally:
+                    probe.close()
+                if not filename:
+                    raise sqlite3.OperationalError("Dashboard requires a file-backed SQLite database")
+                # The observer serves multiple request threads, but never
+                # writes and never keeps a read transaction open.
+                db = sqlite3.connect(Path(filename).resolve().as_uri()+"?mode=ro",
+                                     uri=True, check_same_thread=False,
+                                     isolation_level=None, timeout=0.5)
                 db.execute("PRAGMA query_only=ON")
                 db.execute("PRAGMA busy_timeout=500")
                 self._db = db
