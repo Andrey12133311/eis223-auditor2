@@ -32,7 +32,9 @@ INDEX_SECONDS=90
 # Establish a source snapshot once for historical completed reviews. Prior
 # findings remain intact; only newly evidenced legal episodes are appended.
 ANALYSIS_VERSION=5
-DB_RETRY_DELAYS=(.15,.4)
+# Background thematic DB writes may collide with original-file intake.
+# Keep recovery bounded, but tolerate short bursts without redoing an audit.
+DB_RETRY_DELAYS=(.15,.4,1.0,2.0)
 MAX_RETRY_SECONDS=1800
 ITEM_TIMEOUT_SECONDS=600
 PENDING_RESULT_LIMIT=MAX_PER_CYCLE
