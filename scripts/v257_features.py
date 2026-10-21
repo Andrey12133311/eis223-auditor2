@@ -182,7 +182,7 @@ def install(ns:dict)->None:
     def dashboard(request:Request):
         params=request.query_params
         inn=(params.get('inn') or '').strip()
-        if inn and not re.fullmatch(r'\\d{10}|\\d{12}',inn):
+        if inn and not re.fullmatch(r'\d{10}|\d{12}',inn):
             raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
         try:
             return dashboard_cache.get(str(params),lambda: _read_dashboard(params))
