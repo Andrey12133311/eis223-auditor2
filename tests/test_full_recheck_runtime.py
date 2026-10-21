@@ -6,6 +6,7 @@ import io
 import json
 import itertools
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import time
