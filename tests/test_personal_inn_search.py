@@ -131,6 +131,23 @@ class PersonalInnSearchTests(unittest.TestCase):
                        (reg, "Закупка", "Заказчик", inn, "100", 100, 0, 0, 0, "2026-10-19"))
             db.commit()
 
+    def test_recent_searches_are_owner_scoped_and_read_only(self):
+        empty = self.client.get("/me/inn-search", headers=self.headers("alice", None))
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json(), {"searches": []})
+        self.assertIn("no-store", empty.headers["cache-control"])
+        self.assertEqual(self.client.get("/me/inn-search").status_code, 401)
+        first = self.start(INN, owner="alice").json()["id"]
+        other = self.start(OTHER_INN, owner="bob").json()["id"]
+        seen = self.client.get("/me/inn-search", headers=self.headers("alice", None))
+        self.assertEqual(seen.json(), {"searches": [{"id": first, "inn": INN}]})
+        self.assertNotIn(other, seen.text)
+        self.assertEqual(
+            self.client.get("/me/inn-search", headers=self.headers("bob", None)).json(),
+            {"searches": [{"id": other, "inn": OTHER_INN}]}
+        )
+        self.assertEqual(self.count("v301_search_jobs"), 2)
+
     def test_requires_session_for_both_routes(self):
         self.assertEqual(self.start(owner="").status_code, 401)
         self.assertEqual(self.snapshot("a" * 24, owner="").status_code, 401)
