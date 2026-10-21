@@ -484,10 +484,20 @@ def claim_next(ns):
         # Use exactly the same company scope as dashboard queue admission.
         # SQLite LIKE does not case-fold Cyrillic or normalize quoted names.
         c.create_function("eis_business_company",1,business_company,deterministic=True)
-        c.execute("BEGIN IMMEDIATE")
-        ensure_source_column(c)
-        ensure_scan_cursors(c)
-        c.commit()
+        # Schema migrations need an exclusive writer reservation, but a normal
+        # worker turn does not. On the already-initialized production database,
+        # avoid grabbing an extra BEGIN IMMEDIATE on each of four pollers.
+        columns={r[1] for r in c.execute("PRAGMA table_info(v332_audit_queue)")}
+        required={"last_source_version","retry_count","next_retry_at",
+                  "last_result_token","last_counted_token","last_semantic_version",
+                  "last_engine_signature","reservation_token","receipt_ready"}
+        cursors_ready=c.execute("""SELECT 1 FROM sqlite_master
+          WHERE type='table' AND name='v382_audit_scan_cursors'""").fetchone()
+        if not required.issubset(columns) or not cursors_ready:
+            c.execute("BEGIN IMMEDIATE")
+            ensure_source_column(c)
+            ensure_scan_cursors(c)
+            c.commit()
         handoff=claim_recheck_handoff(c)
         if handoff is not None:return handoff
         ordinary_handoff=scan_cursor(c,"general-recheck-handoff:"+CAMPAIGN)
