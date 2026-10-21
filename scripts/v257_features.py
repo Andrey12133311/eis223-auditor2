@@ -9,7 +9,7 @@ import sqlite3
 import time
 from dashboard_read_cache import MembershipCache, MembershipUnavailable, ensure_read_indexes
 from dashboard_load_ui import inject as dashboard_load_state
-from dashboard_async_read import DashboardReadCoordinator, DashboardWarming
+from dashboard_async_read import DashboardReadCoordinator, DashboardWarming, SQLiteDataVersion
 from starlette.datastructures import QueryParams
 from contextlib import contextmanager
 from v295_eis_originals import root,allowed_documents,saved_document
@@ -177,7 +177,7 @@ def install(ns:dict)->None:
               ORDER BY purchases DESC,title LIMIT 150""").fetchall()
         return {'items':[{'code':'title:'+r['title'], 'title':r['title'],
                           'purchases':int(r['purchases'])} for r in rows]}
-    dashboard_cache = DashboardReadCoordinator()
+    dashboard_cache = DashboardReadCoordinator(version_getter=SQLiteDataVersion(connection))
     @app.get('/api/v257/dashboard',include_in_schema=False)
     def dashboard(request:Request):
         params=request.query_params
