@@ -6,7 +6,7 @@ No automatic polling/retry storm; the user can retry after source Retry-After.
 SCRIPT = r'''<script id="eis-dashboard-load-state">(()=>{'use strict';
 if(location.pathname!=='/'||window.__eisDashboardLoadState||typeof window.fetch!=='function')return;
 window.__eisDashboardLoadState=true;
-const original=window.fetch.bind(window);let serial=0,notice='',retryAt=0,timer=null;
+const original=window.fetch.bind(window);let serial=0,notice='',retryAt=0,timer=null,autoTimer=null,attempts=0,lastUrl='';
 function render(){
  if(!document.body)return;
  let box=document.getElementById('eis-dashboard-load-notice');
@@ -31,11 +31,26 @@ window.fetch=async function(input,options){
  target=method==='GET'&&url.origin===location.origin&&url.pathname==='/api/v257/dashboard';}catch(_){}
  if(!target)return original(input,options);
  const ticket=++serial;
+ const key=String(typeof input==='string'||input instanceof URL?input:input.url);
+ if(key!==lastUrl){attempts=0;lastUrl=key}
+ if(autoTimer!==null){clearTimeout(autoTimer);autoTimer=null}
  try{const response=await original(input,options);
   if(response.status===503&&['warming','busy'].includes(response.headers.get('X-EIS-Dashboard-State'))){
-   show(ticket,'Список закупок обновляется. Сохранённые результаты не удалены. Повторите загрузку после паузы.',delay(response));
+   const pause=Math.max(5000,delay(response));
+   show(ticket,'Идёт загрузка списка закупок. Повторная попытка выполняется автоматически; сохранённые результаты не удалены.',pause);
+   if(attempts<15){attempts+=1;autoTimer=setTimeout(()=>{
+     autoTimer=null;if(ticket!==serial||document.hidden)return;
+     const form=document.getElementById('filters');
+     if(form){if(typeof form.requestSubmit==='function')form.requestSubmit();
+      else form.dispatchEvent(new Event('submit',{bubbles:false,cancelable:true}));}
+   },Math.min(15000,pause+attempts*500));}
   }else if(response.ok){
+   attempts=0;
    response.clone().json().then(data=>{
+    if(data.dashboard_stale){const date=new Date(data.dashboard_snapshot_as_of);
+     const stamp=Number.isFinite(date.getTime())?date.toLocaleTimeString('ru-RU'):'';
+     show(ticket,'Показаны ранее рассчитанные результаты'+(stamp?' на '+stamp:'')+'. Проверка новых данных продолжается.');
+     return;}
     if(data.membership_stale){const date=new Date(data.membership_refreshed_at);const stamp=Number.isFinite(date.getTime())?date.toLocaleTimeString('ru-RU'):'';
      show(ticket,'Показан последний полученный список'+(stamp?' на '+stamp:'')+'. Обновление списка ожидается; это не отметка о завершении проверки.');
     }else show(ticket,'');
