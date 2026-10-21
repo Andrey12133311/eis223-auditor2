@@ -361,10 +361,25 @@ def _renew(ns, reg):
 
 
 async def _renew_loop(ns, reg):
-    from v332_all_procurements_audit import db_stage
+    from v332_all_procurements_audit import db_stage, transient_sqlite
+    # A busy SQLite writer must not silently kill the renewal task while the
+    # document analyzer still holds the physical per-procurement lock. Keep the
+    # exact lease token and retry soon; stale/foreign claims still fail closed.
+    delay = RENEW_SECONDS
     while True:
-        await asyncio.sleep(RENEW_SECONDS)
-        await db_stage(ns, "full_request_renew", _renew_if_due, ns, reg)
+        await asyncio.sleep(delay)
+        try:
+            await db_stage(ns, "full_request_renew", _renew_if_due, ns, reg)
+        except Exception as exc:
+            if not transient_sqlite(exc):
+                raise
+            # db_stage already spent its bounded lock-wait/retry budget.
+            # Retry the SAME fenced claim, without manufacturing a new lease.
+            delay = min(5, RENEW_SECONDS)
+            print("FULL_RECHECK_RENEW_CONTENTION retry_seconds=" + str(delay),
+                  flush=True)
+        else:
+            delay = RENEW_SECONDS
 
 
 async def _lock(reg):
