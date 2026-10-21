@@ -36,14 +36,14 @@ window.fetch=async function(input,options){
  if(autoTimer!==null){clearTimeout(autoTimer);autoTimer=null}
  try{const response=await original(input,options);
   if(response.status===503&&['warming','busy'].includes(response.headers.get('X-EIS-Dashboard-State'))){
-   const pause=Math.max(5000,delay(response));
+   const pause=delay(response);
    show(ticket,'Идёт загрузка списка закупок. Повторная попытка выполняется автоматически; сохранённые результаты не удалены.',pause);
    if(attempts<15){attempts+=1;autoTimer=setTimeout(()=>{
      autoTimer=null;if(ticket!==serial||document.hidden)return;
      const form=document.getElementById('filters');
      if(form){if(typeof form.requestSubmit==='function')form.requestSubmit();
       else form.dispatchEvent(new Event('submit',{bubbles:false,cancelable:true}));}
-   },Math.min(15000,pause+attempts*500));}
+   },Math.min(15000,Math.max(5000,pause)+attempts*500));}
   }else if(response.ok){
    attempts=0;
    response.clone().json().then(data=>{
