@@ -69,6 +69,28 @@ class InnSearchTests(unittest.TestCase):
         self.assertTrue(second)
         self.assertTrue(all(job["kind"] == "reg" for job in second))
 
+    def test_claim_uses_bounded_ready_selection_under_large_inn_backlog(self):
+        # Many due INN pages must not consume a registry slot or force a
+        # full-queue SELECT while the single SQLite writer is reserved.
+        for i in range(9):
+            inn = str(7701234500 + i)
+            self.inn_job(inn)
+        self.enqueue()
+        seen = []
+        connector = self.ns["conn"]
+        def traced():
+            db = connector()
+            db.set_trace_callback(seen.append)
+            return db
+        with patch.dict(self.ns, {"conn": traced}):
+            jobs = self.claim()
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual([job["kind"] for job in jobs], ["inn", "reg"])
+        selects = [line.upper() for line in seen if "SELECT * FROM V301_SEARCH_JOBS" in line.upper()]
+        self.assertTrue(any("KIND='INN'" in line and "LIMIT 1" in line for line in selects))
+        self.assertTrue(any("KIND='REG'" in line and "LIMIT 1" in line for line in selects))
+        self.assertFalse(any("LIMIT 350" in line for line in selects))
+
     def test_due_pagination_gets_one_slot_despite_registry_backlog(self):
         pagination = queue._enqueue(self.ns, "inn", INN, 2, 12, "", False)[0]
         for suffix in range(20):
