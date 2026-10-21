@@ -179,6 +179,23 @@ async def start_inn_search(data:InnSearchRequest, request:Request, response:Resp
             "new_request":created,"local_recheck":False,"existing":existing[:50],
             "bridge":await asyncio.to_thread(_bridge,ns)}
 
+def _recent_inn_searches(owner):
+    """Show only this owner's existing INN jobs; never enqueue on page load."""
+    with connect() as db:
+        rows = db.execute(
+            """SELECT job_id,inn FROM account_inn_searches
+               WHERE user_id=%s ORDER BY last_started_at DESC,job_id DESC LIMIT 10""",
+            (owner,)
+        ).fetchall()
+    return [{"id": row[0], "inn": row[1]} for row in rows]
+
+
+@inn_router.get("")
+async def recent_inn_searches(request:Request, response:Response):
+    owner=current_account(request)[0]
+    response.headers.update(no_store_headers())
+    return {"searches": await asyncio.to_thread(_recent_inn_searches,owner)}
+
 
 def _inn_search_snapshot(ns, identifier, inn):
     from v301_search_jobs import _db, _bridge
