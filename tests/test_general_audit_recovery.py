@@ -137,6 +137,15 @@ class DatabaseFixture:
 
 
 class QueueRecovery(DatabaseFixture, unittest.TestCase):
+    def test_existing_schema_does_not_repeat_writer_migrations_for_claim(self):
+        reg = self.purchase()
+        audit.initialize(self.ns)
+        with patch.object(audit, "ensure_source_column",
+                          side_effect=AssertionError("repeated schema migration")), \
+             patch.object(audit, "ensure_scan_cursors",
+                          side_effect=AssertionError("repeated cursor DDL")):
+            self.assertEqual(audit.claim_next(self.ns), reg)
+
     def test_old_locked_failure_is_recovered_without_repeating_current_success(self):
         locked, invalid, completed = [self.purchase(i) for i in (1, 2, 3)]
         audit.initialize(self.ns)
