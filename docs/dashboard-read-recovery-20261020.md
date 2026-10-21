@@ -61,3 +61,9 @@ and real authenticated table responses. Compare accepted originals, errors,
 queue and committed audit receipts in equal windows. If Railway refuses
 deployment, report the infrastructure block; do not claim that the main page
 or full recheck has been fixed in production.
+
+## Live regression observed 21 October 2026
+
+At 22:53 Europe/Moscow, the main mobile page showed `Загрузка...`, a blank checked-document counter, and a request timeout. Railway `web` production continued to serve deployment `d4445338` (commit `bdcffad5`) rather than the branch's reviewed dashboard recovery changes. HTTP logs contained `/api/v257/dashboard` client disconnects (499) after waits exceeding 40 s, and runtime logs showed concurrent SQLite `database is locked` retries and occasional PostgreSQL identity pool timeouts. The VPS 1.4.0 continued successful original uploads. These observations establish degraded UI/API responsiveness, not disappearance of stored purchases or a stopped VPS.
+
+Release the already-reviewed branch through the existing `web` service, never by re-deploying the old `bdcffad5` image or creating a replacement service. Railway may reject deploys while paused. Verify a *new* successful deployment's commit SHA, `/api/v257/dashboard` and status response times, `DASHBOARD_MEMBERSHIP_READY` and `DASHBOARD_READ_READY`, and the existing acquisition/queue/DB invariants before claiming production recovery. This documentation-only change does not manipulate the production database, rate limits, audit state, or worker.
