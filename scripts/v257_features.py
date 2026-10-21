@@ -9,6 +9,8 @@ import sqlite3
 import time
 from dashboard_read_cache import MembershipCache, MembershipUnavailable, ensure_read_indexes
 from dashboard_load_ui import inject as dashboard_load_state
+from dashboard_async_read import DashboardReadCoordinator, DashboardWarming, SQLiteDataVersion
+from starlette.datastructures import QueryParams
 from contextlib import contextmanager
 from v295_eis_originals import root,allowed_documents,saved_document
 from fastapi import HTTPException, Request
@@ -175,9 +177,29 @@ def install(ns:dict)->None:
               ORDER BY purchases DESC,title LIMIT 150""").fetchall()
         return {'items':[{'code':'title:'+r['title'], 'title':r['title'],
                           'purchases':int(r['purchases'])} for r in rows]}
+    dashboard_cache = DashboardReadCoordinator(version_getter=SQLiteDataVersion(connection))
     @app.get('/api/v257/dashboard',include_in_schema=False)
     def dashboard(request:Request):
         params=request.query_params
+        inn=(params.get('inn') or '').strip()
+        if inn and not re.fullmatch(r'\d{10}|\d{12}',inn):
+            raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
+        try:
+            return dashboard_cache.get(str(params),lambda: _read_dashboard(params))
+        except ValueError:
+            raise HTTPException(400,'Некорректные параметры фильтра')
+        except DashboardWarming:
+            raise HTTPException(503,'Список закупок готовится; сохранённые результаты не удалены.',
+                                headers={'Retry-After':'5','Cache-Control':'no-store',
+                                         'X-EIS-Dashboard-State':'warming'})
+        except sqlite3.OperationalError as exc:
+            if 'locked' in str(exc).lower() or 'interrupted' in str(exc).lower():
+                raise HTTPException(503,'База данных занята, выполняется обновление списка.',
+                                    headers={'Retry-After':'5','Cache-Control':'no-store',
+                                             'X-EIS-Dashboard-State':'busy'})
+            raise
+
+    def _read_dashboard(params):
         inn=(params.get('inn') or '').strip()
         if inn and not re.fullmatch(r'\d{10}|\d{12}',inn):
             raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
@@ -275,6 +297,11 @@ def install(ns:dict)->None:
                 'count_basis':'unique_saved_legal_episodes',
                 'list_basis':'verified_intake_and_persistent_automatic_queue',
                 'filter_scoped':True}
+    @app.on_event('startup')
+    async def prewarm_default_dashboard():
+        # Shared, read-only, exact saved count; never a completion shortcut.
+        dashboard_cache.prime('', lambda: _read_dashboard(QueryParams('')))
+
     @app.get('/api/v257/manual',include_in_schema=False)
     def manual_list(offset:int=0,limit:int=80):
         offset=min(max(offset,0),1_000_000);limit=min(max(1,limit),200)
