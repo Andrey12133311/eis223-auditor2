@@ -727,6 +727,37 @@ class FullRecheckRuntime(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(lock)
         _release_execution_lock(lock)
 
+    async def test_transient_sqlite_renewal_retries_same_claim_without_dropping_task(self):
+        reg = object()
+        calls = []
+        recovered = asyncio.Event()
+
+        async def db_stage(ns, phase, function, namespace, item):
+            self.assertEqual(phase, "full_request_renew")
+            self.assertIs(item, reg)
+            calls.append(item)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            recovered.set()
+
+        with patch.object(runtime, "RENEW_SECONDS", .001), \
+             patch.object(general, "db_stage", side_effect=db_stage):
+            task = asyncio.create_task(runtime._renew_loop(self.ns, reg))
+            try:
+                await asyncio.wait_for(recovered.wait(), 1)
+                self.assertFalse(task.done())
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(item is reg for item in calls))
+
+    async def test_renewal_does_not_retry_stale_or_foreign_claim(self):
+        with patch.object(runtime, "RENEW_SECONDS", .001), \
+             patch.object(general, "db_stage", side_effect=ledger.StaleClaim("superseded")):
+            with self.assertRaises(ledger.StaleClaim):
+                await asyncio.wait_for(runtime._renew_loop(self.ns, object()), 1)
+
     async def test_release_cancellation_settles_renewal_and_releases_real_lock(self):
         reg = self.purchase()
         general.initialize(self.ns)
