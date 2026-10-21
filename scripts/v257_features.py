@@ -298,7 +298,7 @@ def install(ns:dict)->None:
                 'list_basis':'verified_intake_and_persistent_automatic_queue',
                 'filter_scoped':True}
     @app.on_event('startup')
-    def prewarm_default_dashboard():
+    async def prewarm_default_dashboard():
         # Shared, read-only, exact saved count; never a completion shortcut.
         dashboard_cache.prime('', lambda: _read_dashboard(QueryParams('')))
 
