@@ -1,0 +1,30 @@
+name: Dashboard responsiveness
+on:
+  pull_request:
+    branches: [thematic-audit-20261015]
+    paths:
+      - 'scripts/dashboard_async_read.py'
+      - 'scripts/dashboard_load_ui.py'
+      - 'scripts/v257_features.py'
+      - 'tests/test_dashboard_async_read.py'
+      - '.github/workflows/dashboard-responsiveness.yml'
+  push:
+    branches: [thematic-audit-20261015]
+    paths:
+      - 'scripts/dashboard_async_read.py'
+      - 'scripts/dashboard_load_ui.py'
+      - 'scripts/v257_features.py'
+      - 'tests/test_dashboard_async_read.py'
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile dashboard modules
+        run: python -m py_compile scripts/dashboard_async_read.py scripts/dashboard_load_ui.py scripts/v257_features.py tests/test_dashboard_async_read.py
+      - name: Run dashboard concurrency tests
+        run: python -m unittest discover -s tests -p test_dashboard_async_read.py -v
