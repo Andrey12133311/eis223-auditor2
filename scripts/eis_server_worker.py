@@ -190,10 +190,31 @@ def _log_database_busy(operation):
         pass
 
 
+# Keep the response shorter than the VPS HTTP client's 30s deadline.
+# Cancelling to_thread does NOT abort a live DB transaction or evidence hash:
+# the thread may finish and commit; a later retry is fenced/idempotent by
+# (job_id, lease_token) and returns the saved report. Never claim success here.
+_RESPONSE_BUDGET_SECONDS = {
+    "claim": 12, "bootstrap": 12, "report": 20, "inn_report": 20,
+    "heartbeat": 8, "discovery": 12,
+}
+
+
 async def _database_call(operation, function, *args):
     detail = _DATABASE_BUSY_DETAILS[operation]
     try:
-        return await asyncio.to_thread(function, *args)
+        return await asyncio.wait_for(
+            asyncio.to_thread(function, *args),
+            timeout=_RESPONSE_BUDGET_SECONDS[operation],
+        )
+    except asyncio.TimeoutError:
+        # The underlying thread may still finish: keep the request pending
+        # at the VPS until the report is actually committed and replayable.
+        _log_telemetry(operation + "_deadline", retry_after_seconds=_DATABASE_RETRY_SECONDS)
+        raise HTTPException(
+            503, "Worker operation still pending; retry this request unchanged",
+            headers={"Retry-After": str(_DATABASE_RETRY_SECONDS)},
+        ) from None
     except sqlite3.OperationalError as exc:
         from audit_db_retry import is_busy
         if not is_busy(exc):
@@ -922,10 +943,16 @@ def install(ns):
             enqueue_review = ns.get("_v295_enqueue_review")
             if callable(enqueue_async) or callable(enqueue_review):
                 try:
-                    admission = (await enqueue_async(result["reg_number"]) if callable(enqueue_async)
-                                 else await asyncio.to_thread(enqueue_review, result["reg_number"]))
+                    # A slow audit-admission queue must not turn an already
+                    # committed receipt into endless VPS 30-second HTTP 499.
+                    # Existing periodic intake reconciliation will retry.
+                    admission = await asyncio.wait_for(
+                        enqueue_async(result["reg_number"]) if callable(enqueue_async)
+                        else asyncio.to_thread(enqueue_review, result["reg_number"]),
+                        timeout=5,
+                    )
                     result["review_status"] = admission.get("status")
-                except Exception:
+                except (Exception, asyncio.TimeoutError):
                     result["review_status"] = "pending_retry"
         return result
 
