@@ -207,9 +207,30 @@ def install(ns:dict)->None:
         try:
             snapshot,membership_info=membership.snapshot()
         except MembershipUnavailable:
-            raise HTTPException(503,'Список закупок обновляется. Повторите загрузку через 10 секунд.',
-                                headers={'Retry-After':'10','Cache-Control':'no-store',
-                                         'X-EIS-Dashboard-State':'warming'})
+            # The collector's volatile membership can be unavailable under
+            # SQLite contention. Use only persisted, verified audit-queue
+            # membership as a read-only fallback, never an empty fake result.
+            # The existing queue union below still runs for normal reads.
+            try:
+                with db() as c:
+                    table = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v332_audit_queue'").fetchone()
+                    if not table:
+                        raise sqlite3.OperationalError("verified queue unavailable")
+                    from v332_all_procurements_audit import CAMPAIGN
+                    snapshot = frozenset(str(row[0]) for row in c.execute(
+                        "SELECT q.reg FROM v332_audit_queue q JOIN purchases p "
+                        "ON p.reg_number=q.reg WHERE q.campaign=?", (CAMPAIGN,)))
+                    if not snapshot:
+                        raise sqlite3.OperationalError("verified queue empty")
+                membership_info = {
+                    'membership_basis': 'persisted_verified_audit_queue_fallback',
+                    'membership_stale': True,
+                    'membership_refreshing': True,
+                }
+            except sqlite3.Error:
+                raise HTTPException(503,'Список закупок обновляется. Повторите загрузку через 10 секунд.',
+                                    headers={'Retry-After':'10','Cache-Control':'no-store',
+                                             'X-EIS-Dashboard-State':'warming'})
         verified=set(snapshot)
         # The current intake snapshot is volatile (it can shrink to a few
         # hundred after the collector rotates pages). Preserve ALL purchases
