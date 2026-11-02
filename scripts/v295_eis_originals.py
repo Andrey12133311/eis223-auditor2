@@ -1393,7 +1393,11 @@ def install(ns):
         auth(request)
         if not REG.fullmatch(reg) or not UID.fullmatch(uid):
             raise HTTPException(400,"Invalid original identifier")
-        allowed=allowed_documents(reg)
+        # Source manifest enumeration can read many receipts on /data. Keep
+        # all blocking file operations off the ASGI event loop so that VPS
+        # heartbeat and report requests remain serviceable.
+        from v381_audit_scheduling import run_file_io
+        allowed=await run_file_io(allowed_documents,reg)
         if uid not in allowed:raise HTTPException(404,"Upload official XML first")
         if request.headers.get("content-length","").isdigit() and int(request.headers["content-length"])>MAX_BYTES:
             raise HTTPException(413,"Original exceeds 64 MiB")
@@ -1412,17 +1416,16 @@ def install(ns):
             raise HTTPException(400,"Incomplete original request body")
         data=raw.getvalue()
         entry=allowed[uid]
-        try:assert_format(data,entry["ext"])
+        try:await run_file_io(assert_format,data,entry["ext"])
         except ValueError as exc:
             print(f"V295 ORIGINAL_REJECTED reg={reg} code={_rejection_code(exc)} bytes={size}",flush=True)
             raise HTTPException(422,str(exc)) from exc
         # Persist both the prior and incoming version provenance before the
         # active pointer advances. Concurrent captures cannot lose a receipt.
-        from v381_audit_scheduling import run_file_io
         receipt,changed=await run_file_io(_store_original_version,reg,uid,entry,data)
         chars=0
         print(f"V295 ORIGINAL_IMPORTED reg={reg} uid={uid} size={size} chars={chars}",flush=True)
-        review=enqueue_review(reg,force=changed)
+        review=await enqueue_review_async(reg,force=changed)
         return {"accepted":True,"reg_number":reg,"uid":uid,"bytes":size,
             "extracted_chars":chars,"status":receipt["state"],
             "review_status":review["status"],"audited_documents_increment":0}
