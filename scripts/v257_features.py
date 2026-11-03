@@ -224,6 +224,8 @@ def install(ns:dict)->None:
                         raise sqlite3.OperationalError("verified queue empty")
                 membership_info = {
                     'membership_basis': 'persisted_verified_audit_queue_fallback',
+                    'membership_refreshed_at': None,
+                    'membership_age_seconds': None,
                     'membership_stale': True,
                     'membership_refreshing': True,
                 }
