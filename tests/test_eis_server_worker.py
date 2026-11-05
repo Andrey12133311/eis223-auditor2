@@ -203,6 +203,35 @@ class ServerWorkerTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 self.report(job)
 
+    def test_report_replays_if_parallel_commit_lands_between_receipt_and_lease_reads(self):
+        self.enqueue()
+        job = self.claim()
+        archive_hash = self.archive()
+        self.original()
+        payload = {"worker_id": self.identity, "lease_token": job["lease_token"],
+                   "reg_number": REG, "status": "completed", "archive_sha256s": [archive_hash]}
+        winner = []
+
+        class InterleavedConnection(sqlite3.Connection):
+            def execute(connection, sql, parameters=(), /):
+                if (not winner and sql.startswith("SELECT * FROM v301_search_jobs WHERE id=?")):
+                    # The other request commits after our receipt lookup, but
+                    # before our lease read. Both belong to the same lease.
+                    winner.append(None)
+                    winner[0] = worker.report(self.ns, job["id"], payload)
+                return super().execute(sql, parameters)
+
+        connector = lambda: sqlite3.connect(self.home/"queue.sqlite", timeout=5,
+                                             factory=InterleavedConnection)
+        with patch.dict(self.ns, {"conn": connector}):
+            replay = worker.report(self.ns, job["id"], payload)
+        self.assertTrue(winner[0]["download_complete"])
+        self.assertTrue(replay["replayed"])
+        self.assertTrue(replay["download_complete"])
+        self.assertEqual(self.row(job["id"])["status"], "done")
+        with self.ns["conn"]() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM eis_server_reports").fetchone()[0], 1)
+
     def test_report_classifies_busy_and_locked_extended_codes_without_exposing_details(self):
         self.enqueue()
         job = self.claim()

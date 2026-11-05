@@ -698,6 +698,16 @@ def evidence(reg, hashes=None):
                       "no_original_references" if records and not refs else ""}
 
 
+def _report_replay(db, identifier, token, identity, reg):
+    replay = db.execute("SELECT * FROM eis_server_reports WHERE job_id=? AND lease_token=?",
+                        (identifier, token)).fetchone()
+    if replay:
+        if replay["worker_id"] != identity or replay["reg_number"] != reg:
+            raise HTTPException(409, "Report does not match completed lease")
+        return {**json.loads(replay["result_json"]), "replayed": True}
+    return None
+
+
 def report(ns, identifier, data):
     identity = worker_id(data.get("worker_id"))
     reg = registry(data.get("reg_number"))
@@ -716,14 +726,21 @@ def report(ns, identifier, data):
         raise HTTPException(422, "Invalid retry delay")
     db = _db(ns)
     try:
-        replay = db.execute("SELECT * FROM eis_server_reports WHERE job_id=? AND lease_token=?",
-                            (identifier, token)).fetchone()
+        replay = _report_replay(db, identifier, token, identity, reg)
         if replay:
-            if replay["worker_id"] != identity or replay["reg_number"] != reg:
-                raise HTTPException(409, "Report does not match completed lease")
-            return {**json.loads(replay["result_json"]), "replayed": True}
+            return replay
         row = db.execute("SELECT * FROM v301_search_jobs WHERE id=?", (identifier,)).fetchone()
-        _assert_lease(row, identity, token, reg)
+        try:
+            _assert_lease(row, identity, token, reg)
+        except HTTPException:
+            # Receipt and lease are separate autocommit reads. A parallel
+            # request can commit this lease between them; that is a replay,
+            # not a stale/foreign lease. Its receipt is committed atomically
+            # with the now-finished job, so re-read before rejecting it.
+            replay = _report_replay(db, identifier, token, identity, reg)
+            if replay:
+                return replay
+            raise
         if row["kind"] != "reg":
             raise HTTPException(409, "Use the INN report endpoint for this job")
         proof = evidence(reg, hashes) if hashes or status in ("completed", "partial") else {
@@ -739,11 +756,10 @@ def report(ns, identifier, data):
                     metadata_stored = False
         db.execute("BEGIN IMMEDIATE")
         # A concurrent report/lease reclaim may have happened during hashing.
-        replay = db.execute("SELECT * FROM eis_server_reports WHERE job_id=? AND lease_token=?",
-                            (identifier, token)).fetchone()
+        replay = _report_replay(db, identifier, token, identity, reg)
         if replay:
             db.commit()
-            return {**json.loads(replay["result_json"]), "replayed": True}
+            return replay
         row = db.execute("SELECT * FROM v301_search_jobs WHERE id=?", (identifier,)).fetchone()
         _assert_lease(row, identity, token, reg)
         metadata_only = row["parent_id"] == "v341-card-facts"

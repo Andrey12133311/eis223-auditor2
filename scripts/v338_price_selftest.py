@@ -22,7 +22,7 @@ def run():
                 reg_number TEXT PRIMARY KEY,
                 price TEXT,price_num REAL,card_fields_json TEXT,
                 documents_checked INTEGER DEFAULT 1,last_seen TEXT,
-                method TEXT,submission_end TEXT
+                method TEXT,submission_end TEXT,submission_start TEXT,published_at TEXT
             );
             INSERT INTO purchases(reg_number) VALUES('32616471929');
         """)

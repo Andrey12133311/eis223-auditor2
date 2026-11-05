@@ -851,7 +851,8 @@ def as_procurement(row):
             }
     except (ValueError,TypeError,AttributeError,KeyError):
         pass
-    return out
+    from saved_eis_dates import with_saved_dates
+    return with_saved_dates(out)
 
 def source_verified(reg,path,digest,meta):
     source=meta.get("source")

@@ -10,6 +10,7 @@ import sqlite3
 from urllib.parse import urlsplit
 from fastapi.responses import HTMLResponse
 from v342_identity import organization_display_name
+from saved_eis_dates import recovered_date
 
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
 STYLE="""<style id="eis-modern-audit-card">
@@ -107,22 +108,8 @@ def recovered_submission_start(p):
     Never infer it from publication date or bid deadline. Preserve the source
     timezone label rather than silently converting a local EIS date to Moscow.
     """
-    if p.get("submission_start"):
-        return p["submission_start"]
-    import json
-    try:
-        card=json.loads(p.get("card_fields_json") or "{}")
-    except (TypeError,ValueError):
-        return ""
-    if not isinstance(card,dict):
-        return ""
-    for key in ("submission_start","submissionStart","applicationStartDate","submissionStartDate"):
-        value=card.get(key)
-        if isinstance(value,str) and re.fullmatch(
-            r"\\s*\\d{2}\\.\\d{2}\\.\\d{4}(?:\\s+\\d{2}:\\d{2})?(?:\\s*\\(МСК[+-]\\d{1,2}\\))?\\s*|"
-            r"\\s*\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?(?:Z|[+-]\\d{2}:?\\d{2})?)?\\s*",value):
-            return value.strip()
-    return ""
+    from saved_eis_dates import recovered_date
+    return recovered_date(p,"submission_start")
 
 def read(ns,reg):
     c=ns["conn"]()
@@ -421,9 +408,9 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         keys=[
           ('Предмет закупки',val(p,'title')),('Заказчик',organization_display_name(val(p,'customer'))),
           ('ИНН заказчика',val(p,'customer_inn')),('Способ закупки',val(p,'method')),
-          ('Стоимость закупки',val(p,'price')),('Дата размещения',val(p,'published_at')),
+          ('Стоимость закупки',val(p,'price')),('Дата размещения',recovered_date(p,'published')),
           ('Начало подачи заявок',recovered_submission_start(p)),
-          ('Окончание подачи заявок',val(p,'submission_end'))]
+          ('Окончание подачи заявок',recovered_date(p,'submission_end'))]
         if not val(p,'price') and val(p,'price_num') is not None:
             keys[4]=('Стоимость закупки',val(p,'price_num'))
         from v383_msp_scope import display as msp_display

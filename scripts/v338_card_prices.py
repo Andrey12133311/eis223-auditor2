@@ -165,24 +165,36 @@ def handoff_card_rechecks(ns,limit=32):
 
 
 def enqueue_missing_prices(ns,limit=8):
-    """Put EIS-card reads in the same browser queue, behind manual requests."""
+    """Queue bounded official metadata repairs behind manual requests."""
     from v301_search_jobs import _enqueue
     db=ns["conn"]();db.row_factory=sqlite3.Row
     try:
         ready=db.execute("""SELECT COUNT(*) FROM v301_search_jobs
                        WHERE status IN ('queued','leased','deferred')""").fetchone()[0]
-        if ready>=24:return 0
+        budget=max(0,min(8,int(limit),24-ready))
+        if not budget:return 0
         from v332_all_procurements_audit import CAMPAIGN
+        tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        scopes=[];params=[]
+        if "v332_audit_queue" in tables:
+            scopes.append("EXISTS(SELECT 1 FROM v332_audit_queue aq WHERE aq.reg=p.reg_number AND aq.campaign=?)")
+            params.append(CAMPAIGN)
+        if {"thematic_items","thematic_batches"}<=tables:
+            scopes.append("EXISTS(SELECT 1 FROM thematic_items ti JOIN thematic_batches tb ON tb.id=ti.batch_id "
+                          "WHERE ti.reg=p.reg_number AND tb.status='active' AND ti.status<>'excluded_company')")
+        if not scopes:return 0
         rows=db.execute("""SELECT p.reg_number FROM purchases p
-                    JOIN v332_audit_queue aq ON aq.reg=p.reg_number AND aq.campaign=?
                     LEFT JOIN v338_price_requests r ON r.reg=p.reg_number
                     WHERE p.documents_checked>0
+                    AND ("""+" OR ".join(scopes)+""")
                     AND (p.price_num IS NULL OR TRIM(COALESCE(p.price,''))=''
                          OR TRIM(COALESCE(p.method,''))=''
-                         OR TRIM(COALESCE(p.submission_end,''))='')
+                         OR TRIM(COALESCE(p.submission_end,''))=''
+                         OR TRIM(COALESCE(p.submission_start,''))=''
+                         OR TRIM(COALESCE(p.published_at,''))='')
                     AND (r.reg IS NULL OR
                          (r.attempts<3 AND strftime('%s',r.created_at)<strftime('%s','now','-6 hours')))
-                    ORDER BY p.last_seen DESC LIMIT ?""",(CAMPAIGN,min(8,limit))).fetchall()
+                    ORDER BY p.last_seen DESC LIMIT ?""",(*params,budget)).fetchall()
     finally:db.close()
     queued=0
     for row in rows:

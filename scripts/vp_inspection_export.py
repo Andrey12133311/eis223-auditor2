@@ -56,6 +56,8 @@ def metadata(p, detail=None, card=None):
     detail = detail if isinstance(detail, dict) else {}
     card = card if isinstance(card, dict) else {}
     values = {**detail, **{k: v for k, v in p.items() if v not in (None, "")}}
+    from saved_eis_dates import with_saved_dates
+    values = with_saved_dates(values, card or None)
     price = _value(values, "price", "price_num", "initialSum")
     price_kind = _value(values, "price_kind")
     if price_kind in ("framework", "unit_price", "formula"):
@@ -71,9 +73,9 @@ def metadata(p, detail=None, card=None):
         "BIDS": _value(values, "bids_summary", "applications_summary"),
         "PRICE": price,
         "STAGE": _value(values, "stage", "purchase_status", "purchaseStatusName"),
-        "PUBLISHED": _value(values, "published", "published_at", "publicationDate"),
-        "SUBMISSION_START": _value(values, "submission_start", "submissionStart"),
-        "SUBMISSION_END": _value(values, "submission_end", "deadline", "submissionEnd"),
+        "PUBLISHED": values["published"],
+        "SUBMISSION_START": values["submission_start"],
+        "SUBMISSION_END": values["submission_end"],
         "RESULT_DATE": _value(values, "result_date", "summarizing_date", "summarizingDate"),
     }
 

@@ -754,6 +754,9 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
     originals = [d for d in docs if verified(d) and str(d.get("text") or "").strip()]
     if card and not p.get("card_fields_json"):
         p["card_fields_json"] = card
+    from saved_eis_dates import ALIASES, with_saved_dates
+    dates = with_saved_dates({**detail, **p}, card or None)
+    p.update({key: dates[key] for key in ALIASES})
     sme = resolve_sme(p, originals)
     sme_payment_status = _sme_payment_scope(p, sme, originals)
     competitive = competitive_rule_scope(p)
@@ -859,9 +862,9 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
         "title": str(p.get("title") or detail.get("purchaseName") or ""),
         "customer": str(p.get("customer") or ""), "customer_inn": str(p.get("customer_inn") or ""),
         "method": str(p.get("method") or detail.get("purchaseMethodName") or ""),
-        "published": str(p.get("published") or p.get("published_at") or detail.get("publicationDate") or ""),
-        "submission_start": str(p.get("submission_start") or detail.get("submissionStart") or ""),
-        "submission_end": str(p.get("submission_end") or detail.get("submissionEnd") or ""),
+        "published": p["published"],
+        "submission_start": p["submission_start"],
+        "submission_end": p["submission_end"],
         "price": str(p.get("price") or ""), "price_kind": str(p.get("price_kind") or ""),
         "url": str(p.get("url") or "")}
     return {"revision": REVISION, "rows": rows, "outcomes": outcomes, "metadata": metadata,
