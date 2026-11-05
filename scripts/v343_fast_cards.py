@@ -101,6 +101,29 @@ def text(x):
 def val(p,key):
     return p.get(key) if p is not None else None
 
+def recovered_submission_start(p):
+    """Recover a missing start date only from an explicit saved official-card field.
+
+    Never infer it from publication date or bid deadline. Preserve the source
+    timezone label rather than silently converting a local EIS date to Moscow.
+    """
+    if p.get("submission_start"):
+        return p["submission_start"]
+    import json
+    try:
+        card=json.loads(p.get("card_fields_json") or "{}")
+    except (TypeError,ValueError):
+        return ""
+    if not isinstance(card,dict):
+        return ""
+    for key in ("submission_start","submissionStart","applicationStartDate","submissionStartDate"):
+        value=card.get(key)
+        if isinstance(value,str) and re.fullmatch(
+            r"\\s*\\d{2}\\.\\d{2}\\.\\d{4}(?:\\s+\\d{2}:\\d{2})?(?:\\s*\\(МСК[+-]\\d{1,2}\\))?\\s*|"
+            r"\\s*\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?(?:Z|[+-]\\d{2}:?\\d{2})?)?\\s*",value):
+            return value.strip()
+    return ""
+
 def read(ns,reg):
     c=ns["conn"]()
     try:
@@ -399,7 +422,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
           ('Предмет закупки',val(p,'title')),('Заказчик',organization_display_name(val(p,'customer'))),
           ('ИНН заказчика',val(p,'customer_inn')),('Способ закупки',val(p,'method')),
           ('Стоимость закупки',val(p,'price')),('Дата размещения',val(p,'published_at')),
-          ('Начало подачи заявок',val(p,'submission_start')),
+          ('Начало подачи заявок',recovered_submission_start(p)),
           ('Окончание подачи заявок',val(p,'submission_end'))]
         if not val(p,'price') and val(p,'price_num') is not None:
             keys[4]=('Стоимость закупки',val(p,'price_num'))
