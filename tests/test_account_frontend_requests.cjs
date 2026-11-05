@@ -175,7 +175,7 @@ function staffResponse(call) {
 
 async function testStaffRequestsAndAsyncForms() {
   const ui = harness(embedded('v370_staff_ui.py', 'JS='),
-    'section,templates,loadCase,loadDashboard,loadToday', staffResponse);
+    'section,templates,loadCase,loadDashboard', staffResponse);
   await flush();
   assert.equal(ui.calls.length, 6, 'startup only loads profile and visible overview data');
   assert.equal(ui.count('/me/campaign-goals'), 0);
@@ -231,12 +231,12 @@ async function testParallelCaseReadsIgnoreOlderResponses() {
 
 async function testDashboardSharingAndMutationRefresh() {
   let held = null;
-  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadDashboard,loadToday', async call => {
+  const ui = harness(embedded('v370_staff_ui.py', 'JS='), 'loadDashboard', async call => {
     if (held && call.url === '/me/center/dashboard') await held.promise;
     return staffResponse(call);
   });
   await flush(); held = deferred();
-  const first = ui.api.loadDashboard(), second = ui.api.loadToday();
+  const first = ui.api.loadDashboard(), second = ui.api.loadDashboard();
   const fresh = ui.api.loadDashboard(true);
   assert.equal(ui.count('/me/center/dashboard'), 2, 'concurrent views share one GET');
   held.resolve(); held = null;
@@ -703,6 +703,7 @@ async function testManagerFindingQueueAndVersionedDecisions() {
   assert.equal(ui.get('mgr-submission-items').children.length, 1);
   ui.get('mgr-finding-worker').value = 'employee-1'; ui.get('mgr-finding-reg').value = reviewReg;
   await ui.api.loadFindings();
+  assert.equal(ui.get('mgr-case-review').open, true, 'opening an assigned case expands its review panel');
   let buttons = flatten(ui.get('mgr-finding-items')).filter(x => x.tagName === 'BUTTON');
   assert.deepEqual(buttons.map(x => x.textContent), ['Согласовать', 'Отказать']);
   ui.context.prompt = () => 'Нет'; await buttons[1].onclick();
@@ -769,6 +770,29 @@ async function testManagerSelfAttachAndRefresh() {
   assert.match(ui.get('mgr-attach-status').textContent,/Сотрудник прикреплён/);
 }
 
+async function testCompactCabinetAdminShortcutOpensItsFoldout() {
+  const source = embedded('account_site_ui_v1.py', 'def site_header');
+  const ui = harness(source, '', async call => {
+    if (call.url === '/me/profile') return {full_name: 'Administrator', role: 'admin', completed: true};
+    if (call.url === '/me/summary') return {};
+    if (call.url === '/api/thematic/history') return {batches: []};
+    if (call.url === '/me/campaign-goals/violations') return {findings: []};
+    return [];
+  });
+  await flush();
+  ui.get('eis223-cabinet').hidden = false;
+  ui.get('eis223-admin-panel').hidden = true;
+  ui.get('eis223-admin-controls').open = false;
+  const open = ui.get('eis223-admin-open');
+  open.click = () => open.listeners.click();
+  ui.get('eis223-admin-nav').listeners.click();
+  await flush();
+  assert.equal(ui.get('eis223-admin-controls').open, true, 'admin shortcut opens its collapsed group');
+  assert.equal(ui.get('eis223-admin-panel').hidden, false);
+  assert.equal(ui.count('/admin/roles/users'), 1);
+  assert.ok(ui.calls.every(call => call.method === 'GET'), 'opening admin controls changes no account state');
+}
+
 (async () => {
   for (const test of [testManualFiltersAndRefreshRace, testThematicFiltersAndDeniedPolling,
     testHistoricalAdoptionQueuesFreshRead, testStaffRequestsAndAsyncForms, testParallelCaseReadsIgnoreOlderResponses,
@@ -781,8 +805,9 @@ async function testManagerSelfAttachAndRefresh() {
     testFindingMutationOutranksInFlightRead, testThematicFindingContextAndNoDuplicate,
     testMspRecheckButtonScopeAndSingleMutation, testMspInvalidatedSubmissionAndRecheckFailureRetry,
     testManagerFindingQueueAndVersionedDecisions,
-    testAdminTeamSaveCancelRetryAndInactive, testManagerSelfAttachAndRefresh]) {
+    testAdminTeamSaveCancelRetryAndInactive, testManagerSelfAttachAndRefresh,
+    testCompactCabinetAdminShortcutOpensItsFoldout]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 24 scenarios passed');
+  console.log('Account frontend request/race regressions: 25 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

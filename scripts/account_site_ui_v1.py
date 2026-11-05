@@ -203,14 +203,71 @@ _STYLE = """
 """
 
 
+_COMPACT_STYLE = """<style id="eis223-cabinet-compact">
+.eis223-compact-cabinet .eis223-menu{min-height:62px;padding-block:9px;gap:8px}
+.eis223-compact-cabinet .eis223-brand-icon{width:34px;height:34px;border-radius:8px}
+.eis223-compact-cabinet .eis223-brand-name{font-size:18px}
+.eis223-compact-cabinet .eis223-auth-user{padding:5px 10px}
+.eis223-compact-cabinet .eis223-personal{padding-block:17px 20px}
+.eis223-compact-cabinet .eis223-cabinet-heading{align-items:center;margin-bottom:12px;gap:10px}
+.eis223-compact-cabinet .eis223-personal h2{font-size:23px!important;margin-bottom:2px}
+.eis223-compact-cabinet .eis223-subtle{font-size:12px;line-height:1.4}
+.eis223-compact-cabinet .eis223-cabinet-heading .eis223-all-checks{margin:0;min-height:36px;padding:7px 10px}
+.eis223-compact-cabinet .eis223-cabinet-shortcuts{padding:0;border:0;background:transparent;box-shadow:none;margin:0 0 12px}
+.eis223-compact-cabinet .eis223-employee-links{margin:0;gap:7px}
+.eis223-compact-cabinet .eis223-employee-links a{min-height:38px;padding:8px 11px;font-size:12px}
+.eis223-compact-cabinet .eis223-cabinet-shortcuts .eis223-note{padding:0;background:transparent;margin:7px 0 0;font-size:11px}
+.eis223-compact-cabinet .eis223-overview{margin:12px 0;gap:9px}
+.eis223-compact-cabinet .eis223-overview>span{padding:10px 13px;display:flex;gap:9px;align-items:center;border-radius:8px}
+.eis223-compact-cabinet .eis223-overview b{font-size:22px}
+.eis223-compact-cabinet .eis223-overview small{margin:0;font-size:12px}
+.eis223-compact-cabinet .eis223-columns{gap:10px}
+.eis223-compact-cabinet .eis223-tile{padding:14px;border-radius:9px}
+.eis223-compact-cabinet .eis223-tile-head{margin-bottom:9px;padding-bottom:8px}
+.eis223-compact-cabinet .eis223-tile h3{font-size:15px!important}
+.eis223-compact-cabinet .eis223-tile-sub{font-size:11px;line-height:1.4}
+.eis223-compact-cabinet .eis223-tile ul{max-height:180px;min-height:38px;margin-bottom:8px}
+.eis223-compact-cabinet .eis223-tile li{padding:8px 0;gap:7px}
+.eis223-compact-cabinet .eis223-tile-head~.eis223-all-checks{min-height:34px;padding:5px 0;font-size:12px}
+.eis223-compact-cabinet .eis223-tile form{gap:7px;margin-top:9px}
+.eis223-compact-cabinet .eis223-tile input{min-height:38px;padding:8px 10px}
+.eis223-compact-cabinet .eis223-tile button{min-height:38px;padding:8px 10px}
+.eis223-compact-cabinet .eis223-tile [role=status]:empty{margin:0}
+.eis223-compact-cabinet .eis223-more{gap:10px;margin-top:12px;align-items:start}
+.eis223-compact-cabinet .eis223-cabinet-extra{padding:0 13px;border-radius:9px;box-shadow:none;margin:0}
+.eis223-compact-cabinet .eis223-cabinet-extra>summary{min-height:42px;padding:12px 0;cursor:pointer;color:#2c526c;font-size:13px;font-weight:700;line-height:1.4}
+.eis223-compact-cabinet .eis223-cabinet-extra[open]{padding-bottom:12px}
+.eis223-compact-cabinet .eis223-cabinet-extra[open]>summary{border-bottom:1px solid #dce5ed;margin-bottom:10px}
+.eis223-compact-cabinet .eis223-cabinet-extra p{font-size:12px;line-height:1.45;margin:5px 0 9px}
+.eis223-compact-cabinet .eis223-cabinet-extra ul{max-height:210px}
+.eis223-compact-cabinet #eis223-admin-controls{margin-bottom:12px}
+@media(max-width:820px){
+ .eis223-compact-cabinet .eis223-columns{grid-template-columns:minmax(0,1fr)}
+ .eis223-compact-cabinet .eis223-more{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .eis223-compact-cabinet .eis223-tile ul{max-height:155px}
+}
+@media(max-width:560px){
+ .eis223-compact-cabinet .eis223-menu{padding:10px 12px;gap:7px}
+ .eis223-compact-cabinet .eis223-personal{padding:14px 12px}
+ .eis223-compact-cabinet .eis223-personal h2{font-size:21px!important}
+ .eis223-compact-cabinet .eis223-overview{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+ .eis223-compact-cabinet .eis223-overview>span{padding:9px 8px;display:block}
+ .eis223-compact-cabinet .eis223-overview small{font-size:11px}
+ .eis223-compact-cabinet .eis223-employee-links a{flex:1 1 42%;justify-content:center}
+ .eis223-compact-cabinet .eis223-more{grid-template-columns:minmax(0,1fr)}
+}
+@media(pointer:coarse){.eis223-compact-cabinet .eis223-cabinet-extra>summary,.eis223-compact-cabinet .eis223-employee-links a{min-height:44px}}
+</style>"""
+
+
 def site_header(role="user"):
     admin = ('<a href="/account/admin">Заявки на регистрацию</a>'
              '<button type="button" id="eis223-admin-nav" hidden>Управление пользователями</button>'
              if role == "admin" else "")
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + workspace_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
-<div class="eis223-workspace" data-eis223-account-nav="1">
+    return (_STYLE + workspace_style() + _COMPACT_STYLE + (TEAM_SCRIPT if role == "admin" else "") + '''
+<div class="eis223-workspace eis223-compact-cabinet" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span></span></span>
 <span class="eis223-auth-user" aria-label="Авторизованный пользователь"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></span>
@@ -235,25 +292,20 @@ def site_header(role="user"):
 </div>
 <section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
 <div class="eis223-cabinet-heading">
-<div><p class="eis223-kicker">Персональное пространство</p>
-<h2>Личный кабинет</h2>
-<p class="eis223-subtle" id="eis223-owner-fullname">Фамилия, имя, отчество: загрузка…</p>
-<a class="eis223-all-checks" href="/account/profile">Редактировать ФИО →</a>
-<p class="eis223-subtle">Самостоятельные и тематические проверки, документы и результаты в одном месте</p></div>
-<span class="eis223-panel-mark">Доступно только вашей учётной записи</span></div>
+<div><h2>Личный кабинет</h2>
+<p class="eis223-subtle" id="eis223-owner-fullname">Загрузка ФИО…</p></div>
+<a class="eis223-all-checks" href="/account/profile">Профиль</a></div>
 ''' + ('''
-<section class="eis223-feature" id="eis223-admin-controls" aria-label="Управление пользователями">
-<h3>Администрирование пользователей</h3>
+<details class="eis223-feature eis223-cabinet-extra" id="eis223-admin-controls" aria-label="Управление пользователями">
+<summary>Администрирование пользователей</summary>
 <p>Подтверждайте заявки, назначайте роли и прикрепляйте сотрудников к руководителям.</p>
 <button type="button" id="eis223-admin-open" aria-expanded="false" aria-controls="eis223-admin-panel">Пользователи, роли и руководители</button>
 <div id="eis223-admin-panel" hidden>
 <p role="status" id="eis223-admin-status"></p>
 <div id="eis223-admin-users"></div>
-</div></section>
+</div></details>
 ''' if role == "admin" else "") + '''
-<section class="eis223-feature" aria-label="Работа сотрудника на сегодня">
-<h3>Работа на сегодня</h3>
-<p>Быстрый доступ к проверкам, поручениям, нарушениям и документам без перехода через отдельные кабинеты.</p>
+<section class="eis223-feature eis223-cabinet-shortcuts" aria-label="Разделы личного кабинета">
 <div class="eis223-employee-links">
 <a href="/account/workbench">Рабочее место сотрудника</a>
 <a href="/account/home">Мои проверки</a>
@@ -265,7 +317,7 @@ def site_header(role="user"):
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
 <span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
-<div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">01</span>
+<div class="eis223-tile"><div class="eis223-tile-head">
 <div><h3>Самостоятельные проверки</h3><p class="eis223-tile-sub">Закупки, которые вы запустили на проверку</p></div></div>
 <ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/home">Все самостоятельные проверки →</a>
@@ -275,13 +327,13 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <button type="submit">Запустить проверку</button></form>
 <p role="status" id="eis223-add-status"></p>
 </div>
-<div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">02</span>
+<div class="eis223-tile"><div class="eis223-tile-head">
 <div><h3>Тематические проверки</h3><p class="eis223-tile-sub">Запущенные под вашей учётной записью</p></div></div>
 <ul id="eis223-my-batches"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/thematic">Посмотреть все мои проверки →</a>
 <p role="status" id="eis223-batch-status"></p>
 </div>
-<div class="eis223-tile"><div class="eis223-tile-head"><span class="eis223-tile-number" aria-hidden="true">03</span>
+<div class="eis223-tile"><div class="eis223-tile-head">
 <div><h3>Служебные записки</h3><p class="eis223-tile-sub">Сохранённые документы и проекты</p></div></div>
 <ul id="eis223-my-memos"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/memos">Посмотреть служебные записки →</a>
@@ -289,14 +341,14 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 </div>
 </div>
 <div class="eis223-more">
-<section class="eis223-feature" aria-label="Уведомления по проверкам">
-<h3>Уведомления <span id="eis223-alert-count" class="eis223-notification-dot" hidden></span></h3>
+<details class="eis223-feature eis223-cabinet-extra" aria-label="Уведомления по проверкам">
+<summary>Уведомления <span id="eis223-alert-count" class="eis223-notification-dot" hidden></span></summary>
 <p>Новые подтверждённые нарушения и завершение обработки документов. Обновляются при открытии сайта.</p>
 <ul id="eis223-alert-list"><li>Загрузка уведомлений…</li></ul>
 <p class="eis223-note" role="status" id="eis223-alert-status"></p>
-</section>
-<section class="eis223-feature" aria-label="Избранные закупки и заказчики">
-<h3>Избранное</h3>
+</details>
+<details class="eis223-feature eis223-cabinet-extra" aria-label="Избранные закупки и заказчики">
+<summary>Избранное</summary>
 <p>Сохраните номер закупки или ИНН заказчика для быстрого доступа.</p>
 <form id="eis223-favorite-form">
 <select name="kind" aria-label="Тип избранного"><option value="procurement">Закупка</option><option value="customer">Заказчик</option></select>
@@ -305,20 +357,20 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <button type="submit">Добавить в избранное</button></form>
 <ul id="eis223-favorite-list"><li>Загрузка избранного…</li></ul>
 <p role="status" id="eis223-favorite-status"></p>
-</section>
-<section class="eis223-feature" aria-label="Обычные поручения">
-<h3>Поручения руководителя</h3>
+</details>
+<details class="eis223-feature eis223-cabinet-extra" aria-label="Обычные поручения">
+<summary>Поручения руководителя</summary>
 <p>Только отдельные задания по конкретным закупкам и сроки их выполнения.</p>
 <ul id="eis223-assignment-list"><li>Загрузка поручений…</li></ul>
 <p id="eis223-assignment-status" role="status"></p>
-</section>
-<section class="eis223-feature" aria-label="Нарушения тематических проверок">
-<h3>Нарушения тематических проверок</h3>
+</details>
+<details class="eis223-feature eis223-cabinet-extra" aria-label="Нарушения тематических проверок">
+<summary>Нарушения тематических проверок</summary>
 <p>Обычные карточки нарушений с правовой нормой, доказательством и оригиналом ЕИС. План руководителя не заменяет фактические результаты.</p>
 <ul id="eis223-manager-goals"><li>Загрузка нарушений…</li></ul>
 <a class="eis223-all-checks" href="/account/workbench">Все нарушения и тематические проверки →</a>
 <p id="eis223-thematic-status" role="status"></p>
-</section>
+</details>
 </div></section></div>
 <script>
 (()=>{
@@ -327,6 +379,7 @@ const navAdmin=q('eis223-admin-nav');
 if(navAdmin){navAdmin.hidden=false;navAdmin.addEventListener('click',()=>{
  const cabinet=q('eis223-cabinet'),toggle=q('eis223-toggle-cabinet');
  if(cabinet.hidden){toggle.click()}
+ const controls=q('eis223-admin-controls');if(controls)controls.open=true;
  const open=q('eis223-admin-open'),panel=q('eis223-admin-panel');
  if(open&&panel.hidden)open.click();
  q('eis223-admin-controls')?.scrollIntoView({behavior:'smooth',block:'start'});

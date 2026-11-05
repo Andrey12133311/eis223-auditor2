@@ -99,6 +99,44 @@ button:disabled{cursor:wait;opacity:.55}
 </style>
 """
 
+COMPACT_STYLE=r"""<style id="eis223-manager-compact">
+body>header.mgr-top{padding:10px clamp(14px,2.5vw,34px);border-bottom-width:2px}
+.mgr-logo{width:34px;height:34px;border-radius:7px}.mgr-top a{min-height:34px;padding:6px 10px}
+.mgr-shell{grid-template-columns:194px minmax(0,1fr)}
+.mgr-shell .mgr-side{padding:14px 9px;gap:3px}
+.mgr-shell .mgr-tab{min-height:38px;padding:8px 10px;font-size:12px;border-radius:7px;width:100%}
+.mgr-tab-icon{font-size:14px;width:18px;height:18px}
+.mgr-work{padding:20px 24px}.mgr-head{margin-bottom:13px}.mgr-head h1{font-size:25px;margin-bottom:3px}
+.mgr-head p{font-size:12px}.mgr-head .mgr-row{margin:0}.mgr-role{padding:6px 9px}
+.mgr-shell .mgr-card,.mgr-shell .mgr-entry{padding:14px;box-shadow:none;border-radius:9px;margin-bottom:11px}
+.mgr-card h2{font-size:16px;margin-bottom:10px}.mgr-card p{margin-bottom:10px;line-height:1.5}
+.mgr-grid{gap:9px;margin-bottom:11px}.mgr-shell .mgr-kpi{padding:12px 14px;box-shadow:none;border-radius:9px}
+.mgr-kpi strong{font-size:27px;line-height:1.3}.mgr-kpi small{font-size:12px}.mgr-kpi span{font-size:10px}
+.mgr-shell .mgr-table th,.mgr-shell .mgr-table td{padding:8px 10px;line-height:1.5}
+.mgr-entry{margin:8px 0}.mgr-entry h3{margin-bottom:6px}.mgr-row{margin:8px 0;gap:8px}
+.mgr-form{gap:9px;margin-bottom:10px}.mgr-form :is(input,select,textarea){min-height:36px;padding:7px 9px;margin-top:4px}
+.mgr-form textarea{min-height:60px}.mgr-primary,.mgr-outline,.mgr-danger{min-height:34px;padding:7px 10px}
+.mgr-disclosure>summary,.mgr-guidance>summary,.mgr-nav-more>summary{cursor:pointer;font-size:12px;font-weight:700;color:#285b7e;line-height:1.5;padding:9px 0}
+.mgr-disclosure>summary{font-size:14px;list-style-position:inside}
+.mgr-disclosure[open]>summary{margin-bottom:10px;border-bottom:1px solid var(--edge);padding-bottom:11px}
+.mgr-disclosure:not([open]){padding-block:3px!important}
+.mgr-guidance{margin:0 0 12px;border-bottom:1px solid var(--edge)}
+.mgr-guidance>summary{font-weight:500;color:var(--muted);padding-top:0}
+.mgr-guidance p{max-width:900px;font-size:12px;line-height:1.5;color:var(--muted);margin:0 0 10px}
+.mgr-nav-more{border-top:1px solid var(--edge);margin-top:6px;padding-top:3px;width:100%}
+.mgr-nav-more>summary{padding:9px 11px;color:var(--muted);font-weight:600}
+.mgr-nav-more[open]>summary{margin-bottom:3px}.mgr-nav-more .mgr-tab{margin:2px 0}
+.mgr-secondary-stats{margin-top:12px}.mgr-secondary-stats .mgr-panels{grid-template-columns:1fr}
+.mgr-secondary-stats .mgr-card{padding:0!important;border:0;margin:0}
+.mgr-secondary-stats .mgr-bars{min-height:115px;padding-top:15px}.mgr-footnote{margin-top:10px}
+.mgr-goal-options{grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:6px;max-height:300px;overflow:auto}
+.mgr-goal-option{padding:7px 9px;font-size:12px!important;align-items:start}
+@media(max-width:1000px){.mgr-work{padding:16px}.mgr-shell{grid-template-columns:178px minmax(0,1fr)}}
+@media(max-width:900px){.mgr-shell{grid-template-columns:1fr}.mgr-shell .mgr-side{padding:8px;flex-wrap:wrap;overflow:visible;position:static;max-height:none}.mgr-side>.mgr-tab{width:auto;flex:1 1 100px}.mgr-nav-more{flex-basis:100%;margin-top:3px;padding-top:0}.mgr-nav-more[open]{display:flex;flex-wrap:wrap;gap:4px}.mgr-nav-more>summary{width:100%;padding:6px}.mgr-nav-more .mgr-tab{width:auto;flex:1 1 130px}.mgr-side-heading{display:none}}
+@media(max-width:520px){body>header.mgr-top{padding:10px 12px}.mgr-work{padding:12px}.mgr-head h1{font-size:22px}.mgr-shell .mgr-card{padding:12px}.mgr-shell .mgr-kpi{padding:10px}.mgr-kpi strong{font-size:24px}.mgr-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mgr-form{grid-template-columns:1fr}.mgr-top .mgr-actions{gap:6px}.mgr-goal-options{grid-template-columns:1fr}}
+@media(pointer:coarse){.mgr-shell :is(button,.mgr-actions a),.mgr-top a,.mgr-disclosure>summary,.mgr-nav-more>summary{min-height:44px}}
+</style>"""
+
 SCRIPT=r"""
 <script>
 (()=>{
@@ -538,6 +576,7 @@ async function openFindings(employee,reg){
 async function loadFindings(){
  const employee=$("mgr-finding-worker").value,reg=$("mgr-finding-reg").value.trim();
  if(!employee||!/^3[0-9]{10}$/.test(reg))return toast("Выберите сотрудника и номер закупки ЕИС");
+ $("mgr-case-review").open=true;
  const sequence=++findingSequence;
  const [data,personalNotes]=await Promise.all([
   api("/manager/findings/"+encodeURIComponent(employee)+"/"+reg),
@@ -767,40 +806,45 @@ __STYLE__</head><body>
 <button type="button" class="mgr-tab" data-tab="tasks" aria-selected="false"><span class="mgr-tab-icon">☷</span>Поручения</button>
 <button type="button" class="mgr-tab" data-tab="thematic" aria-selected="false"><span class="mgr-tab-icon">◈</span>Тематические</button>
 <button type="button" class="mgr-tab" data-tab="findings" aria-selected="false"><span class="mgr-tab-icon">⚖</span>Нарушения</button>
-<button type="button" class="mgr-tab" data-tab="quality" aria-selected="false"><span class="mgr-tab-icon">✓</span>Качество</button>
 <button type="button" class="mgr-tab" data-tab="memos" aria-selected="false"><span class="mgr-tab-icon">▤</span>Записки</button>
 <button type="button" class="mgr-tab" data-tab="team" aria-selected="false"><span class="mgr-tab-icon">♙</span>Сотрудники</button>
+<details class="mgr-nav-more"><summary>Ещё разделы</summary>
+<button type="button" class="mgr-tab" data-tab="quality" aria-selected="false"><span class="mgr-tab-icon">✓</span>Качество</button>
 <button type="button" class="mgr-tab" data-tab="reports" aria-selected="false"><span class="mgr-tab-icon">▥</span>Отчёты</button>
 <button type="button" class="mgr-tab" data-tab="history" aria-selected="false"><span class="mgr-tab-icon">◷</span>Журнал действий</button>
+</details>
 </nav>
 <main class="mgr-work"><div class="mgr-head"><div><h1 id="mgr-title">Панель управления</h1>
-<p>Контроль фактических результатов проверок закупок по 223-ФЗ</p></div>
+<p>Поручения, согласования и сотрудники</p></div>
 <div class="mgr-row"><span class="mgr-role">__LABEL__</span>
-<button type="button" id="mgr-refresh" class="mgr-outline">Обновить данные ↻</button></div></div>
-<div class="mgr-banner">Числа получены из сохранённых заданий и проверенных данных ЕИС.
+<button type="button" id="mgr-refresh" class="mgr-outline">Обновить ↻</button></div></div>
+<details class="mgr-guidance"><summary>Как учитываются результаты</summary><p>Числа получены из сохранённых заданий и проверенных данных ЕИС.
 Выявленное программой нарушение и согласованное руководителем нарушение показываются отдельно.
-Поручение само по себе не запускает проверку ЕИС.</div>
+Поручение само по себе не запускает проверку ЕИС.</p></details>
 <section class="mgr-section" data-section="overview">
 <div class="mgr-grid">
-<div class="mgr-kpi"><small>Сотрудники подразделения</small><strong id="mgr-kpi-staff">—</strong><span>Назначены администратором</span></div>
-<div class="mgr-kpi"><small>Поручения</small><strong id="mgr-kpi-tasks">—</strong><span>Сохранённые задания</span></div>
-<div class="mgr-kpi"><small>Просроченные поручения</small><strong id="mgr-kpi-overdue">—</strong><span>С действующими сроками</span></div>
-<div class="mgr-kpi"><small>Ожидают решения</small><strong id="mgr-kpi-pending">—</strong><span>Сданы сотрудниками</span></div>
+<div class="mgr-kpi"><small>Ожидают решения</small><strong id="mgr-kpi-pending">—</strong><span>Поручения сотрудников</span></div>
+<div class="mgr-kpi"><small>Просрочены</small><strong id="mgr-kpi-overdue">—</strong><span>Поручения с истёкшим сроком</span></div>
+<div class="mgr-kpi"><small>Записки на согласовании</small><strong id="mgr-kpi-memos">—</strong><span>Ожидают рассмотрения</span></div>
+<div class="mgr-kpi"><small>Сотрудники</small><strong id="mgr-kpi-staff">—</strong><span>Ваше подразделение</span></div>
+</div>
+<div class="mgr-card"><h2>Требуют внимания</h2>
+<div id="mgr-alerts"><p>Получаем события...</p></div></div>
+<details class="mgr-card mgr-disclosure mgr-secondary-stats"><summary>Показатели подразделения и динамика</summary>
+<div class="mgr-grid">
+<div class="mgr-kpi"><small>Все поручения</small><strong id="mgr-kpi-tasks">—</strong><span>Сохранённые задания</span></div>
 <div class="mgr-kpi"><small>Найдено нарушений</small><strong id="mgr-kpi-findings">—</strong><span>Программный юридический анализ</span></div>
 <div class="mgr-kpi"><small>Согласовано руководителем</small><strong id="mgr-kpi-accepted">—</strong><span>Самостоятельные решения</span></div>
 <div class="mgr-kpi"><small>Прочитано оригиналов</small><strong id="mgr-kpi-documents">—</strong><span>Фактически учтённые документы</span></div>
-<div class="mgr-kpi"><small>Записки на согласовании</small><strong id="mgr-kpi-memos">—</strong><span>Ожидают рассмотрения</span></div>
 </div>
-<div class="mgr-panels">
 <div class="mgr-card"><h2>Динамика выдачи поручений</h2><p>Количество реально созданных заданий по датам</p>
 <div id="mgr-bars" class="mgr-bars"></div><div id="mgr-bars-labels" class="mgr-bar-labels"></div>
 </div>
-<div class="mgr-card"><h2>Требуют внимания</h2>
-<div id="mgr-alerts"><p>Получаем события...</p></div></div></div>
 <p id="mgr-accuracy" class="mgr-footnote"></p>
+</details>
 </section>
 <section class="mgr-section mgr-hidden" data-section="tasks">
-<div class="mgr-card"><h2>Назначить проверку сотруднику</h2>
+<details class="mgr-card mgr-disclosure" id="mgr-new-task"><summary>Назначить поручение сотруднику</summary>
 <p>Создаёт поручение, не подменяя запуск фактической проверки ЕИС.</p>
 <form id="mgr-task-create" class="mgr-form">
 <label>Исполнитель<select name="user_id" id="mgr-worker" required><option value="">Загрузка…</option></select></label>
@@ -809,7 +853,7 @@ __STYLE__</head><body>
 <label>Срок исполнения<input name="due_date" type="date"></label>
 <label class="wide">Комментарий<textarea name="note" maxlength="2000" placeholder="Что необходимо проверить"></textarea></label>
 <button class="mgr-primary" type="submit">Назначить поручение</button>
-</form></div>
+</form></details>
 <div class="mgr-card"><h2>Поручения подразделения</h2>
 <div class="mgr-row"><input id="mgr-task-search" type="search" placeholder="Поиск по номеру, теме или сотруднику" aria-label="Поиск поручений">
 <select id="mgr-task-status" aria-label="Фильтр статуса">
@@ -821,7 +865,7 @@ __STYLE__</head><body>
 <p class="mgr-muted mgr-hidden" id="mgr-task-empty">Поручений пока нет.</p></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="thematic">
-<div class="mgr-card"><h2>Новое тематическое поручение сотруднику</h2>
+<details class="mgr-card mgr-disclosure" id="mgr-new-goal"><summary>Новое тематическое поручение</summary>
 <p>Выберите направления проверки, формы заказчиков и целевое число подтверждённых нарушений.
 План не является требованием получить нарушения любой ценой. Проверяются только реальные документы ЕИС.</p>
 <form id="mgr-goal-form" class="mgr-form">
@@ -838,7 +882,7 @@ __STYLE__</head><body>
 <label class="wide">Пояснение к поручению<textarea name="note" maxlength="1800" placeholder="Укажите область и особенности проверки"></textarea></label>
 <button class="mgr-primary" type="submit">Назначить и запустить тематическую проверку</button>
 </form><p class="mgr-muted" id="mgr-goal-status" role="status"></p>
-</div>
+</details>
 <div class="mgr-card"><h2>План и фактические результаты</h2>
 <p>Динамика подтягивается из настоящей тематической очереди. Повторы не увеличивают число нарушений.</p>
 <div id="mgr-goal-results"></div>
@@ -864,7 +908,7 @@ __STYLE__</head><body>
 <button type="button" id="mgr-submission-refresh" class="mgr-outline">Обновить очередь</button>
 <p id="mgr-submission-note" class="mgr-muted" role="status" aria-live="polite">Загружаем очередь…</p>
 <div id="mgr-submission-items"></div></div>
-<div class="mgr-card"><h2>Рассмотрение нарушений</h2>
+<details class="mgr-card mgr-disclosure" id="mgr-case-review"><summary>Открыть дело по сотруднику и номеру ЕИС</summary>
 <p>Выберите исполнителя и закупку. Отображаются только подтверждённые анализатором нарушения из реальных записей.
 Недостаток доказательств блокирует согласование, но не удаляет запись.</p>
 <div class="mgr-form">
@@ -881,7 +925,7 @@ __STYLE__</head><body>
 <form id="mgr-case-message" class="mgr-form">
 <label class="wide">Сообщение или замечание<textarea name="body" minlength="4" maxlength="2000" required></textarea></label>
 <button class="mgr-primary" type="submit">Отправить сотруднику</button></form>
-</div>
+</details>
 </section>
 <section class="mgr-section mgr-hidden" data-section="memos">
 <div class="mgr-card"><h2>Служебные записки на согласовании</h2>
@@ -893,13 +937,13 @@ __STYLE__</head><body>
 <p id="mgr-memo-empty" class="mgr-muted mgr-hidden">Записок на согласовании нет.</p></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="team">
-<div class="mgr-card mgr-hidden" id="mgr-self-attach">
-<h2>Прикрепить сотрудника к себе</h2>
+<details class="mgr-card mgr-disclosure mgr-hidden" id="mgr-self-attach">
+<summary>Прикрепить сотрудника к себе</summary>
 <p>Выберите одобренного сотрудника без руководителя. Если сотрудник уже прикреплён к другому руководителю, переназначить его может администратор.</p>
 <p>После прикрепления вам станут доступны проверки и ранее отправленные нарушения сотрудника. История решений сохраняется.</p>
 <label>Сотрудник <select id="mgr-available-employee" style="max-width:100%"></select></label>
 <button type="button" class="mgr-primary" id="mgr-attach-self" disabled>Прикрепить к себе</button>
-<p role="status" id="mgr-attach-status"></p></div>
+<p role="status" id="mgr-attach-status"></p></details>
 <div class="mgr-card"><h2>Сотрудники подразделения</h2>
 <p>Руководитель видит только назначенных ему сотрудников. Администратор назначает руководителей
 и состав подразделений без ручного ввода идентификаторов.</p>
@@ -908,8 +952,8 @@ __STYLE__</head><body>
 </tr></thead><tbody id="mgr-team-rows"></tbody></table></div>
 <p id="mgr-team-empty" class="mgr-muted mgr-hidden">Сотрудники ещё не назначены.</p>
 </div>
-<div class="mgr-card mgr-hidden" id="mgr-admin-section">
-<h2>Администрирование ролей и подразделений</h2>
+<details class="mgr-card mgr-disclosure mgr-hidden" id="mgr-admin-section">
+<summary>Настройки ролей и подразделений</summary>
 <p>Изменяйте роли уже зарегистрированных сотрудников и руководителей. Все изменения фиксируются в журнале; назначение администратора требует отдельного подтверждения.</p>
 <div class="mgr-row" style="margin-bottom:13px">
 <label style="min-width:180px;flex:1">Найти пользователя
@@ -922,12 +966,12 @@ __STYLE__</head><body>
 <div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
 <th>Учётная запись</th><th>Доступ</th><th>Роль</th><th>Управление</th>
 </tr></thead><tbody id="mgr-admin-rows"></tbody></table></div>
-<div style="margin-top:14px;background:#f7fafc;border:1px solid #dce6ed;border-radius:10px;padding:16px">
-<h3 style="margin:0 0 6px;font-size:15px">Почтовые уведомления</h3>
+<details class="mgr-disclosure" style="margin-top:12px;border-top:1px solid #dce6ed">
+<summary>Почтовые уведомления</summary>
 <p id="mgr-mail-status" class="mgr-muted" role="status" aria-live="polite">Проверяю настройки отправки…</p>
 <button id="mgr-mail-test" class="mgr-outline" type="button" disabled>Отправить тестовое письмо на мою почту</button>
 <p class="mgr-muted">Используется регистрационный адрес администратора. Счётчик отправки означает принятие письма почтовым сервисом.</p>
-</div></div>
+</details></details>
 </section>
 <section class="mgr-section mgr-hidden" data-section="reports">
 <div class="mgr-card"><h2>Отчёт подразделения</h2>
@@ -956,7 +1000,7 @@ __STYLE__</head><body>
 </main></div>
 <div id="mgr-toast" class="mgr-toast mgr-hidden" role="status" aria-live="polite"></div>
 __SCRIPT__</body></html>"""
-    return (shell.replace("__STYLE__",STYLE+account_page_style())
+    return (shell.replace("__STYLE__",STYLE+account_page_style()+COMPACT_STYLE)
                  .replace("__ADMIN_REGISTRATION_LINK__",'<a href="/account/admin">Заявки на регистрацию</a>' if role=="admin" else "")
                  .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role)))
                  .replace("__LABEL__","Роль: "+("Администратор" if role=="admin" else "Руководитель")))

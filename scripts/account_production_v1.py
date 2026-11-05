@@ -68,6 +68,9 @@ SHARED_READ_PATTERNS = tuple(map(re.compile, (
     # Template uploads and personal archive writes remain separately protected.
     r"/api/v304/memo/3[0-9]{10}\.odt",
     r"/api/inspection/3[0-9]{10}\.(?:odt|docx|json)",
+    # Legacy inspection buttons resolve to the current saved report; PDF is
+    # an authenticated redirect to ODT, never a legacy PDF generation route.
+    r"/api/purchases/3[0-9]{10}/inspection(?:-sheet)?(?:\.(?:odt|docx|json|pdf))?",
     r"/check-new/3[0-9]{10}/?",
     r"/api/v334/violation-ledger/purchase/3[0-9]{10}",
     r"/reports/3[0-9]{10}\.html",

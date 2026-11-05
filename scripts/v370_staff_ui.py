@@ -120,43 +120,15 @@ function dashboardData(force=false){
  if(!dashboardRequest)dashboardRequest=api('/me/center/dashboard').finally(()=>{dashboardRequest=null});
  return dashboardRequest;
 }
-async function loadToday(){
- const status=el('today-status');status.textContent='Получение данных…';
- try{
-  const data=await dashboardData();
-  for(const [id,value] of [['today-tasks',data.task_active],['today-campaigns',data.campaign_active],
-   ['today-manual',data.manual_checks],['today-alerts',data.unread_notifications]]){
-   el(id).textContent=Number(value||0).toLocaleString('ru-RU');
-  }
-  const activeTasks=(data.tasks||[]).filter(x=>!['completed','cancelled'].includes(x.status));
-  const activeCampaigns=(data.campaigns||[]).filter(x=>['active','submitted'].includes(x.status));
-  const fill=(target,items,format,onOpen)=>{
-   const root=el(target);root.replaceChildren();
-   if(!items.length)root.append(make('p','Нет активных записей'));
-   for(const item of items.slice(0,12)){
-    const row=make('div');row.className='staff-smallrow';
-    const body=make('div');body.className='staff-rowbody';
-    body.append(make('strong',item.title||item.reg_number||'Проверка'),
-     make('small',format(item)));
-    const action=createAction('Открыть',()=>onOpen(item));
-    row.append(body,action);root.append(row);
-   }
-  };
-  fill('today-task-list',activeTasks,x=>'№ '+(x.reg_number||'—')+' · '+(taskNames[x.status]||x.status),
-   x=>{section('overview');if(x.reg_number)location.href='/check-new/'+encodeURIComponent(x.reg_number)});
-  fill('today-campaign-list',activeCampaigns,x=>'Цель: '+x.target_violations+' нарушений · '+x.status,
-   ()=>section('goals'));
-  status.textContent='Данные обновлены';
- }catch(error){status.textContent='Не удалось получить данные: '+error.message}
-}
 function section(tab){
  document.querySelectorAll('[data-staff-section]').forEach(x=>x.hidden=x.dataset.staffSection!==tab);
  document.querySelectorAll('[data-staff-tab]').forEach(x=>x.setAttribute("aria-selected",String(x.dataset.staffTab===tab)));
+ const selected=document.querySelector('[data-staff-tab="'+tab+'"]');
+ const more=selected?.closest?.('details');if(more)more.open=true;
  if(tab==='goals')return campaigns();
  if(tab==='activity')return loadHistory();
  if(tab==='overview')return loadDashboard();
  if(tab==='library')return loadLibrary();
- if(tab==='today')return loadToday();
  if(tab==='templates')return Promise.all([templates(),options()]);
 }
 document.querySelectorAll('[data-staff-tab]').forEach(x=>x.onclick=()=>section(x.dataset.staffTab));
@@ -201,7 +173,6 @@ async function loadDashboard(force=false){
    'unread':data.unread_notifications,'reviewed':data.finding_decisions?.confirmed||0
   }))if(el('staff-'+id))el('staff-'+id).textContent=Number(count).toLocaleString('ru-RU');
   el('staff-updated').textContent='Данные обновлены: '+new Date(data.as_of).toLocaleTimeString('ru-RU');
-  if(data.full_name)el('staff-hello').textContent='Здравствуйте, '+data.full_name;
   list('staff-task-list',data.tasks.filter(x=>!['completed','cancelled'].includes(x.status)),x=>{
    const row=make('div');row.className='staff-smallrow';
    const body=make('div');body.className='staff-rowbody';
@@ -748,57 +719,118 @@ setInterval(()=>{
 })();
 </script>
 """
+COMPACT_CSS=r"""<style id="staff-compact-layout">
+body.staff-compact{font-size:14px;line-height:1.45}
+body.staff-compact>header{padding:11px clamp(14px,3vw,36px);min-height:66px}
+body.staff-compact>header strong{font-size:17px}
+body.staff-compact main{max-width:1400px;padding:20px 24px 30px}
+body.staff-compact h1{font-size:25px;line-height:1.25}
+body.staff-compact h2{font-size:17px;margin-bottom:10px}
+body.staff-compact h3{font-size:14px}
+body.staff-compact p{margin:5px 0 10px}
+.staff-compact .staff-hero{margin-bottom:14px}
+.staff-compact .staff-layout{grid-template-columns:178px minmax(0,1fr);gap:14px;margin-top:0}
+.staff-compact .staff-layout>.tabs{padding:6px;box-shadow:none;border-radius:9px}
+.staff-compact .staff-layout>.tabs button{min-height:39px;padding:9px 10px;line-height:1.35}
+.staff-compact section.panel{padding:17px 19px;border-radius:10px;margin:0}
+.staff-compact .staff-section-heading{gap:8px;margin-bottom:10px}
+.staff-compact .staff-section-heading .staff-statline{margin:0}
+.staff-compact .grid{gap:8px}
+.staff-compact .metric{padding:11px 13px;border-radius:8px;display:flex;align-items:center;gap:8px;justify-content:space-between}
+.staff-compact .metric strong{font-size:24px;line-height:1.2}
+.staff-compact .metric small{font-size:12px;line-height:1.35;max-width:135px}
+.staff-compact .staff-columns{grid-template-columns:minmax(0,1.35fr) minmax(250px,1fr);gap:11px}
+.staff-compact .staff-subpanel{padding:12px 14px;margin-bottom:11px;border-radius:8px;background:#fff}
+.staff-compact .staff-subpanel h3{margin:0 0 7px}
+.staff-compact .staff-smallrow{padding:9px 0;gap:8px}
+.staff-compact .staff-tools{gap:6px;margin-top:5px}
+.staff-compact .staff-tools button,.staff-compact .staff-tools a{min-height:32px;padding:6px 8px}
+.staff-compact .staff-live-note{font-size:11px;color:#627b8c;margin:9px 0}
+.staff-compact .notice{margin:10px 0;padding:9px 11px}
+.staff-compact .action-row{margin:9px 0;gap:7px}
+.staff-compact input,.staff-compact select,.staff-compact textarea{padding:9px 10px}
+.staff-compact textarea{min-height:80px}
+.staff-compact td,.staff-compact th{padding:9px 8px}
+.staff-compact fieldset{padding:10px;margin:10px 0}
+.staff-compact #staff-task-list,.staff-compact #staff-progress-list{max-height:25rem;overflow:auto;scrollbar-gutter:stable}
+.staff-compact #staff-notification-list,.staff-compact #staff-goal-summary{max-height:19rem;overflow:auto;scrollbar-gutter:stable}
+.staff-compact .staff-search-box{margin-bottom:12px}
+.staff-compact #staff-global-search{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:7px;margin:0}
+.staff-compact #staff-global-search .wide{grid-column:auto}
+.staff-compact #staff-global-search button{min-height:40px;white-space:nowrap}
+.staff-compact .staff-saved-searches{border:0!important;margin:0!important;padding:0!important}
+.staff-compact .staff-saved-searches>summary{font-size:11px;padding:8px 0!important;color:#59788e}
+.staff-compact .staff-foldout{border:1px solid var(--line);border-radius:8px;margin:10px 0;padding:0 12px;background:#fff}
+.staff-compact .staff-foldout>summary{cursor:pointer;font-size:13px;font-weight:700;min-height:40px;padding:11px 0;line-height:1.4;color:#285a7d}
+.staff-compact .staff-foldout[open]{padding-bottom:12px}
+.staff-compact .staff-foldout[open]>summary{margin-bottom:9px;border-bottom:1px solid var(--line)}
+.staff-compact .staff-statistics{margin-bottom:0;background:#fafcfe}
+.staff-compact .staff-secondary-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
+.staff-compact .staff-nav-more{border-top:1px solid var(--line);margin-top:5px;padding-top:4px}
+.staff-compact .staff-nav-more>summary{cursor:pointer;min-height:39px;padding:10px;font-size:12px;font-weight:700;color:#53748c}
+.staff-compact .staff-nav-more button{font-size:12px}
+@media(max-width:980px){
+ .staff-compact main{padding:16px}
+ .staff-compact .staff-layout{grid-template-columns:1fr;gap:10px}
+ .staff-compact .staff-layout>.tabs{flex-direction:row;flex-wrap:wrap;overflow:visible}
+ .staff-compact .staff-layout>.tabs button{width:auto;white-space:normal;flex:1 1 auto;text-align:center}
+ .staff-compact .staff-nav-more{width:100%;border-top:0;margin:0;padding:0}
+ .staff-compact .staff-nav-more>summary{padding:9px;min-height:36px}
+ .staff-compact .staff-nav-more[open]{border-top:1px solid var(--line)}
+ .staff-compact .staff-nav-more button{display:inline-block;margin:3px}
+}
+@media(max-width:760px){
+ .staff-compact main{padding:12px}
+ .staff-compact h1{font-size:22px}
+ .staff-compact section.panel{padding:13px}
+ .staff-compact .staff-columns{grid-template-columns:minmax(0,1fr)}
+ .staff-compact .grid,.staff-compact .staff-secondary-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .staff-compact .metric{padding:10px;align-items:flex-start}
+ .staff-compact .metric strong{font-size:22px}
+ .staff-compact #staff-global-search{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .staff-compact #staff-global-search .wide{grid-column:1/-1}
+ .staff-compact .staff-smallrow{display:flex}
+ .staff-compact .staff-smallrow .staff-tools{margin-top:0}
+ .staff-compact .staff-tools button,.staff-compact .staff-tools a{min-height:40px}
+ .staff-compact .staff-foldout>summary{min-height:44px}
+}
+@media(pointer:coarse){.staff-compact button,.staff-compact .staff-tools a{min-height:44px}}
+</style>"""
+
 PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Рабочее место сотрудника — ЕИС Аудитор</title>__CSS__</head>
-<body><header><div><strong>ЕИС Аудитор · Рабочее место сотрудника</strong>
+<body class="staff-compact"><header><div><strong>ЕИС Аудитор</strong>
 <div id="staff-user-name" style="font-size:12px;color:#d9e9f3">ФИО: загрузка…</div></div>
-<div class="action-row" id="staff-account-actions"><a href="/account/profile">Моё ФИО</a>
-<a href="/">← В личный кабинет</a></div></header>
+<div class="action-row" id="staff-account-actions"><a href="/account/profile">Профиль</a>
+<a href="/">Главная</a></div></header>
 <main>
-<div class="staff-hero"><div><h1 id="staff-hello">Моё рабочее пространство</h1>
-<p>Собственные проверки, поручения и нарушения по реальным данным ЕИС. Без дублирования результатов.</p></div>
+<div class="staff-hero"><div><h1 id="staff-hello">Кабинет сотрудника</h1></div>
 <button id="staff-refresh" type="button" class="outline">↻ Обновить данные</button></div>
-<div class="grid">
-<div class="metric"><small>Самостоятельные проверки</small><strong id="staff-checks">—</strong></div>
-<div class="metric"><small>Завершён анализ</small><strong id="staff-complete">—</strong></div>
-<div class="metric"><small>Нарушения</small><strong id="staff-found">—</strong></div>
-<div class="metric"><small>Прочитано документов</small><strong id="staff-documents">—</strong></div>
-<div class="metric"><small>Ожидают документы</small><strong id="staff-waiting">—</strong></div>
-<div class="metric"><small>Служебные записки</small><strong id="staff-memos">—</strong></div>
-</div>
 <div class="staff-layout">
 <nav class="tabs" aria-label="Разделы рабочего места">
-<button type="button" data-staff-tab="overview" aria-selected="true">Обзор</button><button type="button" data-staff-tab="today" aria-selected="false">Работа на сегодня</button>
+<button type="button" data-staff-tab="overview" aria-selected="true">Моя работа</button>
 <button type="button" data-staff-tab="goals" aria-selected="false">Нарушения и поручения</button>
 <button type="button" data-staff-tab="bulk" aria-selected="false">Массовая проверка</button>
+<button type="button" data-staff-tab="case" aria-selected="false">Инструменты закупки</button>
+<details class="staff-nav-more"><summary>Ещё</summary>
 <button type="button" data-staff-tab="templates" aria-selected="false">Мои шаблоны</button>
-<button type="button" data-staff-tab="case" aria-selected="false">Контроль закупки</button>
 <button type="button" data-staff-tab="activity" aria-selected="false">История работы</button>
 <button type="button" data-staff-tab="library" aria-selected="false">База нарушений</button>
+</details>
 </nav>
 <div class="staff-panels">
-<section class="panel" data-staff-section="today" hidden>
-<h2>Работа на сегодня</h2>
-<p>Актуальные поручения, самостоятельные и тематические проверки, уведомления и служебные записки.</p>
-<div class="grid">
-<div class="metric"><small>Активные поручения</small><strong id="today-tasks">—</strong></div>
-<div class="metric"><small>Тематические проверки</small><strong id="today-campaigns">—</strong></div>
-<div class="metric"><small>Самостоятельные проверки</small><strong id="today-manual">—</strong></div>
-<div class="metric"><small>Непрочитанные уведомления</small><strong id="today-alerts">—</strong></div>
-</div>
-<div class="action-row">
-<a href="/account/home">Мои проверки</a><a href="/account/thematic">Тематические проверки</a>
-<a href="/account/memos">Служебные записки ODT</a>
-</div>
-<h3>Поручения руководителя</h3><div id="today-task-list"></div>
-<h3>Тематические проверки</h3><div id="today-campaign-list"></div>
-<p class="notice" id="today-status" role="status">Загрузка при открытии раздела.</p>
-</section>
 <section class="panel" data-staff-section="overview">
 <div class="staff-section-heading"><h2>Рабочая панель</h2><small id="staff-updated" class="staff-statline">Получение актуальных данных</small></div>
-<div class="staff-auto"><span class="staff-dot" aria-hidden="true"></span>
-Автоматический анализ закупок выполняется сервером. Карточки и показатели обновляются без перезагрузки.</div>
+<div class="staff-search-box">
+<form id="staff-global-search" class="staff-search-toolbar"><label class="wide">Поиск по моим материалам
+<input id="staff-global-query" type="search" minlength="2" maxlength="80" placeholder="32616412317 или срок подачи заявок" required></label>
+<button class="primary" type="submit">Найти</button>
+<button class="outline" type="button" id="staff-search-save">Сохранить запрос</button></form>
+<details class="staff-foldout staff-saved-searches"><summary>Сохранённые запросы</summary><div id="staff-saved-searches"></div></details>
+<div id="staff-global-results"></div>
+</div>
+<p class="staff-live-note">Показатели обновляются автоматически.</p>
 <div class="grid" style="margin-bottom:18px">
 <div class="metric"><small>Активные поручения</small><strong id="staff-active-tasks">—</strong></div>
 <div class="metric"><small>Тематические проверки</small><strong id="staff-active-campaigns">—</strong></div>
@@ -822,24 +854,22 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <p id="staff-memo-reviews"></p>
 <a class="pill" href="/account/memos">Открыть документы и проверку качества →</a></div>
 </div></div>
-<div class="staff-subpanel"><h3>Быстрый поиск по моим материалам</h3>
-<form id="staff-global-search"><label class="wide">Номер ЕИС, название поручения или обнаруженного нарушения
-<input id="staff-global-query" type="search" minlength="2" maxlength="80" placeholder="32616412317 или срок подачи заявок" required></label>
-<button class="primary" type="submit">Найти</button>
-<button class="outline" type="button" id="staff-search-save">Сохранить запрос</button></form>
-<div id="staff-saved-searches"></div>
-<div id="staff-global-results"></div>
-<p><a href="/">Поиск по общей базе ЕИС и расширенные фильтры ИНН, ОГРН и цены →</a></p></div>
+
+<details class="staff-foldout staff-statistics"><summary>Статистика проверок</summary><div class="grid staff-secondary-metrics">
+<div class="metric"><small>Самостоятельные проверки</small><strong id="staff-checks">—</strong></div>
+<div class="metric"><small>Завершён анализ</small><strong id="staff-complete">—</strong></div>
+<div class="metric"><small>Нарушения</small><strong id="staff-found">—</strong></div>
+<div class="metric"><small>Прочитано документов</small><strong id="staff-documents">—</strong></div>
+<div class="metric"><small>Ожидают документы</small><strong id="staff-waiting">—</strong></div>
+<div class="metric"><small>Служебные записки</small><strong id="staff-memos">—</strong></div>
+</div></details>
 </section>
 <section class="panel" data-staff-section="goals" hidden>
 <h2>Нарушения тематических проверок</h2>
-<p class="notice">Все подтверждённые анализатором эпизоды отображаются как обычные нарушения:
-с доказательствами, нормами закона и ссылками на ЕИС. Цель руководителя не влияет
-на количество и не создаёт искусственных результатов.</p>
+<p>Подтверждённые эпизоды с доказательствами и нормами закона. План поручения не влияет на число найденных нарушений.</p>
 <h3 id="staff-violations-title">Нарушения</h3>
 <div id="staff-thematic-findings"></div>
-<h3>Параметры проверки, заданные руководителем</h3>
-<div id="staff-campaign-list"></div>
+<details class="staff-foldout"><summary>Параметры поручений руководителя</summary><div id="staff-campaign-list"></div></details>
 <div class="action-row"><a href="/account/home">Мои самостоятельные проверки</a>
 <a href="/account/thematic">Мои тематические проверки</a>
 <a href="/account/memos">Служебные записки</a></div>
@@ -857,13 +887,14 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 </section>
 <section class="panel" data-staff-section="templates" hidden>
 <h2>Шаблоны тематических проверок</h2>
-<form id="staff-template-form">
+
+<div id="staff-template-list"></div>
+<details class="staff-foldout"><summary>Создать шаблон проверки</summary><form id="staff-template-form">
 <label class="wide">Наименование шаблона<input name="name" minlength="3" maxlength="120" required
  placeholder="Контроль сроков, МСП и договоров"></label>
 <fieldset class="wide"><legend>Категории проверки</legend><div id="staff-cats" class="check-options"></div></fieldset>
 <fieldset class="wide"><legend>Формы заказчиков</legend><div id="staff-forms" class="check-options"></div></fieldset>
-<button class="primary" type="submit">Сохранить шаблон</button></form>
-<h3>Мои сохранённые шаблоны</h3><div id="staff-template-list"></div>
+<button class="primary" type="submit">Сохранить шаблон</button></form></details>
 </section>
 <section class="panel" data-staff-section="case" hidden>
 <h2>Контроль собственной закупки</h2>
@@ -883,12 +914,13 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <a id="staff-case-download" href="#">Выгрузить материалы ZIP</a>
 <a href="/account/memos">Архив служебных записок</a></div>
 <p class="notice" id="staff-automatic-review-note">Юридическая проверка обновляется автоматически при получении новых подтверждённых материалов или обновлении правил. Сохранённые документы и результаты остаются доступны.</p>
-<fieldset><legend>Персональные настройки</legend>
+<details class="staff-foldout"><summary>Приоритет закупки</summary>
 <label class="check-options"><input id="staff-priority" type="checkbox"> Приоритетная закупка</label>
-<button class="outline" type="button" id="staff-save-pref">Сохранить приоритет</button></fieldset>
-<h2>Чек-лист проверки по 223-ФЗ</h2>
+<button class="outline" type="button" id="staff-save-pref">Сохранить приоритет</button></details>
+<details class="staff-foldout"><summary>Чек-лист проверки по 223-ФЗ</summary>
 <div id="staff-checklist"></div>
-<h2>Зафиксировать нарушение вручную</h2>
+</details>
+<details class="staff-foldout"><summary>Зафиксировать нарушение вручную</summary>
 <p class="notice">Это предложение к проверке, а не подтверждённое нарушение. Нужны конкретная норма и первоисточник ЕИС.</p>
 <form id="staff-manual-form">
 <label class="wide">Название нарушения<input name="title" minlength="8" maxlength="220" required></label>
@@ -898,30 +930,36 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <textarea name="evidence" minlength="30" maxlength="4000" required></textarea></label>
 <button class="primary" type="submit">Передать на проверку</button></form>
 <div id="staff-manual-findings"></div>
-<h2>Связанные закупки заказчика</h2><div id="staff-related"></div>
-<h2>Сравнение доступных редакций</h2>
+</details>
+<details class="staff-foldout"><summary>Связанные закупки заказчика</summary><div id="staff-related"></div>
+</details>
+<details class="staff-foldout"><summary>Сравнение доступных редакций</summary>
 <p>Для сохранённых документов с одинаковым названием можно проверить различия в извлечённом тексте.</p>
 <div class="action-row"><label>Первый документ<select id="staff-version-left"></select></label>
 <label>Второй документ<select id="staff-version-right"></select></label>
 <button class="outline" type="button" id="staff-version-compare">Показать различия</button></div>
 <p id="staff-version-note"></p>
 <div class="entry" id="staff-version-diff"></div>
-<h2>Поиск внутри сохранённых оригиналов</h2>
+</details>
+<details class="staff-foldout"><summary>Поиск внутри сохранённых оригиналов</summary>
 <form id="staff-original-search">
 <label class="wide">Точное слово или фраза<input name="q" minlength="3" maxlength="100" required
 placeholder="Срок оплаты договора"></label>
 <button class="primary">Поиск в файлах ЕИС</button></form>
 <div id="staff-original-results"></div>
-<h2>Поиск по сохранённым доказательствам и документам</h2>
+</details>
+<details class="staff-foldout"><summary>Поиск по сохранённым доказательствам</summary>
 <form id="staff-search-form"><label class="wide">Искомая фраза
 <input name="q" minlength="3" maxlength="110" required placeholder="Обеспечение заявки"></label>
 <button class="primary">Найти фрагменты</button></form>
 <div id="staff-search-results"></div>
-<h2>Обсуждение с руководителем</h2>
+</details>
+<details class="staff-foldout"><summary>Обсуждение с руководителем</summary>
 <div id="staff-discussion"></div>
 <form id="staff-message-form"><label class="wide">Комментарий
 <textarea name="body" minlength="4" maxlength="2000" required></textarea></label>
 <button class="primary" type="submit">Отправить сообщение</button></form>
+</details>
 </div></section>
 <section class="panel" data-staff-section="activity" hidden>
 <h2>История работы</h2>
@@ -931,13 +969,10 @@ placeholder="Срок оплаты договора"></label>
 <h2>Моя база согласованных нарушений</h2>
 <p>Только подтверждённые руководителем выводы, отдельно от автоматических находок анализатора.</p>
 <div id="staff-library-list"></div>
-<h2>Проверка оформления служебной записки</h2>
-<p>Откройте архив и нажмите «Проверить записку» рядом с нужным документом.
-Никаких идентификаторов вводить не требуется.</p>
-<p><a href="/account/memos">Открыть архив и проверить мои ODT →</a></p></section>
+<p><a href="/account/memos">Архив служебных записок и проверка оформления →</a></p></section>
 </div></div>
 <div id="staff-status" role="status" aria-live="polite"></div>
 </main>__JS__</body></html>"""
 
 def render_workbench():
-    return PAGE.replace("__CSS__",CSS+account_page_style()).replace("__JS__",JS)
+    return PAGE.replace("__CSS__",CSS+account_page_style()+COMPACT_CSS).replace("__JS__",JS)

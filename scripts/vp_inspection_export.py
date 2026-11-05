@@ -18,11 +18,14 @@ from lxml import etree as ET
 from zipfile import ZipFile, ZIP_DEFLATED
 
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, RedirectResponse
 from v295_eis_originals import root
 from legal_audit_revision import engine_signature, EngineSignatureError
 
 REG = re.compile(r"^[0-9]{11,20}$")
+# Exact legacy report family observed in the restored runtime. Other purchase
+# endpoints and the inspection-card page retain their existing behavior.
+LEGACY_DOWNLOAD = re.compile(r"^/api/purchases/([^/]+)/inspection(?:-sheet)?(?:\.([A-Za-z0-9]+))?$")
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 REVISION = "vp-inspection-19-20261105"
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -293,18 +296,52 @@ def install(ns):
     ns["_vp_save_snapshot"] = lambda p, docs, findings, checks, detail=None, card=None: save_snapshot(ns, p, docs, findings, checks, detail, card)
     app = ns["app"]
 
-    @app.get("/api/inspection/{reg}.{extension}")
-    async def inspection_file(reg: str, extension: str, request: Request):
-        if not REG.fullmatch(reg) or extension not in ("odt", "docx", "json"):
-            raise HTTPException(404, "Лист проверки не найден")
+    def require_login(request):
         if os.getenv("EIS223_AUTH_ENFORCE", "").lower() == "true" and request.scope.get("eis223_account_id") is None:
             raise HTTPException(401, "Требуется авторизация")
+
+    async def download(reg, extension, request):
+        require_login(request)
+        if not REG.fullmatch(reg) or extension not in ("odt", "docx", "json"):
+            raise HTTPException(404, "Лист проверки не найден")
         snapshot = await asyncio.to_thread(read_snapshot, reg)
         if extension == "json":
-            return JSONResponse(snapshot, headers={"Cache-Control": "private,no-store"})
-        data = await asyncio.to_thread(render, snapshot, extension)
-        mime = {"odt": "application/vnd.oasis.opendocument.text", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[extension]
-        return Response(data, media_type=mime, headers={"Cache-Control": "private,no-store",
-                        "Content-Disposition": 'attachment; filename="inspection_' + reg + '.' + extension + '"'})
+            response = JSONResponse(snapshot, headers={"Cache-Control": "private,no-store"})
+        else:
+            data = await asyncio.to_thread(render, snapshot, extension)
+            mime = {"odt": "application/vnd.oasis.opendocument.text", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[extension]
+            response = Response(data, media_type=mime, headers={"Cache-Control": "private,no-store",
+                            "Content-Disposition": 'attachment; filename="inspection_' + reg + '.' + extension + '"'})
+        if request.method == "HEAD":
+            response.body = b""
+        return response
+
+    @app.api_route("/api/inspection/{reg}.{extension}", methods=["GET", "HEAD"])
+    async def inspection_file(reg: str, extension: str, request: Request):
+        return await download(reg, extension, request)
+
+    @app.middleware("http")
+    async def current_inspection_downloads(request, call_next):
+        # The restored runtime has middleware that can serve its old template
+        # before route dispatch. This narrowly scoped outer boundary handles
+        # only its observed report family, after the production account gate.
+        match = LEGACY_DOWNLOAD.fullmatch(request.url.path)
+        if request.method not in ("GET", "HEAD") or match is None:
+            return await call_next(request)
+        try:
+            require_login(request)
+            reg, extension = match[1], match[2] or "odt"
+            if not REG.fullmatch(reg):
+                raise HTTPException(404, "Лист проверки не найден")
+            if extension == "pdf":
+                return RedirectResponse("/api/inspection/" + reg + ".odt", status_code=303,
+                                        headers={"Cache-Control": "private,no-store"})
+            return await download(reg, extension, request)
+        except HTTPException as exc:
+            response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                                    headers={**(exc.headers or {}), "Cache-Control": "private,no-store"})
+            if request.method == "HEAD":
+                response.body = b""
+            return response
 
     print("VP_INSPECTION_EXPORT_READY criteria=19 comments=blank formats=odt,docx saved_only=True", flush=True)

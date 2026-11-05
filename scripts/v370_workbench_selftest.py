@@ -197,7 +197,7 @@ def check_routes_schema_and_ui():
     assert {"overview","bulk","goals","templates","case","activity","library"}<=parser.tabs
     for phrase in ("Массовая самостоятельная проверка","Нарушения тематических проверок",
                    "Зафиксировать нарушение вручную","Сравнение доступных редакций",
-                   "Служебные записки","Моё рабочее пространство"):
+                   "Служебные записки","Кабинет сотрудника"):
         assert phrase in html,phrase
     assert "Календарь сроков" not in html
     assert "staff-case-draft" in html and "staff-task-list" in html
