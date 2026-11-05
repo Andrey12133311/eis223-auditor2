@@ -1433,11 +1433,15 @@ def install(ns):
     @app.get("/api/v295/eis223/manifest/{reg}")
     async def manifest(reg:str,request:Request):
         auth(request)
-        items=[]
-        for uid,d in allowed_documents(reg).items():
-            receipt=saved_document(reg,uid)
-            items.append({**d,"received":receipt is not None,
-                          "extracted_chars":receipt[1].get("extracted_chars",0) if receipt else 0})
+        from v381_audit_scheduling import run_file_io
+        def saved_manifest():
+            items=[]
+            for uid,d in allowed_documents(reg).items():
+                receipt=saved_document(reg,uid)
+                items.append({**d,"received":receipt is not None,
+                              "extracted_chars":receipt[1].get("extracted_chars",0) if receipt else 0})
+            return items
+        items=await run_file_io(saved_manifest)
         return {"reg_number":reg,"metadata_received":bool(items),"documents":items,
                 "counted_as_audited":False,"max_original_bytes":MAX_BYTES}
 
@@ -1445,7 +1449,7 @@ def install(ns):
     async def recheck_official(reg:str,request:Request):
         auth(request)
         if not REG.fullmatch(reg):raise HTTPException(400,"Invalid registry number")
-        info=enqueue_review(reg,force=True)
+        info=await enqueue_review_async(reg,force=True)
         if info["status"]=="waiting_for_originals":
             raise HTTPException(422,"Original documents are not all received")
         return JSONResponse({"reg_number":reg,**info,"queued":info["status"] in ("queued","running")},
@@ -1455,8 +1459,11 @@ def install(ns):
     async def recheck_status(reg:str,request:Request):
         auth(request)
         if not REG.fullmatch(reg):raise HTTPException(400,"Invalid registry number")
-        total,received=review_counts(reg)
-        return {**review_state(reg),"originals_received":received,"originals_expected":total}
+        from v381_audit_scheduling import run_file_io
+        def saved_status():
+            total,received=review_counts(reg)
+            return {**review_state(reg),"originals_received":received,"originals_expected":total}
+        return await run_file_io(saved_status)
 
     @app.get("/api/v295/eis223/documents",response_class=HTMLResponse)
     async def page():

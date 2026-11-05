@@ -176,7 +176,57 @@ class AsyncIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         env=patch.dict(os.environ,{"EIS223_DATA_DIR":self.tmp.name,"EIS223_UPLOAD_TOKEN":TOKEN})
         env.start();self.addCleanup(env.stop)
-        self.app=FastAPI();bridge.install({"app":self.app})
+        self.app=FastAPI();self.ns={"app":self.app};bridge.install(self.ns)
+
+    async def check_admission_responsiveness(self, use_async):
+        entered,release=threading.Event(),threading.Event()
+        loop_thread=threading.get_ident()
+        calls=[]
+        def admission(reg,force=False):
+            self.assertNotEqual(threading.get_ident(),loop_thread)
+            calls.append((reg,force))
+            entered.set()
+            if not release.wait(3):raise RuntimeError("test admission wait expired")
+            return {"status":"queued"}
+        if use_async:
+            async def async_admission(reg,force=False):
+                return await asyncio.to_thread(admission,reg,force)
+            self.ns["_v295_enqueue_review_async"]=async_admission
+            def wrong_hook(*args,**kwargs):
+                self.fail("native HTTP intake called the synchronous admission hook")
+            self.ns["_v295_enqueue_review"]=wrong_hook
+        else:
+            self.ns["_v295_enqueue_review"]=admission
+        @self.app.get("/health-probe")
+        async def health():return {"ok":True}
+        raw=archive(fixture())
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url="http://test") as client:
+            task=asyncio.create_task(client.post("/api/v294/eis223/archive",content=raw,
+                headers={"x-eis223-upload-token":TOKEN}))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait,2))
+                response=await asyncio.wait_for(client.get("/health-probe"),.5)
+                self.assertEqual(response.json(),{"ok":True})
+                self.assertFalse(task.done())
+                saved=list(Path(self.tmp.name).rglob("*.zip"))
+                self.assertEqual(len(saved),1)
+                self.assertEqual(saved[0].read_bytes(),raw)
+            finally:
+                release.set()
+                results=await asyncio.gather(task,return_exceptions=True)
+            if isinstance(results[0],BaseException):raise results[0]
+            self.assertEqual(results[0].status_code,200)
+            replay=await client.post("/api/v294/eis223/archive",content=raw,
+                headers={"x-eis223-upload-token":TOKEN})
+            self.assertEqual(replay.status_code,200)
+            self.assertTrue(replay.json()["already_received"])
+        self.assertEqual(calls,[(REG,True)])
+
+    async def test_async_review_admission_keeps_health_responsive_and_replay_idempotent(self):
+        await self.check_admission_responsiveness(use_async=True)
+
+    async def test_legacy_review_admission_keeps_health_responsive_and_replay_idempotent(self):
+        await self.check_admission_responsiveness(use_async=False)
 
     async def test_parse_and_fsync_are_off_http_thread(self):
         loop_thread=threading.get_ident();parse=bridge.parse_notices;write=bridge._atomic

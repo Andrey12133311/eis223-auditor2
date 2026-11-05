@@ -577,6 +577,37 @@ class IntakeAutomaticRechecks(unittest.IsolatedAsyncioTestCase):
             tick.cancel()
             await asyncio.gather(tick,return_exceptions=True)
 
+    async def test_receipt_http_routes_keep_slow_file_reads_off_event_loop(self):
+        import httpx
+        token="local-receipt-http-fixture-token"
+        actual=originals.allowed_documents
+        loop_thread=threading.get_ident()
+        @self.ns["app"].get("/health-probe")
+        async def health():return {"ok":True}
+        with patch.dict(os.environ,{"EIS223_UPLOAD_TOKEN":token}):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.ns["app"]),base_url="http://test") as client:
+                for method,path in (("GET","manifest"),("GET","recheck-status"),("POST","recheck")):
+                    entered,release=threading.Event(),threading.Event()
+                    def slow_receipts(reg):
+                        self.assertNotEqual(threading.get_ident(),loop_thread)
+                        entered.set()
+                        if not release.wait(3):raise RuntimeError("test receipt wait expired")
+                        return actual(reg)
+                    with self.subTest(path=path),patch.object(originals,"allowed_documents",side_effect=slow_receipts):
+                        task=asyncio.create_task(client.request(method,"/api/v295/eis223/"+path+"/"+REG,
+                            headers={"x-eis223-upload-token":token}))
+                        try:
+                            self.assertTrue(await asyncio.to_thread(entered.wait,2))
+                            reply=await asyncio.wait_for(client.get("/health-probe"),.5)
+                            self.assertEqual(reply.status_code,200)
+                            self.assertFalse(task.done())
+                        finally:
+                            release.set()
+                            results=await asyncio.gather(task,return_exceptions=True)
+                        if isinstance(results[0],BaseException):raise results[0]
+                        self.assertIn(results[0].status_code,(200,202))
+                await self.settled()
+
     async def test_parallel_async_intake_admissions_keep_one_physical_review(self):
         self.block = asyncio.Event()
         results = await asyncio.gather(*(

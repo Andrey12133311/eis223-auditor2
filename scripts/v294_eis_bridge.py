@@ -252,7 +252,9 @@ def install(ns):
         unsupported_xmls=sum(n["xml_family"]=="unsupported" for n in notices)
         from v295_eis_originals import _review_source_version
         enqueue=ns.get("_v295_enqueue_review")
-        before=await _intake_io(_review_source_version,reg) if callable(enqueue) else None
+        enqueue_async=ns.get("_v295_enqueue_review_async")
+        can_enqueue=callable(enqueue_async) or callable(enqueue)
+        before=await _intake_io(_review_source_version,reg) if can_enqueue else None
         was_new=await _intake_io(_store_archive,raw,notices,sha)
         metadata_import="pending"
         import_metadata=ns.get("_v379_import_soap_metadata")
@@ -264,9 +266,18 @@ def install(ns):
                 # The durable archive is acknowledged; a retry can repair the
                 # card without losing bytes or claiming a completed audit.
                 print(f"V379 SOAP_METADATA_PENDING reg={reg} type={type(exc).__name__}",flush=True)
-        if callable(enqueue):
+        if can_enqueue:
             after=await _intake_io(_review_source_version,reg)
-            if before!=after:enqueue(reg,force=True)
+            if before!=after:
+                # Admission reads receipts, hashes originals and takes file/DB
+                # locks. The synchronous hook can stop every HTTP request while
+                # another review owns one of those locks. Keep the native async
+                # admission on the loop; it offloads its physical I/O itself.
+                if callable(enqueue_async):
+                    await enqueue_async(reg,force=True)
+                else:
+                    from functools import partial
+                    await _intake_io(partial(enqueue,reg,force=True))
         print(f"V294 EIS_INBOX reg={reg} metadata={len(notices)} links={sum(n['documents_referenced'] for n in notices)} duplicate={not was_new} verified_originals=0",flush=True)
         if unsupported_xmls:
             print(f"V294 EIS_INBOX_PARTIAL reg={reg} unsupported_xmls={unsupported_xmls}",flush=True)
