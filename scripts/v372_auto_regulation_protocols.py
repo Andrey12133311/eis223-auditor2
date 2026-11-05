@@ -19,6 +19,7 @@ import re
 from v331_broad_legal import verified as receipt_verified
 from v341_precise_legal import COMPETITIVE
 from v330_amendments_223 import day
+from legal_document_context import document_context, local_context
 
 LAW_REG = "https://www.consultant.ru/document/cons_doc_LAW_116964/fa59dfcdcfd8c5c80928d33fa840280273464c74/"
 LAW_4 = "https://www.consultant.ru/document/cons_doc_LAW_116964/441d00be62e3224cdc0514cffaf2a26b5b40a1c7/"
@@ -177,7 +178,8 @@ def review_protocols(p,documents):
         text=_text(doc)
         if len(text)<100:
             continue
-        is_final=bool(re.search(r"итогов\w*|итогов\w*\s+протокол|подведени\w*\s+итог",str(doc.get("name") or "")+" "+text[:120],re.I))
+        context=document_context(doc)
+        is_final=bool(re.search(r"итогов\w*\s+протокол|протокол.{0,70}подведени\w*\s+итог",str(doc.get("name") or "")+" "+text[:120],re.I))
         article="223-ФЗ, ст. 3.2 ч. "+("14 п. 5 пп. «б»" if is_final else "13 п. 3 пп. «б»")
         # A direct numbered-bid statement in an authenticated original is
         # stronger than an absence inferred from text search. Multiple
@@ -190,7 +192,21 @@ def review_protocols(p,documents):
                 # together with express lack of reasons, not a quote of law.
                 if not RX_BID_REFERENCE.search(nearby) or not RX_BIDS.search(nearby):
                     continue
-                if re.search(r"образец\s+протокол|проект\s+протокол|пример\s+заполнени",text[:350],re.I):
+                # A grammatical negation is not an actual rejection: e.g.
+                # "не отклонена заявка № 12, основания отклонения не указаны".
+                if re.search(r"\bне\s+$",text[max(0,m.start()-20):m.start()],re.I):
+                    continue
+                passage=local_context(text,m.start(),m.end())
+                if not context["eligible_actual"] or not passage["eligible_actual"]:
+                    reasons=context.get("reason_labels",[])+passage.get("reason_labels",[])
+                    checks.append(_record(
+                        doc,"v372-protocol-document-context",
+                        "Проверить, относится ли фрагмент к действительному решению комиссии",
+                        "223-ФЗ, ст. 3.2 ч. 13, 14",LAW_PROT,
+                        _fragment(text,m.start(),m.end(),1100),m.start(),
+                        "Оригинал сохранён, но его контекст ограничивает вывод: "+", ".join(dict.fromkeys(reasons))+
+                        ". Образец, цитата, проект или отменённая редакция не доказывают фактическое отклонение заявки. "
+                        "Нужны соответствующий акт комиссии и применимая редакция; исторические доказательства не удаляются."))
                     continue
                 findings.append(_record(
                     doc,"v372-protocol-rejected-bid-no-reasons",
@@ -200,13 +216,16 @@ def review_protocols(p,documents):
                     "Окончательную квалификацию и применимую редакцию документа подтверждает проверяющий.",
                     violation=True))
                 break
+        if not context["eligible_actual"]:
+            continue
         # Detect questionable protocol content automatically. These are not
         # confirmed violations because an excerpt can omit information on
         # another page or in an annex.
         rejected=RX_BIDS.search(text[:MAX_TEXT])
         if rejected:
             around=text[max(0,rejected.start()-180):min(len(text),rejected.end()+900)]
-            if RX_BID_REFERENCE.search(around) and not RX_CLAUSE.search(around):
+            if (local_context(text,rejected.start(),rejected.end())["eligible_actual"] and
+                    RX_BID_REFERENCE.search(around) and not RX_CLAUSE.search(around)):
                 checks.append(_record(
                     doc,"v372-protocol-rejected-bid-document-clause",
                     "Проверить ссылку на пункт документации при отклонении заявки",
@@ -217,7 +236,7 @@ def review_protocols(p,documents):
                     "не означает установленного нарушения."))
         assessed=re.search(r"(?:присвоен\w*\s+\d{1,3}\s+балл|"
                            r"оценк\w*\s+заявк\w*|результат\w*\s+оценк\w*)",text,re.I)
-        if assessed and not re.search(r"критери\w*[\s\S]{0,180}\d{1,3}\s+балл",
+        if assessed and local_context(text,assessed.start(),assessed.end())["eligible_actual"] and not re.search(r"критери\w*[\s\S]{0,180}\d{1,3}\s+балл",
                                        text[max(0,assessed.start()-120):assessed.start()+1500],re.I):
             checks.append(_record(
                 doc,"v372-protocol-criteria-values",

@@ -18,7 +18,7 @@ from v331_broad_legal import verified
 from v383_msp_scope import resolve as resolve_sme
 from legal_applicability import competitive_rule_scope
 
-REVISION = "inspection-sheet-19-v1"
+REVISION = "inspection-sheet-19-v3"
 
 # Exact rule identities take precedence over titles. In particular, a mention
 # of "documentation" in a payment finding cannot become a documentation defect.
@@ -111,6 +111,7 @@ _RULE_KEYS = {
     "v383-bid-security-msp-scope": ("sme_bid_security",),
     "223-sme-bid-security-over-two-percent": ("sme_bid_security",),
     "223-4-11-amendment-publication-delay": ("amendments",),
+    "223-4-11-amendment-publication-late": ("amendments",),
     "223-4-11-change-after-bid-deadline": ("post_deadline_extension",),
     "v372-protocol-rejected-bid-no-reasons": ("protocol_compliance",),
     "v372-protocol-rejected-bid-document-clause": ("protocol_compliance",),
@@ -118,6 +119,8 @@ _RULE_KEYS = {
     "vp-payment-term": ("payment_223",),
     "vp-trademark-exclusion": ("trademark_equivalent",),
     "vp-sme-purchase-list": ("sme_criteria",),
+    "223-3.4-19.2-sme-evaluation-docs-rejection": ("sme_application_requirements",),
+    "1352-28-sme-payment-over-seven-workdays": ("sme_payment",),
 }
 
 _REQUIRED_EVIDENCE = {
@@ -149,7 +152,7 @@ _COMPETITIVE_KEYS = frozenset({"trademark_equivalent", "clarifications",
     "bid_security", "post_deadline_extension"})
 
 
-def criterion_keys(finding):
+def _inferred_criterion_keys(finding):
     """Return precise sheet rows for a legal outcome, without reading evidence.
 
     Generic group labels and document titles are intentionally insufficient.
@@ -157,13 +160,6 @@ def criterion_keys(finding):
     """
     if not isinstance(finding, dict):
         return ()
-    explicit = finding.get("criterion_keys")
-    if isinstance(explicit, str):
-        explicit = (explicit,)
-    if isinstance(explicit, (list, tuple)):
-        keys = tuple(dict.fromkeys(x for x in explicit if isinstance(x, str) and x in BY_KEY))
-        if keys:
-            return keys
     code = str(finding.get("code") or finding.get("field_path") or "").strip().lower()
     if code in BY_KEY:
         return (code,)
@@ -218,6 +214,207 @@ def criterion_keys(finding):
     matched = tuple(key for pattern, key in refs if re.search(pattern, law))
     # A composite citation cannot turn one general signal into many findings.
     return matched if len(matched) == 1 else ()
+
+
+def _explicit_criterion_keys(item):
+    value = item.get("reported_criterion_keys", item.get("criterion_keys"))
+    if isinstance(value, str):
+        value = (value,)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(dict.fromkeys(key for key in value if isinstance(key, str) and key in BY_KEY))
+
+
+def criterion_keys(finding):
+    """Prefer the registered rule/norm identity over an inconsistent row tag."""
+    if not isinstance(finding, dict):
+        return ()
+    return _inferred_criterion_keys(finding) or _explicit_criterion_keys(finding)
+
+
+def _normal_law(value):
+    law = str(value or "").lower().replace("ё", "е").replace("\xa0", " ")
+    for pattern, replacement in ((r"\bстать(?:я|и|е|ю|ей)\b", "ст."),
+                                 (r"\bчаст(?:ь|и|ью|ей)\b", "ч."),
+                                 (r"\bпункт(?:ы|а|ов)?\b", "п.")):
+        law = re.sub(pattern, replacement, law)
+    return re.sub(r"\s+", " ", law)
+
+
+def _numbers(value):
+    result = set(re.findall(r"\d+(?:\.\d+)*", value))
+    for match in re.finditer(r"(?<![\d.])(\d+)\s*[-–—]\s*(\d+)(?![\d.])", value):
+        first, last = map(int, match.groups())
+        if 0 <= last-first <= 30:
+            result.update(str(number) for number in range(first, last+1))
+    return result
+
+
+def _article_parts(law, article, parts):
+    number_list = r"\d+(?:\.\d+)*(?:\s*(?:[,/–—-]|\bи\b)\s*\d+(?:\.\d+)*)*"
+    article = re.escape(article)
+    for pattern in (
+        r"\bст\.?\s*"+article+r"(?![\d.])\s*[,;:]?\s*ч\.?\s*(?P<n>"+number_list+r")",
+        r"\bч\.?\s*(?P<n>"+number_list+r")\s*[,;:]?\s*ст\.?\s*"+article+r"(?![\d.])",
+    ):
+        if any(_numbers(match["n"]) & set(parts) for match in re.finditer(pattern, law)):
+            return True
+    return False
+
+
+def norm_matches_criterion(item, key):
+    """Check that the specific cited provision belongs to this criterion.
+
+    This is reference consistency, not a claim that every historical edition
+    or factual precondition was verified. A statute number alone is insufficient.
+    """
+    # Keep separate acts separate. A bare 223-ФЗ at the end must not lend
+    # authority to a provision cited under the Civil Code in another clause.
+    clauses = [_normal_law(value) for value in re.split(r"[;\n]", str(item.get("law") or ""))]
+    provisions = {
+        "payment_223": ("3", {"5.3", "5.4"}),
+        "trademark_equivalent": ("3", {"6.1"}),
+        "clarifications": ("3.2", {"3", "4"}),
+        "cancellation": ("3.2", {"5", "6", "7"}),
+        "protocol_compliance": ("3.2", {"13", "14"}),
+        "contract_signing": ("3.2", {"15"}),
+        "notice_deadlines": ("3.2", {"17", "19", "21", "23"}),
+        "bid_security": ("3.2", {"25", "26", "27"}),
+        "notice_content": ("4", {"9"}),
+        "documentation_content": ("4", {"10"}),
+        "amendments": ("4", {"11"}),
+        "post_deadline_extension": ("4", {"11"}),
+        "sme_notice_deadlines": ("3.4", {"3"}),
+        "sme_bid_security": ("3.4", {"12"}),
+        "sme_application_requirements": ("3.4", {"19.1", "19.2", "19.3", "19.4"}),
+        "sme_collective_participation": ("3.4", {"19.1"}),
+    }
+    code = str(item.get("code") or item.get("field_path") or "").lower()
+    # A registered narrow event also needs its own provision, rather than
+    # another provision that happens to belong to the same sheet row.
+    if code.startswith("223-3.2-3-clarification-"):
+        provisions["clarifications"] = ("3.2", {"3"})
+    elif code.startswith("223-3.2-6-cancellation-"):
+        provisions["cancellation"] = ("3.2", {"6"})
+    elif code.startswith("223-3.2-27-bid-security-"):
+        provisions["bid_security"] = ("3.2", {"27"})
+    elif code == "223-3.4-19.2-sme-evaluation-docs-rejection":
+        provisions["sme_application_requirements"] = ("3.4", {"19.2"})
+    for law in clauses:
+        if not law or re.search(r"не\s+применя\w*|утратил\w*\s+силу", law):
+            continue
+        if re.search(r"\b(?:гк|коап|тк|нк|бк|жк|ук)\s*рф\b|\b(?:договор|контракт)\s*№", law):
+            continue
+        acts = set(re.findall(r"(?<!\d)(\d+)\s*[-–—‑]?\s*фз\b", law))
+        has_223 = acts == {"223"}
+        if key in provisions and has_223 and _article_parts(law, *provisions[key]):
+            return True
+        decree = re.search(r"\b(?:пп\s*(?:рф)?|постановлени\w*(?:\s+правительств\w*)?(?:\s+рф)?|положени\w*)\s*№?\s*(1352|1875)(?!\d)", law)
+        if not decree:
+            continue
+        paragraphs = {
+            "sme_criteria": r"(?:18|19)(?![\d.(])",
+            "sme_payment": r"(?:14\s*\(\s*3\s*\)|28)(?![\d.(])",
+            "sme_bid_security": r"23(?![\d.(])",
+        }
+        if decree[1] == "1352" and key in paragraphs and re.search(r"\bп\.?\s*"+paragraphs[key], law):
+            return True
+        if key == "national_1875" and decree[1] == "1875":
+            if re.search(r"\bп\.?\s*\d|приложени\w*\s*(?:№\s*)?\d", law):
+                return True
+    return False
+
+
+def _rule_known(item):
+    code = str(item.get("code") or item.get("field_path") or "").strip().lower()
+    return (code in _RULE_KEYS or code in BY_KEY or code in {
+        "223-3.2-3-clarification-response-late", "223-3.2-3-clarification-cross-doc-late",
+        "223-3.2-6-cancellation-posted-late", "223-3.2-27-bid-security-low-nmcd",
+        "223-3.2-27-bid-security-over-five-percent"} or
+        bool(re.fullmatch(r"223-4-(?:9|10)-\d+", code)))
+
+
+def decision_qualification(item, key):
+    """Qualify one reported conclusion without discarding its source record."""
+    code = str(item.get("code") or item.get("field_path") or "").strip().lower()
+    explicit = _explicit_criterion_keys(item)
+    inferred = _inferred_criterion_keys(item)
+    criterion_consistent = not explicit or not inferred or set(explicit) == set(inferred)
+    kind = str(item.get("reported_kind", item.get("kind")) or "").strip().lower()
+    status = str(item.get("reported_status", item.get("status")) or "").strip().lower()
+    positive = {"ok", "pass", "compliant"}
+    review = {"check", "review", "risk", "unknown", "not_applicable"}
+    status_consistent = not (
+        (kind == "violation" and status and status != "violation") or
+        (kind in {"risk", "review"} and status in positive | {"violation"}) or
+        (kind in positive | {"check", "unknown", "not_applicable"} and status == "violation") or
+        (status and status not in positive | review | {"violation"}))
+    requested = _status({**item, "kind": kind, "status": status})
+    norm_verified = norm_matches_criterion(item, key)
+    rule_known = _rule_known(item)
+    codes, reasons = [], []
+    def add(code, reason):
+        codes.append(code)
+        reasons.append(reason)
+    if not rule_known:
+        add("unregistered_decision_rule", "Правило вывода не зарегистрировано для автоматического подтверждения; требуется проверка.")
+    if not criterion_consistent:
+        add("criterion_rule_conflict", "Указанный критерий расходится с идентификатором правила или точной нормой; результат требует проверки.")
+    if not status_consistent:
+        add("reported_status_conflict", "Вид результата и заявленный статус противоречат друг другу; автоматическое подтверждение отменено.")
+    if not norm_verified:
+        add("legal_reference_unverified", "Точная норма не согласована с критерием: одной ссылки на акт или на другую статью недостаточно.")
+    review_only = (code.startswith(("v337-", "v341-")) or code in {
+        "vp-payment-term", "vp-trademark-exclusion", "vp-sme-purchase-list",
+        "v372-protocol-rejected-bid-document-clause", "v372-protocol-criteria-values",
+        "v336-bid-security-needs-verified-nmcd", "v383-bid-security-msp-scope"})
+    if requested in {"violation", "compliant"} and review_only:
+        add("review_rule_cannot_confirm", "Это правило выявляет обстоятельство для проверки и не устанавливает нарушение или соблюдение критерия.")
+    if status in positive and item.get("criterion_complete") is not True:
+        add("criterion_not_fully_checked", "Положительный результат отдельного поля не подтверждает проверку всего критерия.")
+    if (code == "223-4-11-change-after-bid-deadline" and requested == "unknown" and
+            (kind == "violation" or status == "violation")):
+        add("post_deadline_breach_unproven", "Сам перенос после окончания подачи заявок не подтверждает самостоятельное нарушение закона.")
+    if requested == "unknown" and not codes:
+        add("review_outcome_not_verdict", "Исходный результат требует проверки и не подтверждает нарушение или соблюдение всего критерия.")
+    return {
+        "status": requested if not codes else "unknown",
+        "legal_basis_verified": norm_verified,
+        "methodology_reasons": reasons,
+        "methodology_reason_codes": codes,
+        "decision_basis": {"rule_code": code, "criterion_keys": list(inferred or explicit),
+            "rule_known": rule_known, "norm_verified": norm_verified,
+            "status_consistent": status_consistent, "criterion_consistent": criterion_consistent,
+            "requested_status": requested, "legal_verification_scope": "citation_consistency"},
+    }
+
+
+def qualify_record(item):
+    """Return a consistent mapped verdict, retaining rejected claims as reviews."""
+    if not isinstance(item, dict):
+        return item
+    keys = criterion_keys(item)
+    if not keys:
+        return dict(item)
+    decisions = [decision_qualification(item, key) for key in keys]
+    result = dict(item)
+    if _explicit_criterion_keys(item) and set(_explicit_criterion_keys(item)) != set(keys):
+        result.setdefault("reported_criterion_keys", item.get("criterion_keys"))
+    result["criterion_keys"] = list(keys)
+    result["legal_basis_verified"] = all(value["legal_basis_verified"] for value in decisions)
+    result["decision_basis"] = decisions[0]["decision_basis"]
+    result["methodology_reasons"] = list(dict.fromkeys(reason for value in decisions for reason in value["methodology_reasons"]))
+    result["methodology_reason_codes"] = list(dict.fromkeys(code for value in decisions for code in value["methodology_reason_codes"]))
+    if result["methodology_reasons"]:
+        result.setdefault("reported_kind", item.get("kind"))
+        result.setdefault("reported_status", item.get("status"))
+        result["kind"] = "review"
+        result["status"] = "check"
+        result.setdefault("item", item.get("title") or "Проверить вывод по критерию")
+        result.setdefault("title", item.get("item") or "Проверить вывод по критерию")
+        result.setdefault("field_path", item.get("code") or "methodology-review")
+        result.setdefault("source", item.get("document") or "Материалы закупки")
+    return result
 
 
 def _text(value):
@@ -278,6 +475,127 @@ def _source_support(item, docs, body_cache=None):
         if len(excerpt) >= 25 and excerpt in body:
             return doc, excerpt[:2200]
     return None
+
+
+def _fragment_bounds(body, excerpt):
+    """Locate a whitespace-normalized exact excerpt in the unflattened text."""
+    direct = body.find(excerpt)
+    if direct >= 0:
+        return direct, direct+len(excerpt)
+    normalized = _text(body)
+    start = normalized.find(_text(excerpt))
+    if start < 0:
+        return None
+    stop, position, first = start+len(_text(excerpt)), 0, None
+    for token in re.finditer(r"\S+", body):
+        end = position+len(token[0])
+        if first is None and end > start:
+            first = token.start()+max(0, start-position)
+        if end >= stop and first is not None:
+            return first, token.start()+stop-position
+        position = end+1
+    return None
+
+
+def _source_context(item, docs, body_cache=None):
+    """Reject explicit examples/replaced acts without inventing missing proof.
+
+    Some event engines have authoritative XML/history proof without a binary
+    quote. In that case this limiter reports availability separately and leaves
+    their existing source/proof gates in charge.
+    """
+    from legal_document_context import document_context, local_context, REASON_LABELS
+    code = str(item.get("code") or item.get("field_path") or "").lower()
+    actual_event = (code.startswith(("223-3.2-3-clarification-", "223-3.2-6-cancellation-", "223-4-11-")) or
+                    code == "v372-protocol-rejected-bid-no-reasons" or
+                    item.get("decision_kind") in {"actual_event", "completed_act"})
+    support = _source_support(item, docs, body_cache)
+    matches = [support[0]] if support else []
+    requested = _text(item.get("document") or item.get("source"))
+    url = str(item.get("source_url") or "")
+    if not matches:
+        candidates = [doc for doc in docs if (
+            (not requested or requested in {_text(doc.get("name")), _text(doc.get("local")), _text((doc.get("meta") or {}).get("filename"))}) and
+            (not url or url == str((doc.get("meta") or {}).get("source_url") or doc.get("url") or "")))] if requested or url else []
+        if candidates and len({_doc_identity(doc) for doc in candidates}) == 1:
+            matches = candidates[:1]
+    # Cross-original timelines cite both original URLs. A template on either
+    # side cannot prove that an actual request/answer occurred.
+    if code == "223-3.2-3-clarification-cross-doc-late":
+        evidence = str(item.get("evidence") or "")
+        for doc in docs:
+            source_url = str((doc.get("meta") or {}).get("source_url") or doc.get("url") or "")
+            if source_url and source_url in evidence and doc not in matches:
+                matches.append(doc)
+    codes, records = [], []
+    for doc in matches:
+        context = document_context(doc)
+        reasons = list(context["reasons"])
+        if not actual_event:
+            # A contract project can establish its proposed payment/security
+            # term; it cannot establish that a contract was signed or paid.
+            reasons = [value for value in reasons if value != "project_is_not_completed_act"]
+        bounds = _fragment_bounds(str(doc.get("text") or ""), support[1]) if support and doc is support[0] else None
+        local = local_context(doc.get("text"), *bounds) if bounds else None
+        # For a second cited original, inspect only explicit event labels. This
+        # is a contextual veto, never a way to construct a missing date pair.
+        if not local and code == "223-3.2-3-clarification-cross-doc-late":
+            from v341_precise_legal import REQUEST, ANSWER
+            passages = [local_context(doc.get("text"), match.start(), match.end())
+                        for pattern in (REQUEST, ANSWER)
+                        for match in pattern.finditer(str(doc.get("text") or ""))]
+            if passages:
+                reasons.extend(reason for passage in passages for reason in passage["reasons"])
+        if local:
+            reasons.extend(local["reasons"])
+        codes.extend(reasons)
+        records.append({"document": str(doc.get("name") or ""),
+            "role": context["role"], "version_status": context["version_status"],
+            "fragment_context_available": bool(local), "reason_codes": list(dict.fromkeys(reasons))})
+    codes = list(dict.fromkeys(codes))
+    return {"source_context_available": bool(matches),
+            "source_fragment_context_available": bool(support),
+            "source_context_eligible": not codes if matches else None,
+            "source_context": records,
+            "methodology_reason_codes": codes,
+            "methodology_reasons": ["Источник не подтверждает конкретное действие или условие: "+REASON_LABELS.get(value, value)+"." for value in codes]}
+
+
+def _qualify_with_context(item, docs, body_cache=None):
+    result = qualify_record(item)
+    if not isinstance(result, dict) or not criterion_keys(result):
+        return result
+    context = _source_context(result, docs, body_cache)
+    for field in ("source_context_available", "source_fragment_context_available", "source_context_eligible", "source_context"):
+        result[field] = context[field]
+    result["decision_basis"] = {**result["decision_basis"],
+        "source_context_available": context["source_context_available"],
+        "source_context_eligible": context["source_context_eligible"]}
+    for field in ("methodology_reasons", "methodology_reason_codes"):
+        result[field] = list(dict.fromkeys(result.get(field, [])+context[field]))
+    if context["methodology_reasons"]:
+        result.setdefault("reported_kind", item.get("kind"))
+        result.setdefault("reported_status", item.get("status"))
+        result.update(kind="review", status="check")
+        result.setdefault("item", item.get("title") or "Проверить вывод по критерию")
+        result.setdefault("field_path", item.get("code") or "methodology-review")
+        result.setdefault("source", item.get("document") or "Материалы закупки")
+    return result
+
+
+def qualify_outcomes(p, docs, findings=(), checks=()):
+    """Common pure pipeline stage: retain unsupported claims as review items."""
+    originals = [doc for doc in list(docs or ()) if isinstance(doc, dict) and verified(doc)]
+    qualified_findings, qualified_checks, body_cache = [], [], {}
+    for item in list(findings or ()):
+        result = _qualify_with_context(item, originals, body_cache)
+        if isinstance(result, dict) and criterion_keys(result) and result.get("methodology_reasons"):
+            qualified_checks.append(result)
+        else:
+            qualified_findings.append(result)
+    for item in list(checks or ()):
+        qualified_checks.append(_qualify_with_context(item, originals, body_cache))
+    return qualified_findings, qualified_checks
 
 
 def targeted_reviews(p, docs):
@@ -347,10 +665,12 @@ def _status(item):
         if not (item.get("statutory_breach_verified") is True and
                 item.get("post_deadline_breach_basis") and item.get("legal_basis_verified") is True):
             return "unknown"
-    if item.get("kind") == "violation" or item.get("status") == "violation":
+    kind = str(item.get("kind") or "").strip().lower()
+    status = str(item.get("status") or "").strip().lower()
+    if kind == "violation" or status == "violation":
         return "violation"
     # An individual 'ok' field is not a finding of whole-row compliance.
-    if item.get("status") in {"compliant", "ok", "pass"} and item.get("criterion_complete") is True:
+    if status in {"compliant", "ok", "pass"} and item.get("criterion_complete") is True:
         return "compliant"
     return "unknown"
 
@@ -440,6 +760,7 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
         keys = criterion_keys(item)
         if not keys:
             continue
+        item = _qualify_with_context(item, originals, body_cache)
         support = _source_support(item, originals, body_cache)
         status = _status(item)
         for key in keys:
@@ -447,30 +768,49 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
             applicable = (sme_payment_status is True if key == "sme_payment" else
                 sme["value"] is True if criterion.sme_only else
                 competitive is True if key in _COMPETITIVE_KEYS else True)
-            if not support or not item.get("law") or not applicable:
-                unknown_items[key].append({"code": str(item.get("code") or item.get("field_path") or ""),
-                    "status": "unknown", "reason": "Применимость или точный фрагмент проверенного оригинала не подтверждены"})
-                continue
-            doc, excerpt = support
+            reasons = list(item.get("methodology_reasons") or [])
+            reason_codes = list(item.get("methodology_reason_codes") or [])
+            if not support:
+                reasons.append("Точный фрагмент однозначно определённого проверенного оригинала не подтверждён.")
+                reason_codes.append("source_fragment_unverified")
+            if not applicable:
+                reasons.append("Применимость критерия к установленному режиму закупки не подтверждена.")
+                reason_codes.append("criterion_scope_unverified")
+            qualified_status = status if support and applicable and not reasons else "unknown"
+            doc, excerpt = support if support else ({}, "")
             identity = (key, status, str(item.get("code") or item.get("field_path") or ""),
                         _doc_identity(doc), _text(item.get("evidence")))
             if identity in seen:
                 continue
             seen.add(identity)
-            result = {"status": status, "source_index": source_index,
+            result = {"status": qualified_status, "source_index": source_index,
                 "evidence": _text(item.get("evidence"))[:3000],
                 "source_excerpt": excerpt, "document": str(doc.get("name") or item.get("document") or ""),
-                "source_url": str((doc.get("meta") or {}).get("source_url") or ""),
+                "source_url": str((doc.get("meta") or {}).get("source_url") or item.get("source_url") or ""),
                 "sha256": str((doc.get("meta") or {}).get("sha256") or ""),
                 "archive_member": str((doc.get("meta") or {}).get("archive_member") or ""),
                 "law": str(item.get("law") or ""), "law_url": str(item.get("law_url") or ""),
                 "code": str(item.get("code") or item.get("field_path") or ""),
                 "title": str(item.get("title") or item.get("item") or ""),
-                "note": str(item.get("note") or ""), "legal_basis_verified": True,
+                "note": str(item.get("note") or ""), "legal_basis_verified": norm_matches_criterion(item, key),
+                "methodology_reasons": list(dict.fromkeys(reasons)),
+                "methodology_reason_codes": list(dict.fromkeys(reason_codes)),
+                "decision_basis": item.get("decision_basis") or {},
+                "decision_kind": str(item.get("decision_kind") or ""),
+                "reported_kind": item.get("reported_kind", item.get("kind")),
+                "reported_status": item.get("reported_status", item.get("status")),
+                "source_context_available": item.get("source_context_available", False),
+                "source_fragment_context_available": item.get("source_fragment_context_available", False),
+                "source_context_eligible": item.get("source_context_eligible"),
+                "source_context": item.get("source_context") or [],
                 # Administrative qualification requires its own dated event
                 # investigation. Never copy obsolete blanket mappings.
-                "administrative_basis": _administrative_basis(item, key) if status == "violation" else ""}
-            outcomes[key].append(result)
+                "administrative_basis": _administrative_basis(item, key) if qualified_status == "violation" else ""}
+            result["reason"] = " ".join(result["methodology_reasons"])
+            if qualified_status == "unknown":
+                unknown_items[key].append(result)
+            if support and applicable:
+                outcomes[key].append(result)
     chosen = {}
     for key, items in outcomes.items():
         violations = [x for x in items if x["status"] == "violation"]
@@ -492,6 +832,8 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
         else:
             applicable = True
         status = "violation" if row["has_violation"] else "compliant" if row["no_violation"] else "not_applicable" if applicable is False else "unknown"
+        records = outcomes[row["key"]]+unknown_items[row["key"]]
+        methodology_reasons = list(dict.fromkeys(reason for value in records for reason in value["methodology_reasons"]))
         row.update(status=status, applicable=applicable,
             results=outcomes[row["key"]], unresolved=unknown_items[row["key"]],
             review_required=(status == "unknown"),
@@ -501,6 +843,10 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
                 "Критерий не применяется к установленному режиму закупки" if applicable is False else
                 "Недостаточно подтверждённых данных для вывода по критерию" if status == "unknown" else ""),
             required_evidence=_REQUIRED_EVIDENCE[row["key"]], comment="",
+            methodology_reasons=methodology_reasons,
+            methodology_reason_codes=list(dict.fromkeys(code for value in records for code in value["methodology_reason_codes"])),
+            legal_basis_verified=(chosen[row["key"]]["legal_basis_verified"] if row["key"] in chosen else
+                bool(records) and all(value["legal_basis_verified"] for value in records)),
             koap="; ".join(dict.fromkeys(x["administrative_basis"] for x in outcomes[row["key"]]
                 if x["status"] == "violation" and x["administrative_basis"])))
     metadata = {"reg": str(p.get("reg") or p.get("reg_number") or detail.get("registrationNumber") or ""),
@@ -522,12 +868,22 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
 
 
 def _tag(items):
-    return [{**item, "criterion_keys": list(criterion_keys(item))} if isinstance(item, dict) else item
-            for item in list(items or ())]
+    tagged = []
+    for item in list(items or ()):
+        if not isinstance(item, dict):
+            tagged.append(item)
+            continue
+        result = {**item, "criterion_keys": list(criterion_keys(item))}
+        if _explicit_criterion_keys(item) and set(_explicit_criterion_keys(item)) != set(result["criterion_keys"]):
+            result.setdefault("reported_criterion_keys", item.get("criterion_keys"))
+        tagged.append(result)
+    return tagged
 
 
 def install(ns):
     """Use the same criterion mapping in general, manual and thematic audits."""
+    ns["vp_methodology_qualify"] = qualify_outcomes
+    ns["vp_methodology_qualify_record"] = qualify_record
     analyze, build = ns.get("analyze"), ns.get("build_checks")
     if not callable(analyze) or not callable(build):
         raise RuntimeError("Inspection sheet requires the common legal analyzer and checklist")

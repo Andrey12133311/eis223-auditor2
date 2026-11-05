@@ -219,6 +219,9 @@ async def independent_review(ns,reg,categories):
  findings=await asyncio.to_thread(analyzer,p,verified)
  audit_funnel.observe("analyzer_results",findings)
  checks=await asyncio.to_thread(checker,p,detail,card,verified)
+ qualify=ns.get("vp_methodology_qualify")
+ if callable(qualify):
+    findings,checks=await asyncio.to_thread(qualify,p,verified,findings,checks)
  audit_funnel.observe("checklist_results",checks)
  audit_funnel.observe("thematic_reviews",checks)
  findings=list(findings) if isinstance(findings,(list,tuple)) else []
@@ -283,7 +286,11 @@ async def independent_review(ns,reg,categories):
       "code":str(f.get("code") or "")[:150],
       "document":str(f.get("document") or "")[:255],
       "source_url":str(f.get("source_url") or "")[:2000],
-      "law_url":str(f.get("law_url") or "")[:1000]
+      "law_url":str(f.get("law_url") or "")[:1000],
+      "note":str(f.get("note") or "")[:3000],
+      "decision_kind":str(f.get("decision_kind") or "")[:100],
+      "criterion_keys":list(f.get("criterion_keys") or []),
+      "legal_basis_verified":f.get("legal_basis_verified") is True
     })
  # This only changes new presentation/persistence, never deletes historical
  # thematic results. Different dated acts and documentary sources stay distinct.

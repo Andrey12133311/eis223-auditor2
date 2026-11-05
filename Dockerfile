@@ -97,6 +97,8 @@ COPY tests/test_vp_inspection_criteria.py tests/test_vp_inspection_engine.py tes
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_vp_inspection_criteria test_vp_inspection_engine test_vp_inspection_export test_vp_thematic_alignment test_vp_pipeline
 COPY tests/test_staff_compact_ui.py tests/test_manager_compact_ui.py tests/test_cabinet_shell_compact.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_staff_compact_ui test_manager_compact_ui test_cabinet_shell_compact
+COPY tests/test_protocol_document_context.py tests/test_vp_sme_application.py tests/test_vp_methodology_decisions.py tests/test_methodology_export.py tests/test_methodology_pipeline.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_protocol_document_context test_vp_sme_application test_vp_methodology_decisions test_methodology_export test_methodology_pipeline
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

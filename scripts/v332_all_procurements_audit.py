@@ -1488,6 +1488,9 @@ async def _inspect_one(ns,reg):
     audit_funnel.observe("analyzer_results",findings)
     await db_stage(ns,"reservation",check_reservation,ns,reg)
     checks=await thread_call(checker,purchase,detail,card,docs)
+    qualify=ns.get("vp_methodology_qualify")
+    if callable(qualify):
+        findings,checks=await thread_call(qualify,purchase,docs,findings,checks)
     audit_funnel.observe("checklist_results",checks)
     verified_sources={d.get("name") for d in readable if is_official(d)}
     verified_urls={str((d.get("meta") or {}).get("source_url"))

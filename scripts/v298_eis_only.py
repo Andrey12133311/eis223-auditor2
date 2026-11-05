@@ -896,6 +896,9 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
                 "evidence":f"Решение: {decision}; размещение: {published_day}",
                 "legal_basis":"223-ФЗ, статья 3.2, часть 6",
                 "reason":"Сверить официальный протокол, время и основания отмены"})
+    qualify=ns.get("vp_methodology_qualify")
+    if callable(qualify):
+        findings,checks=await asyncio.to_thread(qualify,p,docs,findings,checks)
     annotate=ns.get("annotate")
     if callable(annotate):
         await asyncio.to_thread(annotate,reg,docs,findings,checks)

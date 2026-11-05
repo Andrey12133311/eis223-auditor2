@@ -206,12 +206,20 @@ def _appendix(snapshot):
         lines.append(str(number) + ". " + str(row.get("criterion") or row.get("key")) + ": " + _status(row))
         if row.get("reason"):
             lines.append(str(row["reason"]))
+        for reason in dict.fromkeys(row.get("methodology_reasons") or []):
+            lines.append("Проверка обоснованности: " + str(reason))
+        if row.get("review_required") and row.get("required_evidence"):
+            lines.append("Для завершения проверки: " + str(row["required_evidence"]))
         # The engine may retain multiple episodes under one criterion.
         events = row.get("results") or row.get("findings") or row.get("evidence_items") or []
         if not isinstance(events, list):
             events = []
         if not events and row.get("evidence"):
             events = [row]
+        # An unsupported candidate is retained as a review question with its
+        # stated source and norm, never silently lost or endorsed as a finding.
+        events = events + [item for item in row.get("unresolved", [])
+                           if isinstance(item, dict) and item not in events]
         for event in events:
             if not isinstance(event, dict):
                 continue
@@ -219,7 +227,14 @@ def _appendix(snapshot):
                 label = {"violation": "Есть нарушение", "compliant": "Нет нарушения по проверенному обстоятельству", "unknown": "Требует проверки"}.get(str(event["status"]), "Требует проверки")
                 lines.append(label + (": " + str(event["title"]) if event.get("title") else ""))
             if event.get("law"):
-                lines.append("Норма: " + str(event["law"]))
+                prefix = "Норма, требующая подтверждения: " if event.get("legal_basis_verified") is False else "Норма: "
+                lines.append(prefix + str(event["law"]))
+            if event.get("decision_kind") == "document_requirement":
+                lines.append("Проверено условие документа. Фактическое отклонение заявки этим выводом не устанавливается.")
+            for reason in dict.fromkeys(event.get("methodology_reasons") or []):
+                lines.append("Проверка обоснованности: " + str(reason))
+            if event.get("reason"):
+                lines.append(str(event["reason"]))
             if event.get("evidence"):
                 lines.append(str(event["evidence"]))
             if event.get("source_excerpt") and event["source_excerpt"] != event.get("evidence"):

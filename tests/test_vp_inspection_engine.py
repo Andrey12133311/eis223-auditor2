@@ -84,7 +84,7 @@ def test_subfield_ok_does_not_mean_entire_criterion_compliant():
 
 
 def test_unknown_noncompetitive_and_sme_scopes_remain_distinct():
-    item = finding(code="223-SME-BID-SECURITY-OVER-TWO-PERCENT")
+    item = finding(code="223-SME-BID-SECURITY-OVER-TWO-PERCENT", law="223-ФЗ, ст. 3.4 ч. 12; ПП РФ № 1352, п. 23")
     unknown = evaluate(purchase(), [doc()], [item])
     assert row(unknown, "sme_bid_security")["status"] == "unknown"
     broad = evaluate(purchase(method="Закупка у единственного поставщика"), [doc()], [finding()])
