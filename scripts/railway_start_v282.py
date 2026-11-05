@@ -195,6 +195,8 @@ def main():
     # Disabled: DaMIA/TenderGuru discovery feed patches and Roseltorg retry scheduler.
     # The VPS supplies official EIS ZIPs and originals; audit uses saved bytes.
     digest=patch_v291(path)
+    from legacy_import_backfill import patch_file as skip_legacy_import_backfill
+    skip_legacy_import_backfill(path, source_mode=os.environ["EIS223_SOURCE_MODE"])
     sys.path.insert(0,str(path.parent))
     import importlib
     entry=importlib.import_module('entry')
