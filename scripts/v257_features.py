@@ -133,6 +133,20 @@ def manual_progress(reg,checked,search_status):
             'originals_received':received}
 
 
+def _dashboard_cache_key(params):
+    # The prewarmed default page and the browser's explicit default paging
+    # parameters are the same query. Keep duplicate-value order, because
+    # QueryParams.get() uses its last occurrence.
+    items=[]
+    for name,value in params.multi_items():
+        if (len(params.getlist(name))==1 and
+                ((name=='offset' and value=='0') or
+                 (name=='limit' and value=='100'))):
+            continue
+        items.append((name,value))
+    return str(QueryParams(sorted(items,key=lambda item:item[0])))
+
+
 def install(ns:dict)->None:
     app,connection=ns['app'],ns['conn']
     membership=MembershipCache(lambda: ns['_verified_set235']())
@@ -177,7 +191,29 @@ def install(ns:dict)->None:
               ORDER BY purchases DESC,title LIMIT 150""").fetchall()
         return {'items':[{'code':'title:'+r['title'], 'title':r['title'],
                           'purchases':int(r['purchases'])} for r in rows]}
-    dashboard_cache = DashboardReadCoordinator(version_getter=SQLiteDataVersion(connection))
+    def dashboard_scope_guard():
+        # A display snapshot may outlive collector writes, but must never put
+        # an explicitly submitted purchase back into the shared queue after
+        # it moved to the independent-check population. Compare only this
+        # small, indexed membership set rather than all audit evidence.
+        c=connection()
+        deadline=time.monotonic()+0.5
+        try:
+            c.execute('PRAGMA query_only=ON')
+            c.execute('PRAGMA busy_timeout=500')
+            c.set_progress_handler(lambda: int(time.monotonic()>=deadline),1000)
+            return tuple(str(row[0]) for row in c.execute(
+                'SELECT reg FROM ('+MANUAL_SOURCE_SQL+') ORDER BY reg'))
+        finally:
+            c.set_progress_handler(None,0)
+            c.close()
+    dashboard_cache = DashboardReadCoordinator(
+        version_getter=SQLiteDataVersion(connection),
+        stale_guard_getter=dashboard_scope_guard,
+        # A measured full read takes about a minute under audit load. Allow
+        # the labelled display snapshot to span the following refresh too;
+        # visibility changes still invalidate it immediately via the guard.
+        max_stale=180.0)
     @app.get('/api/v257/dashboard',include_in_schema=False)
     def dashboard(request:Request):
         params=request.query_params
@@ -185,7 +221,7 @@ def install(ns:dict)->None:
         if inn and not re.fullmatch(r'\d{10}|\d{12}',inn):
             raise HTTPException(400,'Введите ИНН из 10 или 12 цифр')
         try:
-            return dashboard_cache.get(str(params),lambda: _read_dashboard(params))
+            return dashboard_cache.get(_dashboard_cache_key(params),lambda: _read_dashboard(params))
         except ValueError:
             raise HTTPException(400,'Некорректные параметры фильтра')
         except DashboardWarming:
