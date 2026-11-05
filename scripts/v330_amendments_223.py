@@ -18,6 +18,7 @@ from v295_eis_originals import root,uid_from_url
 
 LAW="223-ФЗ, статья 4, часть 11"
 LAW_URL="https://www.consultant.ru/document/cons_doc_LAW_116964/441d00be62e3224cdc0514cffaf2a26b5b40a1c7/"
+POST_DEADLINE_CODE="223-4-11-CHANGE-AFTER-BID-DEADLINE"
 REG=re.compile(r"^[0-9]{11,20}$")
 MONTHS={"января":1,"февраля":2,"марта":3,"апреля":4,"мая":5,"июня":6,
         "июля":7,"августа":8,"сентября":9,"октября":10,"ноября":11,"декабря":12}
@@ -371,23 +372,16 @@ def evaluation(p,docs):
         if not deadline:
             reviews.append({"reason":event.get("submission_review") or "Не подтверждён срок подачи заявок именно после данного изменения", "event":event})
             continue
-        # Any deadline before publication cannot satisfy the half-term rule
-        # regardless of a procurement regulation duration.
+        # Publication after a source-specific deadline warrants review of the
+        # affected stage and circumstances. Article 4(11) does not impose an
+        # absolute ban on amendments after submission closes: an FAS order,
+        # a platform outage, or another revision may explain the event. Keep
+        # the independently proved three-day publication breach above intact.
         remaining=(deadline-published).days
         if remaining<0:
-            findings.append({
-                "code":"223-4-11-CHANGE-AFTER-BID-DEADLINE",
-                "kind":"violation","title":"Изменения размещены после окончания срока подачи заявок",
-                "law":LAW,"law_url":LAW_URL,
-                "evidence":(f"Размещение изменений: {published}; окончание подачи заявок по проверенной редакции: {deadline}."
-                            +(f" Подтверждение срока в данной редакции: {event['submission_evidence']}. "
-                              f"Публикация: {event.get('publication_evidence') or event.get('source')}."
-                              if event.get("submission_evidence") else "")),
-                "note":"Срок подачи не мог быть продлён с даты размещения изменений; проверить последующую редакцию и применимые исключения.",
-                "document":event.get("document"),"source_url":event.get("source"),
-                "location":"Официальные изменения и срок подачи заявок",
-                "match_text":event.get("publication_evidence") or str(published)
-            })
+            reviews.append({"code":POST_DEADLINE_CODE,
+                "reason":"Изменения размещены после срока подачи заявок по проверенной редакции; требуется проверка обстоятельств",
+                "event":event})
         else:
             reviews.append({"reason":"Проверить минимум половины срока из положения о закупке для конкретного способа", "event":event})
     # Explicitly dated archived documentation alone is a reason to compare
@@ -413,23 +407,46 @@ def evaluation(p,docs):
         # Keep distinct dated legal events; do not count copies as violations.
         key=finding_event_key(f) or (f["code"],f.get("source_url"),f.get("match_text"))
         unique.setdefault(key,f)
-    return list(unique.values()),reviews[:15]
+    # One event may be present in its EIS history and original attachment.
+    # Retain one review, with the original's explicit deadline quote if any.
+    unique_reviews={}
+    for item in reviews:
+        event=item["event"]
+        key=((item["code"],event.get("publication_date"),event.get("submission_end"))
+             if item.get("code")==POST_DEADLINE_CODE else (id(item),))
+        existing=unique_reviews.get(key)
+        if existing is None or (event.get("submission_evidence") and
+                                not existing["event"].get("submission_evidence")):
+            unique_reviews[key]=item
+    return list(unique.values()),list(unique_reviews.values())[:15]
 
 def review_check(item):
     e=item["event"]
+    post_deadline=item.get("code")==POST_DEADLINE_CODE
+    deadline_evidence=(
+        f"; окончание подачи заявок по проверенной редакции: {e.get('submission_end')}"
+        f"; подтверждение срока: {e.get('submission_evidence') or 'история изменений ЕИС'}"
+        f"; публикация: {e.get('publication_evidence') or e.get('source') or '—'}"
+        if post_deadline else "")
     return {
         "scope":"223-ФЗ / изменения документации",
-        "item":"Проверить срок публикации и продление подачи заявок (ч. 11 ст. 4)",
+        "item":("Проверить изменения после окончания срока подачи заявок (ч. 11 ст. 4)" if post_deadline
+                else "Проверить срок публикации и продление подачи заявок (ч. 11 ст. 4)"),
         "status":"check",
+        "code":item.get("code") or "",
         "evidence":(
             f"{item['reason']}; документ: {e.get('document') or '—'}; "
             f"решение: {e.get('decision_date') or 'не установлено'}; "
-            f"ЕИС: {e.get('publication_date') or 'не установлено'}")[:1900],
+            f"ЕИС: {e.get('publication_date') or 'не установлено'}{deadline_evidence}")[:1900],
         "source":e.get("document") or "История изменений ЕИС",
         "source_url":e.get("source") or "",
         "document":e.get("document"),
-        "field_path":"amendment-decision-vs-publication",
-        "note":"Не считать нарушением без подтверждения даты решения и публикации, применимости конкурентной процедуры и положения о закупке.",
+        "field_path":("amendment-after-bid-deadline" if post_deadline else "amendment-decision-vs-publication"),
+        "note":("Сам факт размещения изменений после срока подачи не доказывает нарушение. "
+                "Проверить изменённый этап, положение о закупке, последующие редакции, предписание ФАС, "
+                "сбой ЭТП и соблюдение принципов закупки; минимум половины срока определять по положению "
+                "для конкретного способа закупки." if post_deadline else
+                "Не считать нарушением без подтверждения даты решения и публикации, применимости конкурентной процедуры и положения о закупке."),
         "law":LAW,"law_url":LAW_URL,
         "location":"Изменения и разъяснения / версии документации"
     }
@@ -442,7 +459,7 @@ def install(ns):
     if getattr(analyze,"__art4_11_v330__",False):return
     @wraps(analyze)
     def wrapped_analyze(p,docs):
-        old=list(analyze(p,docs))
+        old=[item for item in analyze(p,docs) if item.get("code")!=POST_DEADLINE_CODE]
         new,_=evaluation(p,docs)
         if str(p.get("reg"))=="32616233661" or new:
             print(f"V330 ART4_11 reg={p.get('reg')} proved={len(new)}",flush=True)

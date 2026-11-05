@@ -21,14 +21,14 @@ from scripts.v368_manager_workflow import supervisor, _member, _audit, _uuid
 router=APIRouter(prefix="/manager/campaigns",tags=["manager-thematic-targets"])
 staff_router=APIRouter(prefix="/me/campaign-goals",tags=["staff-thematic-targets"])
 
-from v342_thematic_queue import CATEGORIES, LEGAL_FORMS
+from v342_thematic_queue import CATEGORIES, CATEGORY_LABELS, LEGAL_FORMS, ordered_categories
 import v360_thematic_ownership as ownership
 from thematic_period import normalize_period
 
 class CampaignCreate(BaseModel):
     assignee_id:UUID
     title:str=Field(min_length=5,max_length=170)
-    categories:list[str]=Field(min_length=1,max_length=10)
+    categories:list[str]=Field(min_length=1,max_length=len(CATEGORY_LABELS))
     legal_forms:list[str]=Field(min_length=1,max_length=5)
     target_violations:int=Field(ge=1,le=10000)
     due_date:date|None=None
@@ -44,7 +44,7 @@ class CampaignCreate(BaseModel):
     @field_validator("categories")
     @classmethod
     def validate_categories(cls,values):
-        if len(set(values))!=len(values) or set(values)-set(CATEGORIES):
+        if len(set(values))!=len(values) or set(values)-set(CATEGORY_LABELS):
             raise ValueError("Выбраны неизвестные или повторяющиеся категории")
         return values
 
@@ -79,7 +79,7 @@ def _insert_real_batch(ns,batch,categories,forms,date_from="",date_to="",*,owner
             """INSERT INTO thematic_batches
                (id,categories,created_at,status,legal_forms,date_from,date_to)
                VALUES(?,?,?,'active',?,?,?)""",
-            (batch,json.dumps(sorted(categories),ensure_ascii=False),now(),
+            (batch,json.dumps(ordered_categories(categories),ensure_ascii=False),now(),
              json.dumps(sorted(forms),ensure_ascii=False),date_from,date_to))
         con.commit()
         return "active"
@@ -106,7 +106,7 @@ def _format(row,batch=None):
         "id":str(row[0]),"manager_id":str(row[1]),"user_id":str(row[2]),
         "employee":row[3],"batch_id":row[4],"title":row[5],
         "categories":row[6],"legal_forms":row[7],
-        "category_names":[CATEGORIES.get(x,x) for x in row[6]],
+        "category_names":[CATEGORY_LABELS.get(x,x) for x in row[6]],
         "target_violations":target,"actual_violations":actual,
         "progress_percent":min(100,round(100*actual/target,1)),
         "target_met":actual>=target,

@@ -807,7 +807,7 @@ class FunnelRevision(unittest.TestCase):
             ('is_official(d) and str(d.get("text") or "").strip()', 'str(d.get("text") or "").strip()'),
             ('analyzer,p,verified', 'analyzer,p,docs'),
             ('checker,p,detail,card,verified', 'checker,p,detail,card,docs'),
-            ('category=match_legal_category(f,categories)', 'category="dates"'),
+            ('category=match_legal_category(f,eligible_categories)', 'category="dates"'),
             ('return ("retry" if incomplete else "completed"),collapse_legal_events(selected)', 'return "completed",selected'),
             ('audit_funnel.observe("checklist_results",checks)', 'audit_funnel.observe("checklist_results",checks.clear())'),
         )

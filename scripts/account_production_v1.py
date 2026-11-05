@@ -67,6 +67,7 @@ SHARED_READ_PATTERNS = tuple(map(re.compile, (
     # Render saved shared findings with the current account's requisites.
     # Template uploads and personal archive writes remain separately protected.
     r"/api/v304/memo/3[0-9]{10}\.odt",
+    r"/api/inspection/3[0-9]{10}\.(?:odt|docx|json)",
     r"/check-new/3[0-9]{10}/?",
     r"/api/v334/violation-ledger/purchase/3[0-9]{10}",
     r"/reports/3[0-9]{10}\.html",

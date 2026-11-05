@@ -49,13 +49,16 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
     def positive_text(self, deadline=DEADLINE):
         return "Изменение № 1.\n" + DECISION + "\n" + PUBLICATION + "\n" + deadline
 
-    def after_deadline(self, findings):
-        return [item for item in findings if item["code"] == CODE]
+    def after_deadline(self, reviews):
+        return [rules.review_check(item) for item in reviews if item.get("code") == CODE]
 
     def test_explicit_revised_deadline_is_not_lost_without_a_manifest(self):
-        findings, _ = self.assess(self.positive_text())
-        found = self.after_deadline(findings)
+        findings, reviews = self.assess(self.positive_text())
+        self.assertFalse(findings)
+        found = self.after_deadline(reviews)
         self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["status"], "check")
+        self.assertEqual(found[0]["field_path"], "amendment-after-bid-deadline")
         self.assertEqual(found[0]["source_url"], SOURCE)
         self.assertEqual(found[0]["document"], "Изменение № 1.pdf")
         for value in ("2026-10-13", "2026-10-12", "После внесения изменений"):
@@ -70,38 +73,41 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
                       "Дата окончания срока подачи заявок в новой редакции извещения",
                       "Дата окончания срока подачи заявок по новой редакции документации"):
             with self.subTest(label=label):
-                found, _ = self.assess(self.positive_text(label + " | «12» октября 2026"))
-                self.assertEqual(len(self.after_deadline(found)), 1)
+                findings, reviews = self.assess(self.positive_text(label + " | «12» октября 2026"))
+                self.assertFalse(findings)
+                self.assertEqual(len(self.after_deadline(reviews)), 1)
 
     def test_unique_reversed_table_and_publication_only_original(self):
         for text in (DEADLINE + "\n" + PUBLICATION + "\n" + DECISION,
                      PUBLICATION + "\n" + DEADLINE):
             with self.subTest(text=text):
-                self.assertEqual(len(self.after_deadline(self.assess(text)[0])), 1)
+                self.assertEqual(len(self.after_deadline(self.assess(text)[1])), 1)
 
     def test_future_or_same_day_new_deadline_is_not_an_after_deadline_violation(self):
         for deadline in ("13.10.2026", "20.10.2026"):
             with self.subTest(deadline=deadline):
-                found, _ = self.assess(self.positive_text(DEADLINE.replace("12.10.2026", deadline)))
-                self.assertFalse(self.after_deadline(found))
+                findings, reviews = self.assess(self.positive_text(DEADLINE.replace("12.10.2026", deadline)))
+                self.assertFalse(findings)
+                self.assertFalse(self.after_deadline(reviews))
 
     def test_old_deadline_cannot_replace_the_explicit_new_date(self):
         text = (DECISION + "\n" + PUBLICATION +
                 "\nДо внесения изменений дата окончания срока подачи заявок: 12.10.2026."
                 "\nНовая дата окончания срока подачи заявок: 20.10.2026.")
-        self.assertFalse(self.after_deadline(self.assess(text)[0]))
+        self.assertFalse(self.after_deadline(self.assess(text)[1]))
         # The explicitly labelled old row may accompany the real new row.
         text = text.replace("заявок: 12.10.2026", "заявок: 20.10.2026", 1)
         text = text.rsplit("20.10.2026", 1)[0] + "12.10.2026."
-        self.assertEqual(len(self.after_deadline(self.assess(text)[0])), 1)
+        self.assertEqual(len(self.after_deadline(self.assess(text)[1])), 1)
 
     def test_current_card_generic_deadline_and_duration_are_not_substitutes(self):
         for text in (DECISION + "\n" + PUBLICATION,
                      DECISION + "\n" + PUBLICATION + "\nДата окончания срока подачи заявок: 12.10.2026.",
                      DECISION + "\n" + PUBLICATION + "\nНовый срок подачи заявок: 7 календарных дней."):
             with self.subTest(text=text):
-                found, _ = self.assess(text, purchase=dict(PURCHASE, submission_end="2026-10-12"))
-                self.assertFalse(self.after_deadline(found))
+                findings, reviews = self.assess(text, purchase=dict(PURCHASE, submission_end="2026-10-12"))
+                self.assertFalse(findings)
+                self.assertFalse(self.after_deadline(reviews))
 
     def test_competing_revised_or_current_dates_remain_review(self):
         for extra in ("Новая дата окончания срока подачи заявок: 20.10.2026.",
@@ -109,8 +115,9 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
                       "Дата принятия решения о внесении изменений: 12.10.2026.",
                       "Дата публикации изменений в ЕИС: 14.10.2026."):
             with self.subTest(extra=extra):
-                found, reviews = self.assess(self.positive_text() + "\n" + extra)
-                self.assertFalse(self.after_deadline(found))
+                findings, reviews = self.assess(self.positive_text() + "\n" + extra)
+                self.assertFalse(any(item.get("code") == CODE for item in findings))
+                self.assertFalse(self.after_deadline(reviews))
                 self.assertTrue(any("соответствие" in item["reason"] for item in reviews))
 
     def test_different_amendment_rows_or_title_identity_never_cross_pair(self):
@@ -118,8 +125,9 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
                            ("Редакция № 1. " + PUBLICATION + "\nРедакция № 2. " + DEADLINE, "Изменения.pdf"),
                            ("Изменение № 2. " + PUBLICATION + "\n" + DEADLINE, "Изменение № 1.pdf")):
             with self.subTest(text=text):
-                found, reviews = self.assess(text, name=name)
-                self.assertFalse(self.after_deadline(found))
+                findings, reviews = self.assess(text, name=name)
+                self.assertFalse(any(item.get("code") == CODE for item in findings))
+                self.assertFalse(self.after_deadline(reviews))
                 self.assertTrue(reviews)
 
     def test_bounded_proximity_and_no_publication_remain_review(self):
@@ -127,8 +135,9 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
                      DECISION + "\n" + DEADLINE,
                      DECISION + "\nДата публикации извещения в ЕИС: 13.10.2026.\n" + DEADLINE):
             with self.subTest(text=text[:120]):
-                found, reviews = self.assess(text)
-                self.assertFalse(self.after_deadline(found))
+                findings, reviews = self.assess(text)
+                self.assertFalse(any(item.get("code") == CODE for item in findings))
+                self.assertFalse(self.after_deadline(reviews))
                 self.assertTrue(reviews)
 
     def test_templates_invalid_dates_and_unverified_originals_do_not_confirm(self):
@@ -136,8 +145,8 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
         for name in ("Проект изменений.pdf", "Образец.docx", "Пример.pdf"):
             with self.subTest(name=name):self.assertFalse(self.assess(text, name=name)[0])
         for prefix in ("Проект: ", "Пример: ", "Шаблон: "):
-            self.assertFalse(self.after_deadline(self.assess(prefix + text)[0]))
-        self.assertFalse(self.after_deadline(self.assess(text.replace("12.10.2026", "31.02.2026"))[0]))
+            self.assertFalse(self.after_deadline(self.assess(prefix + text)[1]))
+        self.assertFalse(self.after_deadline(self.assess(text.replace("12.10.2026", "31.02.2026"))[1]))
         doc = original(text)
         doc["status"] = "unverified"
         with patch.object(rules, "manifest_changes", return_value=[]):
@@ -166,7 +175,7 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
 
     def test_unrelated_distant_example_does_not_poison_actual_event(self):
         text = "Пример заполнения формы: не является сведениями о закупке.\n" + "x" * 500 + "\n" + self.positive_text()
-        self.assertEqual(len(self.after_deadline(self.assess(text)[0])), 1)
+        self.assertEqual(len(self.after_deadline(self.assess(text)[1])), 1)
 
     def test_unknown_noncompetitive_and_historical_scope_do_not_confirm(self):
         for purchase in (dict(PURCHASE, method="Не установлено"),
@@ -178,12 +187,16 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
         event = {"kind": "eis_history", "publication_date": date(2026, 10, 13),
                  "submission_end": date(2026, 10, 12), "document": "История ЕИС",
                  "source": "https://zakupki.gov.ru/223/purchase/public/purchase/info/changes.html?regNumber=" + REG}
-        found, _ = self.assess(self.positive_text(), events=[event])
-        self.assertEqual(len(self.after_deadline(found)), 1)
+        findings, reviews = self.assess(self.positive_text(), events=[event])
+        self.assertFalse(findings)
+        self.assertEqual(len(self.after_deadline(reviews)), 1)
+        self.assertIn("После внесения изменений", self.after_deadline(reviews)[0]["evidence"])
 
     def test_actual_analyzer_result_is_saved_and_replayed_without_duplicate(self):
-        found, _ = self.assess(self.positive_text())
-        self.assertEqual(len(found), 1)
+        found, reviews = self.assess(self.positive_text())
+        checks = [rules.review_check(item) for item in reviews]
+        self.assertFalse(found)
+        self.assertEqual(len(checks), 1)
         with tempfile.TemporaryDirectory(prefix="revised-deadline-") as folder:
             path = Path(folder) / "audit.sqlite"
             def connect():
@@ -202,11 +215,32 @@ class AmendmentRevisedDeadlineEvidence(unittest.TestCase):
                         field_path TEXT,note TEXT,law TEXT,law_url TEXT,location TEXT);
                 """)
                 db.execute("INSERT INTO purchases(reg_number) VALUES(?)", (REG,))
-            self.assertEqual(general.persist({"conn": connect}, REG, found, []), (1, 0))
-            self.assertEqual(general.persist({"conn": connect}, REG, found, []), (0, 0))
+            self.assertEqual(general.persist({"conn": connect}, REG, found, checks), (0, 1))
+            self.assertEqual(general.persist({"conn": connect}, REG, found, checks), (0, 0))
             with connect() as db:
-                self.assertEqual(db.execute("SELECT code FROM findings").fetchall()[0][0], CODE)
-                self.assertEqual(db.execute("SELECT violations FROM purchases").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM findings").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT status,field_path FROM checks").fetchone()[:],
+                                 ("check", "amendment-after-bid-deadline"))
+                self.assertEqual(db.execute("SELECT violations,checks_attention FROM purchases").fetchone()[:], (0, 1))
+
+    def test_post_deadline_review_preserves_separately_proved_publication_delay(self):
+        text = self.positive_text().replace("решения о внесении изменений в документацию: 13.10.2026",
+                                           "решения о внесении изменений в документацию: 06.10.2026")
+        found, reviews = self.assess(text)
+        self.assertEqual([item["code"] for item in found], ["223-4-11-AMENDMENT-PUBLICATION-DELAY"])
+        check = self.after_deadline(reviews)[0]
+        for value in ("предписание ФАС", "сбой ЭТП", "половины срока", "положению"):
+            self.assertIn(value, check["note"])
+
+    def test_installed_analyzer_does_not_reintroduce_legacy_blanket_finding(self):
+        ns = {"analyze": lambda p, docs: [{"code": CODE, "kind": "violation"}],
+              "build_checks": lambda p, detail, card, docs: []}
+        rules.install(ns)
+        doc = original(self.positive_text())
+        with patch.object(rules, "manifest_changes", return_value=[]):
+            self.assertFalse(ns["analyze"](PURCHASE, [doc]))
+            checks = ns["build_checks"](PURCHASE, {}, {}, [doc])
+        self.assertEqual([(item["status"], item["code"]) for item in checks], [("check", CODE)])
 
 
 class RevisedDeadlinePipelineParity(unittest.TestCase):
@@ -309,11 +343,14 @@ class RevisedDeadlinePipelineParity(unittest.TestCase):
         self.assertEqual({row["code"] for row in general_rows}, {row["code"] for row in thematic_rows})
         return general_rows, thematic_rows
 
-    def test_revised_deadline_from_docx_is_saved_by_general_and_thematic_once(self):
+    def test_revised_deadline_from_docx_is_review_without_general_or_thematic_violation(self):
         self.seed_actual_original("Изменение № 1.\n" + DECISION + "\n" + PUBLICATION + "\n" + DEADLINE)
-        general_rows, thematic_rows = self.assert_pipeline_counts(1)
-        for row in general_rows + thematic_rows:
-            self.assertEqual(row["code"], CODE)
+        self.assert_pipeline_counts(0)
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute("SELECT * FROM checks WHERE field_path='amendment-after-bid-deadline'")]
+        self.assertEqual(len(rows), 1)
+        for row in rows:
+            self.assertEqual(row["status"], "check")
             self.assertEqual(row["source_url"], saved.URL)
             self.assertIn("2026-10-12", row["evidence"])
             self.assertIn("После внесения изменений", row["evidence"])

@@ -16,7 +16,7 @@ from pydantic import BaseModel,Field,field_validator
 from scripts.account_api_v1 import connect,current_account,require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 from scripts.v368_manager_workflow import supervisor,_member,_audit
-from v342_thematic_queue import CATEGORIES,LEGAL_FORMS
+from v342_thematic_queue import CATEGORIES,CATEGORY_LABELS,LEGAL_FORMS
 
 router=APIRouter(prefix="/me/workbench",tags=["staff-workbench"])
 team_router=APIRouter(prefix="/manager/workbench",tags=["manager-staff-workbench"])
@@ -73,12 +73,12 @@ class Bulk(BaseModel):
 
 class Template(BaseModel):
     name:str=Field(min_length=3,max_length=120)
-    categories:list[str]=Field(default_factory=lambda:list(CATEGORIES),max_length=10)
+    categories:list[str]=Field(default_factory=lambda:list(CATEGORIES),max_length=len(CATEGORY_LABELS))
     legal_forms:list[str]=Field(default_factory=lambda:list(LEGAL_FORMS),max_length=5)
     @field_validator("categories")
     @classmethod
     def cats(cls,v):
-        if not v or len(set(v))!=len(v) or set(v)-set(CATEGORIES):
+        if not v or len(set(v))!=len(v) or set(v)-set(CATEGORY_LABELS):
             raise ValueError("Некорректные категории")
         return v
     @field_validator("legal_forms")
@@ -106,7 +106,7 @@ class ManualIssue(BaseModel):
 
 class Preferences(BaseModel):
     priority_regs:list[str]=Field(default_factory=list,max_length=30)
-    pinned_legal_categories:list[str]=Field(default_factory=list,max_length=10)
+    pinned_legal_categories:list[str]=Field(default_factory=list,max_length=len(CATEGORY_LABELS))
     notification_days:int=Field(default=3,ge=0,le=30)
     @field_validator("priority_regs")
     @classmethod
@@ -117,7 +117,7 @@ class Preferences(BaseModel):
     @field_validator("pinned_legal_categories")
     @classmethod
     def legal(cls,v):
-        if len(set(v))!=len(v) or set(v)-set(CATEGORIES):
+        if len(set(v))!=len(v) or set(v)-set(CATEGORY_LABELS):
             raise ValueError("Некорректные категории")
         return v
 

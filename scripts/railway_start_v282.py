@@ -57,6 +57,8 @@ import v341_precise_legal
 import v347_text_cache
 import v348_cross_document_legal
 import v372_auto_regulation_protocols
+import vp_inspection_engine
+import vp_inspection_export
 import v342_thematic_queue
 import v345_thematic_accelerator
 import v356_collector_delivery
@@ -241,6 +243,8 @@ def main():
     # All incoming, historical and thematic EIS documents now pass through
     # these same automatic regulation/protocol legal validators.
     v372_auto_regulation_protocols.install(vars(entry))
+    vp_inspection_engine.install(vars(entry))
+    vp_inspection_export.install(vars(entry))
     v342_thematic_queue.install(vars(entry))
     v345_thematic_accelerator.install(vars(entry))
     v356_collector_delivery.install(vars(entry))

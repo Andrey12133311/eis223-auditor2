@@ -431,6 +431,8 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
                   else 'Сформировать служебную записку ODT')
     actions='<p class="card-actions"><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">'+export_label+'</a></p>' if candidates else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
     if thematic:actions=''
+    inspection_actions=('<p class="card-actions"><a class="action" href="/api/inspection/'+esc(reg)+
+                        '.odt">Лист внеплановой проверки ODT</a></p>')
     checked='<p class="meta">'+str(len(reviews))+' вопросов требуют дополнительной юридической проверки.</p>'
     for x in reviews[:50]:
         checked+=detail_block(x,'review',x.get('item'),x.get('law'),x.get('evidence'),x.get('document'),x.get('source_url'),x.get('law_url'))
@@ -470,6 +472,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
      '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+'</head><body>'
      '<header><h1>'+('Карточка тематической проверки № ' if thematic else 'Карточка проверки закупки № ')+esc(reg)+'</h1></header><main>'+nav
      +'<section class="panel"><h2>Сведения о закупке</h2>'+basic+'</section>'
+     +inspection_actions
      +thematic_html
      +general_section+review_section
      +'<section class="panel"><h2>Документы ЕИС ('+str(dtotal)+')</h2>'+docs_html+'</section>'

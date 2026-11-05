@@ -1531,6 +1531,11 @@ async def _inspect_one(ns,reg):
     # Keep the computed evidence and token while a short write lock clears.
     # Retrying the whole inspection would needlessly rerun legal analyzers.
     new_f,new_c=await db_stage(ns,"persist",persist,ns,reg,accepted,checks,token,source["_reconciled_rows"])
+    # Publish the sheet only after the underlying evidence was committed.
+    # Atomic report writes and legal evaluation hold no SQLite transaction.
+    inspection=ns.get("_vp_save_snapshot")
+    if callable(inspection):
+        await thread_call(inspection,purchase,docs,accepted,checks,detail,card)
     return ("completed",{
         "documents_found":len(docs)+unreadable,
         "documents_read":counted,"documents_unreadable":unreadable,

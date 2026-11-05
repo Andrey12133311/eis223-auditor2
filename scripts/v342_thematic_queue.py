@@ -11,6 +11,7 @@ import v360_thematic_ownership as ownership
 from v381_audit_scheduling import audit_signals
 from v342_identity import organization_display_name
 from thematic_period import normalize_period, period_fields, index_campaign
+from vp_inspection_criteria import CRITERIA
 
 WORKER_TASK=None
 WORKER_STATE={"last_cycle_at":None,"last_cycle_finished_at":None,"last_error":None}
@@ -27,7 +28,7 @@ def storage_health():
   return {"blocked":False,"low":False,"free_mb":None,
           "reserve_mb":64,"unknown":True}
 
-CATEGORIES={
+LEGACY_CATEGORIES={
 "dates":"Сроки подачи заявок, изменений и разъяснений",
 "docs":"Извещение и документация",
 "national":"Национальный режим",
@@ -38,6 +39,18 @@ CATEGORIES={
 "contract":"Заключение и исполнение договора",
 "notices":"Сведения извещения",
 "evaluation":"Оценка заявок"}
+# The same registry drives the inspection sheet and every new thematic picker.
+# Keep broad historical directions readable and executable without rewriting
+# the saved scope or evidence of an existing campaign.
+CATEGORIES={item.key:f"{index}. {item.title} — {item.law}"
+            for index,item in enumerate(CRITERIA,1)}
+CATEGORY_LABELS={**LEGACY_CATEGORIES,**CATEGORIES}
+
+def ordered_categories(values):
+ """Preserve the sheet's order, including for saved campaign metadata."""
+ selected=set(values)
+ return [key for key in CATEGORIES if key in selected]+[
+     key for key in LEGACY_CATEGORIES if key in selected]
 LEGAL_FORMS={"ООО":"Общество с ограниченной ответственностью","АО":"Акционерное общество","ПАО":"Публичное акционерное общество","ОАО":"Открытое акционерное общество","ЗАО":"Закрытое акционерное общество"}
 def customer_form(name):
  value=str(name or "").strip().strip('"«»').upper()
@@ -127,6 +140,13 @@ async def tick(ns):
  finally:c.close()
 def match_legal_category(f,categories):
  """Classify a documented offence, not an unrelated word in the source."""
+ # Canonical rows use the shared legal mapping. A generic documentation or
+ # participant finding cannot establish all rows in its former broad group.
+ if any(key in CATEGORIES for key in categories):
+    from vp_inspection_engine import criterion_keys
+    matched=set(criterion_keys(f))
+    for key in CATEGORIES:
+       if key in categories and key in matched:return key
  title=str(f.get("title") or "").casefold().replace("ё","е")
  code=str(f.get("code") or "").casefold()
  law=str(f.get("law") or "").casefold()
@@ -210,6 +230,15 @@ async def independent_review(ns,reg,categories):
     findings.append({**item,"kind":"violation",
                      "title":item.get("item") or item.get("title") or "",
                      "code":item.get("field_path") or item.get("code") or ""})
+ # New exact topics use the same evidence and applicability decision as the
+ # filled sheet. Classifying a rule alone does not establish a violation.
+ confirmed_criteria=set()
+ if any(key in CATEGORIES for key in categories):
+    from vp_inspection_engine import evaluate as evaluate_inspection
+    projection=await asyncio.to_thread(evaluate_inspection,p,verified,findings,(),detail,card)
+    confirmed_criteria={(result["source_index"],key)
+       for key,results in projection["outcomes"].items() for result in results
+       if result.get("status")=="violation"}
  # Match document provenance robustly: verified originals can be stored
  # under a local filename while the analyzer cites the EIS display name.
  import os
@@ -224,7 +253,7 @@ async def independent_review(ns,reg,categories):
        for d in verified}
  urls.discard("")
  selected=[]
- for f in findings if isinstance(findings,list) else []:
+ for finding_index,f in enumerate(findings if isinstance(findings,list) else []):
     if not isinstance(f,dict) or f.get("kind")!="violation":
        audit_funnel.observe("gate","non_violation")
        continue
@@ -240,7 +269,9 @@ async def independent_review(ns,reg,categories):
             (f.get("source_url") and str(f["source_url"]).strip() in urls)):
        audit_funnel.observe("gate","source_unverified")
        continue
-    category=match_legal_category(f,categories)
+    eligible_categories=[key for key in categories if key not in CATEGORIES or
+                         (finding_index,key) in confirmed_criteria]
+    category=match_legal_category(f,eligible_categories)
     if category is None:
        audit_funnel.observe("gate","category_unselected")
        continue
@@ -258,6 +289,12 @@ async def independent_review(ns,reg,categories):
  # thematic results. Different dated acts and documentary sources stay distinct.
  from v352_dashboard_truth import collapse_legal_events
  audit_funnel.observe("selected_before_collapse",selected)
+ # Build the complete sheet during the same document review. It uses all
+ # source-backed outcomes, independently of the campaign's selected topics.
+ # A failed save propagates so this item is retried rather than called filled.
+ save_sheet=ns.get("_vp_save_snapshot")
+ if callable(save_sheet):
+    await asyncio.to_thread(save_sheet,p,verified,findings,checks,detail,card)
  return ("retry" if incomplete else "completed"),collapse_legal_events(selected)
 
 def read_db(ns):
@@ -355,7 +392,7 @@ def overview(ns,batch):
    else:
     itm["detail"]="Запрос оригиналов ожидает подключения загрузчика ЕИС"
   worker={"active":bool(WORKER_TASK is not None and not WORKER_TASK.done()),"last_cycle_at":WORKER_STATE["last_cycle_at"],"last_cycle_finished_at":WORKER_STATE["last_cycle_finished_at"],"last_error":WORKER_STATE["last_error"],"mode":"saved_eis_originals"}
-  return {"worker":worker,"bridge":bridge,"storage":storage,"id":batch,"categories":cats,"legal_forms":json.loads(b["legal_forms"]),**period_fields(b),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"reassessed_findings":revised,"items":items,"note":"Тематические результаты сохраняются отдельно. Проверяются подтверждённые оригиналы ЕИС; доступные правила не охватывают все категории."}
+  return {"worker":worker,"bridge":bridge,"storage":storage,"id":batch,"categories":cats,"category_labels":CATEGORY_LABELS,"legal_forms":json.loads(b["legal_forms"]),**period_fields(b),"status":b["status"],"counts":counts,"confirmed_matching_findings":matches,"reassessed_findings":revised,"items":items,"note":"Тематические результаты сохраняются отдельно. Критерии соответствуют листу внеплановой проверки. Подтверждённое нарушение требует доказательств в оригиналах ЕИС; отсутствие находки не подтверждает соблюдение критерия."}
  finally:c.close()
 _HISTORY_COUNT_CACHE={}
 
@@ -633,7 +670,7 @@ def install(ns):
    cats=payload["categories"]
    forms=payload.get("legal_forms",list(LEGAL_FORMS))
   except (ValueError,KeyError,TypeError):raise HTTPException(422,"Некорректный запрос")
-  if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORIES) or any(not isinstance(x,str) or x not in CATEGORIES for x in cats):raise HTTPException(422,"Некорректные категории")
+  if not isinstance(cats,list) or not cats or len(cats)>len(CATEGORY_LABELS) or any(not isinstance(x,str) or x not in CATEGORY_LABELS for x in cats):raise HTTPException(422,"Некорректные категории")
   if not isinstance(forms,list) or not forms or len(forms)>len(LEGAL_FORMS) or any(not isinstance(x,str) or x not in LEGAL_FORMS for x in forms):raise HTTPException(422,"Некорректные организационно-правовые формы")
   try:
    date_from,date_to=normalize_period(payload.get("date_from"),payload.get("date_to"))
@@ -653,7 +690,7 @@ def install(ns):
     ownership.link_started(request,identifier)
     linked=True
     c.execute("INSERT INTO thematic_batches(id,categories,created_at,legal_forms,date_from,date_to) VALUES(?,?,?,?,?,?)",
-              (identifier,json.dumps(sorted(set(cats))),now(),
+              (identifier,json.dumps(ordered_categories(cats)),now(),
                json.dumps(sorted(set(forms)),ensure_ascii=False),date_from,date_to))
     c.commit()
    except Exception:
@@ -751,7 +788,7 @@ def install(ns):
    themed={"batch":batch,"state":str(item["status"]),
            "detail":str(item["detail"] or ""),
            "categories":json.loads(b["categories"]),
-           "category_labels":CATEGORIES,
+           "category_labels":CATEGORY_LABELS,
            "findings_canonical":True,
            "findings":[dict(f) for f in findings]}
    return HTMLResponse(render_card(reg,audit,thematic=themed,
@@ -773,7 +810,7 @@ def install(ns):
    revised=f.get("effective_status","confirmed")!="confirmed"
    reassessment=f.get("reassessment") or {}
    banner=("<p><b>Пересмотренный вывод / требуется проверка.</b> "+escape(str(reassessment.get("reason") or ""))+"</p>") if revised else ""
-   rows+="<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'>"+banner+"<h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORIES.get(f["category"],f["category"])))+"</p><p><b>Правовое основание первоначального вывода:</b> "+escape(str(f["law"] or "Не указано"))+"</p>"+legal_links(f,f.get("law"),f.get("law_url"))+"<p style='white-space:pre-wrap'><b>Сохранённые обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>"
+   rows+="<section style='border:1px solid #ccd7e2;padding:16px;margin:16px 0;border-radius:8px'>"+banner+"<h3>"+escape(str(f["title"] or ""))+"</h3><p><b>Категория:</b> "+escape(str(CATEGORY_LABELS.get(f["category"],f["category"])))+"</p><p><b>Правовое основание первоначального вывода:</b> "+escape(str(f["law"] or "Не указано"))+"</p>"+legal_links(f,f.get("law"),f.get("law_url"))+"<p style='white-space:pre-wrap'><b>Сохранённые обстоятельства и доказательства:</b> "+escape(str(f["evidence"] or "Не указаны"))+"</p></section>"
   owner=request.scope.get("eis223_account_id")
   requisites={}
   if owner:

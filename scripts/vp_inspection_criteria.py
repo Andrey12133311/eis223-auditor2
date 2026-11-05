@@ -32,11 +32,11 @@ CRITERIA = (
     Criterion("sme_bid_security", "Обеспечение заявки (ПРИ МСП)", "ч. 12 ст. 3.4 Закона № 223-ФЗ", "sme", True),
     Criterion("sme_application_requirements", "Требования к составу заявки (ПРИ МСП)", "ч. 19.1, 19.2 ст. 3.4 Закона № 223-ФЗ", "sme", True),
     Criterion("sme_collective_participation", "Коллективное участие (ПРИ МСП) — запрет", "ч. 19.1 ст. 3.4 Закона № 223-ФЗ", "sme", True),
-    Criterion("sme_payment", "Срок оплаты", "п. 14(3), 28 ПП РФ № 1352", "sme", True),
+    Criterion("sme_payment", "Срок оплаты", "п. 14(3), 28 ПП РФ № 1352", "sme"),
 )
 BY_KEY = {item.key: item for item in CRITERIA}
 
-def inspection_rows(findings, *, sme_status=None):
+def inspection_rows(findings, *, sme_status=None, sme_payment_status=None):
     """Return 19 deterministic rows from independently verified, criterion-keyed outcomes.
 
     findings: mapping criterion key -> {status: violation|compliant|unknown,
@@ -52,6 +52,10 @@ def inspection_rows(findings, *, sme_status=None):
         supported = bool(item.get("evidence") and item.get("document") and
                          item.get("legal_basis_verified") is True)
         applicable = not criterion.sme_only or sme_status is True
+        if criterion.key == "sme_payment":
+            # Paragraph 14(3) also covers a nonexclusive procurement with
+            # a confirmed SME contractor; paragraph 28 covers exclusive SME.
+            applicable = sme_status is True or sme_payment_status is True
         verified = supported and applicable and status in ("violation", "compliant")
         violation = verified and status == "violation"
         compliant = verified and status == "compliant"

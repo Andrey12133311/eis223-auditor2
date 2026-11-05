@@ -25,8 +25,10 @@ ANALYZER_REGISTRY = {
     "v341_precise_legal": ("install",),
     "v348_cross_document_legal": ("install",),
     "v372_auto_regulation_protocols": ("install",),
+    "vp_inspection_engine": ("install", "evaluate", "criterion_keys"),
 }
 DEPENDENCY_REGISTRY = {
+    "vp_inspection_criteria": ("CRITERIA", "inspection_rows"),
     "legal_applicability": ("competitive_scope", "competitive_rule_scope"),
     "official_publication_evidence": ("annotate_protocol_publications", "protocol_publication_verifier",
                                       "verified_protocol_publication", "clarification_publication_verifier"),

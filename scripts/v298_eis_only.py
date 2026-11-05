@@ -909,6 +909,9 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
        "api_fields":list(detail.items()),
     }
     await asyncio.to_thread(save,p,docs,findings,checks,payload)
+    inspection=ns.get("_vp_save_snapshot")
+    if callable(inspection):
+        await asyncio.to_thread(inspection,p,docs,findings,checks,detail,card)
     from v381_audit_scheduling import notify_evidence
     notify_evidence(ns)
     if metadata:
