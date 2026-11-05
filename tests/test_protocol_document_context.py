@@ -83,6 +83,33 @@ class SourceContext(unittest.TestCase):
         pos = actual.rindex(EVENT)
         self.assertTrue(local_context(actual, pos, pos+len(EVENT))["eligible_actual"])
 
+    def test_former_documentation_requirement_is_historical_until_current_section(self):
+        from vp_sme_application import evaluate as evaluate_sme
+
+        clause = ("Непредставление документов об опыте исполнения договоров, представляемых "
+                  "для оценки заявки по критерию «Квалификация участника», является "
+                  "основанием для отклонения заявки.")
+        purchase = {**PURCHASE, "method": "Открытый конкурс в электронной форме",
+                    "card_fields_json": {"fact_evidence": {"sme_only": {
+                        "value": True, "source": "official_eis_card",
+                        "evidence": "Участники закупки: только МСП"}}}}
+        for intro in ("В предыдущей редакции документации было установлено: ",
+                      "В прежней редакции извещения было предусмотрено: ",
+                      "В ранее действовавшей редакции документации было указано: "):
+            with self.subTest(intro=intro):
+                text = intro+clause
+                pos = text.index(clause)
+                context = local_context(text, pos, pos+len(clause))
+                self.assertFalse(context["eligible_actual"])
+                self.assertIn("historical_reference", context["reasons"])
+                self.assertEqual(evaluate_sme(purchase, [original("Документация.pdf", text)])[0], [])
+                current = text+"\n\nДействующая редакция документации:\n\n"+clause
+                pos = current.rindex(clause)
+                self.assertTrue(local_context(current, pos, pos+len(clause))["eligible_actual"])
+                findings, _ = evaluate_sme(purchase, [original("Документация.pdf", current)])
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0]["source_position"], pos)
+
 
 class ProtocolDecisions(unittest.TestCase):
     def assert_review_only(self, doc):

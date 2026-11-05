@@ -37,8 +37,9 @@ def run_pipeline(documents, injected=None):
 
 class MethodologyPipeline(unittest.TestCase):
     def test_new_sme_rule_reaches_general_and_exact_thematic_criterion(self):
-        from test_vp_sme_application import P, original
-        doc = original()
+        from test_vp_sme_application import P, CLAUSE, original
+        doc = original("В предыдущей редакции документации было установлено: "+CLAUSE+
+                       "\n\nДействующая редакция документации:\n\n"+CLAUSE)
         purchase = {**P, "reg_number": fixture.REG, "reg": fixture.REG,
                     "customer": "ООО Тест", "published_at": P["published"],
                     "card_fields_json": json.dumps(P["card_fields_json"])}

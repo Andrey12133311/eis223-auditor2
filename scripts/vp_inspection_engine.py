@@ -477,8 +477,14 @@ def _source_support(item, docs, body_cache=None):
     return None
 
 
-def _fragment_bounds(body, excerpt):
+def _fragment_bounds(body, excerpt, source_position=None):
     """Locate a whitespace-normalized exact excerpt in the unflattened text."""
+    # The same clause can be quoted historically and repeated in the current
+    # section. A validated source offset binds context to the actual occurrence.
+    if isinstance(source_position, int) and not isinstance(source_position, bool) and 0 <= source_position < len(body):
+        relative = _fragment_bounds(body[source_position:], excerpt)
+        if relative and relative[0] == 0:
+            return source_position, source_position+relative[1]
     direct = body.find(excerpt)
     if direct >= 0:
         return direct, direct+len(excerpt)
@@ -535,7 +541,7 @@ def _source_context(item, docs, body_cache=None):
             # A contract project can establish its proposed payment/security
             # term; it cannot establish that a contract was signed or paid.
             reasons = [value for value in reasons if value != "project_is_not_completed_act"]
-        bounds = _fragment_bounds(str(doc.get("text") or ""), support[1]) if support and doc is support[0] else None
+        bounds = _fragment_bounds(str(doc.get("text") or ""), support[1], item.get("source_position")) if support and doc is support[0] else None
         local = local_context(doc.get("text"), *bounds) if bounds else None
         # For a second cited original, inspect only explicit event labels. This
         # is a contextual veto, never a way to construct a missing date pair.

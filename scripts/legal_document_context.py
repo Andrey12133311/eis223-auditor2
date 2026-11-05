@@ -34,6 +34,14 @@ _LOCAL_INSTRUCTION = re.compile(
 _LOCAL_HISTORICAL = re.compile(
     r"\bв\s+(?:ранее\s+)?отмен[её]нн\w*\s+протокол\w*|"
     r"\bцитат\w*\s+из\s+предыдущ\w*\s+редакци\w*", re.I)
+_HISTORICAL_REQUIREMENT_SECTION = re.compile(
+    r"\bв\s+(?:предыдущ\w*|прежн\w*|ранее\s+действовавш\w*|ранн\w*)\s+"
+    r"редакци\w*\s+(?:документаци\w*|извещени\w*)\s+"
+    r"(?:был[аои]?\s+)?(?:установлен\w*|предусмотрен\w*|указан\w*)\s*[:：]", re.I)
+_CURRENT_REQUIREMENT_SECTION = re.compile(
+    r"(?:^|[\n\r])\s*(?:(?:действующ\w*|текущ\w*|настоящ\w*)\s+редакци\w*\s+"
+    r"(?:документаци\w*|извещени\w*)|требовани\w*\s+"
+    r"(?:действующ\w*|текущ\w*|настоящ\w*)\s+(?:документаци\w*|извещени\w*))\s*[:：]", re.I)
 _TEMPLATE_HEADING = re.compile(r"\b(?:шаблон\w*|образец\w*|форм[аы])\s+"
                                r"(?:(?:заполнени\w*|типов\w*)\s+)?протокол\w*", re.I)
 _TEMPLATE_TITLE = re.compile(r"(?:^|[\[(–—-])\s*(?:\d+[.)]?\s*)?(?:шаблон\w*|образец\w*|пример\w*)\b|"
@@ -60,7 +68,7 @@ REASON_LABELS = {
     "illustrative_passage": "иллюстративный или условный пример",
     "quoted_norm": "цитируется нормативная формулировка",
     "instruction_example": "инструкция о недопустимом оформлении",
-    "historical_reference": "ссылка на отменённую редакцию или прежний протокол",
+    "historical_reference": "ссылка на прежнюю редакцию документа или прежний протокол",
 }
 
 
@@ -177,6 +185,15 @@ def local_context(text, start, end):
         if not _ACTUAL_SECTION.search(preceding[last.end():]):
             context_heading = last.group(0).lstrip("\r\n.!? ")
             reasons.append("quoted_norm" if "цитата" in context_heading.casefold() else "illustrative_passage")
+    # A documentation attachment may quote an obsolete requirement before
+    # stating its current text. An explicit former-edition introduction is
+    # historical context, not an operative requirement of this procurement.
+    historical = list(_HISTORICAL_REQUIREMENT_SECTION.finditer(preceding))
+    if historical:
+        last = historical[-1]
+        if not _CURRENT_REQUIREMENT_SECTION.search(preceding[last.end():]):
+            context_heading = last.group(0)
+            reasons.append("historical_reference")
     reasons = list(dict.fromkeys(reasons))
     return {"eligible_actual": not reasons, "reasons": reasons,
             "reason_labels": [REASON_LABELS[value] for value in reasons],
