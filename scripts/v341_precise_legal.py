@@ -82,7 +82,9 @@ PROTOCOL_PUBLISHED = (
     + _EIS_LABEL + r")")
 COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)", re.I)
 CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+закупки|решение\s+об\s+отмене\s+закупки\s+принято)"
-CANCEL_POSTED = r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки(?:\s+в\s+ЕИС)?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+размещено)"
+CANCEL_POSTED = (r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки"
+                 r"(?:\s+в\s+" + _EIS_LABEL + r")?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+"
+                 r"(?:размещено|опубликовано)(?:\s+в\s+" + _EIS_LABEL + r")?)")
 SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\s+субъект[ыа-я\s]{0,35}малого\s+и\s+среднего\s+предпринимательства|участниками\s+которо[йго]+\s+могут\s+быть\s+только\s+субъект",re.I)
 _PAYMENT_SUBJECT = r"\b(?:срок\s+оплаты|оплата|расч[её]т[ыа]?|оплат[уы])\b"
 PAYMENT_DAYS = re.compile(
@@ -300,6 +302,38 @@ def review(doc, code, title, evidence, law, match):
             "note": "Неполная цепочка фактов или применимость исключения. Не включается в подтверждённые нарушения."}
 
 
+def clarification_deadline(p, request_doc, request, received):
+    """Read one verified notice snapshot per analysis, then use a pure resolver.
+
+    An explicit empty snapshot is meaningful. Reuse it across individual
+    requests, the cross-original analyzer and the checklist instead of opening
+    the same archives again for every date pair.
+    """
+    if "_verified_notice_revisions" not in p:
+        from v298_eis_only import official_notice_revisions
+        try:
+            p["_verified_notice_revisions"] = official_notice_revisions(
+                str(p.get("reg") or p.get("reg_number") or ""))
+        except (OSError, ValueError, TypeError, RuntimeError):
+            # Retain unavailable separately from a successfully read empty
+            # history. A current card cannot silently repair a failed read.
+            p["_verified_notice_revisions"] = {"state": "unavailable"}
+    from clarification_deadline_evidence import resolve_clarification_deadline
+    return resolve_clarification_deadline(p, request_doc, received=received,
+        request_span=request.span(), notice_revisions=p["_verified_notice_revisions"])
+
+
+def clarification_deadline_review(doc, request, assessment, evidence, *, cross_original=False):
+    code = "v341-clarification-cross-doc-deadline" if cross_original else "v341-clarification-deadline"
+    item = review(doc, code, "Установить срок подачи заявок на дату конкретного запроса разъяснений",
+        evidence, "223-ФЗ, ст. 3.2 ч. 3", request)
+    item.update(match_text=request[0], source_excerpt=request[0], source_position=request.start(),
+        decision_kind="actual_event", clarification_deadline_assessment=assessment,
+        methodology_reason_codes=[assessment["reason_code"]], methodology_reasons=[assessment["reason"]])
+    item["note"] = assessment["reason"]
+    return item
+
+
 def _distinct_numbered_events(left, right):
     """Only independently established, different event numbers defeat dedup.
 
@@ -426,49 +460,71 @@ def evaluate(p, docs):
                 continue
             received = day(request["date"])
             published = day(clarification_proof["publication_date"] if xml_reply else peers[0]["date"])
-            deadline = day(p.get("submission_end") or p.get("deadline"))
-            due, latest = shifted(received, 3), shifted(deadline, -3)
             if xml_reply:
                 snippet = " ".join(text[max(0, request.start()-60):request.end()+70].split())
                 snippet += " " + clarification_proof["evidence"]
             else:
                 snippet = " ".join(text[max(0, min(request.start(), peers[0].start())-60):max(request.end(), peers[0].end())+70].split())
-            if not competitive or not received or not published or not deadline or not due or not latest or received > latest or published < received:
+            if not competitive or not received or not published or published < received:
                 checks.append(review(doc, "v341-clarification-applicability", "Проверить обязанность и срок ответа на запрос разъяснений",
                                      snippet, "223-ФЗ, ст. 3.2 ч. 3", request))
                 continue
+            deadline_proof = clarification_deadline(p, doc, request, received)
+            if deadline_proof.get("evidence_text"):
+                snippet += " " + deadline_proof["evidence_text"]
+            if deadline_proof["state"] != "confirmed":
+                checks.append(clarification_deadline_review(doc, request, deadline_proof, snippet))
+                continue
+            deadline = day(deadline_proof["deadline"])
+            due, latest = shifted(received, 3), shifted(deadline, -3)
+            if not deadline or not due or not latest or received > latest:
+                item = review(doc, "v341-clarification-applicability", "Проверить обязанность и срок ответа на запрос разъяснений",
+                              snippet, "223-ФЗ, ст. 3.2 ч. 3", request)
+                reason = ("Запрос поступил после предельной даты обязательного ответа по действовавшему сроку подачи заявок."
+                          if latest and received > latest else "Не подтверждён производственный календарь для срока ответа на этот запрос.")
+                item.update(match_text=request[0], source_excerpt=request[0], source_position=request.start(),
+                    decision_kind="actual_event", clarification_deadline_assessment=deadline_proof,
+                    methodology_reason_codes=["clarification_request_after_cutoff" if latest and received > latest
+                                              else "clarification_calendar_unverified"], methodology_reasons=[reason], note=reason)
+                checks.append(item)
+                continue
             if published > due:
-                findings.append(finding(doc, "223-3.2-3-CLARIFICATION-RESPONSE-LATE",
+                item = finding(doc, "223-3.2-3-CLARIFICATION-RESPONSE-LATE",
                     "Разъяснение опубликовано позднее трёх рабочих дней после поступления запроса",
                     "223-ФЗ, ст. 3.2 ч. 3",
                     f"Запрос получен {received}; крайний день ответа {due}; опубликован {published}; окончание подачи {deadline}. {snippet}", request,
-                    event_number=number(doc, "CLARIFICATION")))
-        # Memo-derived rule: cancellation decision must be published on
-        # the same calendar date (223-FZ art. 3.2(6)).
+                    event_number=number(doc, "CLARIFICATION"))
+                item.update(source_excerpt=request[0], source_position=request.start(),
+                            decision_kind="actual_event", clarification_deadline_assessment=deadline_proof)
+                findings.append(item)
+        # Both dates must describe one actual cancellation, including its
+        # procurement/lot, applicable period and explicit EIS publication.
+        from cancellation_event_evidence import cancellation_event_pairs
         cancel_decisions, cancel_posts = matches(CANCEL_DECISION,text), matches(CANCEL_POSTED,text)
-        cancel_pairs = []
-        for index, decision in enumerate(cancel_decisions):
-            stop = cancel_decisions[index+1].start() if index+1 < len(cancel_decisions) else len(text)
-            candidates = [post for post in cancel_posts
-                          if decision.end() <= post.start() < stop
-                          and post.start()-decision.end() <= 1500]
-            if len(candidates) == 1:
-                cancel_pairs.append((decision,candidates[0]))
-        if len(cancel_decisions)==len(cancel_posts)==1 and not cancel_pairs:
-            cancel_pairs=[(cancel_decisions[0],cancel_posts[0])]
-        for decision, publication in cancel_pairs:
-            decided, posted = day(decision["date"]), day(publication["date"])
-            if competitive and decided and posted and 0 < (posted-decided).days < 365:
-                findings.append(finding(doc,"223-3.2-6-CANCELLATION-POSTED-LATE",
+        for event in cancellation_event_pairs(p, doc, text, cancel_decisions, cancel_posts):
+            decision, publication = event['decision'], event['publication']
+            proof = '; '.join(match[0] for match in (decision, publication) if match is not None)
+            anchor = decision if decision is not None else publication
+            if not event['supported']:
+                item = review(doc, 'v341-cancellation-date-chain',
+                    'Сверить решение об отмене и публикацию того же события в ЕИС',
+                    proof, '223-ФЗ, ст. 3.2 ч. 6', anchor)
+                item.update(match_text=anchor[0], source_excerpt=anchor[0],
+                            source_position=anchor.start(), decision_kind='actual_event',
+                            methodology_reason_codes=event['reason_codes'],
+                            methodology_reasons=event['reasons'])
+                item['note'] = ' '.join(event['reasons'])
+                checks.append(item)
+                continue
+            decided, posted = event['decision_date'], event['publication_date']
+            if posted > decided:
+                item = finding(doc,"223-3.2-6-CANCELLATION-POSTED-LATE",
                     "Решение об отмене конкурентной закупки размещено не в день принятия",
                     "223-ФЗ, ст. 3.2 ч. 6",
-                    f"Решение об отмене принято {decided}; размещено в ЕИС {posted}.",
-                    decision))
-        if len(cancel_pairs)<len(cancel_decisions) or len(cancel_pairs)<len(cancel_posts):
-            checks.append(review(doc,"v341-cancellation-date-chain",
-                "Сверить дату решения об отмене с датой публикации в ЕИС",
-                f"Дат решений: {len(cancel_decisions)}; дат публикаций: {len(cancel_posts)}.",
-                "223-ФЗ, ст. 3.2 ч. 6",(cancel_decisions or cancel_posts)[0]))
+                    f"Решение об отмене принято {decided}; размещено в ЕИС {posted}. {proof}", decision)
+                item.update(source_excerpt=decision[0], source_position=decision.start(),
+                            decision_kind='actual_event')
+                findings.append(item)
         # Memo-derived SME payment term: only explicit exclusive SME scope
         # and contractual payment terms; not general legal quotations.
         if sme_scope:
@@ -648,5 +704,5 @@ def install(ns):
 
     enriched_analyze.__v341__ = True
     ns["analyze"], ns["build_checks"] = enriched_analyze, enriched_checks
-    print("V341 LEGAL_FACTS_READY clarification_workdays=True protocols=True source_metadata=True payment_cross_document=True", flush=True)
+    print("V341 LEGAL_FACTS_READY clarification_workdays=True protocols=True source_metadata=True payment_cross_document=True cancellation_event_binding=True", flush=True)
 

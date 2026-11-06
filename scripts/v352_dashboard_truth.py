@@ -51,10 +51,10 @@ def _common_event(a,b):
     Different dates, money/payment terms or independently established clauses
     cannot be merged solely because a title, law article or detector is shared.
     """
-    # A current payment conclusion and its unreconfirmed historical evidence
+    # A current legal conclusion and its unreconfirmed historical evidence
     # are separate display records even when the clauses are textually equal.
     # Choosing the better-looking quote must not replace either classification.
-    if "payment_reassessment" in a or "payment_reassessment" in b:
+    if any(key in row for row in (a,b) for key in ("payment_reassessment","legal_reassessment")):
         if a.get("effective_status","confirmed")!=b.get("effective_status","confirmed"):
             return False
     a_status=a.get("status") or a.get("kind")
@@ -215,7 +215,7 @@ def load_counts(conn,regs,*,labels=None):
     The optional dictionary receives at most forty labels per procurement;
     obtaining them adds no source reads or separate interpretation of status.
     """
-    from payment_finding_reassessment import apply_general_reassessments,is_payment_finding
+    from payment_finding_reassessment import apply_general_reassessments,is_reassessable_finding
     regs=list(dict.fromkeys(str(x) for x in regs))
     counts={}
     # Checklist rows need their rule identity too: without it the numbered
@@ -241,7 +241,7 @@ def load_counts(conn,regs,*,labels=None):
         for row in check_rows:
             d=dict(row);grouped[d.pop("reg_number")].append(d)
         for reg,rows in grouped.items():
-            if any(is_payment_finding(row) for row in rows):
+            if any(is_reassessable_finding(row) for row in rows):
                 grouped[reg]=[row for row in apply_general_reassessments(conn,reg,rows)
                               if row.get("effective_status","confirmed")=="confirmed"]
         if labels is not None:

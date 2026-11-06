@@ -33,7 +33,8 @@ _EIS_LABEL=r"(?:ЕИС|единой\s+информационной\s+систе�
 DECISION=re.compile(
     r"(?:дата\s+(?:принятия\s+)?решения\s+о\s+внесении\s+изменени\w*"+_AMENDMENT_TARGET+r"|"
     r"решени\w*\s+о\s+внесении\s+изменени\w*"+_AMENDMENT_TARGET+r"\s+(?:от|принят\w*)|"
-    r"(?:изменени\w*|редакци\w*)\s+документаци\w*\s+(?:от|утвержден\w*\s*))"
+    r"(?:изменени\w*|(?:нов\w*\s+)?редакци\w*)\s+(?:в\s+)?"
+    r"(?:документаци\w*|извещени\w*)\s+утвержден\w*\s*)"
     +SEPARATOR+DATE_RX,re.I)
 # Real originals often identify the act first, with the amendment subject
 # after its date. The date must belong to that act, not a nearby notice,
@@ -51,8 +52,10 @@ PUBLISHED=re.compile(
 # Separate clues: a document dated Aug 10 is NOT proof of formal adoption;
 # a publication date of a general notice is NOT an amendment's publication.
 DOC_DATE=re.compile(
-    r"(?:изменени\w*|редакци\w*|документаци\w*)"
-    r".{0,95}?\b(?:от|утвержден\w*)\s*"+DATE_RX,re.I)
+    r"(?:(?:изменени\w*|редакци\w*|документаци\w*|извещени\w*|документ\w*)"
+    r".{0,95}?\b(?:от|утвержден\w*)\s*|"
+    r"дата\s+(?:редакци\w*|документаци\w*|извещени\w*|документ\w*)"+SEPARATOR+r")"
+    +DATE_RX,re.I)
 SUBMISSION_DATE=re.compile(
     r"(?:дата\s+(?:и\s+время\s+)?окончани\w*\s+(?:срока\s+)?"
     r"подачи\s+заявок|окончани\w*\s+(?:срока\s+)?подачи\s+заявок)"
@@ -84,6 +87,14 @@ def actual_date_label(text,match):
     """A planned field or a nearby example section is not an actual event."""
     prefix=text[max(0,match.start()-400):match.start()]
     return not (_NON_ACTUAL_PREFIX.search(prefix[-180:]) or _EXAMPLE_SECTION.search(prefix))
+
+
+def decision_matches(text):
+    """An edition/document date alone is not an amendment-adoption event."""
+    matches=sorted([*DECISION.finditer(text),*DECISION_ACT.finditer(text)],key=lambda m:m.start())
+    return [match for match in matches if actual_date_label(text,match) and not re.search(
+        r"(?:проект|образец|пример|например|шаблон)\s*[:：,–—-]?\s*$",
+        text[max(0,match.start()-35):match.start()],re.I)]
 
 
 def revised_submission_evidence(doc,text,decisions,publications):
@@ -162,10 +173,7 @@ def document_evidence(docs):
         if not verified(d):continue
         text=str(d.get("text") or "")[:650000].replace("\xa0"," ")
         if re.search(r"\b(?:проект|образец|пример|шаблон)\b",str(d.get("name") or ""),re.I):continue
-        decisions=sorted([*DECISION.finditer(text),*DECISION_ACT.finditer(text)],key=lambda m:m.start())
-        decisions=[m for m in decisions if actual_date_label(text,m) and not re.search(
-            r"(?:проект|образец|пример|например|шаблон)\s*[:：,–—-]?\s*$",
-            text[max(0,m.start()-35):m.start()],re.I)]
+        decisions=decision_matches(text)
         publications=[m for m in PUBLISHED.finditer(text) if actual_date_label(text,m)]
         revised_deadline=revised_submission_evidence(d,text,decisions,publications)
         used=set()
@@ -384,23 +392,28 @@ def evaluation(p,docs):
                 "event":event})
         else:
             reviews.append({"reason":"Проверить минимум половины срока из положения о закупке для конкретного способа", "event":event})
-    # Explicitly dated archived documentation alone is a reason to compare
-    # the published change history, but NOT a confirmed legal violation.
-    if not proofs and not events:
-        candidates=0
-        for d in docs:
-            if not verified(d):continue
-            name=str(d.get("name") or "")
-            if not re.search(r"(?:изменен|редакц|документац)",name,re.I):continue
-            text=str(d.get("text") or "")[:500000]
-            match=DOC_DATE.search(text)
-            if match:
-                reviews.append({"reason":"В оригинале есть датированная редакция; дата размещения изменений в ЕИС ещё не подтверждена",
-                                "event":{"document":name,"source":(d.get("meta") or {}).get("source_url"),
-                                         "decision_date":day(match.group("day")),
-                                         "decision_evidence":match.group(0)}})
-                candidates+=1
-                if candidates>=5:break
+    # A date on a revision, notice or document does not establish when an
+    # amendment was formally adopted. Preserve the exact clue even when its
+    # publication is known, without relabelling that date as a decision.
+    candidates=0
+    for d in docs:
+        if not verified(d):continue
+        name=str(d.get("name") or "")
+        if re.search(r"\b(?:проект|образец|пример|шаблон)\b",name,re.I):continue
+        text=str(d.get("text") or "")[:500000].replace("\xa0"," ")
+        if decision_matches(text):continue
+        if not re.search(r"(?:изменен|редакц|документац|извещен|документ)",name,re.I) and not PUBLISHED.search(text):continue
+        for match in DOC_DATE.finditer(text):
+            if not actual_date_label(text,match):continue
+            document_day=day(match.group("day"))
+            if not document_day:continue
+            reviews.append({"reason":"Дата редакции или документа не подтверждает дату принятия решения о внесении изменений; требуется отдельное доказательство решения или утверждения изменений",
+                            "event":{"document":name,"source":(d.get("meta") or {}).get("source_url"),
+                                     "decision_date":None,"document_date":document_day,
+                                     "document_date_evidence":match.group(0)}})
+            candidates+=1
+            if candidates>=5:break
+        if candidates>=5:break
     unique={}
     for f in findings:
         # A single amendment may appear in both EIS history and its original.
@@ -423,6 +436,9 @@ def evaluation(p,docs):
 def review_check(item):
     e=item["event"]
     post_deadline=item.get("code")==POST_DEADLINE_CODE
+    quote=e.get("document_date_evidence") or e.get("decision_evidence") or e.get("publication_evidence") or ""
+    document_date_evidence=(f"; датировка документа: {e['document_date']}; цитата: {quote}"
+                            if e.get("document_date") else (f"; цитата: {quote}" if quote else ""))
     deadline_evidence=(
         f"; окончание подачи заявок по проверенной редакции: {e.get('submission_end')}"
         f"; подтверждение срока: {e.get('submission_evidence') or 'история изменений ЕИС'}"
@@ -437,10 +453,11 @@ def review_check(item):
         "evidence":(
             f"{item['reason']}; документ: {e.get('document') or '—'}; "
             f"решение: {e.get('decision_date') or 'не установлено'}; "
-            f"ЕИС: {e.get('publication_date') or 'не установлено'}{deadline_evidence}")[:1900],
+            f"ЕИС: {e.get('publication_date') or 'не установлено'}{deadline_evidence}{document_date_evidence}")[:1900],
         "source":e.get("document") or "История изменений ЕИС",
         "source_url":e.get("source") or "",
         "document":e.get("document"),
+        "match_text":quote,
         "field_path":("amendment-after-bid-deadline" if post_deadline else "amendment-decision-vs-publication"),
         "note":("Сам факт размещения изменений после срока подачи не доказывает нарушение. "
                 "Проверить изменённый этап, положение о закупке, последующие редакции, предписание ФАС, "

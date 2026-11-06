@@ -29,13 +29,14 @@ CODE = "223-SME-BID-SECURITY-OVER-TWO-PERCENT"
 TITLE = "Размер обеспечения заявки превышает 2% НМЦД в закупке только для МСП"
 URL = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid=" + "A" * 32
 LABEL = "Участниками закупки могут быть только субъекты малого и среднего предпринимательства"
+SECURITY_EVIDENCE = "В документации предусмотрено обеспечение заявки в размере 5% НМЦД."
 
 
 def current_sources(state="no"):
     purchase = {"reg": fixture.REG_A, "method": "Аукцион в электронной форме",
                 "price": "38720976", "price_num": 38720976}
     text = ("Начальная (максимальная) цена договора: 38 720 976 рублей.\n"
-            "Обеспечение заявки составляет: 5% от начальной (максимальной) цены договора.\n")
+            + SECURITY_EVIDENCE + "\n")
     if state in ("yes", "no", "conflict"):
         text += LABEL + ": " + ("Да" if state == "yes" else "Нет")
     else:
@@ -44,10 +45,38 @@ def current_sources(state="no"):
     if state == "conflict":
         purchase["fact_evidence"] = {"sme_only": {"value": True,
             "source": "official_eis_card", "evidence": LABEL + ": Да"}}
-    doc = {"name": "current-notice.txt", "status": "checked", "text": text,
+    doc = {"name": "current-notice.xml", "status": "checked", "text": text,
            "meta": {"source": "official_eis_original", "source_url": URL,
                     "sha256": hashlib.sha256(text.encode()).hexdigest()}}
     return purchase, [doc]
+
+
+def record_complete_legal_assessment(db, batch, reg, purchase, docs, findings, *, state="completed"):
+    """Validate the exact security evidence, then save the normal journal handshake.
+
+    This represents the preceding complete legal pass. A private SME recheck
+    must neither manufacture this pass nor replace its source metadata.
+    """
+    from legal_audit_revision import engine_signature
+    from payment_finding_reassessment import db_source_token, prepare_assessment, record_assessment
+    from vp_inspection_engine import document_fingerprint, qualify_outcomes
+
+    confirmed, reviews = qualify_outcomes(purchase, docs,
+        [{**item, "kind": "violation"} for item in findings], [])
+    if reviews or len(confirmed) != len(findings):
+        raise AssertionError({"confirmed": confirmed, "reviews": reviews})
+    columns = {row[1] for row in db.execute("PRAGMA table_info(thematic_items)")}
+    for column in ("status", "last_semantic_version", "last_engine_signature"):
+        if column not in columns:
+            db.execute("ALTER TABLE thematic_items ADD COLUMN " + column + " TEXT")
+    signature = engine_signature()
+    event = prepare_assessment(reg, confirmed, scope="thematic", batch=batch,
+        engine_signature=signature, source_version=document_fingerprint(docs),
+        db_token=db_source_token(db, reg), state=state)
+    record_assessment(db, event)
+    db.execute("UPDATE thematic_items SET status=?,last_semantic_version=?,last_engine_signature=? "
+               "WHERE batch_id=? AND reg=?", (state, event["source_version"], signature, batch, reg))
+    return event
 
 
 class MspReassessmentTests(unittest.TestCase):
@@ -71,8 +100,9 @@ class MspReassessmentTests(unittest.TestCase):
                            "code,document,source_url) VALUES(?,?,?,?,?,?,?,?,?)", (
                     batch, fixture.REG_A, "security", TITLE,
                     "223-ФЗ, ст. 3 ч. 8; ПП РФ № 1352, п. 23",
-                    "В документации предусмотрено обеспечение заявки в размере 5% НМЦД.",
-                    CODE, "historical-notice.pdf", URL))
+                    SECURITY_EVIDENCE, CODE, "current-notice.xml", URL))
+        self.prepare_stored_original("yes")
+        self.complete_legal_pass()
         self.initial = self.item()
         self.key = self.initial["finding_key"]
         self.original_rows = self.evidence_snapshot()
@@ -102,10 +132,23 @@ class MspReassessmentTests(unittest.TestCase):
     def audit_rows(self):
         with sqlite3.connect(self.f.evidence_path) as db:
             db.row_factory = sqlite3.Row
-            tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' "
-                                              "AND name LIKE '%reassess%'")]
-            self.assertEqual(len(tables), 1, "One append-only thematic reassessment audit table is required")
-            return [dict(row) for row in db.execute("SELECT * FROM " + tables[0] + " ORDER BY rowid")]
+            self.assertTrue(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                       (reassessment.TABLE,)).fetchone())
+            return [dict(row) for row in db.execute("SELECT * FROM " + reassessment.TABLE + " ORDER BY rowid")]
+
+    def complete_legal_pass(self, batches=(BATCH_A, BATCH_B, BATCH_C), *, state="completed"):
+        purchase, docs = asyncio.run(reassessment.collect_sources(self.ns, fixture.REG_A))
+        with sqlite3.connect(self.f.evidence_path) as db:
+            db.row_factory = sqlite3.Row
+            for batch in batches:
+                rows = [dict(row) for row in db.execute("SELECT * FROM thematic_findings "
+                    "WHERE batch_id=? AND reg=? AND code=?", (batch, fixture.REG_A, CODE))]
+                record_complete_legal_assessment(db, batch, fixture.REG_A, purchase, docs, rows, state=state)
+
+    def legal_audit_rows(self):
+        from payment_finding_reassessment import TABLE
+        with sqlite3.connect(self.f.evidence_path) as db:
+            return db.execute("SELECT * FROM " + TABLE + " ORDER BY id").fetchall()
 
     def assert_no_submission(self):
         self.assertEqual(self.f.rows("account_finding_submissions"), [])
@@ -147,10 +190,46 @@ class MspReassessmentTests(unittest.TestCase):
         return item
 
     def test_exclusive_yes_keeps_confirmed_finding_and_key(self):
+        complete = self.legal_audit_rows()
         response, collect = self.post("yes")
         self.assert_outcome(response, "confirmed", "yes")
+        self.assertEqual(self.legal_audit_rows(), complete,
+                         "A private SME check must preserve the prior complete assessment")
         collect.assert_awaited_once()
         self.assertEqual(self.t.submit(self.key).status_code, 200)
+
+    def test_exclusive_yes_without_complete_legal_journal_remains_review(self):
+        batch = "d" * 24
+        with sqlite3.connect(self.f.evidence_path) as db:
+            db.execute("INSERT INTO thematic_batches(id,categories,created_at) VALUES(?,?,?)",
+                       (batch, '["security"]', "2026-11-06"))
+            db.execute("INSERT INTO thematic_items(batch_id,reg,status,updated_at) VALUES(?,?,?,?)",
+                       (batch, fixture.REG_A, "completed", "2026-11-06"))
+            db.execute("INSERT INTO thematic_findings(batch_id,reg,category,title,law,evidence,code,document,source_url) "
+                "SELECT ?,reg,category,title,law,evidence,code,document,source_url FROM thematic_findings "
+                "WHERE batch_id=? AND code=?", (batch, BATCH_A, CODE))
+        with sqlite3.connect(self.f.identity_path) as db:
+            db.execute("INSERT INTO account_thematic_batches VALUES(?,?)", (str(fixture.EMPLOYEE_A), batch))
+        complete = self.legal_audit_rows()
+        for repeated in (False, True):
+            response, _ = self.post("yes", batch=batch)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["already_reassessed"], repeated)
+            self.assertEqual(response.json()["effective_status"], "requires_review")
+            self.assertEqual(response.json()["reassessment"]["scope"]["state"], "yes")
+            self.assertEqual(self.item(batch)["effective_status"], "requires_review")
+            self.assertEqual(self.t.submit(self.key, batch).status_code, 409)
+        self.assertEqual(self.legal_audit_rows(), complete)
+        self.assert_no_submission()
+
+    def test_exclusive_yes_after_incomplete_legal_pass_remains_review(self):
+        self.complete_legal_pass((BATCH_A,), state="retry")
+        complete = self.legal_audit_rows()
+        self.original_rows = self.evidence_snapshot()
+        response, _ = self.post("yes")
+        self.assert_outcome(response, "requires_review", "yes")
+        self.assertEqual(self.t.submit(self.key).status_code, 409)
+        self.assertEqual(self.legal_audit_rows(), complete)
 
     def test_explicit_no_supersedes_without_deleting_historical_finding(self):
         response, _ = self.post("no")
@@ -335,20 +414,36 @@ class MspReassessmentTests(unittest.TestCase):
         body = ("<document>\n" + docs[0]["text"] + "\n</document>").encode()
         digest = hashlib.sha256(body).hexdigest()
         folder = root / "eis223_official_originals" / fixture.REG_A / ("A" * 32)
-        folder.mkdir(parents=True)
+        folder.mkdir(parents=True, exist_ok=True)
         path = folder / (digest + ".xml")
         path.write_bytes(body)
         if receipt:
             (folder / "receipt.json").write_text(json.dumps({
                 "reg_number": fixture.REG_A, "uid": "A" * 32,
                 "extension": ".xml", "sha256": digest, "bytes": len(body)}))
+        else:
+            (folder / "receipt.json").unlink(missing_ok=True)
         with sqlite3.connect(self.f.evidence_path) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(docs)")}
             for column in ("published_at", "local_path", "metadata_json", "final_url"):
-                db.execute("ALTER TABLE docs ADD COLUMN " + column + " TEXT")
-            db.execute("INSERT INTO docs(reg_number,name,status,url,local_path,metadata_json) "
-                       "VALUES(?,?,?,?,?,?)", (fixture.REG_A, "current-notice.xml", "checked", URL,
-                       str(path), json.dumps({"source": "official_eis_original", "sha256": digest,
-                                             "source_url": URL})))
+                if column not in columns:
+                    db.execute("ALTER TABLE docs ADD COLUMN " + column + " TEXT")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(purchases)")}
+            for column in ("method", "price", "price_num"):
+                if column not in columns:
+                    db.execute("ALTER TABLE purchases ADD COLUMN " + column + " TEXT")
+            db.execute("UPDATE purchases SET method='Аукцион в электронной форме',price='38720976',"
+                       "price_num='38720976' WHERE reg_number=?", (fixture.REG_A,))
+            fields = ("current-notice.xml", "checked", URL, str(path),
+                      json.dumps({"source": "official_eis_original", "sha256": digest, "source_url": URL}))
+            existing = db.execute("SELECT id FROM docs WHERE reg_number=? AND url=?",
+                                  (fixture.REG_A, URL)).fetchone()
+            if existing:
+                db.execute("UPDATE docs SET name=?,status=?,url=?,local_path=?,metadata_json=? WHERE id=?",
+                           (*fields, existing[0]))
+            else:
+                db.execute("INSERT INTO docs(reg_number,name,status,url,local_path,metadata_json) "
+                           "VALUES(?,?,?,?,?,?)", (fixture.REG_A, *fields))
         def connection():
             db = sqlite3.connect(self.f.evidence_path)
             db.row_factory = sqlite3.Row
@@ -448,12 +543,14 @@ class MspReassessmentTests(unittest.TestCase):
         self.assertEqual([row[4] for row in self.f.audits()], ["reassess"])
 
     def assert_persisted_source_staleness(self, scope):
-        self.prepare_stored_original(scope)
         self.assertEqual(self.t.submit(self.key).status_code, 200)
         approved = self.f.decision(key=self.key, version=1, comment="Проверено по сохранённой редакции")
         self.assertEqual(approved.status_code, 200, approved.text)
         identity = {table: self.f.rows(table) for table in (
             "account_finding_submissions", "account_manager_finding_reviews", "account_manager_actions")}
+        # The approval belongs to the preceding fully verified source. A new
+        # source must not be made approvable by a partial SME check alone.
+        self.prepare_stored_original(scope)
         purchase, docs = asyncio.run(reassessment.collect_sources(self.ns, fixture.REG_A))
         result = reassessment.record_reassessment(self.ns, fixture.EMPLOYEE_A, BATCH_A,
                                                   fixture.REG_A, self.key, purchase, docs)
@@ -494,7 +591,8 @@ class MspReassessmentTests(unittest.TestCase):
         purchase, docs = asyncio.run(reassessment.collect_sources(self.ns, fixture.REG_A))
         fresh = reassessment.record_reassessment(self.ns, fixture.EMPLOYEE_A, BATCH_A,
                                                  fixture.REG_A, self.key, purchase, docs)
-        self.assertEqual(fresh["effective_status"], original_status)
+        self.assertEqual(fresh["effective_status"], "requires_review" if scope == "yes" else "superseded")
+        self.assertEqual(self.item()["effective_status"], fresh["effective_status"])
         self.assertFalse(self.item()["reassessment"].get("stale", False))
         self.assertEqual(len(self.audit_rows()), 2)
         self.assertEqual(self.audit_rows()[0], journal[0])

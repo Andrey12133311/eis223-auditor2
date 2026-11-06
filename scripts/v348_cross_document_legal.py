@@ -7,6 +7,8 @@ ambiguous or missing event evidence is not turned into a violation.
 """
 from __future__ import annotations
 from functools import wraps
+from collections import OrderedDict
+from threading import Lock
 import re
 import json
 from datetime import date,timedelta
@@ -15,10 +17,13 @@ from legal_applicability import competitive_rule_scope
 from v295_eis_originals import uid_from_url
 from v341_eis_facts import DATE_TOKEN
 from v341_precise_legal import (matches,REQUEST,ANSWER,SIGNED,PROTOCOL_PUBLISHED,
-                                 shifted,day,COMPETITIVE,LAW32,LAW4,federal_workday)
+                                 shifted,day,COMPETITIVE,LAW32,LAW4,federal_workday,
+                                 clarification_deadline,clarification_deadline_review)
 
 EVENT_DOC=re.compile(r"разъяснен|запрос",re.I)
 EXCLUDE=re.compile(r"образец|пример|шаблон|проект|инструкци",re.I)
+_CLARIFICATION_CACHE=OrderedDict()
+_CLARIFICATION_LOCK=Lock()
 
 # Only explicit request labels establish identity. Neither a purchase number,
 # an answer's own number nor a numeric/date-shaped filename identifies a request.
@@ -66,11 +71,9 @@ def finding_clarification_number(item):
     return next(iter(identifiers)) if len(identifiers)==1 else ""
 
 
-def cross_doc_clarifications(p,docs):
+def _clarification_outcomes(p,docs):
     if competitive_rule_scope(p) is not True:
-        return []
-    deadline=day(p.get("submission_end") or p.get("deadline"))
-    if not deadline:return []
+        return [],[]
     requests,answers=[],[]
     ambiguous_numbers=set()
     originals={}
@@ -115,23 +118,38 @@ def cross_doc_clarifications(p,docs):
             if number:groups.setdefault(number,[[],[]])[side].append(event)
     if len(requests)==len(answers)==1 and requests[0][4]==answers[0][4]=="":
         groups[""]=[requests,answers]
-    findings=[]
+    findings,checks=[],[]
     for number,(qs,ans) in groups.items():
         if number and (unknown or number in ambiguous_numbers):continue
         if len(qs)!=1 or len(ans)!=1:continue
         qi,qdoc,request,received,_=qs[0]
         ai,adoc,response,published,_=ans[0]
         if qi==ai or received>published:continue
-        latest=shifted(deadline,-3)
-        due=shifted(received,3)
-        if latest is None or due is None or received>latest or published<=due:
-            continue
         if (published-received).days>90:continue
         original=qdoc.get("meta") or {}
         reply=adoc.get("meta") or {}
         request_source=original.get("source_url") or qdoc.get("url") or ""
         reply_source=reply.get("source_url") or adoc.get("url") or ""
         if not request_source or not reply_source:continue
+        deadline_proof=clarification_deadline(p,qdoc,request,received)
+        proof_text=(request[0]+". Источник запроса: "+request_source+"; "+response[0]+
+                    ". Источник ответа: "+reply_source+". "+deadline_proof.get("evidence_text", ""))
+        if deadline_proof["state"]!="confirmed":
+            checks.append(clarification_deadline_review(qdoc,request,deadline_proof,proof_text,cross_original=True))
+            continue
+        deadline=day(deadline_proof["deadline"])
+        latest=shifted(deadline,-3)
+        due=shifted(received,3)
+        if latest is None or due is None or received>latest:
+            reason=("Запрос поступил после предельной даты обязательного ответа по действовавшему сроку подачи заявок."
+                    if latest and received>latest else "Не подтверждён производственный календарь для срока ответа на этот запрос.")
+            item=clarification_deadline_review(qdoc,request,deadline_proof,proof_text,cross_original=True)
+            item.update(field_path="v341-clarification-cross-doc-applicability",note=reason,
+                methodology_reason_codes=["clarification_request_after_cutoff" if latest and received>latest
+                                          else "clarification_calendar_unverified"],methodology_reasons=[reason])
+            checks.append(item)
+            continue
+        if published<=due:continue
         findings.append({
       "code":"223-3.2-3-CLARIFICATION-CROSS-DOC-LATE",
       "kind":"violation",
@@ -146,17 +164,43 @@ def cross_doc_clarifications(p,docs):
           " по оригиналу «"+str(adoc.get("name") or "")+"» ("+reply_source+"); "
           "крайний день ответа "+due.isoformat()+
           "; окончание подачи заявок "+deadline.isoformat()+
-          ". Даты учитываются по дням, без времени."
+          ". Даты учитываются по дням, без времени. "+deadline_proof.get("evidence_text", "")
       )[:2500], "CLARIFICATION", number, adoc),
       "document":str(adoc.get("name") or ""),
       "source_url":reply_source,
       "location":"ЕИС: подтверждённые запрос и публикация",
       "match_text":response.group(0)[:500],
+      "source_excerpt":response[0],"source_position":response.start(),"decision_kind":"actual_event",
+      "clarification_deadline_assessment":deadline_proof,
+      "clarification_request_source":{"document":str(qdoc.get("name") or ""),
+          "source_url":request_source,"sha256":str(original.get("sha256") or ""),
+          "archive_member":str(original.get("archive_member") or original.get("member") or ""),
+          "source_excerpt":request[0],"source_position":request.start()},
       "note":("В обоих оригиналах совпадает явный номер запроса. " if number else
               "Установлена единственная ненумерованная пара. ")+
              "Неоднозначные идентификаторы и версии не объединяются автоматически."
         })
-    return findings
+    return findings,checks
+
+
+def cross_doc_clarifications(p,docs):
+    """Compatibility accessor; installed workflows also retain review reasons."""
+    return _clarification_outcomes(p,docs)[0]
+
+
+def _shared_clarifications(p,docs,consume=False):
+    key=(id(p),id(docs))
+    with _CLARIFICATION_LOCK:
+        cached=_CLARIFICATION_CACHE.pop(key,None)
+        if cached is not None and cached[0] is p and cached[1] is docs:
+            if not consume:_CLARIFICATION_CACHE[key]=cached
+            return cached[2]
+    result=_clarification_outcomes(p,docs)
+    if not consume:
+        with _CLARIFICATION_LOCK:
+            _CLARIFICATION_CACHE[key]=(p,docs,result)
+            while len(_CLARIFICATION_CACHE)>2:_CLARIFICATION_CACHE.popitem(last=False)
+    return result
 
 PROTOCOL_DOC=re.compile(r"протокол",re.I)
 PROTOCOL_KINDS=(
@@ -411,17 +455,37 @@ _CLARIFICATION_CONTEXT={
         r"(?=\.\s+Даты\s+учитываются\s+по\s+дням,\s+без\s+времени\.?\s*\Z)",re.I),
 }
 
+# The resolver appends these closed, generated XML provenance descriptors.
+# They establish applicability; their notice dates are not request/answer
+# event dates. Strip only complete trailing descriptors when comparing an
+# occurrence. The immutable evidence (and its exact assessment key) retains
+# every date and hash, and arbitrary original quotations remain significant.
+_CLARIFICATION_XML_DESCRIPTOR=(
+    r"XML\s+извещения\s+ЕИС,\s+версия\s+[^,;\n]{0,80},\s+публикация\s+"+DATE_TOKEN+
+    r",\s+срок\s+подачи\s+"+DATE_TOKEN+
+    r"(?:,\s+изменение\s+XML\s+"+DATE_TOKEN+r")?,\s+SHA-256\s+[0-9a-f]{64}")
+_CLARIFICATION_XML_TAIL=re.compile(
+    r"\s+"+_CLARIFICATION_XML_DESCRIPTOR+
+    r"(?:;\s*"+_CLARIFICATION_XML_DESCRIPTOR+r")*\s*\Z",re.I)
+
 
 def event_occurrence_text(item):
     """Compare the documented event independently of its applicability context.
 
-    Only our exact generated clarification explanation has a removable
-    submission deadline. The original quote, request/publication dates, event
-    numbers and source links remain intact; saved evidence is never changed.
+    Only our generated clarification explanation and closed XML provenance
+    have removable applicability dates. The original quote, request/publication
+    dates, event numbers and source links remain intact; saved evidence is
+    never changed.
     """
     text=event_evidence_text(item.get("evidence"))
     pattern=_CLARIFICATION_CONTEXT.get(str(item.get("code") or item.get("field_path") or ""))
-    return pattern.sub(lambda match:match["event"],text,count=1) if pattern else text
+    if not pattern:return text
+    without_xml=_CLARIFICATION_XML_TAIL.sub("",text,count=1)
+    # A recognizable generated explanation must still exist after removal.
+    # Do not treat an arbitrary source quotation ending with similar text as
+    # disposable metadata.
+    if pattern.search(without_xml):text=without_xml
+    return pattern.sub(lambda match:match["event"],text,count=1)
 
 
 def _local_identity_number(item, family):
@@ -755,7 +819,8 @@ def install(ns):
     @wraps(previous)
     def with_cross_originals(p,docs):
         base=list(previous(p,docs))
-        extra=cross_doc_clarifications(p,docs)+cross_doc_protocols(p,docs)
+        clarifications,_=_shared_clarifications(p,docs)
+        extra=clarifications+cross_doc_protocols(p,docs)
         # Avoid inflating totals when the same documented event was already
         # established inside one canonical original.
         for issue in extra:
@@ -784,5 +849,13 @@ def install(ns):
         return base
     with_cross_originals.__v348__=True
     ns["analyze"]=with_cross_originals
+    previous_checks=ns.get("build_checks")
+    if callable(previous_checks):
+        @wraps(previous_checks)
+        def with_clarification_reviews(p,detail,card,docs):
+            base=list(previous_checks(p,detail,card,docs))
+            _,reviews=_shared_clarifications(p,docs,consume=True)
+            return base+reviews
+        ns["build_checks"]=with_clarification_reviews
     print("V348_CROSS_DOCUMENT_CLARIFICATION_READY verified_pair_only=True",flush=True)
 

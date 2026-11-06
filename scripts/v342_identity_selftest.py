@@ -11,6 +11,10 @@ from v314_eis_metadata import parse_text
 from v342_identity import subject, valid_inn
 from v332_all_procurements_audit import persist, dashboard_regs, DASHBOARD_MAX
 from v341_precise_legal import evaluate
+from legal_audit_revision import engine_signature
+from vp_inspection_engine import document_fingerprint
+from payment_finding_reassessment import prepare_assessment, db_source_token
+from v352_dashboard_truth import load_counts
 
 REG = "32616422163"
 SOURCE = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="+"A"*32
@@ -119,11 +123,35 @@ def run():
         finally:
             if previous_key is None:os.environ.pop("EIS223_UPLOAD_TOKEN",None)
             else:os.environ["EIS223_UPLOAD_TOKEN"]=previous_key
-        assert persist(ns,REG,findings,[]) == (2,0)
-        assert persist(ns,REG,findings,[]) == (0,0)
-        # A different date spelling of the same factual event is a duplicate.
+        with conn() as db:
+            db.execute("CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,name TEXT,"
+                       "url TEXT,status TEXT,metadata_json TEXT,text_chars INTEGER)")
+            db.execute("INSERT INTO docs VALUES(1,?,?,?,?,?,?)",
+                       (REG,cancelled["name"],SOURCE,cancelled["status"],
+                        json.dumps(cancelled["meta"]),len(cancelled["text"])))
+        def assessment(current):
+            with conn() as db:
+                return prepare_assessment(REG,current,engine_signature=engine_signature(),
+                    source_version=document_fingerprint([cancelled]),db_token=db_source_token(db,REG))
+        current_assessment=assessment(findings)
+        assert persist(ns,REG,findings,[],payment_assessment=current_assessment) == (2,0)
+        assert persist(ns,REG,findings,[],payment_assessment=current_assessment) == (0,0)
+        with conn() as db:
+            original_rows=[dict(row) for row in db.execute("SELECT * FROM findings ORDER BY id")]
+            assert load_counts(db,[REG])=={REG:2}
+        # A new exact proof is retained without creating another current act.
+        # Both independent cancellations remain in this pass's assessment.
         same=[{**f,"evidence":f["evidence"].replace("2026-10-01","01.10.2026")} for f in findings]
-        assert persist(ns,REG,same,[]) == (0,0)
+        alias_assessment=assessment(same)
+        assert persist(ns,REG,same,[],payment_assessment=alias_assessment) == (1,0)
+        assert persist(ns,REG,same,[],payment_assessment=alias_assessment) == (0,0)
+        with conn() as db:
+            rows=[dict(row) for row in db.execute("SELECT * FROM findings ORDER BY id")]
+            assert len(rows)==3 and rows[:2]==original_rows,rows
+            assert load_counts(db,[REG])=={REG:2}
+            # This legacy SQL counter tracks appended evidence rows; the
+            # dashboard's current legal count above applies reassessment.
+            assert db.execute("SELECT violations FROM purchases WHERE reg_number=?",(REG,)).fetchone()[0]==len(rows)
         db=conn()
         regs=["3"+str(n).zfill(10) for n in range(1,1261)]
         db.executemany("INSERT OR IGNORE INTO purchases(reg_number,last_seen,customer) VALUES(?,'2026-10-14','ООО Тестовый заказчик')",((v,) for v in regs))

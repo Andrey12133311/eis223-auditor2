@@ -1,6 +1,7 @@
 """Synthetic independently verified EIS fixtures for clarification identity."""
 import copy
 import hashlib
+import json
 import sys
 import sqlite3
 import tempfile
@@ -13,8 +14,19 @@ from v341_precise_legal import evaluate
 from v332_all_procurements_audit import persist
 from v352_dashboard_truth import collapse_legal_events, load_counts
 from v353_episode_guard import same_episode
+from legal_audit_revision import engine_signature
+from payment_finding_reassessment import prepare_assessment, db_source_token
+from vp_inspection_engine import document_fingerprint
 
-PURCHASE = {"method": "Аукцион в электронной форме", "submission_end": "2026-10-30"}
+def notice_revision(deadline="2026-10-30"):
+    """Synthetic hash-verified notice published before every request fixture."""
+    return {"sha256": hashlib.sha256(("notice:" + deadline).encode()).hexdigest(),
+            "xml_type": "purchaseNotice", "version": "1",
+            "publication": "2026-10-01", "submission_end": deadline}
+
+
+PURCHASE = {"method": "Аукцион в электронной форме", "submission_end": "2026-10-30",
+            "_verified_notice_revisions": [notice_revision()]}
 SOURCE = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
 
 
@@ -117,7 +129,8 @@ class ClarificationIdentityTests(unittest.TestCase):
 
     def test_timely_response_and_late_request_not_flagged(self):
         self.assertEqual(self.run_analyzer(pair(published="09.10.2026")), [])
-        p = dict(PURCHASE, submission_end="2026-10-08")
+        p = dict(PURCHASE, submission_end="2026-10-08",
+                 _verified_notice_revisions=[notice_revision("2026-10-08")])
         self.assertEqual(legal.cross_doc_clarifications(p, pair()), [])
 
     def test_explicit_historical_purchase_does_not_use_current_rule(self):
@@ -147,7 +160,9 @@ class ClarificationIdentityTests(unittest.TestCase):
                 db.executescript("""
                     CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,
                         violations INTEGER DEFAULT 0, checks_ok INTEGER DEFAULT 0,
-                        checks_attention INTEGER DEFAULT 0);
+                        checks_attention INTEGER DEFAULT 0, method TEXT, card_fields_json TEXT);
+                    CREATE TABLE docs(id INTEGER PRIMARY KEY, reg_number TEXT,
+                        name TEXT, status TEXT, metadata_json TEXT, text_chars INTEGER);
                     CREATE TABLE findings(id INTEGER PRIMARY KEY, reg_number TEXT,
                         code TEXT, kind TEXT, title TEXT, law TEXT, law_url TEXT,
                         evidence TEXT, note TEXT, document TEXT, source_url TEXT,
@@ -157,12 +172,25 @@ class ClarificationIdentityTests(unittest.TestCase):
                         source_url TEXT, document TEXT, field_path TEXT, note TEXT,
                         law TEXT, law_url TEXT, location TEXT);
                 """)
-                db.execute("INSERT INTO purchases(reg_number) VALUES (?)", ("synthetic",))
+                db.execute("INSERT INTO purchases(reg_number,method,card_fields_json) VALUES (?,?,?)",
+                           ("synthetic", PURCHASE["method"], json.dumps({
+                               "verified_notice_revisions": PURCHASE["_verified_notice_revisions"]})))
             ns = {"conn": connect, "analyze": lambda p, d: []}
             legal.install(ns)
-            found = ns["analyze"](PURCHASE, pair("1") + pair("2", first=3))
-            self.assertEqual(persist(ns, "synthetic", found, []), (2, 0))
-            self.assertEqual(persist(ns, "synthetic", found, []), (0, 0))
+            docs = pair("1") + pair("2", first=3)
+            found = ns["analyze"](PURCHASE, docs)
+            with connect() as db:
+                for identifier, doc in enumerate(docs, 1):
+                    db.execute("INSERT INTO docs VALUES(?,?,?,?,?,?)",
+                               (identifier, "synthetic", doc["name"], doc["status"],
+                                json.dumps(doc["meta"]), len(doc["text"])))
+                event = prepare_assessment("synthetic", found,
+                    engine_signature=engine_signature(),
+                    source_version=document_fingerprint(docs), db_token=db_source_token(db, "synthetic"))
+            # Mirror the guarded writer's real handshake: fresh conclusions
+            # and their source token commit with the append-only evidence rows.
+            self.assertEqual(persist(ns, "synthetic", found, [], payment_assessment=event), (2, 0))
+            self.assertEqual(persist(ns, "synthetic", found, [], payment_assessment=event), (0, 0))
             with connect() as db:
                 rows = [dict(row) for row in db.execute("SELECT * FROM findings")]
                 self.assertEqual(len(rows), 2)

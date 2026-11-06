@@ -182,7 +182,8 @@ def official_notice_revisions(reg):
     from eis223_soap_xml import revision_key
     notices=[item for item in official_xml_documents(reg) if item[0]["xml_family"]=="notice"]
     return [{"sha256":record["xml_sha256"],"version":record["version"],
-             "xml_type":record["xml_type"],
+             "xml_type":record["xml_type"],"reg_number":record["reg_number"],
+             "modified":record.get("modified") or field(data,"modificationDate"),
              "publication":field(data,"publicationDateTime"),
              "submission_end":field(data,"submissionCloseDateTime"),
              "submission_start":field(data,"applSubmisionStartDate")}
@@ -631,6 +632,11 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
     save=ns.get("save")
     if not all(callable(x) for x in (analyze,build_checks,save)):
         raise RuntimeError("Existing 223-FZ legal analysis functions are unavailable")
+    # The actual notice history must already be available when clarification
+    # rules choose the deadline effective on each request date. Reuse this same
+    # verified snapshot for the revision review below and both legal stages.
+    revisions=await asyncio.to_thread(official_notice_revisions,reg)
+    p["_verified_notice_revisions"]=revisions
     findings=await asyncio.to_thread(analyze,p,docs)
     # Only substantiated violations enter the NEW incoming audit results.
     # Weak heuristic "risk" matches do not become violations and are not
@@ -751,7 +757,6 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
                            "legal_basis":"223-ФЗ, статья 3.1-4",
                            "reason":"Сопоставить с XML ЕИС, кодом ОКПД2, датой и исключениями"})
     # Revisions are source-backed and deduplicated by actual XML SHA256.
-    revisions=await asyncio.to_thread(official_notice_revisions,reg)
     if len(revisions)>1:
         deadlines={v["submission_end"][:10] for v in revisions if v["submission_end"]}
         if len(deadlines)>1:

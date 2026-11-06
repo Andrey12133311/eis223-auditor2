@@ -90,7 +90,7 @@ class DateLabelPipelineParity(unittest.TestCase):
 
     def test_extended_request_and_eis_prefix_labels_reach_both_paths(self):
         shutil.rmtree(self.root / 'eis223_official_archive_inbox' / saved.REG)
-        self.write_archive(self.make_xml('purchaseNotice', version=2,
+        self.write_archive(self.make_xml('purchaseNotice', version=1, publication='2026-09-30T12:00:00+03:00',
             filename='Разъяснение на запрос № 1.docx'))
         self.write_original(
             'Номер запроса: 1. '
@@ -103,13 +103,14 @@ class DateLabelPipelineParity(unittest.TestCase):
     def test_extended_request_split_across_verified_originals_reaches_both_paths(self):
         answer_uid = 'A' * 32
         shutil.rmtree(self.root / 'eis223_official_archive_inbox' / saved.REG)
-        self.write_archive(self.make_xml('purchaseNotice', version=2,
+        self.write_archive(self.make_xml('purchaseNotice', version=1, publication='2026-09-30T12:00:00+03:00',
             filename='Запрос разъяснений № 1.docx'))
         self.write_original(
             'Номер запроса: 1. '
             'Дата поступления запроса на предоставление разъяснений положений документации: '
             '06.10.2026. Запрос поступил от участника закупки.')
-        self.write_archive(self.make_xml('purchaseNotice', version=3, uid=answer_uid,
+        self.write_archive(self.make_xml('purchaseNotice', version=2, uid=answer_uid,
+            publication='2026-10-02T12:00:00+03:00',
             filename='Разъяснение на запрос № 1.docx'))
         self.write_original(
             'Номер запроса: 1. '

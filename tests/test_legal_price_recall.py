@@ -104,6 +104,16 @@ class LegalPriceRecallTests(unittest.TestCase):
                 docs = [original(example + separator + PRICE + "\n" + BID)]
                 self.assert_one({**PURCHASE, "price_num": None}, docs)
 
+    def test_actual_requirement_after_completed_example_survives_common_qualifier(self):
+        from vp_inspection_engine import qualify_outcomes
+        docs = [original("Например, НМЦД составляет 8 000 000 рублей. " + PRICE + "\n" + BID)]
+        p = {**PURCHASE, "price_num": None}
+        found = self.assert_one(p, docs)
+        qualified, _ = qualify_outcomes(p, docs, found, [])
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(qualified[0]["kind"], "violation")
+        self.assertFalse(qualified[0]["methodology_reasons"])
+
     def test_example_table_context_survives_reconstructed_price_pairs(self):
         for table in (
             "| НМЦД | 4 000 000 руб. |",

@@ -42,7 +42,7 @@ COPY tests/test_manual_navigation_fix.py tests/test_personal_inn_search.py tests
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manual_navigation_fix.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_personal_inn_search.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_manual_inn_ui.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_dashboard_filter_reset.py'
 COPY tests/test_memo_download_access.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_memo_download_access.py'
-COPY tests/test_thematic_memo_odt.py tests/
+COPY tests/test_thematic_memo_odt.py tests/test_thematic_finding_submissions.py tests/test_v385_msp_reassessment.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_thematic_memo_odt.py'
 COPY tests/test_account_connection_pool.py tests/test_account_request_responsiveness.py tests/test_page_response_performance.py tests/
 RUN PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_account_connection_pool.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_account_request_responsiveness.py' && PYTHONPATH=/app:/app/scripts python -m unittest discover -s tests -p 'test_page_response_performance.py'
@@ -105,6 +105,8 @@ COPY tests/test_dashboard_async_read.py tests/test_dashboard_read_recovery.py te
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_dashboard_async_read test_dashboard_read_recovery
 COPY tests/test_payment_terms.py tests/test_payment_source_binding.py tests/test_payment_finding_reassessment.py tests/test_payment_terms_pipeline.py tests/test_payment_staff_view.py tests/test_payment_case_view.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_payment_terms test_payment_source_binding test_payment_finding_reassessment test_payment_terms_pipeline test_payment_staff_view test_payment_case_view
+COPY tests/test_cancellation_event_evidence.py tests/test_legal_finding_reassessment.py tests/test_security_context_evidence.py tests/test_legal_evidence_qualification.py tests/test_amendment_decision_evidence.py tests/test_clarification_deadline_evidence.py tests/test_clarification_deadline_pipeline.py tests/test_clarification_xml_evidence.py tests/test_v385_msp_reassessment.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_cancellation_event_evidence test_legal_finding_reassessment test_security_context_evidence test_legal_evidence_qualification test_amendment_decision_evidence test_clarification_deadline_evidence test_clarification_deadline_pipeline test_v385_msp_reassessment
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

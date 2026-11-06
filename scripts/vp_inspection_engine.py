@@ -108,6 +108,7 @@ _RULE_KEYS = {
     "v336-original_application": ("sme_application_requirements",),
     "v336-notarization": ("sme_application_requirements",),
     "v336-bid-security-needs-verified-nmcd": ("bid_security",),
+    "v336-bid-security-context": ("bid_security",),
     "v383-bid-security-msp-scope": ("sme_bid_security",),
     "223-sme-bid-security-over-two-percent": ("sme_bid_security",),
     "223-4-11-amendment-publication-delay": ("amendments",),
@@ -149,7 +150,7 @@ _REQUIRED_EVIDENCE = {
 # the general payment, documentation and national-regime rows outside this set.
 _COMPETITIVE_KEYS = frozenset({"trademark_equivalent", "clarifications",
     "cancellation", "protocol_compliance", "contract_signing", "notice_deadlines",
-    "bid_security", "post_deadline_extension"})
+    "bid_security", "amendments", "post_deadline_extension"})
 
 
 def _inferred_criterion_keys(finding):
@@ -367,7 +368,7 @@ def decision_qualification(item, key):
     review_only = (code.startswith(("v337-", "v341-")) or code in {
         "vp-payment-term", "vp-trademark-exclusion", "vp-sme-purchase-list",
         "v372-protocol-rejected-bid-document-clause", "v372-protocol-criteria-values",
-        "v336-bid-security-needs-verified-nmcd", "v383-bid-security-msp-scope"})
+        "v336-bid-security-needs-verified-nmcd", "v336-bid-security-context", "v383-bid-security-msp-scope"})
     if requested in {"violation", "compliant"} and review_only:
         add("review_rule_cannot_confirm", "Это правило выявляет обстоятельство для проверки и не устанавливает нарушение или соблюдение критерия.")
     if status in positive and item.get("criterion_complete") is not True:
@@ -437,10 +438,19 @@ def _source_support(item, docs, body_cache=None):
     """Return an exact normalized source fragment and the unique original."""
     requested = _text(item.get("document") or item.get("source"))
     url = str(item.get("source_url") or "").strip()
+    digest = str(item.get("sha256") or item.get("source_sha256") or "").strip()
+    member = str(item.get("archive_member") or "").strip()
     candidates = []
     for doc in docs:
+        meta = doc.get("meta") or {}
+        # A saved hash/member is part of the citation, not a decorative field.
+        # A newer original with the same filename and URL cannot replace it.
+        if digest and digest != str(meta.get("sha256") or ""):
+            continue
+        if member and member != str(meta.get("archive_member") or meta.get("member") or ""):
+            continue
         names = {_text(doc.get(k)) for k in ("name", "local", "local_path")}
-        names.add(_text((doc.get("meta") or {}).get("filename")))
+        names.add(_text(meta.get("filename")))
         names.discard("")
         name_match = bool(requested and (requested in names or
             os.path.basename(requested.replace("\\", "/")) in {
@@ -503,14 +513,117 @@ def _fragment_bounds(body, excerpt, source_position=None):
     return None
 
 
-def _source_context(item, docs, body_cache=None):
+def _source_occurrence(item, support, body_cache=None):
+    """Bind an exact quote to one occurrence, never to the first of copies."""
+    if not support:
+        return None, False
+    doc, excerpt = support
+    body = str(doc.get("text") or "")
+    position = item.get("source_position")
+    relative = (_fragment_bounds(body[position:], excerpt)
+                if isinstance(position, int) and not isinstance(position, bool)
+                and 0 <= position < len(body) else None)
+    if relative and relative[0] == 0:
+        return (position, position + relative[1]), False
+    normalized = (body_cache or {}).get(id(doc))
+    if normalized is None:
+        normalized = _text(body)
+    if normalized.count(_text(excerpt)) > 1:
+        return None, True
+    return _fragment_bounds(body, excerpt), False
+
+
+def _external_history_gate(item):
+    """Retain the existing independent EIS-history gate without extra I/O.
+
+    The amendments engine can prove dates from the official history tab rather
+    than a binary attachment. General persistence independently rechecks that
+    exact feed. This narrow exception neither verifies a new history event nor
+    permits an unsupported quote from a downloadable original.
+    """
+    if str(item.get("code") or item.get("field_path") or "").upper() != "223-4-11-AMENDMENT-PUBLICATION-DELAY":
+        return False
+    from v330_amendments_223 import finding_event_key, official_url
+    from v295_eis_originals import uid_from_url
+    url = str(item.get("source_url") or "")
+    return bool(official_url(url) and not uid_from_url(url) and finding_event_key(item))
+
+
+def _criterion_scopes(p, docs, body_cache):
+    """Use the same tri-state applicability at persistence and sheet stages."""
+    if "criterion_scopes" not in body_cache:
+        sme = resolve_sme(p or {}, docs)
+        body_cache["criterion_scopes"] = {
+            "sme": sme, "sme_payment": _sme_payment_scope(p or {}, sme, docs),
+            "competitive": competitive_rule_scope(p or {})}
+    return body_cache["criterion_scopes"]
+
+
+def _criterion_scope(key, scopes):
+    if key == "sme_payment":
+        return scopes["sme_payment"]
+    if BY_KEY[key].sme_only:
+        return scopes["sme"]["value"]
+    if key in _COMPETITIVE_KEYS:
+        return scopes["competitive"]
+    return True
+
+
+def _sources_incomplete(p, docs):
+    """Known missing originals forbid a whole-criterion compliance finding."""
+    if (p or {}).get("source_incomplete") is True:
+        return True
+    for key in ("documents_unreadable", "unreadable"):
+        try:
+            if int((p or {}).get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    expected, received = (p or {}).get("original_expected"), (p or {}).get("original_received")
+    if (isinstance(expected, int) and not isinstance(expected, bool) and
+            isinstance(received, int) and not isinstance(received, bool) and received < expected):
+        return True
+    return any(doc.get("status") in {"downloaded_no_text", "archive_unreadable"} or
+               (doc.get("meta") or {}).get("archive_warnings") or
+               (doc.get("status") == "checked" and not str(doc.get("text") or "").strip())
+               for doc in docs)
+
+
+def _evidence_qualification(p, item, docs, body_cache, all_docs):
+    support = _source_support(item, docs, body_cache)
+    scopes = _criterion_scopes(p, docs, body_cache)
+    applicable = {key: _criterion_scope(key, scopes) for key in criterion_keys(item)}
+    codes, reasons = [], []
+    external = not support and _external_history_gate(item)
+    if not support and not external:
+        codes.append("source_fragment_unverified")
+        reasons.append("Точный фрагмент однозначно определённого проверенного оригинала не подтверждён.")
+    if any(value is not True for value in applicable.values()):
+        codes.append("criterion_scope_unverified")
+        reasons.append("Применимость критерия к установленному режиму закупки не подтверждена.")
+    requested = {**item, "kind": item.get("reported_kind", item.get("kind")),
+                 "status": item.get("reported_status", item.get("status"))}
+    if _status(requested) == "compliant":
+        if "sources_incomplete" not in body_cache:
+            body_cache["sources_incomplete"] = _sources_incomplete(p, all_docs)
+        if body_cache["sources_incomplete"]:
+            codes.append("criterion_sources_incomplete")
+            reasons.append("Не все оригиналы и приложения прочитаны; отсутствие нарушения по всему критерию не подтверждено.")
+    return {"methodology_reason_codes": codes, "methodology_reasons": reasons,
+            "decision_basis": {"criterion_scope": applicable,
+                "source_fragment_verified": bool(support),
+                "source_proof_scope": "verified_original" if support else
+                    "independent_eis_history_gate" if external else "unverified"}}
+
+
+def _source_context(item, docs, body_cache=None, *, p=None):
     """Reject explicit examples/replaced acts without inventing missing proof.
 
     Some event engines have authoritative XML/history proof without a binary
     quote. In that case this limiter reports availability separately and leaves
     their existing source/proof gates in charge.
     """
-    from legal_document_context import document_context, local_context, REASON_LABELS
+    from legal_document_context import document_context, local_context, source_scope_context, REASON_LABELS
     code = str(item.get("code") or item.get("field_path") or "").lower()
     actual_event = (code.startswith(("223-3.2-3-clarification-", "223-3.2-6-cancellation-", "223-4-11-")) or
                     code == "v372-protocol-rejected-bid-no-reasons" or
@@ -533,23 +646,25 @@ def _source_context(item, docs, body_cache=None):
             source_url = str((doc.get("meta") or {}).get("source_url") or doc.get("url") or "")
             if source_url and source_url in evidence and doc not in matches:
                 matches.append(doc)
-    codes, records = [], []
+    bounds, ambiguous = _source_occurrence(item, support, body_cache)
+    codes, records = (["source_occurrence_ambiguous"] if ambiguous else []), []
     for doc in matches:
         context = document_context(doc)
         reasons = list(context["reasons"])
+        scope = source_scope_context(p, doc, bounds[0] if bounds and support and doc is support[0] else None)
+        reasons.extend(scope["reasons"])
         if not actual_event:
             # A contract project can establish its proposed payment/security
             # term; it cannot establish that a contract was signed or paid.
             reasons = [value for value in reasons if value != "project_is_not_completed_act"]
-        bounds = _fragment_bounds(str(doc.get("text") or ""), support[1], item.get("source_position")) if support and doc is support[0] else None
-        local = local_context(doc.get("text"), *bounds) if bounds else None
+        local = local_context(doc.get("text"), *bounds) if bounds and support and doc is support[0] else None
         # For a second cited original, inspect only explicit event labels. This
         # is a contextual veto, never a way to construct a missing date pair.
-        if not local and code == "223-3.2-3-clarification-cross-doc-late":
-            from v341_precise_legal import REQUEST, ANSWER
+        if not local and code == "223-3.2-3-clarification-cross-doc-late" and (not support or doc is not support[0]):
+            from v341_precise_legal import REQUEST, ANSWER, matches as event_matches
             passages = [local_context(doc.get("text"), match.start(), match.end())
                         for pattern in (REQUEST, ANSWER)
-                        for match in pattern.finditer(str(doc.get("text") or ""))]
+                        for match in event_matches(pattern, str(doc.get("text") or ""))]
             if passages:
                 reasons.extend(reason for passage in passages for reason in passage["reasons"])
         if local:
@@ -557,14 +672,17 @@ def _source_context(item, docs, body_cache=None):
         codes.extend(reasons)
         records.append({"document": str(doc.get("name") or ""),
             "role": context["role"], "version_status": context["version_status"],
-            "fragment_context_available": bool(local), "reason_codes": list(dict.fromkeys(reasons))})
+            "fragment_context_available": bool(local), "scope": scope,
+            "reason_codes": list(dict.fromkeys(reasons))})
     codes = list(dict.fromkeys(codes))
     return {"source_context_available": bool(matches),
-            "source_fragment_context_available": bool(support),
+            "source_fragment_context_available": bool(bounds),
             "source_context_eligible": not codes if matches else None,
             "source_context": records,
             "methodology_reason_codes": codes,
-            "methodology_reasons": ["Источник не подтверждает конкретное действие или условие: "+REASON_LABELS.get(value, value)+"." for value in codes]}
+            "methodology_reasons": ["Источник не подтверждает конкретное действие или условие: "+
+                ("цитата повторяется, а конкретное вхождение не установлено" if value == "source_occurrence_ambiguous"
+                 else REASON_LABELS.get(value, value))+"." for value in codes]}
 
 
 def _payment_context(p, item, docs, body_cache, all_docs):
@@ -620,28 +738,130 @@ def _payment_context(p, item, docs, body_cache, all_docs):
             "methodology_reasons": list(assessment.get("reason_labels") or []) if limited else []}
 
 
+def _security_context(p, item, docs, body_cache, all_docs):
+    """Apply the same source/lot/NMCD limiter to legacy security candidates."""
+    code = str(item.get("code") or item.get("field_path") or "").upper()
+    if code not in {"223-3.2-27-BID-SECURITY-LOW-NMCD",
+                    "223-3.2-27-BID-SECURITY-OVER-FIVE-PERCENT",
+                    "223-SME-BID-SECURITY-OVER-TWO-PERCENT"}:
+        return {}
+    requested = {**item, "kind": item.get("reported_kind", item.get("kind")),
+                 "status": item.get("reported_status", item.get("status"))}
+    if _status(requested) != "violation":
+        return {}
+    support = _source_support(item, docs, body_cache)
+    bounds, _ = _source_occurrence(item, support, body_cache)
+    if not support or not bounds:
+        # The common proof gate already explains why an exact source is
+        # unavailable. Do not search another clause to repair its allegation.
+        return {}
+    from v336_legal_matrix import assess_security_context, _security_terms
+    if "security_terms" not in body_cache:
+        body_cache["security_terms"] = _security_terms(all_docs)
+    assessment = assess_security_context(p or {}, all_docs, support[0], *bounds,
+        rule_code=code, prepared=body_cache["security_terms"],
+        scope_cache=body_cache.setdefault("security_scope_facts", {}))
+    limited = assessment.get("status") != "confirmed"
+    return {"security_assessment": assessment,
+            "methodology_reason_codes": list(assessment.get("reasons") or []) if limited else [],
+            "methodology_reasons": list(assessment.get("reason_labels") or []) if limited else []}
+
+
+def _clarification_context(p, item, docs, body_cache):
+    """Rebind the actual request and its historical deadline without source I/O."""
+    code = str(item.get("code") or item.get("field_path") or "").upper()
+    if code not in {"223-3.2-3-CLARIFICATION-RESPONSE-LATE", "223-3.2-3-CLARIFICATION-CROSS-DOC-LATE"}:
+        return {}
+    requested = {**item, "kind": item.get("reported_kind", item.get("kind")),
+                 "status": item.get("reported_status", item.get("status"))}
+    if _status(requested) != "violation":
+        return {}
+    cross_original = code.endswith("CROSS-DOC-LATE")
+    source = item.get("clarification_request_source") if cross_original else item
+    support = _source_support(source, docs, body_cache) if isinstance(source, dict) else None
+    bounds, ambiguous = _source_occurrence(source, support, body_cache) if support else (None, False)
+    request = None
+    if support and bounds and not ambiguous:
+        from v341_precise_legal import matches, REQUEST
+        body = str(support[0].get("text") or "").replace("\xa0", " ")
+        requests = [match for match in matches(REQUEST, body)
+                    if bounds[0] <= match.start() and match.end() <= bounds[1]]
+        if len(requests) == 1:
+            request = requests[0]
+    if request is not None and cross_original:
+        from v348_cross_document_legal import _document_original_identity
+        answer_support = _source_support(item, docs, body_cache)
+        request_identity = _document_original_identity(support[0])
+        answer_identity = _document_original_identity(answer_support[0]) if answer_support else None
+        # A caller-supplied assessment/reference cannot borrow a request from
+        # another version, or turn one original into a two-original timeline.
+        if (not request_identity or not answer_identity or request_identity == answer_identity or
+                not source.get("sha256") or
+                not source.get("source_url") or
+                str(source["source_url"]) not in str(item.get("evidence") or "")):
+            request = None
+    if request is None:
+        assessment = {"state": "requires_review", "deadline": None,
+            "reason_code": "clarification_request_source_unverified",
+            "reason": "Не подтверждена точная привязка исторического срока к конкретному запросу и его оригиналу.",
+            "evidence": [], "evidence_text": ""}
+    else:
+        from clarification_deadline_evidence import resolve_clarification_deadline
+        from v341_precise_legal import day, shifted
+        received = day(request["date"])
+        assessment = resolve_clarification_deadline(p or {}, support[0], received=received,
+            request_span=request.span())
+        if assessment["state"] == "confirmed":
+            latest = shifted(day(assessment["deadline"]), -3)
+            if latest is None or received > latest:
+                assessment = {**assessment, "state": "requires_review",
+                    "reason_code": "clarification_request_after_cutoff" if latest else "clarification_calendar_unverified",
+                    "reason": "Запрос поступил после предельной даты обязательного ответа по действовавшему сроку подачи заявок."
+                        if latest else "Не подтверждён производственный календарь для срока ответа на этот запрос."}
+    limited = assessment["state"] != "confirmed"
+    return {"clarification_deadline_assessment": assessment,
+            "methodology_reason_codes": [assessment["reason_code"]] if limited else [],
+            "methodology_reasons": [assessment["reason"]] if limited else []}
+
+
 def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None):
     result = qualify_record(item)
     if not isinstance(result, dict) or not criterion_keys(result):
         return result
     if body_cache is None:
         body_cache = {}
-    context = _source_context(result, docs, body_cache)
-    payment = _payment_context(p, result, docs, body_cache, docs if all_docs is None else all_docs)
+    all_docs = docs if all_docs is None else all_docs
+    context = _source_context(result, docs, body_cache, p=p)
+    evidence = _evidence_qualification(p, result, docs, body_cache, all_docs)
+    for field in ("methodology_reasons", "methodology_reason_codes"):
+        context[field] = list(dict.fromkeys(context[field] + evidence[field]))
+    payment = _payment_context(p, result, docs, body_cache, all_docs)
     if payment:
         result["payment_assessment"] = payment["payment_assessment"]
         for field in ("methodology_reasons", "methodology_reason_codes"):
             context[field] = list(dict.fromkeys(context[field] + payment[field]))
-        # Legacy database rows preserve note but not arbitrary JSON fields.
-        # Keep the reason visible after persistence and in generated reports.
+    security = _security_context(p, result, docs, body_cache, all_docs)
+    if security:
+        result["security_assessment"] = security["security_assessment"]
+        for field in ("methodology_reasons", "methodology_reason_codes"):
+            context[field] = list(dict.fromkeys(context[field] + security[field]))
+    clarification = _clarification_context(p, result, docs, body_cache)
+    if clarification:
+        result["clarification_deadline_assessment"] = clarification["clarification_deadline_assessment"]
+        for field in ("methodology_reasons", "methodology_reason_codes"):
+            context[field] = list(dict.fromkeys(context[field] + clarification[field]))
+    # Legacy database rows preserve note but not arbitrary JSON fields. Keep
+    # the reason for an unsupported claim visible after persistence as well.
+    if context["methodology_reasons"] or payment:
         note = str(result.get("note") or "")
-        for reason in payment["methodology_reasons"]:
+        for reason in context["methodology_reasons"]:
             if reason not in note:
                 note = (note + " " + reason).strip()
         result["note"] = note
     for field in ("source_context_available", "source_fragment_context_available", "source_context_eligible", "source_context"):
         result[field] = context[field]
     result["decision_basis"] = {**result["decision_basis"],
+        **evidence["decision_basis"],
         "source_context_available": context["source_context_available"],
         "source_context_eligible": context["source_context_eligible"]}
     for field in ("methodology_reasons", "methodology_reason_codes"):
@@ -825,12 +1045,12 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
     from saved_eis_dates import ALIASES, with_saved_dates
     dates = with_saved_dates({**detail, **p}, card or None)
     p.update({key: dates[key] for key in ALIASES})
-    sme = resolve_sme(p, originals)
-    sme_payment_status = _sme_payment_scope(p, sme, originals)
-    competitive = competitive_rule_scope(p)
+    body_cache = {}
+    scopes = _criterion_scopes(p, originals, body_cache)
+    sme, sme_payment_status, competitive = scopes["sme"], scopes["sme_payment"], scopes["competitive"]
     outcomes = {criterion.key: [] for criterion in CRITERIA}
     unknown_items = {criterion.key: [] for criterion in CRITERIA}
-    seen, body_cache = set(), {}
+    seen = set()
     for source_index, item in enumerate(list(findings or ()) + list(checks or ())):
         if not isinstance(item, dict):
             continue
@@ -841,10 +1061,7 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
         support = _source_support(item, originals, body_cache)
         status = _status(item)
         for key in keys:
-            criterion = BY_KEY[key]
-            applicable = (sme_payment_status is True if key == "sme_payment" else
-                sme["value"] is True if criterion.sme_only else
-                competitive is True if key in _COMPETITIVE_KEYS else True)
+            applicable = _criterion_scope(key, scopes) is True
             reasons = list(item.get("methodology_reasons") or [])
             reason_codes = list(item.get("methodology_reason_codes") or [])
             if not support:
@@ -881,6 +1098,9 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
                 "source_context_eligible": item.get("source_context_eligible"),
                 "source_context": item.get("source_context") or [],
                 "payment_assessment": item.get("payment_assessment") or {},
+                "security_assessment": item.get("security_assessment") or {},
+                "clarification_deadline_assessment": item.get("clarification_deadline_assessment") or {},
+                "clarification_request_source": item.get("clarification_request_source") or {},
                 # Administrative qualification requires its own dated event
                 # investigation. Never copy obsolete blanket mappings.
                 "administrative_basis": _administrative_basis(item, key) if qualified_status == "violation" else ""}
@@ -900,15 +1120,7 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
             chosen[key] = compliant[0]
     rows = inspection_rows(chosen, sme_status=sme["value"], sme_payment_status=sme_payment_status)
     for row in rows:
-        criterion = BY_KEY[row["key"]]
-        if row["key"] == "sme_payment":
-            applicable = sme_payment_status
-        elif criterion.sme_only:
-            applicable = sme["value"]
-        elif row["key"] in _COMPETITIVE_KEYS:
-            applicable = competitive
-        else:
-            applicable = True
+        applicable = _criterion_scope(row["key"], scopes)
         status = "violation" if row["has_violation"] else "compliant" if row["no_violation"] else "not_applicable" if applicable is False else "unknown"
         records = outcomes[row["key"]]+unknown_items[row["key"]]
         methodology_reasons = list(dict.fromkeys(reason for value in records for reason in value["methodology_reasons"]))

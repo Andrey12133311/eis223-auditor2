@@ -158,7 +158,9 @@ def test_real_date_engine_example_is_downgraded_but_real_event_stays_confirmable
     for prefix, expected_count in (("", 1), ("Пример заполнения: ", 0)):
         originals = [doc(prefix+text, name="Разъяснение.pdf")]
         findings, checks = precise(p, originals)
-        assert findings  # Reproduces the upstream detector's sample candidate.
+        # Source-backed deadline qualification can reject the sample before
+        # the common stage; it must retain the actual event and review reason.
+        assert findings if expected_count else checks
         qualified, reviews = qualify_outcomes(p, originals, findings, checks)
         assert len(qualified) == expected_count
         assert reviews if not expected_count else not reviews
@@ -174,7 +176,16 @@ def test_contract_project_can_supply_terms_but_cannot_prove_completed_act():
 
 
 def test_authoritative_history_without_binary_match_is_not_fabricated_or_suppressed():
-    event = finding(code="223-4-11-AMENDMENT-PUBLICATION-DELAY", law="223-ФЗ, ст. 4 ч. 11", document="История ЕИС", evidence="Подтверждённая публикация в истории ЕИС")
+    from datetime import date
+    from unittest.mock import patch
+    import v330_amendments_223 as amendments
+    history = {"decision_date": date(2026, 10, 6), "publication_date": date(2026, 10, 13),
+               "document": "История изменений ЕИС", "kind": "eis_history",
+               "source": "https://zakupki.gov.ru/changes.html?regNumber=32612345678"}
+    with patch.object(amendments, "manifest_changes", return_value=[history]):
+        events, _ = amendments.evaluation(purchase(), [])
+    assert len(events) == 1
+    event = events[0]
     findings, checks = qualify_outcomes(purchase(), [], [event], [])
     assert findings and not checks
     assert findings[0]["source_context_available"] is False

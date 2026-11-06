@@ -242,7 +242,11 @@ class OccurrenceDateChainTests(unittest.TestCase):
                           "archive_member": record["name"], "sha256": record["sha256"]}}
                 for record in records]
         purchase = {"reg": "32619000001", "method": "Аукцион в электронной форме",
-                    "published": "2026-10-01", "submission_end": "2026-10-30"}
+                    "published": "2026-10-01", "submission_end": "2026-10-30",
+                    "_verified_notice_revisions": [{
+                        "sha256": hashlib.sha256(b"notice:2026-10-30").hexdigest(),
+                        "xml_type": "purchaseNotice", "version": "1",
+                        "publication": "2026-10-01", "submission_end": "2026-10-30"}]}
         return analyze(purchase, docs)
 
     def test_occurrence_prefix_preserves_explicit_legal_event_number(self):

@@ -1021,12 +1021,20 @@ def _audit_result_snapshot(c,reg):
 def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
     """Do legal episode matching with no SQLite read/write transaction held."""
     from v353_episode_guard import distinct_new
+    from payment_finding_reassessment import is_reassessable_finding,evidence_key
     saved_findings,saved_checks=snapshot
     previous=[{key:row[key] for key in ("code","title","law","evidence","document","source_url")}
               for row in saved_findings]
     previous.extend({"code":row["field_path"],"title":row["item"],
                      **{key:row[key] for key in ("law","evidence","document","source_url")}}
                     for row in saved_checks if row["status"]=="violation")
+    exact_keys={evidence_key(row) for row in previous if is_reassessable_finding(row)}
+    def duplicate(candidate):
+        # The current journal confirms exact quotations/source identities.
+        # Semantic equivalence cannot discard a fresh proof with a different
+        # key: doing so would leave only an unreconfirmed historical row.
+        if is_reassessable_finding(candidate):return evidence_key(candidate) in exact_keys
+        return not distinct_new(candidate,previous)
     # Preserve the checklist's existing key, including rows inserted earlier
     # in this same result. NULL field/item values do not equal an empty string.
     checklist_keys={(row["field_path"],row["item"],row["document"] or "") for row in saved_checks}
@@ -1039,14 +1047,19 @@ def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
         if not code or not title:
             audit_funnel.increment(diagnostic,"reasons","invalid_record")
             continue
-        if not distinct_new(f,previous):
+        if duplicate(f):
             audit_funnel.increment(diagnostic,"reasons","duplicate")
             continue
+        evidence=str(f.get("evidence") or "")
+        # The journal hashes the complete proof. Cutting a registered finding
+        # would create an unconfirmable stored key and duplicate it on re-audit.
+        if not is_reassessable_finding(f):evidence=evidence[:3000]
         new_findings.append((reg,code,"violation",title,
-            f.get("law"),f.get("law_url"),str(f.get("evidence") or "")[:3000],
+            f.get("law"),f.get("law_url"),evidence,
             str(f.get("note") or "")[:3000],f.get("document"),f.get("source_url"),
             f.get("location"),f.get("match_text")))
         previous.append({**f,"code":code,"title":title})
+        if is_reassessable_finding(f):exact_keys.add(evidence_key(f))
     for ck in checks:
         if not isinstance(ck,dict):continue
         status=ck.get("status")
@@ -1056,13 +1069,16 @@ def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
         path=str(ck.get("field_path") or "")[:170]
         document=str(ck.get("document") or "")[:255]
         if status=="violation":
-            found=not distinct_new({**ck,"title":item},previous)
+            found=duplicate({**ck,"title":item,"code":path})
         else:
             found=(path,item,document) in checklist_keys
         if found:
             audit_funnel.increment(diagnostic,"reasons","duplicate")
             continue
-        new_checks.append((reg,scope,item,status,str(ck.get("evidence") or "")[:2200],
+        evidence=str(ck.get("evidence") or "")
+        if status!="violation" or not is_reassessable_finding({**ck,"code":path}):
+            evidence=evidence[:2200]
+        new_checks.append((reg,scope,item,status,evidence,
             ck.get("source"),ck.get("source_url"),ck.get("document"),path,
             str(ck.get("note") or "")[:3000],ck.get("law"),
             ck.get("law_url"),ck.get("location")))
@@ -1072,6 +1088,7 @@ def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
         if status=="violation":
             confirmed_checks+=1
             previous.append({**ck,"title":item,"code":path})
+            if is_reassessable_finding(previous[-1]):exact_keys.add(evidence_key(previous[-1]))
     return new_findings,new_checks,confirmed_checks
 
 

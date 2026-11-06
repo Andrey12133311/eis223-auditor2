@@ -1,6 +1,7 @@
 """Thematic downloads use the official ODT and the current owner's campaign."""
 import io
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -231,7 +232,7 @@ class ThematicMemoOdtTests(unittest.TestCase):
         for row in extra:
             self.assertIn(row[3], text)
 
-    def reassess_msp(self, state, *, only_msp=False):
+    def reassess_msp(self, state, *, only_msp=False, complete_legal=True):
         from scripts import v385_msp_reassessment as reassessment
         from v384_thematic_findings import thematic_items
         with sqlite3.connect(self.database) as db:
@@ -262,6 +263,31 @@ class ThematicMemoOdtTests(unittest.TestCase):
                      "meta": {"source": "official_eis_original",
                               "source_url": item["source_url"],
                               "sha256": hashlib.sha256(text.encode()).hexdigest()}}]
+        if state == "yes":
+            from test_v385_msp_reassessment import current_sources, record_complete_legal_assessment
+            source_purchase, docs = current_sources("yes")
+            purchase.update({key: value for key, value in source_purchase.items() if key != "reg"})
+            docs[0]["name"] = item["document"]
+            if complete_legal:
+                with sqlite3.connect(self.database) as db:
+                    db.row_factory = sqlite3.Row
+                    columns = {row[1] for row in db.execute("PRAGMA table_info(docs)")}
+                    for column in ("name", "url", "status", "metadata_json"):
+                        if column not in columns:
+                            db.execute("ALTER TABLE docs ADD COLUMN " + column + " TEXT")
+                    db.execute("INSERT INTO docs(reg_number,name,url,status,metadata_json) VALUES(?,?,?,?,?)",
+                               (REG, docs[0]["name"], docs[0]["meta"]["source_url"], "checked",
+                                json.dumps(docs[0]["meta"])))
+                    columns = {row[1] for row in db.execute("PRAGMA table_info(purchases)")}
+                    for column in ("price", "price_num"):
+                        if column not in columns:
+                            db.execute("ALTER TABLE purchases ADD COLUMN " + column + " TEXT")
+                    db.execute("UPDATE purchases SET method=?,price=?,price_num=? WHERE reg_number=?",
+                               (purchase["method"], purchase["price"], purchase["price_num"], REG))
+                    finding = dict(db.execute("SELECT * FROM thematic_findings WHERE batch_id=? AND reg=? AND code=?",
+                                              (ALICE_BATCH, REG, reassessment.ELIGIBLE_CODE)).fetchone())
+                    record_complete_legal_assessment(db, ALICE_BATCH, REG, purchase, docs, [finding])
+            purchase["_msp_source_token"] = reassessment.read_source_token(ns, REG)
         result = reassessment.record_reassessment(ns, "alice", ALICE_BATCH, REG,
                                                   item["finding_key"], purchase, docs)
         self.assertEqual(result["reassessment"]["scope"]["state"], state)
@@ -298,6 +324,12 @@ class ThematicMemoOdtTests(unittest.TestCase):
         text = self.text_from_odt(self.client.get(self.path()))
         self.assertIn(MSP_TITLE, text)
         self.assertIn("Извещение.pdf", text)
+
+    def test_msp_scope_alone_cannot_confirm_a_memo_without_complete_legal_pass(self):
+        result = self.reassess_msp("yes", only_msp=True, complete_legal=False)
+        self.assertEqual(result["effective_status"], "requires_review")
+        self.assertEqual(result["reassessment"]["scope"]["state"], "yes")
+        self.assertEqual(self.client.get(self.path()).status_code, 409)
 
     def test_stale_confirmed_reassessment_cannot_generate_false_memo(self):
         self.reassess_msp("yes", only_msp=True)

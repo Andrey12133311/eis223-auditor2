@@ -1,4 +1,5 @@
 """No network or production state: applicability and amendment evidence fixtures."""
+import hashlib
 import sys
 import unittest
 from datetime import date
@@ -13,7 +14,11 @@ from v372_auto_regulation_protocols import _competitive
 from v342_thematic_queue import competitive_kind
 
 SOURCE='https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid='+'A'*32
-P={'reg':'32616233661','method':'Конкурс','submission_end':'2026-10-26'}
+P={'reg':'32616233661','method':'Конкурс','submission_end':'2026-10-26',
+   '_verified_notice_revisions':[{
+       'sha256':hashlib.sha256(b'notice:2026-10-26').hexdigest(),
+       'xml_type':'purchaseNotice','version':'1','publication':'2026-10-01',
+       'submission_end':'2026-10-26'}]}
 def original(text,source=SOURCE):
  return {'name':'Изменения.pdf','status':'checked','text':text,'url':source,
          'meta':{'source':'official_eis_original','sha256':'a'*64,'source_url':source}}

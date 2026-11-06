@@ -138,7 +138,11 @@ class ProtocolDateLabelRecall(unittest.TestCase):
                     self.assertFalse(cross.cross_doc_protocols(PURCHASE, docs))
 
     def test_planned_clarification_receipt_or_answer_is_not_actual_event_evidence(self):
-        purchase = dict(PURCHASE, submission_end="2026-10-30")
+        purchase = dict(PURCHASE, submission_end="2026-10-30",
+            _verified_notice_revisions=[{
+                "sha256": hashlib.sha256(b"notice:2026-10-30").hexdigest(),
+                "xml_type": "purchaseNotice", "version": "1",
+                "publication": "2026-10-01", "submission_end": "2026-10-30"}])
         text = ("Номер запроса: 1\nДата поступления запроса на предоставление разъяснений "
                 "положений документации: 06.10.2026\nДата размещения в ЕИС ответа на запрос "
                 "о даче разъяснений положений документации: 13.10.2026")

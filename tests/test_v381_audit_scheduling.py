@@ -237,6 +237,7 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
              patch.object(thematic, "independent_review", side_effect=review), \
              patch.object(fast, "_start_item", return_value=True), \
              patch.object(fast, "_watermark", return_value=("fixture", "engine")), \
+             patch.object(fast, "_payment_source_token", return_value="fixture-db-token"), \
              patch.object(fast, "_release_items", return_value=None), \
              patch.object(fast, "_prepare", return_value=items), \
              patch.object(fast, "_persist", side_effect=persist), \
@@ -271,6 +272,7 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
              patch.object(thematic, "independent_review", side_effect=review), \
              patch.object(fast, "_start_item", return_value=True), \
              patch.object(fast, "_watermark", return_value=("fixture", "engine")), \
+             patch.object(fast, "_payment_source_token", return_value="fixture-db-token"), \
              patch.object(fast, "_release_items", return_value=None), \
              patch.object(fast, "_prepare", return_value=[item]), \
              patch.object(fast, "_request_missing_originals", return_value=0):

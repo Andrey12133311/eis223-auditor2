@@ -27,10 +27,11 @@ import v345_thematic_accelerator as fast
 
 
 URL = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
+HISTORICAL_DEADLINE = "На дату получения запроса срок окончания подачи заявок: 30.10.2026."
 TEXT_A = ("Дата поступления запроса разъяснения: 01.10.2026. "
-          "Дата публикации ответа в ЕИС: 07.10.2026.")
+          "Дата публикации ответа в ЕИС: 07.10.2026.\n" + HISTORICAL_DEADLINE)
 TEXT_B = ("Дата поступления запроса разъяснения: 08.10.2026. "
-          "Дата публикации ответа в ЕИС: 14.10.2026.")
+          "Дата публикации ответа в ЕИС: 14.10.2026.\n" + HISTORICAL_DEADLINE)
 
 
 class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
@@ -305,6 +306,57 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT status FROM docs WHERE id=?", (failed_id,)).fetchone()[0],
                              "downloaded_no_text", "The audit must not fabricate an intake checked status")
+
+    async def assert_clarification_currentness(self, category):
+        from v384_thematic_findings import read_thematic_items
+
+        reg = self.purchase()
+        self.document(reg)
+        with self.connection() as c:
+            c.execute("UPDATE thematic_batches SET categories=? WHERE id=?",
+                      (json.dumps([category]), self.batch))
+        await fast.faster_tick(self.ns)
+        saved = self.findings(reg)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(thematic.thematic_history_records(self.ns, [self.batch])["batches"][0]["violations"], 1)
+        with self.connection() as c:
+            assessment = dict(c.execute("SELECT * FROM payment_finding_assessments ORDER BY id DESC LIMIT 1").fetchone())
+            self.assertTrue(assessment["db_token"])
+            self.assertEqual(assessment["audit_state"], "completed")
+            self.assertEqual(read_thematic_items(c, self.batch)[0]["effective_status"], "confirmed")
+
+        failed_id, failed_path = self.document(reg, "Приложение содержит сведения о поставке.")
+        with self.connection() as c:
+            c.execute("UPDATE docs SET status='downloaded_no_text',text_chars=0 WHERE id=?", (failed_id,))
+        failing = True
+
+        def extract(path):
+            if failing and Path(path) == failed_path:
+                raise OSError("Temporary fixture extraction failure")
+            return self.extract(path)
+
+        self.ns["extract_text"] = extract
+        await fast.faster_tick(self.ns)
+        self.assertEqual(self.item(reg)["status"], "retry")
+        self.assertEqual(self.findings(reg), saved)
+        self.assertEqual(thematic.thematic_history_records(self.ns, [self.batch])["batches"][0]["violations"], 0)
+        with self.connection() as c:
+            self.assertEqual(read_thematic_items(c, self.batch)[0]["effective_status"], "requires_review")
+
+        failing = False
+        self.age(reg, 100)
+        await fast.faster_tick(self.ns)
+        self.assertEqual(self.item(reg)["status"], "completed")
+        self.assertEqual(self.findings(reg), saved)
+        self.assertEqual(thematic.thematic_history_records(self.ns, [self.batch])["batches"][0]["violations"], 1)
+        with self.connection() as c:
+            self.assertEqual(read_thematic_items(c, self.batch)[0]["effective_status"], "confirmed")
+
+    async def test_dates_current_assessment_preserves_evidence_through_partial_read(self):
+        await self.assert_clarification_currentness("dates")
+
+    async def test_clarifications_current_assessment_preserves_evidence_through_partial_read(self):
+        await self.assert_clarification_currentness("clarifications")
 
     async def test_saved_no_text_status_is_retried_after_extractor_recovers_without_source_change(self):
         reg = self.purchase()

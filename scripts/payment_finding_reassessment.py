@@ -1,9 +1,9 @@
-"""Current payment conclusions over immutable saved evidence.
+"""Current registered legal conclusions over immutable saved evidence.
 
 Older audits appended payment findings but never withdrew a conclusion when a
 later contract or an applicable alternative changed the evidence.  Keep those
 rows and manager decisions intact.  A small append-only assessment journal says
-which exact payment evidence the current legal pass still confirms.  Missing,
+which exact evidence the current legal pass still confirms. Missing,
 partial, stale or conflicting assessments require review; they never establish
 compliance.  Rendering reads SQL metadata only, never original files.
 """
@@ -15,7 +15,9 @@ import json
 import sqlite3
 
 
-REVISION = "payment-evidence-reassessment-1"
+REVISION = "registered-legal-evidence-reassessment-2"
+# Retain the deployed append-only table and old field aliases. Expanding the
+# assessed rule set must not rebuild history or invalidate manager record keys.
 TABLE = "payment_finding_assessments"
 PAYMENT_CODES = frozenset({
     "1352-28-sme-payment-over-seven-workdays",
@@ -47,6 +49,20 @@ def _digest(value):
 def is_payment_finding(item):
     return (isinstance(item, dict) and
             str(item.get("code") or item.get("field_path") or "").strip().lower() in PAYMENT_CODES)
+
+
+def is_reassessable_finding(item):
+    """Registered decisions in the shared 19-criterion legal pipeline.
+
+    Keep unrelated/unregistered findings outside this overlay; a new legal
+    classification must not be inferred from a similar title or article.
+    """
+    if not isinstance(item, dict):
+        return False
+    if is_payment_finding(item):
+        return True
+    from vp_inspection_engine import _rule_known, criterion_keys
+    return bool(_rule_known(item) and criterion_keys(item))
 
 
 def _record(item):
@@ -143,8 +159,8 @@ def prepare_assessment(reg, findings, *, scope="general", batch="", engine_signa
     """Build outside SQLite's writer from this pass's complete output.
 
     Pass fresh confirmed findings before historical deduplication.  An empty
-    list means no saved payment quotation was reconfirmed, not that payment
-    conditions comply.  A partial/failed pass cannot reconfirm any old row.
+    list means no saved quotation was reconfirmed, not that the procurement
+    complies. A partial/failed pass cannot reconfirm any old row.
     """
     if scope not in {"general", "thematic"} or (scope == "thematic") != bool(batch):
         raise ValueError("Invalid payment assessment scope")
@@ -153,7 +169,7 @@ def prepare_assessment(reg, findings, *, scope="general", batch="", engine_signa
     if complete:
         seen = set()
         for item in findings:
-            if not is_payment_finding(item):
+            if not is_reassessable_finding(item):
                 continue
             if item.get("kind", "violation") != "violation" or item.get("status", "violation") != "violation":
                 continue
@@ -166,15 +182,15 @@ def prepare_assessment(reg, findings, *, scope="general", batch="", engine_signa
             if key not in seen:
                 seen.add(key)
                 records.append({**record, "evidence_key": key})
-    reason = ("Прежний вывод о сроке оплаты не подтверждён текущей проверкой применимого "
-              "договора, его редакции и условий оплаты. Исходное доказательство и решения сохранены."
+    reason = ("Прежний юридический вывод не подтверждён текущей проверкой применимой нормы, "
+              "источника и его редакции. Исходное доказательство и решения сохранены."
               if complete else
-              "Проверка срока оплаты не завершена по полному актуальному набору оригиналов. "
+              "Юридическая проверка не завершена по полному актуальному набору оригиналов. "
               "До завершения проверки прежний вывод не считается подтверждённым.")
     if len(_packed(records).encode()) > _MAX_ASSESSMENT_BYTES:
         records = []
         complete = False
-        reason = "Результат проверки срока оплаты превышает допустимый объём. Требуется повторная проверка."
+        reason = "Результат юридической проверки превышает допустимый объём. Требуется повторная проверка."
     return {"scope": scope, "batch_id": str(batch), "reg": str(reg),
             "detector_revision": REVISION, "engine_signature": str(engine_signature or ""),
             "source_version": str(source_version or ""), "db_token": str(db_token or ""),
@@ -219,8 +235,8 @@ def _thematic_marker(db, batch, reg):
 
 
 def _assessment(db, scope, batch, reg, current_engine=None):
-    reason = ("Сохранённый вывод о сроке оплаты получен до проверки применимости договора "
-              "и противоречий между редакциями. Требуется повторная юридическая проверка.")
+    reason = ("Сохранённый юридический вывод не подтверждён актуальной проверкой источника, "
+              "его редакции и применимости нормы. Требуется повторная юридическая проверка.")
     result = {"id": None, "created_at": None, "effective_status": "requires_review",
               "reason": reason, "stale": True, "confirmed_keys": set()}
     if not _exists(db, TABLE):
@@ -235,14 +251,14 @@ def _assessment(db, scope, batch, reg, current_engine=None):
                   reason=event["reason"])
     engine = _engine() if current_engine is None else current_engine
     if not engine or event["detector_revision"] != REVISION or event["engine_signature"] != engine:
-        result["reason"] = "Правила юридической проверки изменились. Сохранённый вывод о сроке оплаты требует перепроверки."
+        result["reason"] = "Правила юридической проверки изменились. Сохранённый вывод требует перепроверки."
         return result
     try:
         current = db_source_token(db, reg)
     except (sqlite3.Error, ValueError):
         current = ""
     if not current or not event["db_token"] or current != event["db_token"]:
-        result["reason"] = "Источники или сведения закупки изменились после проверки срока оплаты. Требуется повторная проверка."
+        result["reason"] = "Источники или сведения закупки изменились после юридической проверки. Требуется повторная проверка."
         return result
     if not event["source_version"] or event["audit_state"] != "completed":
         result["stale"] = False
@@ -252,7 +268,7 @@ def _assessment(db, scope, batch, reg, current_engine=None):
         if (marker.get("status") != "completed" or
                 marker.get("last_semantic_version") != event["source_version"] or
                 marker.get("last_engine_signature") != event["engine_signature"]):
-            result["reason"] = "Текущая проверка срока оплаты ещё не завершена или относится к другой версии источников."
+            result["reason"] = "Текущая юридическая проверка ещё не завершена или относится к другой версии источников."
             return result
     try:
         if len(event["confirmed_json"].encode()) > _MAX_ASSESSMENT_BYTES:
@@ -260,21 +276,21 @@ def _assessment(db, scope, batch, reg, current_engine=None):
         records = json.loads(event["confirmed_json"])
         if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
             raise ValueError("Invalid payment assessment")
-        result["confirmed_keys"] = {evidence_key(item) for item in records if is_payment_finding(item)}
+        result["confirmed_keys"] = {evidence_key(item) for item in records if is_reassessable_finding(item)}
         result["stale"] = False
     except (TypeError, ValueError):
-        result["reason"] = "Сохранённая перепроверка срока оплаты недоступна. Требуется повторная проверка."
+        result["reason"] = "Сохранённая юридическая перепроверка недоступна. Требуется повторная проверка."
     return result
 
 
 def _apply(db, scope, batch, reg, items):
     items = list(items)
-    if not any(is_payment_finding(item) for item in items):
+    if not any(is_reassessable_finding(item) for item in items):
         return items
     assessment = _assessment(db, scope, batch, reg)
     result = []
     for item in items:
-        if not is_payment_finding(item):
+        if not is_reassessable_finding(item):
             result.append(item)
             continue
         confirmed = evidence_key(item) in assessment["confirmed_keys"] and not assessment["stale"]
@@ -284,13 +300,14 @@ def _apply(db, scope, batch, reg, items):
             status = item["effective_status"]
         event = {key: value for key, value in assessment.items() if key != "confirmed_keys"}
         event.update(effective_status=status,
-                     reason=("Условие оплаты подтверждено текущей проверкой применимого договора и его редакции."
+                     reason=("Вывод подтверждён текущей проверкой применимой нормы и исходного документа."
                              if status == "confirmed" else assessment["reason"]))
         warnings, gaps = list(item.get("warnings") or []), list(item.get("presentation_gaps") or [])
         if status != "confirmed":
             warnings.append(event["reason"])
             gaps.append(event["reason"])
-        result.append({**item, "effective_status": status, "payment_reassessment": event,
+        result.append({**item, "effective_status": status, "legal_reassessment": event,
+                       "payment_reassessment": event,
                        "warnings": list(dict.fromkeys(warnings)),
                        "presentation_gaps": list(dict.fromkeys(gaps))})
     return result
@@ -306,10 +323,9 @@ def apply_thematic_reassessments(db, batch, reg, items):
 
 def revision(db, batch):
     """Saved-view cache stamp, including SQL source edits without added rows."""
-    marks = ",".join("?" for _ in PAYMENT_CODES)
-    regs = [row[0] for row in db.execute("SELECT DISTINCT reg FROM thematic_findings "
-            "WHERE batch_id=? AND lower(code) IN (" + marks + ") ORDER BY reg",
-            (batch, *sorted(PAYMENT_CODES)))]
+    regs = sorted({row[0] for row in db.execute("SELECT DISTINCT reg,code FROM thematic_findings "
+            "WHERE batch_id=? AND code IS NOT NULL", (batch,))
+            if is_reassessable_finding({"code": row[1]})})
     if not regs:
         return (0, "")
     latest = db.execute("SELECT COALESCE(MAX(id),0) FROM " + TABLE +

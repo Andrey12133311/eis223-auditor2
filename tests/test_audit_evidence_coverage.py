@@ -27,6 +27,7 @@ import v342_thematic_queue as thematic
 
 REG = "32616480000"
 URL = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
+HISTORICAL_DEADLINE = "На дату получения запроса срок окончания подачи заявок: 30.10.2026."
 P = {"reg": REG, "reg_number": REG, "title": "Поставка тестовых материалов",
      "customer": "ООО Тест", "method": "Открытый конкурс",
      "published_at": "2026-10-01", "published": "2026-10-01",
@@ -77,6 +78,7 @@ class IncomingEvidenceCoverage(unittest.TestCase):
             cells = document.add_table(rows=1, cols=2).rows[0].cells
             cells[0].text = "Дата публикации ответа в ЕИС"
             cells[1].text = answer
+            document.add_paragraph(HISTORICAL_DEADLINE)
         raw = io.BytesIO()
         document.save(raw)
         if not missing_auxiliary:
@@ -189,7 +191,7 @@ class IncomingEvidenceCoverage(unittest.TestCase):
 class ThematicChecklistCoverage(unittest.TestCase):
     def setUp(self):
         self.doc = verified_doc("Дата поступления запроса разъяснения: 01.10.2026. "
-            "Дата публикации ответа в ЕИС: 07.10.2026.")
+            "Дата публикации ответа в ЕИС: 07.10.2026.\n" + HISTORICAL_DEADLINE)
         self.finding = legal.evaluate(P, [self.doc])[0][0]
         self.check = {**self.finding, "status": "violation",
                       "item": self.finding["title"], "field_path": self.finding["code"]}

@@ -139,19 +139,25 @@ def analyze(values): return stored_docs(values)
         self.assertEqual(wrappers,set(revision.ANALYZER_REGISTRY))
 
     def test_source_evidence_and_dedup_dependencies_are_registered(self):
-        required={'legal_applicability','official_publication_evidence','eis223_soap_xml',
+        required={'legal_applicability','legal_document_context','cancellation_event_evidence',
+                  'clarification_deadline_evidence','payment_finding_reassessment',
+                  'official_publication_evidence','eis223_soap_xml',
                   'v295_eis_originals','v298_eis_only','v310_archive_scan','v311_verified_customer',
                   'v314_eis_metadata','v324_official_price','v332_all_procurements_audit',
                   'v335_price_recovery','v341_eis_facts','v342_thematic_queue',
                   'v347_text_cache','v348_cross_document_legal','v352_dashboard_truth','v353_episode_guard','v383_msp_scope'}
         self.assertTrue(required <= set(revision.DEPENDENCY_REGISTRY))
+        self.assertTrue({'source_scope_context','clause_variant_context','prepare_context_index'} <=
+                        set(revision.DEPENDENCY_REGISTRY['legal_document_context']))
         self.assertIn('collect_saved_evidence',revision.DEPENDENCY_REGISTRY['v332_all_procurements_audit'])
         self.assertIn('saved_review_context',revision.DEPENDENCY_REGISTRY['v298_eis_only'])
         self.assertIn('official_notice_record',revision.DEPENDENCY_REGISTRY['v298_eis_only'])
         self.assertIn('card_predates_notice',revision.DEPENDENCY_REGISTRY['v341_eis_facts'])
         self.assertIn('reconcile_notice_context',revision.DEPENDENCY_REGISTRY['v341_eis_facts'])
         self.assertIn('event_occurrence_text',revision.DEPENDENCY_REGISTRY['v348_cross_document_legal'])
-        self.assertNotIn('v345_thematic_accelerator',revision.DEPENDENCY_REGISTRY)
+        self.assertIn('_plan_audit_results',revision.DEPENDENCY_REGISTRY['v332_all_procurements_audit'])
+        self.assertEqual(set(revision.DEPENDENCY_REGISTRY['v345_thematic_accelerator']),
+                         {'_persistence_findings','_plan_thematic_results'})
         self.assertNotIn('v381_audit_scheduling',revision.DEPENDENCY_REGISTRY)
 
     def test_explicit_legacy_rule_revisions_are_shared_engine_inputs(self):
@@ -195,7 +201,8 @@ def analyze(values): return stored_docs(values)
                                  'if len(lots)<1:return {"price_kind":"unknown"}'),
             ('v324_official_price.py','price_kind_from_label(hit.group(0))','"nmcd"'),
             ('v324_official_price.py','RUBLE_TOKEN=r"руб(?:ль|ля|лей)?','RUBLE_TOKEN=r"руб(?:ль|ля)?'),
-            ('v348_cross_document_legal.py','text,count=1) if pattern else text','text,count=2) if pattern else text'),
+            ('v348_cross_document_legal.py','return pattern.sub(lambda match:match["event"],text,count=1)',
+                                          'return pattern.sub(lambda match:match["event"],text,count=2)'),
             ('v332_all_procurements_audit.py','bool(received_uids-seen_uids)','bool(received_uids)'),
             ('v332_all_procurements_audit.py','output=[doc for doc in results if doc is not None]',
                                             'output=[doc for doc in results if doc is not None and doc.get("status")=="checked"]'),

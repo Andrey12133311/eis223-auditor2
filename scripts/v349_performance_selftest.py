@@ -18,7 +18,11 @@ def doc(name,body,trusted=True):
         "sha256":"a"*64,"source_url":source}}
 
 def run():
-    purchase={"reg":REG,"method":"Аукцион в электронной форме","submission_end":"2026-10-30"}
+    purchase={"reg":REG,"method":"Аукцион в электронной форме","submission_end":"2026-10-30",
+              "_verified_notice_revisions":[{
+                  "sha256":hashlib.sha256(b"notice:2026-09-30:2026-10-30").hexdigest(),
+                  "reg_number":REG,"xml_type":"purchaseNotice","version":1,
+                  "publication":"2026-09-30","submission_end":"2026-10-30"}]}
     request=doc("Запрос разъяснений.pdf","Дата поступления запроса на разъяснение: 01.10.2026")
     response=doc("Разъяснения 1.pdf","Дата размещения разъяснения в ЕИС: 12.10.2026")
     found=cross.cross_doc_clarifications(purchase,[request,response])
@@ -30,7 +34,8 @@ def run():
     assert not cross.cross_doc_clarifications(purchase,[request,response,doc("Разъяснения 2.pdf",response["text"])])
     assert not cross.cross_doc_clarifications(purchase,[request,doc(response["name"],"Дата размещения разъяснения в ЕИС: 05.10.2026")])
     assert not cross.cross_doc_clarifications({**purchase,"method":"Закупка у единственного поставщика"},[request,response])
-    assert not cross.cross_doc_clarifications({**purchase,"submission_end":""},[request,response])
+    assert not cross.cross_doc_clarifications({**purchase,"submission_end":"",
+        "_verified_notice_revisions":[],"_current_soap_context":{}},[request,response])
 
     with tempfile.TemporaryDirectory(prefix="eis-v349-") as tmp:
         root=Path(tmp)

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from test_general_audit_recovery import DatabaseFixture
+import legal_audit_revision as revisions
 import v332_all_procurements_audit as audit
 import v338_card_prices as prices
 import v341_eis_facts as facts
@@ -71,12 +72,21 @@ class AutomaticLegalOutcomes(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         for original in self.contents:os.utime(original,None)
         for _ in range(3):self.assertEqual(audit.refresh_changed(self.ns),0)
         # A genuine later rule version can rerun, but not duplicate the episode.
-        with patch.object(audit,"engine_signature",return_value="synthetic-new-rule-version"):
+        with patch.object(audit,"engine_signature",return_value="synthetic-new-rule-version"), \
+             patch.object(revisions,"engine_signature",return_value="synthetic-new-rule-version"):
             self.assertEqual(audit.refresh_changed(self.ns),1)
             repeated=await self.run_claimed(reg)
             self.assertEqual(repeated["new_findings"],0)
             self.assertEqual(audit.refresh_changed(self.ns),0)
+            self.assertEqual((self.findings(reg),self.displayed(reg)),(1,1))
+        # Returning to another engine revision invalidates the saved current
+        # classification while preserving the original evidence and decision.
+        self.assertEqual((self.findings(reg),self.displayed(reg)),(1,0))
+        self.assertEqual(audit.refresh_changed(self.ns),1)
+        self.assertEqual((await self.run_claimed(reg))["new_findings"],0)
         self.assertEqual((self.findings(reg),self.displayed(reg)),(1,1))
+        with self.connect() as db:
+            self.assertEqual(db.execute("SELECT decision FROM manager_decisions WHERE id=1").fetchone()[0],"approved")
         self.assertEqual(audit.progress(self.ns)["new_evidence_based_findings"],1)
 
     async def test_noncompetitive_source_corrections_do_not_inflate_findings(self):

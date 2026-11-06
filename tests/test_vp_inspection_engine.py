@@ -17,7 +17,13 @@ def doc(text="Размер обеспечения заявки составля�
 
 def purchase(**extra):
     return {"reg": "32612345678", "customer": "ООО Заказчик", "title": "Поставка товара",
-            "method": "Аукцион в электронной форме", "published": "2026-10-01", **extra}
+            "method": "Аукцион в электронной форме", "published": "2026-10-01",
+            "price_num": 8000000,
+            "verified_price_source": {"kind": "nmcd", "price": "8000000",
+                "source": "https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=32612345678"},
+            "_verified_notice_revisions": [{"sha256": "e"*64, "xml_type": "purchaseNotice", "version": 1,
+                "publication": "2026-09-30", "submission_end": "2026-10-30"}],
+            **extra}
 
 
 def finding(**extra):
@@ -66,10 +72,14 @@ def test_ambiguous_source_versions_cannot_supply_proof():
 
 def test_multiple_findings_are_preserved_and_violation_wins():
     second_text = "Размер обеспечения заявки составляет 9 процентов НМЦД."
-    another = doc(second_text, name="Извещение.docx", sha256="b"*64)
+    # Independent lot requirements are separate findings. Different values
+    # for the same unselected lot/revision must instead remain a review.
+    first = doc("НМЦД: 8 000 000 рублей.\n" + doc()["text"], lot_number="1")
+    another = doc("НМЦД: 8 000 000 рублей.\n" + second_text,
+                  name="Извещение.docx", sha256="b"*64, lot_number="2")
     bad = finding(document="Извещение.docx", evidence=second_text)
     compliant = finding(kind="check", status="compliant", criterion_complete=True)
-    result = evaluate(purchase(), [doc(), another], [finding(), bad], [compliant])
+    result = evaluate(purchase(), [first, another], [finding(), bad], [compliant])
     target = row(result, "bid_security")
     assert target["has_violation"] == "✓" and not target["no_violation"]
     assert len(target["results"]) == 3

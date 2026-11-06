@@ -22,8 +22,9 @@ import v341_precise_legal as legal
 from v381_audit_scheduling import notify_evidence
 
 URL = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
+HISTORICAL_DEADLINE = "На дату получения запроса срок окончания подачи заявок: 30.10.2026."
 LATE_REPLY = ("Дата поступления запроса разъяснения: 01.10.2026.\n"
-              "Дата публикации ответа в ЕИС: 07.10.2026.")
+              "Дата публикации ответа в ЕИС: 07.10.2026.\n" + HISTORICAL_DEADLINE)
 
 
 class App:
@@ -81,14 +82,14 @@ class DatabaseFixture:
         con.row_factory = sqlite3.Row
         return con
 
-    def purchase(self, number=1, *, status="checked", present=True):
+    def purchase(self, number=1, *, status="checked", present=True, text=LATE_REPLY):
         reg = str(32619000000 + number)
         self.regs.append(reg)
         with self.connect() as con:
             con.execute("INSERT INTO purchases(reg_number,customer,title,method,published_at,submission_end,last_seen) "
                         "VALUES(?,'ООО Тест','Поставка материалов','Открытый конкурс',"
                         "'2026-10-01','2026-10-30','2026-10-19')", (reg,))
-        self.document(reg, LATE_REPLY, status=status, present=present)
+        self.document(reg, text, status=status, present=present)
         return reg
 
     def document(self, reg, text, *, status="checked", present=True):

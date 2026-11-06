@@ -31,7 +31,10 @@ ANALYZER_REGISTRY = {
 DEPENDENCY_REGISTRY = {
     "payment_terms": ("assess_payment_term", "collect_payment_terms", "detect_payment_coverage"),
     "payment_finding_reassessment": ("prepare_assessment", "apply_general_reassessments", "apply_thematic_reassessments"),
-    "legal_document_context": ("document_context", "local_context"),
+    "legal_document_context": ("document_context", "local_context", "source_scope_context",
+                               "clause_variant_context", "prepare_context_index"),
+    "cancellation_event_evidence": ("cancellation_event_pairs",),
+    "clarification_deadline_evidence": ("resolve_clarification_deadline",),
     "vp_inspection_criteria": ("CRITERIA", "inspection_rows"),
     "legal_applicability": ("competitive_scope", "competitive_rule_scope"),
     "official_publication_evidence": ("annotate_protocol_publications", "protocol_publication_verifier",
@@ -47,11 +50,14 @@ DEPENDENCY_REGISTRY = {
     "v314_eis_metadata": ("document_text", "table_pairs", "from_documents"),
     "v324_official_price": ("prices_in_text", "verified_nmcd"),
     "v332_all_procurements_audit": ("as_procurement", "source_verified", "stored_docs.read_one", "merge_docs", "is_official",
-                                   "collect_saved_evidence", "_require_reconciled_rows"),
+                                   "collect_saved_evidence", "_require_reconciled_rows", "_plan_audit_results"),
     "v335_price_recovery": ("money",),
     "v341_eis_facts": ("enrich", "persist_facts", "card_predates_notice", "reconcile_notice_context", "saved_price_kind"),
     "v342_identity": ("valid_inn", "subject", "customer_label", "organization_display_name"),
     "v342_thematic_queue": ("independent_review",),
+    # Pure retention/identity rules affect which exact proof can be confirmed.
+    # Queue scheduling and the SQLite writer remain outside this signature.
+    "v345_thematic_accelerator": ("_persistence_findings", "_plan_thematic_results"),
     "v347_text_cache": ("cached_extract",),
     "v348_cross_document_legal": ("event_occurrence_text", "finding_protocol_number", "finding_clarification_number",
                                   "finding_original_identity", "finding_binary_identity", "same_original_identity",

@@ -13,8 +13,16 @@ import v341_precise_legal as precise
 import v348_cross_document_legal as cross
 
 
+def notice_revision(deadline="2026-10-30"):
+    """Synthetic hash-verified notice published before every request fixture."""
+    return {"sha256": hashlib.sha256(("notice:" + deadline).encode()).hexdigest(),
+            "xml_type": "purchaseNotice", "version": "1",
+            "publication": "2026-10-01", "submission_end": deadline}
+
+
 PURCHASE = {"reg": "32610002001", "method": "Аукцион в электронной форме",
-            "published": "2026-10-01", "submission_end": "2026-10-30"}
+            "published": "2026-10-01", "submission_end": "2026-10-30",
+            "_verified_notice_revisions": [notice_revision()]}
 SOURCE = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
 REQUEST = "Дата поступления запроса о даче разъяснений положений документации"
 ANSWER = "Дата размещения в ЕИС разъяснений положений документации"
@@ -88,8 +96,10 @@ class ClarificationDateLabelRecall(unittest.TestCase):
 
     def test_unverified_document_scope_deadline_and_timely_response_preserve_gates(self):
         for purchase in (dict(PURCHASE, method="Единственный поставщик"),
-                         dict(PURCHASE, submission_end=""),
-                         dict(PURCHASE, submission_end="2026-10-08")):
+                         dict(PURCHASE, submission_end="", _verified_notice_revisions=[],
+                              _current_soap_context=None),
+                         dict(PURCHASE, submission_end="2026-10-08",
+                              _verified_notice_revisions=[notice_revision("2026-10-08")])):
             with self.subTest(purchase=purchase):self.assertFalse(self.assess(purchase=purchase)[0])
         doc = original("Разъяснение на запрос № 1.pdf",
                        REQUEST + ": 06.10.2026\n" + ANSWER + ": 09.10.2026")

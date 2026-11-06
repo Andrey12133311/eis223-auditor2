@@ -22,9 +22,20 @@ import v333_dedup_ui as dedup
 from v332_all_procurements_audit import persist
 from v352_dashboard_truth import collapse_legal_events, load_counts
 from v353_episode_guard import same_episode
+from legal_audit_revision import engine_signature
+from payment_finding_reassessment import prepare_assessment, db_source_token, evidence_key
+from vp_inspection_engine import document_fingerprint
+
+def notice_revision(deadline="2026-10-30"):
+    """Verified fixture revision effective before all request dates below."""
+    return {"sha256": hashlib.sha256(("notice:" + deadline).encode()).hexdigest(),
+            "xml_type": "purchaseNotice", "version": "1",
+            "publication": "2026-10-01", "submission_end": deadline}
+
 
 P = {"reg": "32616412317", "method": "Открытый конкурс",
-     "published": "2026-10-01", "submission_end": "2026-10-30"}
+     "published": "2026-10-01", "submission_end": "2026-10-30",
+     "_verified_notice_revisions": [notice_revision()]}
 SOURCE = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
 
 
@@ -167,7 +178,8 @@ class LegalEventCoverage(unittest.TestCase):
             with self.subTest(number=number):
                 doc = original("clarification", number)
                 first = precise.evaluate(P, [doc])[0][0]
-                changed = precise.evaluate({**P, "submission_end": "2026-10-31"}, [doc])[0][0]
+                changed = precise.evaluate({**P, "submission_end": "2026-10-31",
+                    "_verified_notice_revisions": [notice_revision("2026-10-31")]}, [doc])[0][0]
                 saved = copy.deepcopy([first, changed])
                 self.assertIn("окончание подачи 2026-10-30", first["evidence"])
                 self.assertIn("окончание подачи 2026-10-31", changed["evidence"])
@@ -185,7 +197,8 @@ class LegalEventCoverage(unittest.TestCase):
         changed_docs[1]["meta"]["sha256"] = hashlib.sha256(changed_docs[1]["text"].encode()).hexdigest()
         for doc in changed_docs:
             with self.subTest(text=doc["text"]):
-                other = precise.evaluate({**P, "submission_end": "2026-10-31"}, [doc])[0][0]
+                other = precise.evaluate({**P, "submission_end": "2026-10-31",
+                    "_verified_notice_revisions": [notice_revision("2026-10-31")]}, [doc])[0][0]
                 self.assertFalse(same_episode(first, other))
                 self.assertEqual(len(collapse_legal_events([first, other])), 2)
         review = {**first, "status": "check", "item": first["title"], "field_path": first["code"]}
@@ -207,7 +220,8 @@ class LegalEventCoverage(unittest.TestCase):
         for analyze, docs in ((lambda p, d: precise.evaluate(p, d)[0], [original("clarification", "1")]),
                               (cross.cross_doc_clarifications, [request, answer])):
             first = analyze(P, docs)[0]
-            changed = analyze({**P, "submission_end": "2026-10-31"}, docs)[0]
+            changed = analyze({**P, "submission_end": "2026-10-31",
+                "_verified_notice_revisions": [notice_revision("2026-10-31")]}, docs)[0]
             with self.subTest(code=first["code"]):
                 self.assertTrue(same_episode(first, changed))
                 self.assertEqual(len(dedup.collapse([first, changed])), 1)
@@ -218,6 +232,35 @@ class LegalEventCoverage(unittest.TestCase):
                 alias = {**changed, "evidence": changed["evidence"][:-len(tail)] + alias_tail}
                 self.assertTrue(same_episode(first, alias))
                 self.assertEqual(len(collapse_legal_events([first, alias])), 1)
+
+    def test_xml_notice_provenance_is_not_a_clarification_occurrence_date(self):
+        request, answer = original("clarification", "1"), original("clarification", "1", 2)
+        request["text"] = request["text"].rsplit("\n", 1)[0]
+        answer["text"] = "Номер запроса: 1\n" + answer["text"].rsplit("\n", 1)[1]
+        for doc in (request, answer):
+            doc["meta"]["sha256"] = hashlib.sha256(doc["text"].encode()).hexdigest()
+        changed_notice = {**notice_revision("2026-10-31"), "version": "2",
+                          "publication": "2026-10-02"}
+        changed_purchase = {**P, "submission_end": "2026-10-31",
+                            "_verified_notice_revisions": [changed_notice]}
+        for analyze, docs in ((lambda p, d: precise.evaluate(p, d)[0], [original("clarification", "1")]),
+                              (cross.cross_doc_clarifications, [request, answer])):
+            first, changed = analyze(P, docs)[0], analyze(changed_purchase, docs)[0]
+            before = copy.deepcopy([first, changed])
+            with self.subTest(code=first["code"]):
+                self.assertNotEqual(evidence_key(first), evidence_key(changed))
+                for items in ([first, changed],
+                              [{key: item[key] for key in ("code", "kind", "title", "law", "evidence",
+                                                         "document", "source_url")} for item in (first, changed)]):
+                    self.assertTrue(same_episode(*items))
+                    self.assertEqual(len(collapse_legal_events(items)), 1)
+                    self.assertEqual(precise._event_dates(items[0]), precise._event_dates(items[1]))
+                    projected = cross.event_occurrence_text(items[1])
+                    self.assertNotIn("2026-10-02", projected)
+                    self.assertNotIn("SHA-256", projected)
+                    for day in ("2026-10-06", "2026-10-09", "2026-10-13"):
+                        self.assertIn(day, projected)
+                self.assertEqual([first, changed], before)
 
     def test_general_and_thematic_pipelines_preserve_numbered_events_and_repeat_counts(self):
         import v332_all_procurements_audit as general
@@ -257,7 +300,9 @@ class LegalEventCoverage(unittest.TestCase):
                              ("clarification", "1"), ("clarification", "2")))]
             source = {"docs": originals, "unreadable": 0, "_reconciled_rows": (), "original_expected": 4,
                       "original_received": 4, "source_incomplete": False,
-                      "source_error": None, "p": {}, "card": {}, "detail": {}}
+                      "source_error": None,
+                      "p": {"_verified_notice_revisions": [notice_revision()]},
+                      "card": {}, "detail": {}}
             ns = {"conn": connect, "analyze": lambda p, docs: [],
                   "build_checks": lambda p, detail, card, docs: []}
             precise.install(ns)
@@ -295,7 +340,10 @@ class LegalEventCoverage(unittest.TestCase):
             with connect() as db:
                 db.executescript("""
                     CREATE TABLE purchases(reg_number TEXT PRIMARY KEY, violations INTEGER DEFAULT 0,
-                        checks_ok INTEGER DEFAULT 0, checks_attention INTEGER DEFAULT 0);
+                        checks_ok INTEGER DEFAULT 0, checks_attention INTEGER DEFAULT 0,
+                        method TEXT,card_fields_json TEXT);
+                    CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,name TEXT,
+                        status TEXT,metadata_json TEXT,text_chars INTEGER);
                     CREATE TABLE findings(id INTEGER PRIMARY KEY, reg_number TEXT, code TEXT, kind TEXT,
                         title TEXT, law TEXT, law_url TEXT, evidence TEXT, note TEXT, document TEXT,
                         source_url TEXT, location TEXT, match_text TEXT);
@@ -303,15 +351,24 @@ class LegalEventCoverage(unittest.TestCase):
                         status TEXT, evidence TEXT, source TEXT, source_url TEXT, document TEXT,
                         field_path TEXT, note TEXT, law TEXT, law_url TEXT, location TEXT);
                 """)
-                db.execute("INSERT INTO purchases(reg_number) VALUES (?)", (P["reg"],))
+                db.execute("INSERT INTO purchases(reg_number,method,card_fields_json) VALUES (?,?,?)",
+                           (P["reg"],P["method"],json.dumps({
+                               "verified_notice_revisions":P["_verified_notice_revisions"]})))
             ns = {"conn": connect}
             docs = [original(family, number, i + 1, neutral_name=True)
                     for i, (family, number) in enumerate((
                         ("protocol", "1"), ("protocol", "2"),
                         ("clarification", "1"), ("clarification", "2")))]
             found, _ = installed(docs)
-            self.assertEqual(persist(ns, P["reg"], found, []), (4, 0))
-            self.assertEqual(persist(ns, P["reg"], found, []), (0, 0))
+            with connect() as db:
+                for identifier, doc in enumerate(docs,1):
+                    db.execute("INSERT INTO docs VALUES(?,?,?,?,?,?)",
+                               (identifier,P["reg"],doc["name"],doc["status"],
+                                json.dumps(doc["meta"]),len(doc["text"])))
+                assessment=prepare_assessment(P["reg"],found,engine_signature=engine_signature(),
+                    source_version=document_fingerprint(docs),db_token=db_source_token(db,P["reg"]))
+            self.assertEqual(persist(ns, P["reg"], found, [],payment_assessment=assessment), (4, 0))
+            self.assertEqual(persist(ns, P["reg"], found, [],payment_assessment=assessment), (0, 0))
             with connect() as db:
                 self.assertEqual(load_counts(db, [P["reg"]]), {P["reg"]: 4})
                 self.assertEqual(db.execute("SELECT violations FROM purchases").fetchone()[0], 4)
@@ -368,7 +425,9 @@ class ReceiptDeadlineOccurrence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(themed[0]["evidence"], original_evidence)
         current_state, current = await thematic.independent_review(fixture.ns, reg, ["dates"])
         self.assertEqual((current_state, len(current)), ("completed", 1))
-        self.assertIn("окончание подачи 2026-10-31", current[0]["evidence"])
+        # A later current-card deadline does not rewrite the deadline proved
+        # by this request's original as-of statement.
+        self.assertIn("окончание подачи 2026-10-30", current[0]["evidence"])
         with fixture.connect() as db:
             saved = db.execute("SELECT evidence FROM findings WHERE reg_number=?", (reg,)).fetchall()
             self.assertEqual([row[0] for row in saved], [original_evidence])

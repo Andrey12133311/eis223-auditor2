@@ -1,4 +1,8 @@
-"""Explicit synonymous date labels, with actual-date and copy guards retained."""
+"""Explicit synonymous event labels against the verified prior notice in P.
+
+The imported fixture proves the request-time deadline independently of the card.
+Actual-date, identity and copy assertions remain unchanged.
+"""
 from copy import deepcopy
 import hashlib
 import unittest

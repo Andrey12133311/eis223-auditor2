@@ -116,6 +116,7 @@ class DocxSeparatorReceiptPipeline(unittest.TestCase):
         # Give this test one consistent documentary role for each original.
         shutil.rmtree(self.root / 'eis223_official_archive_inbox' / saved.REG)
         self.write_archive(self.make_xml('purchaseNotice', version=2,
+            publication='2026-10-01T10:00:00+03:00',
             filename='Запрос разъяснений № 1.docx'))
         self.write_original(
             'Номер запроса:\t1\n'

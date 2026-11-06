@@ -1,5 +1,6 @@
 """Temporary-DB and date-chain regressions; never touches production data."""
 import json
+import hashlib
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -25,6 +26,13 @@ def doc(text,name="Извещение и документация.docx",trusted=
 
 def price(value="41081.60",kind="subject_cost",label="Стоимость предмета закупки"):
     return {"price":value,"price_kind":kind,"price_label":label}
+
+
+def notice_snapshot(deadline):
+    """Synthetic verified notice published before the fixture's requests."""
+    return [{"sha256":hashlib.sha256(("notice:"+deadline).encode()).hexdigest(),
+             "reg_number":REG,"xml_type":"purchaseNotice","version":1,
+             "publication":"2026-09-30","submission_end":deadline}]
 
 
 def run():
@@ -123,7 +131,8 @@ def run():
         save_snapshot(ns,formula)
         assert read_card(ns,REG)["price_formula"]=="Ц = Т × V"
 
-    p={"reg":REG,"method":"Аукцион в электронной форме","submission_end":"2026-10-22T19:00"}
+    p={"reg":REG,"method":"Аукцион в электронной форме","submission_end":"2026-10-22T19:00",
+       "_verified_notice_revisions":notice_snapshot("2026-10-22")}
     late=doc("Дата поступления запроса разъяснений: 01.10.2026 18:00\n"
              "Дата размещения ответа в ЕИС: 08.10.2026 08:00", "Разъяснение.docx")
     found,checks=evaluate(p,[late])
@@ -131,7 +140,8 @@ def run():
     assert evaluate(p,[doc(late["text"],trusted=False)])[0]==[]
     timely=doc(late["text"].replace("08.10.2026 08:00","06.10.2026 23:59"))
     assert evaluate(p,[timely])[0]==[]
-    assert evaluate({**p,"submission_end":"2026-10-02"},[late])[0]==[]
+    assert evaluate({**p,"submission_end":"2026-10-02",
+                     "_verified_notice_revisions":notice_snapshot("2026-10-02")},[late])[0]==[]
     assert evaluate({**p,"method":"Единственный поставщик"},[late])[0]==[]
     incomplete=doc("Дата поступления запроса разъяснений: 01.10.2026. Запрос не сопоставлен с ответом.")
     assert evaluate(p,[incomplete])[0]==[] and evaluate(p,[incomplete])[1]

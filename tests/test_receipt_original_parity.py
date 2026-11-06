@@ -27,13 +27,13 @@ import v332_all_procurements_audit as general
 import v341_precise_legal as legal
 import v342_thematic_queue as thematic
 import v345_thematic_accelerator as fast
-from test_general_audit_recovery import DatabaseFixture, LATE_REPLY, URL
+from test_general_audit_recovery import DatabaseFixture, HISTORICAL_DEADLINE, LATE_REPLY, URL
 
 
 LATE_REPLY_B = ("Дата поступления запроса разъяснения: 08.10.2026.\n"
-                "Дата публикации ответа в ЕИС: 14.10.2026.")
+                "Дата публикации ответа в ЕИС: 14.10.2026.\n" + HISTORICAL_DEADLINE)
 TIMELY_REPLY = ("Дата поступления запроса разъяснения: 01.10.2026.\n"
-                "Дата публикации ответа в ЕИС: 02.10.2026.")
+                "Дата публикации ответа в ЕИС: 02.10.2026.\n" + HISTORICAL_DEADLINE)
 
 
 def docx_bytes(text):
@@ -566,6 +566,7 @@ class ReceiptOriginalParity(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         workbook = openpyxl.Workbook()
         workbook.active.append(["Дата поступления запроса разъяснения: 01.10.2026."])
         workbook.active.append(["Дата публикации ответа в ЕИС: 07.10.2026."])
+        workbook.active.append([HISTORICAL_DEADLINE])
         workbook.active.append(["=1+1"])
         package = io.BytesIO()
         workbook.save(package)
@@ -729,7 +730,9 @@ class SavedCardContext(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await general.inspect_one(self.ns, reg))[1]['new_findings'], 0)
 
     async def test_latest_explicit_revision_replaces_stale_price_publication_method_and_deadline(self):
-        reg = self.purchase()
+        # This request followed the current notice revision. A request on the
+        # publication date cannot independently establish the revision order.
+        reg = self.purchase(text=LATE_REPLY_B)
         self.stale_purchase(reg, method='Закупка у единственного поставщика',
                             published_at='2018-10-01', submission_end='2026-09-01',
                             price='999.00', price_num=999)
@@ -884,7 +887,9 @@ class SavedCardContext(DatabaseFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not p['method'] and 'published' in p['_official_context_conflicts'] for p in self.observed))
 
     async def test_deadline_conflict_cannot_fall_back_to_stored_deadline(self):
-        reg = self.purchase()
+        # This negative deliberately has no source-bound historical deadline;
+        # its unknown current fields must not borrow the common positive proof.
+        reg = self.purchase(text=LATE_REPLY.removesuffix("\n" + HISTORICAL_DEADLINE))
         self.soap(reg)
         self.card_snapshot(reg, captured='2026-10-02T10:00:00+03:00',
                            fields={'submission_end': '2026-11-20'})

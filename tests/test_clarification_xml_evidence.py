@@ -38,7 +38,8 @@ class ClarificationXmlEvidence(unittest.TestCase):
         for path in (self.root / 'eis223_official_archive_inbox' / REG).iterdir():
             path.unlink()
         self.write_original(TEXT)
-        self.write_archive(self.make_xml('purchaseNotice', filename='Разъяснение.docx'))
+        self.write_archive(self.make_xml('purchaseNotice', publication='2026-09-30T12:00:00+03:00',
+                                         filename='Разъяснение.docx'))
 
     def explanation(self, publication='2026-10-13T10:00:00+03:00', request='2026-10-06T09:00:00+03:00',
                     decision='2026-10-07T10:00:00+03:00', status='P', uid=UID, guid='03253434-0000-0000-0000-000000000001',
@@ -172,6 +173,8 @@ class ClarificationXmlEvidence(unittest.TestCase):
                     with patch.object(legal, 'competitive_rule_scope', return_value=False):
                         self.assertEqual(legal.evaluate(p, result['docs'])[0], [])
                 else:
+                    p['_verified_notice_revisions'] = []
+                    p.pop('_current_soap_context', None)
                     self.assertEqual(legal.evaluate(p, result['docs'])[0], [])
 
     def test_ambiguous_explicit_request_label_is_not_bypassed_by_xml(self):

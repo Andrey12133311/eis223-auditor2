@@ -21,8 +21,16 @@ import v342_thematic_queue as thematic
 import v314_eis_metadata as metadata
 from v352_dashboard_truth import collapse_legal_events, load_counts
 
+def notice_revision(deadline="2026-10-30"):
+    """Synthetic hash-verified notice published before every request fixture."""
+    return {"sha256": hashlib.sha256(("notice:" + deadline).encode()).hexdigest(),
+            "xml_type": "purchaseNotice", "version": "1",
+            "publication": "2026-10-01", "submission_end": deadline}
+
+
 P = {"reg": "32610002001", "method": "Аукцион в электронной форме",
-     "published": "2026-10-01", "submission_end": "2026-10-30"}
+     "published": "2026-10-01", "submission_end": "2026-10-30",
+     "_verified_notice_revisions": [notice_revision()]}
 SOURCE = "https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="
 REQUEST = "Дата поступления запроса: 06.10.2026"
 ANSWER = "Дата публикации разъяснения в ЕИС: 13.10.2026"
@@ -111,7 +119,10 @@ class ClarificationDateLabelRecall(unittest.TestCase):
                 "Дата размещения разъяснения документации в ЕИС: 13.10.2026")
         for purchase in (dict(P, method="Единственный поставщик"),
                          dict(P, method="Способ не установлен"),
-                         dict(P, submission_end=""), dict(P, submission_end="2026-10-08")):
+                         dict(P, submission_end="", _verified_notice_revisions=[],
+                              _current_soap_context=None),
+                         dict(P, submission_end="2026-10-08",
+                              _verified_notice_revisions=[notice_revision("2026-10-08")])):
             with self.subTest(purchase=purchase):self.assertFalse(self.assess(text, purchase=purchase)[0])
         self.assertFalse(self.assess(text.replace("13.10.2026", "09.10.2026"))[0])
 
@@ -260,7 +271,9 @@ class ArchiveDateChainRecall(unittest.TestCase):
                             P["method"], P["published"], P["submission_end"]))
             source = {"docs": docs, "unreadable": 0, "_reconciled_rows": (), "original_expected": 1,
                       "original_received": 1, "source_incomplete": False,
-                      "source_error": None, "p": {}, "card": {}, "detail": {}}
+                      "source_error": None,
+                      "p": {"_verified_notice_revisions": [notice_revision()]},
+                      "card": {}, "detail": {}}
             ns = {"conn": connect, "analyze": lambda p, docs: [],
                   "build_checks": lambda p, detail, card, docs: []}
             precise.install(ns)

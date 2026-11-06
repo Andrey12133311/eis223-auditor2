@@ -7,6 +7,7 @@ import asyncio
 from contextlib import ExitStack
 from copy import deepcopy
 import hashlib
+import json
 from itertools import permutations
 from pathlib import Path
 import sqlite3
@@ -25,11 +26,18 @@ import v348_cross_document_legal as cross
 import v372_auto_regulation_protocols as protocols
 from v352_dashboard_truth import collapse_legal_events, load_counts
 from v353_episode_guard import same_episode
+from legal_audit_revision import engine_signature
+from payment_finding_reassessment import prepare_assessment, db_source_token
+from vp_inspection_engine import document_fingerprint
 
 
 REG = "32615969056"
 PURCHASE = {"reg": REG, "method": "Аукцион в электронной форме",
-            "submission_end": "2026-10-30"}
+            "submission_end": "2026-10-30",
+            "_verified_notice_revisions": [{
+                "sha256": hashlib.sha256(b"notice:2026-10-30").hexdigest(),
+                "xml_type": "purchaseNotice", "version": "1",
+                "publication": "2026-10-01", "submission_end": "2026-10-30"}]}
 STORED_PURCHASE = {"reg_number": REG, "customer": "ООО Тест",
     "title": "Поставка материалов", "method": PURCHASE["method"],
     "published_at": "2026-10-01", "submission_end": PURCHASE["submission_end"]}
@@ -67,7 +75,9 @@ class LegalEventRecallTests(unittest.TestCase):
             db.executescript("""
                 CREATE TABLE purchases(reg_number TEXT PRIMARY KEY,
                     violations INTEGER DEFAULT 0, checks_ok INTEGER DEFAULT 0,
-                    checks_attention INTEGER DEFAULT 0);
+                    checks_attention INTEGER DEFAULT 0,method TEXT,card_fields_json TEXT);
+                CREATE TABLE docs(id INTEGER PRIMARY KEY,reg_number TEXT,name TEXT,
+                    status TEXT,metadata_json TEXT,text_chars INTEGER);
                 CREATE TABLE findings(id INTEGER PRIMARY KEY, reg_number TEXT,
                     code TEXT, kind TEXT, title TEXT, law TEXT, law_url TEXT,
                     evidence TEXT, note TEXT, document TEXT, source_url TEXT,
@@ -77,7 +87,9 @@ class LegalEventRecallTests(unittest.TestCase):
                     source_url TEXT, document TEXT, field_path TEXT, note TEXT,
                     law TEXT, law_url TEXT, location TEXT);
             """)
-            db.execute("INSERT INTO purchases(reg_number) VALUES (?)", (REG,))
+            db.execute("INSERT INTO purchases(reg_number,method,card_fields_json) VALUES (?,?,?)",
+                       (REG,PURCHASE["method"],json.dumps({
+                           "verified_notice_revisions":PURCHASE["_verified_notice_revisions"]})))
 
     def connect(self):
         db = sqlite3.connect(self.path)
@@ -111,15 +123,27 @@ class LegalEventRecallTests(unittest.TestCase):
         self.assertEqual(len(collapse_legal_events(found)), 2)
 
     def test_body_only_numbers_survive_analysis_persistence_and_display(self):
+        current_docs=[]
         for make, reader in ((protocol, cross.finding_protocol_number),
                              (clarification, cross.finding_clarification_number)):
             with self.subTest(make=make.__name__):
-                docs = [make("1"), make("2", 2)]
+                first_uid=len(current_docs)+1
+                docs = [make("1",first_uid), make("2",first_uid+1)]
                 for doc in docs:doc["name"] = "Оригинал ЕИС.pdf"
                 found = self.evaluate(docs)
                 self.assertEqual({reader(item) for item in found}, {"1", "2"})
                 self.assertEqual(len(collapse_legal_events(found)), 2)
-                self.assertEqual(general.persist({"conn": self.connect}, REG, found, []), (2, 0))
+                current_docs.extend(docs)
+                complete=self.evaluate(current_docs)
+                with self.connect() as db:
+                    for identifier,doc in enumerate(docs,first_uid):
+                        db.execute("INSERT INTO docs VALUES(?,?,?,?,?,?)",
+                                   (identifier,REG,doc["name"],doc["status"],
+                                    json.dumps(doc["meta"]),len(doc["text"])))
+                    assessment=prepare_assessment(REG,complete,engine_signature=engine_signature(),
+                        source_version=document_fingerprint(current_docs),db_token=db_source_token(db,REG))
+                self.assertEqual(general.persist({"conn": self.connect}, REG, found, [],
+                                                payment_assessment=assessment), (2, 0))
         with self.connect() as db:
             self.assertEqual(load_counts(db, [REG]), {REG: 4})
 

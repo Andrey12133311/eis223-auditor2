@@ -8,6 +8,8 @@ import json
 import re
 from v331_broad_legal import verified
 from v314_eis_metadata import table_pairs
+from legal_document_context import (document_context, local_context,
+                                    source_scope_context, clause_variant_context, prepare_context_index)
 
 SME = r'(?:субъект\w*\s+(?:мал\w*\s+и\s+средн\w*\s+предпринимательств\w*|мсп)|мсп|смсп|сумсп)'
 EXCLUSIVE = re.compile(r'(?:только|исключительно)\s+(?:(?:для|среди)\s+)?'+SME, re.I)
@@ -34,8 +36,17 @@ def saved_card(p):
 
 def resolve(p, docs=()):
     evidence=[]
+    excluded=[]
     def add(value, source, text='', **extra):
         evidence.append(dict(value=value,source=source,evidence=text[:650],**extra))
+    def exclude(doc, reasons, start=None, end=None):
+        if len(excluded)>=60:return
+        meta=doc.get('meta') or {}
+        item={'document':doc.get('name'),'source_url':meta.get('source_url'),
+              'sha256':meta.get('sha256'),'reasons':list(dict.fromkeys(reasons))}
+        if start is not None:
+            item.update(start=start,end=end,evidence=str(doc.get('text') or '')[start:end][:650])
+        excluded.append(item)
     card=saved_card(p)
     for facts in (card.get('fact_evidence') or {}, p.get('fact_evidence') or {}):
         fact=facts.get('sme_only') or {}
@@ -52,6 +63,36 @@ def resolve(p, docs=()):
         if not isinstance(doc,dict) or not verified(doc):continue
         body=str(doc.get('text') or '')[:750000].replace('\xa0',' ')
         if not re.search(SME,body,re.I):continue
+        context=document_context(doc)
+        scope=source_scope_context(p,{**doc,'text':''})
+        # A project may state current tender requirements/participants even
+        # though it cannot prove that a contract was signed or an act occurred.
+        reasons=[reason for reason in context['reasons'] if reason!='project_is_not_completed_act']+scope['reasons']
+        if context['role'] in {'regulation','protocol','contract'}:
+            reasons=reasons+['source_not_tender_scope']
+        if reasons:
+            exclude(doc,reasons)
+            continue
+        # Authentic old/sample bytes cannot establish the procurement's scope.
+        # Mask only the unsupported SME tokens, retaining offsets and all other
+        # declarations, including a later actual section in the same original.
+        masked=None
+        context_index=prepare_context_index(body)
+        for match in re.finditer(SME,body,re.I):
+            local=local_context(body,match.start(),match.end())
+            variant=clause_variant_context(body,match.start(),match.end(),context_index=context_index)
+            local_scope=source_scope_context(p,doc,match.start(),context_index=context_index)
+            reasons=local['reasons']+variant['reasons']+local_scope['reasons']
+            if ((local_scope['lots'] or local_scope['lot_ids']) and
+                    not (local_scope['requested_lots'] or local_scope['requested_lot_ids'])):
+                # A declaration for one lot is not a positive premise for all
+                # lots of a procurement. A lot-scoped caller can resolve it.
+                reasons=reasons+['source_lot_unbound']
+            if reasons:
+                if masked is None:masked=list(body)
+                masked[match.start():match.end()]=' '*(match.end()-match.start())
+                exclude(doc,reasons,match.start(),match.end())
+        if masked is not None:body=''.join(masked)
         body=re.sub(r'\n\s*(Да|Нет)\b',r' | \1',body,flags=re.I)
         body=re.sub(r'((?:если|в случае|при проведении|при осуществлении)[^\n.!?;]*)\n',r'\1 ',body,flags=re.I)
         pairs=table_pairs(body)
@@ -97,7 +138,7 @@ def resolve(p, docs=()):
     values={x['value'] for x in evidence}
     state='conflict' if len(values)>1 else 'yes' if values=={True} else 'no' if values=={False} else 'unknown'
     return dict(value=True if state=='yes' else False if state=='no' else None,
-                state=state,source='msp_scope_resolver',evidence=evidence)
+                state=state,source='msp_scope_resolver',evidence=evidence,excluded_evidence=excluded)
 
 
 def display(p):

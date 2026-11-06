@@ -14,8 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import v332_all_procurements_audit as general
 import v342_thematic_queue as thematic
 import v345_thematic_accelerator as fast
-import v333_dedup_ui as dedup
-import v353_episode_guard as episodes
 
 
 REG = "32616233661"
@@ -99,11 +97,12 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
     def test_general_other_writer_can_commit_during_event_comparison(self):
         first, later = self.finding(), self.finding(later=True)
         self.assertEqual(general.persist(self.ns, REG, [first], []), (1,0))
-        actual = episodes.distinct_new
-        def compare(*args):
+        actual = general._plan_audit_results
+        def compare(*args, **kwargs):
+            result = actual(*args, **kwargs)
             self.intake_write()
-            return actual(*args)
-        with patch.object(episodes, "distinct_new", side_effect=compare):
+            return result
+        with patch.object(general, "_plan_audit_results", side_effect=compare):
             self.assertEqual(general.persist(self.ns, REG, [later], []), (1,0))
         with self.connection() as c:
             self.assertGreater(c.execute("SELECT COUNT(*) FROM intake").fetchone()[0], 0)
@@ -112,11 +111,12 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
     def test_thematic_other_writer_can_commit_during_event_comparison(self):
         first, later = self.finding(), self.finding(later=True)
         fast._persist(self.ns, [(self.item,"completed",[first],"done")])
-        actual = dedup._same_finding
-        def compare(*args):
+        actual = fast._plan_thematic_results
+        def compare(*args, **kwargs):
+            result = actual(*args, **kwargs)
             self.intake_write()
-            return actual(*args)
-        with patch.object(dedup, "_same_finding", side_effect=compare):
+            return result
+        with patch.object(fast, "_plan_thematic_results", side_effect=compare):
             fast._persist(self.ns, [(self.item,"completed",[later],"done")])
         with self.connection() as c:
             self.assertGreater(c.execute("SELECT COUNT(*) FROM intake").fetchone()[0], 0)
@@ -125,16 +125,18 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
     def test_general_concurrent_save_rebases_and_does_not_duplicate_event(self):
         first,later=self.finding(),self.finding(later=True)
         general.persist(self.ns,REG,[first],[])
-        actual=episodes.distinct_new
+        actual=general._plan_audit_results
         changed=False
-        def compare(*args):
+        def compare(*args, **kwargs):
             nonlocal changed
+            result=actual(*args, **kwargs)
             if not changed:
                 changed=True
                 self.assertEqual(general.persist(self.ns,REG,[later],[]),(1,0))
-            return actual(*args)
-        with patch.object(episodes,"distinct_new",side_effect=compare):
+            return result
+        with patch.object(general,"_plan_audit_results",side_effect=compare):
             self.assertEqual(general.persist(self.ns,REG,[later],[]),(0,0))
+        self.assertTrue(changed, "The concurrent save must occur during planning")
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM findings").fetchone()[0],2)
             self.assertEqual(c.execute("SELECT violations FROM purchases").fetchone()[0],2)
@@ -143,18 +145,20 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
         finding=self.finding()
         checklist={**finding,"item":finding["title"],"field_path":finding["code"],"status":"check"}
         general.persist(self.ns,REG,[],[checklist])
-        actual=episodes.distinct_new
+        actual=general._plan_audit_results
         changed=False
-        def compare(*args):
+        def compare(*args, **kwargs):
             nonlocal changed
+            result=actual(*args, **kwargs)
             if not changed:
                 changed=True
                 with self.connection() as c:
                     c.execute("UPDATE checks SET status='violation'")
                     c.execute("UPDATE purchases SET violations=1")
-            return actual(*args)
-        with patch.object(episodes,"distinct_new",side_effect=compare):
+            return result
+        with patch.object(general,"_plan_audit_results",side_effect=compare):
             self.assertEqual(general.persist(self.ns,REG,[finding],[]),(0,0))
+        self.assertTrue(changed, "The concurrent checklist update must occur during planning")
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT status FROM checks").fetchone()[0],"violation")
             self.assertEqual(c.execute("SELECT COUNT(*) FROM findings").fetchone()[0],0)
@@ -165,18 +169,20 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
             c.execute("CREATE TABLE v332_audit_queue(campaign TEXT,reg TEXT,state TEXT,reservation_token TEXT)")
             c.execute("INSERT INTO v332_audit_queue VALUES(?,?,'running','old-owner')",(general.CAMPAIGN,REG))
         old=general.AuditReservation(REG,"old-owner")
-        actual=episodes.distinct_new
+        actual=general._plan_audit_results
         changed=False
-        def compare(*args):
+        def compare(*args, **kwargs):
             nonlocal changed
+            result=actual(*args, **kwargs)
             if not changed:
                 changed=True
                 with self.connection() as c:
                     c.execute("UPDATE v332_audit_queue SET reservation_token='new-owner'")
-            return actual(*args)
-        with patch.object(episodes,"distinct_new",side_effect=compare):
+            return result
+        with patch.object(general,"_plan_audit_results",side_effect=compare):
             with self.assertRaisesRegex(LookupError,"superseded"):
                 general.persist(self.ns,old,[self.finding(later=True)],[])
+        self.assertTrue(changed, "The reservation change must occur during planning")
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM findings").fetchone()[0],1)
             self.assertEqual(c.execute("SELECT violations FROM purchases").fetchone()[0],1)
@@ -186,32 +192,36 @@ class AuditPersistenceLockScope(DatabaseFixture, unittest.TestCase):
     def test_thematic_concurrent_save_rebases_and_does_not_duplicate_event(self):
         first,later=self.finding(),self.finding(later=True)
         fast._persist(self.ns,[(self.item,"completed",[first],"done")])
-        actual=dedup._same_finding
+        actual=fast._plan_thematic_results
         changed=False
-        def compare(*args):
+        def compare(*args, **kwargs):
             nonlocal changed
+            result=actual(*args, **kwargs)
             if not changed:
                 changed=True
                 fast._persist(self.ns,[(self.item,"completed",[later],"done")])
-            return actual(*args)
-        with patch.object(dedup,"_same_finding",side_effect=compare):
+            return result
+        with patch.object(fast,"_plan_thematic_results",side_effect=compare):
             fast._persist(self.ns,[(self.item,"completed",[later],"done")])
+        self.assertTrue(changed, "The concurrent thematic save must occur during planning")
         with self.connection() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM thematic_findings").fetchone()[0],2)
 
     def _thematic_concurrent_change(self,change):
         fast._persist(self.ns,[(self.item,"completed",[self.finding()],"done")])
-        actual=dedup._same_finding
+        actual=fast._plan_thematic_results
         changed=False
-        def compare(*args):
+        def compare(*args, **kwargs):
             nonlocal changed
+            result=actual(*args, **kwargs)
             if not changed:
                 changed=True
                 with self.connection() as c:
                     change(c)
-            return actual(*args)
-        with patch.object(dedup,"_same_finding",side_effect=compare):
+            return result
+        with patch.object(fast,"_plan_thematic_results",side_effect=compare):
             fast._persist(self.ns,[(self.item,"completed",[self.finding(later=True)],"later")])
+        self.assertTrue(changed, "The campaign change must occur during planning")
 
     def test_thematic_stop_during_comparison_prevents_late_save(self):
         self._thematic_concurrent_change(lambda c:c.execute("UPDATE thematic_batches SET status='stopped'"))

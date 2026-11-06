@@ -14,9 +14,12 @@ import v341_precise_legal as precise
 import v348_cross_document_legal as cross
 import v372_auto_regulation_protocols as protocols
 import v314_eis_metadata as metadata
+import v298_eis_only as original_sources
 from v372_automatic_legal_selftest import official,PROTOCOL_HEAD
 REG='32616412317'
 P={'reg_number':REG,'customer':'ООО Тест','title':'Поставка материалов','method':'Открытый конкурс','published_at':'2026-10-01','submission_end':'2026-10-30'}
+P['_verified_notice_revisions']=[{'sha256':hashlib.sha256(b'notice-before-clarification-20260930').hexdigest(),
+    'xml_type':'purchaseNotice','version':1,'publication':'2026-09-30','submission_end':'2026-10-30'}]
 docs=[official('Протокол рассмотрения заявок.pdf',PROTOCOL_HEAD+'По заявке № 12 комиссия приняла решение: отклонена заявка № 12, основания отклонения не указаны. Итоги рассмотрения зафиксированы.'),official('Разъяснения.pdf','Дата поступления запроса разъяснения: 01.10.2026. Дата публикации ответа в ЕИС: 07.10.2026.'),official('Отмена.pdf','Дата принятия решения об отмене закупки: 01.10.2026. Дата публикации решения об отмене закупки в ЕИС: 02.10.2026.')]
 for d in docs:d['meta']['sha256']=hashlib.sha256(d['text'].encode()).hexdigest()
 def compare(originals):
@@ -33,6 +36,8 @@ def compare(originals):
       s.enter_context(patch.object(general,'stored_docs',return_value=(docs,0)))
       s.enter_context(patch.object(general,'allowed_documents',return_value={}))
       s.enter_context(patch.object(metadata,'from_documents',return_value={}))
+      s.enter_context(patch.object(original_sources,'official_notice_revisions',
+                                  return_value=deepcopy(P.get('_verified_notice_revisions', []))))
       s.enter_context(patch.object(precise,'enrich',side_effect=lambda ns,p,d,*a,**kw:p))
       s.enter_context(patch.object(precise,'persist_facts',return_value=None))
       first=asyncio.run(general.inspect_one(ns,REG)); second=asyncio.run(general.inspect_one(ns,REG)); thematic=asyncio.run(theme.independent_review(ns,REG,['protocols','dates']))

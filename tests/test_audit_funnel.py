@@ -200,6 +200,9 @@ class FunnelRuntime(unittest.TestCase):
     def test_retained_result_reuse_does_not_claim_fresh_analysis(self):
         fixture = self.thematic_fixture()
         fixture.item["categories"] = ["dates"]
+        # The retained result belongs to this exact source snapshot. The fresh
+        # attempt recomputes the real SQL token before deciding it can reuse it.
+        fixture.item["_payment_db_token"] = fast._payment_source_token(fixture.ns, fixture.reg)
         old = funnel.new("thematic", fixture.reg)
         old["analysis_observed"] = True
         old["counts"] = {"analyzer_candidates": 7, "verified_documents": 4, "confirmed": 1}

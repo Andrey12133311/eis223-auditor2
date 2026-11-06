@@ -254,7 +254,11 @@ def record_reassessment(ns, actor, batch, reg, key, purchase, docs):
             (batch, reg, key)).fetchone()
         if previous and previous["source_fingerprint"] == fingerprint and previous["effective_status"] == status:
             db.commit()
-            return {"effective_status": status, "already_reassessed": True,
+            # This journal only reassesses the SME premise. The canonical
+            # reader also requires a current complete legal assessment before
+            # the whole violation may remain confirmed.
+            effective_status = _target(db, batch, reg, key)["effective_status"]
+            return {"effective_status": effective_status, "already_reassessed": True,
                     "reassessment": public_event(previous)}
         # Keep original identity/evidence independent of all presentation flags.
         snapshot = {k: v for k, v in item.items() if k not in ("effective_status", "reassessment")}
@@ -266,7 +270,8 @@ def record_reassessment(ns, actor, batch, reg, key, purchase, docs):
              packed(snapshot), packed(scope), packed(sources), reasons[status], created))
         event = db.execute("SELECT * FROM thematic_finding_reassessments WHERE id=?", (cursor.lastrowid,)).fetchone()
         db.commit()
-        return {"effective_status": status, "already_reassessed": False,
+        effective_status = _target(db, batch, reg, key)["effective_status"]
+        return {"effective_status": effective_status, "already_reassessed": False,
                 "reassessment": public_event(event)}
     except Exception:
         if db.in_transaction:

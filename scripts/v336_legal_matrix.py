@@ -15,6 +15,8 @@ from functools import wraps
 from v331_broad_legal import verified
 from v335_price_recovery import money
 from v324_official_price import prices_in_text, AMOUNT as PRICE_AMOUNT, RUBLE_TOKEN
+from legal_document_context import (document_context, local_context, source_scope_context,
+                                    clause_variant_context, prepare_context_index, REASON_LABELS as CONTEXT_LABELS)
 
 LAW_URL="https://www.consultant.ru/document/cons_doc_LAW_116964/"
 MAX_DOCS=650
@@ -113,6 +115,8 @@ BID_CLAUSE=re.compile(
  r"|\d{4,15}(?:[,.]\d{1,2})?|\d{1,3}(?:[,.]\d{1,3})?)"
  r"\s*(?:\((?P<written>[а-яё -]{1,180})\)\s*)?"
  r"(?P<unit>%|процент(?:а|ов)?|руб(?:ль|лей|ля|\.|\b)|₽)",re.I)
+BID_ABSENT=re.compile(BID_LABEL+r"[\s:：|=–—]{0,60}(?:не\s+(?:требуется|устанавливается|"
+                      r"установлено|предусмотрено)|отсутствует)\b",re.I)
 # Only accept actual money and percentage with units, never paragraph numbering.
 MONEY_CLAUSE=re.compile(
  r"(?:начальн\w*\s*\(\s*максимальн\w*\s*\)\s*цен\w*\s*договора|"
@@ -275,13 +279,22 @@ def verified_price(p,docs):
     records=[]
     observed_prices=set()
     lots=set()
+    lot_ids=set()
     for d in docs[:MAX_DOCS]:
         if not isinstance(d,dict) or not verified(d):continue
+        context=document_context(d)
+        scope=source_scope_context(p,d)
+        if "source_other_purchase" in scope["reasons"]:continue
+        if "source_lot_ambiguous" in scope["reasons"]:return None
+        if not scope["eligible_actual"] or not context["eligible_actual"]:continue
+        if context["role"] not in {"documentation","notice","unknown"}:continue
         if (str(d.get("type") or "").casefold() in NON_NOTICE_KIND or
                 NON_PRICE_ORIGINAL.search(str(d.get("name") or ""))):continue
         body=str(d.get("text") or "")[:MAX_TEXT].replace("\u202f"," ")
+        lots.update(scope["lots"])
+        lot_ids.update(scope["lot_ids"])
         lots.update(LOT_LABEL.findall(body))
-        if len(lots)>1:return None
+        if len(lots)>1 or len(lot_ids)>1:return None
         # prices_in_text already rejects dates, percentages, unit/winner
         # prices, conditional statutory thresholds and unrelated table cells.
         values=prices_in_text(body,typed=True)
@@ -316,6 +329,9 @@ def verified_price(p,docs):
         # corroborate the exact NMCD needed by this rule.
         if any(re.search(r"максимальн\w*\s+значени\w*\s+цен",value[2],re.I)
                for value in values):continue
+        if ((scope["requested_lots"] and scope["lots"]!=scope["requested_lots"]) or
+                (scope["requested_lot_ids"] and scope["lot_ids"]!=scope["requested_lot_ids"])):
+            continue
         records.append((observed,d,None))
     # The authenticated EIS card has its own verified browser-source
     # provenance. Only the explicit NMCD price kind can confirm this value,
@@ -324,13 +340,19 @@ def verified_price(p,docs):
         from v311_verified_customer import _official_source
         card_value=money(official.get("price"))
         if _official_source(official.get("source"),str(p.get("reg") or "")):
+            card_scope=source_scope_context(p,{"meta":official})
+            if (not card_scope["eligible_actual"] or
+                    card_scope["requested_lots"] and card_scope["lots"]!=card_scope["requested_lots"] or
+                    card_scope["requested_lot_ids"] and card_scope["lot_ids"]!=card_scope["requested_lot_ids"]):
+                return records[0] if records else None
             if not card_value or card_value[1]<=0:return None
             confirmed_value=Decimal(str(card_value[1]))
             if expected_value is not None and confirmed_value!=expected_value:return None
             if observed_prices and observed_prices!={confirmed_value}:return None
             if records and confirmed_value!=records[0][0]:return None
             if records:return records[0]
-            return (confirmed_value,{"name":"Карточка ЕИС — подтверждённая НМЦД"},None)
+            return (confirmed_value,{"name":"Карточка ЕИС — подтверждённая НМЦД",
+                    "meta":{**official,"source_url":official.get("source")}},None)
     return records[0] if records else None
 
 def price_basis_reason(p):
@@ -340,6 +362,198 @@ def price_basis_reason(p):
                                 "subject_cost","lot_price","contract_price"):
         return "price_basis_non_nmcd"
     return "verified_nmcd_missing"
+
+
+SECURITY_CONTEXT_LABELS={
+    **CONTEXT_LABELS,
+    "security_source_unverified":"Происхождение исходного условия обеспечения не подтверждено",
+    "security_clause_unresolved":"Не установлен единственный точный фрагмент условия обеспечения заявки",
+    "security_source_not_requirement":"Источник не устанавливает требование к обеспечению заявки этой закупки",
+    "security_nmcd_unverified":"Не подтверждена НМЦД для проверяемого условия обеспечения заявки",
+    "security_price_lot_unbound":"Не подтверждено, что НМЦД и условие обеспечения относятся к одному лоту",
+    "security_sme_scope_unverified":"Режим участия только субъектов МСП для этого условия не подтверждён",
+    "security_conflicting_terms":"В оригиналах есть разные условия обеспечения заявки; применимая редакция не установлена",
+    "security_relation_unresolved":"Не установлена связь противоречащих условий обеспечения с одним лотом",
+    "security_conditional_clause":"Фрагмент является условным, отрицательным или справочным, а не установленным размером обеспечения",
+    "security_amount_conflict":"Числовой размер обеспечения не согласован с его написанием прописью",
+    "security_collection_limited":"Сопоставление условий обеспечения ограничено объёмом доступного текста",
+}
+
+
+def _security_identity(doc):
+    meta=doc.get("meta") or {}
+    return (str(meta.get("sha256") or ""),str(meta.get("source_url") or doc.get("url") or ""),
+            str(meta.get("archive_member") or meta.get("member") or ""))
+
+
+def _security_source(doc,start=0,end=None):
+    meta=doc.get("meta") or {}
+    body=str(doc.get("text") or "")
+    end=min(len(body),start+650) if end is None else min(len(body),end)
+    return {"document":str(doc.get("name") or ""),
+            "source_url":str(meta.get("source_url") or doc.get("url") or ""),
+            "sha256":str(meta.get("sha256") or ""),
+            "archive_sha256":str(meta.get("archive_sha256") or ""),
+            "archive_member":str(meta.get("archive_member") or meta.get("member") or ""),
+            "start":start,"end":end,"excerpt":body[start:end][:650]}
+
+
+def _security_purchase(p,doc,position):
+    scope=source_scope_context(p,doc,position)
+    result=dict(p)
+    if not (scope["requested_lots"] or scope["requested_lot_ids"]):
+        if len(scope["lots"])==1:result["lot_number"]=scope["lots"][0]
+        if len(scope["lot_ids"])==1:result["lot_id"]=scope["lot_ids"][0]
+    return result
+
+
+def _security_scope_facts(selected,docs,scope_cache):
+    """Facts calculated by this analysis, shared only within its input snapshot.
+
+    Callers allocate this internal cache; no cache or assessment supplied in
+    purchase/finding data is treated as documentary proof.
+    """
+    key=tuple(str(selected.get(field) or "") for field in
+              ("reg","reg_number","lot_number","lot","lot_id"))
+    if key not in scope_cache:
+        from v383_msp_scope import resolve
+        scope_cache[key]=(verified_price(selected,docs),resolve(selected,docs))
+    return scope_cache[key]
+
+
+def _security_terms(docs):
+    """Prepare source-specific clauses once; records are internal, not persisted."""
+    terms=[]
+    for doc in list(docs)[:MAX_DOCS]:
+        if not isinstance(doc,dict) or not verified(doc):continue
+        body=str(doc.get("text") or "")[:MAX_TEXT].replace("\xa0"," ").replace("\u202f"," ")
+        if not re.search(r"обеспечени\w*\s+заявк",body,re.I):continue
+        context=document_context(doc)
+        context_index=prepare_context_index(body)
+        for pattern in (BID_CLAUSE,BID_ABSENT):
+            matches=list(pattern.finditer(body))
+            for match in matches[:100]:
+                absent=pattern is BID_ABSENT
+                value=Decimal(0) if absent else _decimal(match["amount"])
+                if value is None:continue
+                unit="money" if absent or (match["unit"].casefold().startswith("руб") or match["unit"]=="₽") else "percent"
+                segment=_bid_context(body,match)
+                local=local_context(body,match.start(),match.end())
+                variant=clause_variant_context(body,match.start(),match.end(),context_index=context_index)
+                reasons=[reason for reason in context["reasons"] if reason!="project_is_not_completed_act"]
+                reasons.extend(local["reasons"])
+                reasons.extend(variant["reasons"])
+                if context["role"] in {"regulation","protocol","instruction","template","draft"}:
+                    reasons.append("security_source_not_requirement")
+                if GENERIC_SECURITY.search(segment) or not absent and NEG.search(segment):
+                    reasons.append("security_conditional_clause")
+                if not absent and match["written"] and _written_value(match["written"])!=value:
+                    reasons.append("security_amount_conflict")
+                if len(matches)>100 or len(str(doc.get("text") or ""))>MAX_TEXT or len(docs)>MAX_DOCS:
+                    reasons.append("security_collection_limited")
+                terms.append({"doc":doc,"start":match.start(),"end":match.end(),"value":value,
+                              "unit":unit,"absent":absent,"variant":variant,
+                              "context_index":context_index,
+                              "reasons":list(dict.fromkeys(reasons))})
+    return terms
+
+
+def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=None,scope_cache=None):
+    """Limit a claimed bid-security breach using current, same-lot evidence.
+
+    ``confirmed`` means only that this contextual limiter found no objection;
+    the detector still proves the threshold and law. Unknown/conflicting terms
+    remain review evidence, never a conclusion that the procurement complies.
+    All returned fields are JSON-serializable; the input originals stay intact.
+    """
+    docs=list(docs or ())
+    terms=_security_terms(docs) if prepared is None else prepared
+    scope_cache={} if scope_cache is None else scope_cache
+    reasons=[]
+    related=[]
+    result={"source":_security_source(source_doc,start,end),"related_sources":related}
+    if not verified(source_doc):reasons.append("security_source_unverified")
+    # Equal bytes may have different explicit revision annotations in two
+    # records. Bind to the cited source object before considering an identity
+    # fallback; a current copy cannot lend its status to an obsolete record.
+    same_source=[term for term in terms if term["doc"] is source_doc]
+    if not same_source:
+        same_source=[term for term in terms if _security_identity(term["doc"])==_security_identity(source_doc)
+                     and term["doc"].get("name")==source_doc.get("name")]
+    source_terms=[term for term in same_source if start<=term["start"] and term["end"]<=end]
+    # Repeated identical source objects are one original, not conflicting acts.
+    source_terms=list({(term["start"],term["end"]):term for term in source_terms}.values())
+    source=source_terms[0] if len(source_terms)==1 else None
+    if source is None:
+        reasons.append("security_clause_unresolved")
+    else:
+        reasons.extend(source["reasons"])
+        result["variant_context"]=source["variant"]
+        scope=source_scope_context(p,source_doc,source["start"],context_index=source["context_index"])
+        reasons.extend(scope["reasons"])
+        result["source_scope"]=scope
+        selected=_security_purchase(p,source_doc,source["start"])
+        basis,sme=_security_scope_facts(selected,docs,scope_cache)
+        price=None
+        if basis is None:
+            reasons.append("security_nmcd_unverified")
+        else:
+            price,price_doc,_=basis
+            price_scope=source_scope_context(selected,price_doc)
+            result["price_basis"]={"value":str(price),"source":_security_source(price_doc),"scope":price_scope}
+            # Explicit lot identities must bind both sides of the comparison.
+            # An unscoped clause cannot borrow a price belonging to another lot.
+            if (scope["lots"]!=price_scope["lots"] or scope["lot_ids"]!=price_scope["lot_ids"]):
+                reasons.append("security_price_lot_unbound")
+        if str(rule_code or "").upper()=="223-SME-BID-SECURITY-OVER-TWO-PERCENT":
+            result["sme_scope"]=sme
+            if sme["value"] is not True:reasons.append("security_sme_scope_unverified")
+        for peer in terms:
+            if (_security_identity(peer["doc"])==_security_identity(source_doc) and
+                    peer["start"]==source["start"] and peer["end"]==source["end"]):continue
+            # A nonselected/template/historical peer cannot contradict an
+            # operative requirement. Unselected alternatives remain in the
+            # source assessment itself, without choosing the lower amount.
+            if peer["reasons"]:continue
+            peer_scope=source_scope_context(selected,peer["doc"],peer["start"],context_index=peer["context_index"])
+            if not peer_scope["eligible_actual"]:continue
+            if peer["unit"]==source["unit"]:
+                equal=peer["value"]==source["value"]
+            elif price is not None:
+                first=source["value"]*price/100 if source["unit"]=="percent" else source["value"]
+                second=peer["value"]*price/100 if peer["unit"]=="percent" else peer["value"]
+                equal=abs(first-second)<=Decimal("0.01")
+            else:
+                equal=False
+            if equal:continue
+            same_original=_security_identity(peer["doc"])==_security_identity(source_doc)
+            if same_original and peer["variant"]["section_start"]!=source["variant"]["section_start"]:
+                # Separate explicit sections may concern different lots or
+                # procedures; their relationship is not a proven replacement.
+                reason="security_relation_unresolved"
+            elif (scope["lots"]!=peer_scope["lots"] or scope["lot_ids"]!=peer_scope["lot_ids"]):
+                reason="security_relation_unresolved"
+            else:
+                reason="security_conflicting_terms"
+            reasons.append(reason)
+            if len(related)<12:related.append(_security_source(peer["doc"],peer["start"],peer["end"]))
+    reasons=list(dict.fromkeys(reasons))
+    result.update(status="review" if reasons else "confirmed",reasons=reasons,
+                  reason_labels=[SECURITY_CONTEXT_LABELS.get(reason,reason) for reason in reasons])
+    return result
+
+
+def _security_context_review(doc,match,assessment):
+    return {"scope":"223-ФЗ / обеспечение заявки","item":"Сверить применимое условие обеспечения заявки",
+            "status":"check","field_path":"v336-bid-security-context","criterion_keys":["bid_security"],
+            "evidence":str(doc.get("text") or "")[match.start():match.end()],
+            "match_text":match[0],"source_position":match.start(),
+            "source":doc.get("name"),"document":doc.get("name"),
+            "source_url":(doc.get("meta") or {}).get("source_url") or doc.get("url") or "",
+            "law":"223-ФЗ, ст. 3.2 ч. 25–27","law_url":LAW_URL,
+            "location":f"Оригинал ЕИС, позиция {match.start()+1}",
+            "security_assessment":assessment,"methodology_reason_codes":assessment["reasons"],
+            "note":"; ".join(assessment["reason_labels"])+". Сохранить исходное условие для проверки, не считать подтверждённым нарушением."}
 
 
 def security_findings(p,docs):
@@ -352,10 +566,9 @@ def security_findings(p,docs):
     checks=[]
     if competitive_rule_scope(p) is not True:
         return finding,checks
-    verified_nmcd=verified_price(p,docs)
-    from v383_msp_scope import resolve
-    sme_classification=resolve(p,docs)
-    sme_only=sme_classification["value"] is True
+    docs=list(docs or ())
+    prepared=None
+    scope_cache={}
     for doc in docs[:MAX_DOCS]:
         if not isinstance(doc,dict) or not verified(doc):continue
         if NON_PRICE_ORIGINAL.search(str(doc.get("name") or "")):continue
@@ -383,6 +596,22 @@ def security_findings(p,docs):
             if value>Decimal("100") and is_percent:continue
             evidence=" ".join(segment.split())
             source=(doc.get("meta") or {}).get("source_url") or doc.get("url") or ""
+            selected=_security_purchase(p,doc,match.start())
+            verified_nmcd,sme_classification=_security_scope_facts(selected,docs,scope_cache)
+            sme_only=sme_classification["value"] is True
+            if verified_nmcd is not None:
+                price,price_doc,_=verified_nmcd
+                ratio=value if is_percent else value/price*Decimal("100")
+                if price>Decimal("5000000") and ratio<=Decimal("2"):
+                    # This candidate cannot violate any supported numerical
+                    # threshold. Skipping peer comparisons makes no statement
+                    # about whole-procurement compliance. A conflicting larger
+                    # condition still undergoes the full context gate below.
+                    continue
+            if prepared is None:
+                prepared=_security_terms(docs)
+            assessment=assess_security_context(p,docs,doc,match.start(),match.end(),
+                                               prepared=prepared,scope_cache=scope_cache)
             if verified_nmcd is None:
                 checks.append({
                     "scope":"223-ФЗ / обеспечение заявки",
@@ -390,15 +619,18 @@ def security_findings(p,docs):
                     "status":"check","evidence":evidence,
                     "source":doc.get("name"),"source_url":source,"document":doc.get("name"),
                     "field_path":"v336-bid-security-needs-verified-nmcd",
-                    "price_basis_reason":price_basis_reason(p),
+                    "price_basis_reason":price_basis_reason(selected),
+                    "match_text":match[0],"source_position":match.start(),
+                    "security_assessment":assessment,
                     "law":"223-ФЗ, ст. 3.2 ч. 25–27","law_url":LAW_URL,
                     "location":f"Оригинал ЕИС, позиция {match.start()+1}",
                     "note":"Не подтверждены вид цены и числовая НМЦД по официальным источникам. "
                            "Не квалифицировать условие как нарушение до установления цены."
                 })
                 continue
-            price,price_doc,_=verified_nmcd
-            ratio=value if is_percent else value/price*Decimal("100")
+            if assessment["status"]!="confirmed":
+                checks.append(_security_context_review(doc,match,assessment))
+                continue
             condition=None
             law="223-ФЗ, ст. 3.2 ч. 27"
             code="223-3.2-27-BID-SECURITY-LOW-NMCD"
@@ -437,7 +669,8 @@ def security_findings(p,docs):
                 "document":doc.get("name"),"source_url":source,
                 "location":f"Обеспечение заявки, позиция {match.start()+1}",
                 "sme_scope":sme_classification,
-                "match_text":match.group(0)
+                "match_text":match.group(0),"source_position":match.start(),
+                "security_assessment":assessment
             })
             return finding,checks
     # Coalesce repeated review hints into a single source-specific item,

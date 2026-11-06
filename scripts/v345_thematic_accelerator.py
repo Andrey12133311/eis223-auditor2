@@ -379,13 +379,14 @@ async def _one(ns,item,sem,pending=None):
             except OriginalCatalogueError as exc:
                 item["source_error"]=str(exc)
                 for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
-            # Payment conclusions depend on the whole applicable contract set.
+            # Registered legal conclusions depend on the applicable source set.
             # Retain a pre-analysis SQL token for cheap saved-view invalidation;
             # the real semantic watermark still verifies the source contents.
-            payment_scope=bool(set(item.get("categories") or ()) &
-                               {"sme_payment","payment_223","sme","contract"})
+            # The same registry selects the 19 inspection criteria and the
+            # broad historical directions, including dates and protocols.
+            legal_scope=bool(set(item.get("categories") or ()) & original.CATEGORY_LABELS.keys())
             item.pop("_payment_sources_stable",None)
-            if payment_scope:
+            if legal_scope:
                 item["_payment_db_token"]=await _retry_file(_payment_source_token,ns,item["reg"])
             # Reuse is still a newly owned attempt: queued -> running and a
             # fresh pre-analysis source/engine snapshot are mandatory. A cached
@@ -406,7 +407,7 @@ async def _one(ns,item,sem,pending=None):
             audit_funnel.observe("outcomes_thematic",findings)
             audit_funnel.bind(item)
             if item.get("source_error"):state="retry"
-            if payment_scope and state=="completed" and item.get("_payment_db_token"):
+            if legal_scope and state=="completed" and item.get("_payment_db_token"):
                 # Never certify an unread replacement that arrived mid-audit.
                 # This bounded file work is outside every SQLite writer and is
                 # absent from card, count, memo and account request handlers.
@@ -514,7 +515,7 @@ def _thematic_result_snapshot(c,batch,reg):
 def _plan_thematic_results(results,snapshots,diagnostic_events=None):
     from v333_dedup_ui import _same_finding
     from v348_cross_document_legal import local_event_refines
-    from payment_finding_reassessment import is_payment_finding,prepare_assessment
+    from payment_finding_reassessment import is_reassessable_finding,prepare_assessment,evidence_key
     previous_by_key={key:list(rows) for key,rows in snapshots.items()}
     planned=[]
     for item,state,findings,detail in results:
@@ -523,7 +524,7 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
         before=list(previous)
         inserted=[]
         planned_item=dict(item)
-        if state in ("completed","retry") and any(is_payment_finding(f) for f in before+list(findings)):
+        if state in ("completed","retry") and any(is_reassessable_finding(f) for f in before+list(findings)):
             # Use the fresh output before append-only deduplication. A fully
             # rechecked existing quotation remains confirmed even when it does
             # not insert a new historical row; a missing one requires review.
@@ -539,9 +540,13 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
             # checks without blocking other audits or incoming EIS reports.
             unique_keys={(f.get("category"),f.get("title"),f.get("evidence")) for f in previous
                          if all(f.get(k) is not None for k in ("category","title","evidence"))}
+            exact_keys={evidence_key(f) for f in previous if is_reassessable_finding(f)}
             for f in findings:
-                if any(not local_event_refines(f,old) and _same_finding(old,f,"title")
-                       for old in previous):
+                registered=is_reassessable_finding(f)
+                duplicate=(evidence_key(f) in exact_keys if registered else
+                           any(not local_event_refines(f,old) and _same_finding(old,f,"title")
+                               for old in previous))
+                if duplicate:
                     audit_funnel.increment(diagnostic,"reasons","duplicate")
                     continue
                 key=(f["category"],f["title"],f.get("evidence"))
@@ -552,17 +557,38 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
                     continue
                 inserted.append(f)
                 previous.append(f)
+                if registered:exact_keys.add(evidence_key(f))
                 if all(value is not None for value in key):unique_keys.add(key)
         planned.append((planned_item,state,inserted,detail,before,list(previous),diagnostic))
     return planned
 
 
-def _persist(ns,results):
+def _persistence_findings(findings):
+    """Retain every fresh registered proof key before journal preparation.
+
+    Display may group two confirmed representations of one act. Persistence
+    must first retain both source proofs; exact repeats remain idempotent.
+    Unknown rules keep their established semantic deduplication.
+    """
     from v333_dedup_ui import collapse
+    from payment_finding_reassessment import is_reassessable_finding,evidence_key
+    registered,legacy,seen=[],[],set()
+    for item in findings:
+        if not is_reassessable_finding(item):
+            legacy.append(item)
+            continue
+        key=evidence_key(item)
+        if key not in seen:
+            seen.add(key)
+            registered.append(item)
+    return registered+collapse(legacy)
+
+
+def _persist(ns,results):
     from v352_dashboard_truth import collapse_legal_events
     # Normalize incoming findings once, without opening SQLite. Comparisons
     # with existing evidence are planned from read snapshots below.
-    results=[(item,state,collapse(findings) if state in ("completed","retry") else findings,detail)
+    results=[(item,state,_persistence_findings(findings) if state in ("completed","retry") else findings,detail)
              for item,state,findings,detail in results]
     c=_open(ns)
     saved_events=[]
