@@ -370,6 +370,19 @@ def evaluate(p, docs):
     competitive = competitive_rule_scope(p) is True
     from v383_msp_scope import resolve
     sme_scope = resolve(p,docs)["value"] is True
+    # Conflicting payment terms across official originals require contract-version
+    # reconciliation. A seven-day clause in another contract is not proof that
+    # the longer clause is superseded, but prevents an automatic confirmed finding.
+    payment_terms_by_doc = {}
+    if sme_scope:
+        for candidate in docs[:650]:
+            if not verified(candidate):
+                continue
+            candidate_text = str(candidate.get("text") or "")[:750000].replace("\\xa0", " ")
+            payment_terms_by_doc[id(candidate)] = [
+                int(term["days"]) for term in list(PAYMENT_DAYS.finditer(candidate_text))[:15]
+                if _payment_acceptance_clause(candidate_text, term)
+            ]
     for doc in docs[:650]:
         if not verified(doc):
             continue
@@ -474,6 +487,22 @@ def evaluate(p, docs):
                 days = int(payment["days"])
                 snippet = _payment_acceptance_clause(text, payment) if days > 7 else None
                 if snippet:
+                    conflicting = [
+                        other for other in docs[:650]
+                        if other is not doc and verified(other)
+                        and any(days <= 7 for days in payment_terms_by_doc.get(id(other), []))
+                    ]
+                    if conflicting:
+                        checks.append(review(doc, "v341-sme-payment-contract-version-conflict",
+                            "Сверить действующую редакцию договора и срок оплаты МСП",
+                            f"В документе {doc.get('name')}: {days} рабочих дней; "
+                            f"в другом оригинале ({conflicting[0].get('name')}) найден "
+                            "срок не более 7 рабочих дней. Установить номер договора, "
+                            "дату, статус подписания и приоритет редакции; нарушение "
+                            "пока не подтверждено.",
+                            "Постановление Правительства РФ № 1352, Положение, п. 28",
+                            payment))
+                        continue
                     payment_finding = finding(doc,"1352-28-SME-PAYMENT-OVER-SEVEN-WORKDAYS",
                         "В закупке только для субъектов МСП установлен срок оплаты свыше семи рабочих дней",
                         "Постановление Правительства РФ № 1352, Положение, п. 28",
