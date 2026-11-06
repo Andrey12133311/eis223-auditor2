@@ -148,6 +148,7 @@ def _case_snapshot(ns,reg):
         from scripts.v368_manager_evidence import _legal_items
         canonical=_legal_items(ns,reg)
         findings=[]
+        reassessed_review=[]
         for item in canonical:
             supporting=[]
             for other in item.get("supporting_sources",[])[:25]:
@@ -155,7 +156,7 @@ def _case_snapshot(ns,reg):
                     "document":str(other.get("document") or "")[:240],
                     "url":_validated_source(other.get("url")),
                 })
-            findings.append({
+            entry={
                 "finding_key":item["finding_key"],
                 "title":item["title"][:400],
                 "law":item["law"][:450],
@@ -166,7 +167,15 @@ def _case_snapshot(ns,reg):
                 "source_representations":item.get("source_representations",1),
                 "supporting_sources":supporting,
                 "warnings":item.get("warnings",[]),
-            })
+                "effective_status":item.get("effective_status","confirmed"),
+                **({"payment_reassessment":item["payment_reassessment"]}
+                   if "payment_reassessment" in item else {}),
+            }
+            # The canonical source already applies the current payment
+            # assessment. Retain its original proof/key in the review tab;
+            # a historical violation row is not a currently confirmed one.
+            (findings if entry["effective_status"]=="confirmed"
+             else reassessed_review).append(entry)
         comparisons=[]
         review=[]
         seen=set()
@@ -214,9 +223,13 @@ def _case_snapshot(ns,reg):
             "findings":findings,
             "findings_count":len(findings),
             "original_findings_records":raw_count,
-            "duplicates_grouped":max(0,raw_count-len(findings)),
+            # Reclassification is not deduplication: review entries remain
+            # separate canonical events with their original evidence.
+            "duplicates_grouped":max(0,raw_count-len(canonical)),
             "comparisons":comparisons[:90],
-            "review_items":review[:90],
+            # Preserve every reclassified card; the existing limit applies
+            # only to the additional, ordinary review checks.
+            "review_items":reassessed_review+review[:90],
             "documents":documents,
             "timeline":timeline,
             "note":"Сопоставления и неполные сведения требуют проверки. Они не увеличивают число подтверждённых нарушений.",

@@ -1000,13 +1000,13 @@ def check_reservation(ns,reg):
 
 
 @audit_funnel.trace_sync("general",registration="reg")
-def persist(ns,reg,findings,checks,progress_token=None,reconciled_rows=()):
+def persist(ns,reg,findings,checks,progress_token=None,reconciled_rows=(),payment_assessment=None):
     """Append only under the caller's exact general or intake reservation."""
     guard=ns.get("_v295_persist_guard")
     # Intake's token/file lock is acquired before SQLite's writer transaction.
     # Its short guard contains no source hashing, downloads or analysis.
     with guard(reg) if callable(guard) else nullcontext():
-        return _persist_reserved(ns,reg,findings,checks,progress_token,reconciled_rows)
+        return _persist_reserved(ns,reg,findings,checks,progress_token,reconciled_rows,payment_assessment)
 
 
 def _audit_result_snapshot(c,reg):
@@ -1134,7 +1134,7 @@ def _require_reconciled_rows(c,reg,rows):
         raise SemanticSnapshotError("concurrent_file_change")
 
 
-def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows=()):
+def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows=(),payment_assessment=None):
     """Append unseen results atomically without holding the writer for regex work."""
     c=connect(ns)
     try:
@@ -1175,6 +1175,12 @@ def _persist_reserved(ns,reg,findings,checks,progress_token=None,reconciled_rows
                 (reg_number,scope,item,status,evidence,source,source_url,
                  document,field_path,note,law,law_url,location)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",insert_checks)
+        if payment_assessment is not None:
+            from payment_finding_reassessment import db_source_token, record_assessment
+            # Never acknowledge a newer source which arrived after analysis.
+            if db_source_token(c,reg) != payment_assessment["db_token"]:
+                raise SemanticSnapshotError("concurrent_payment_source_change")
+            record_assessment(c,payment_assessment)
         if raw_new_f or raw_new_c:
             counts=c.execute("""SELECT
               (SELECT COUNT(*) FROM findings WHERE reg_number=? AND kind='violation')
@@ -1448,6 +1454,12 @@ async def _inspect_one(ns,reg):
         if value is not None and value != "" and (not purchase.get(key) or key in ("method","published","submission_end","submission_start",
                                                                 "deadline","price","price_num","price_kind")):
             purchase[key]=value
+    # Source coverage belongs to the legal input snapshot. In particular, a
+    # payment clause cannot be confirmed while an unread original may contain
+    # its selected revision, SME exception or executed contract.
+    purchase.update(source_incomplete=bool(source_incomplete),
+                    documents_unreadable=unreadable,
+                    original_expected=expected, original_received=received)
     card=source["card"] or card
     detail=source["detail"] or detail
     # Repair persisted identity before legal comparison. This also covers
@@ -1482,6 +1494,14 @@ async def _inspect_one(ns,reg):
     checker=ns.get("build_checks")
     if not callable(analyzer) or not callable(checker):
         raise RuntimeError("No legal analyzer installed")
+    def payment_source_snapshot():
+        from payment_finding_reassessment import db_source_token
+        if not callable(ns.get("conn")):
+            return ""  # No durable source snapshot can confirm a saved claim.
+        c=connect(ns)
+        try:return db_source_token(c,reg)
+        finally:c.close()
+    payment_source_before=await db_stage(ns,"payment_source",payment_source_snapshot)
     # Installed analyzer wrappers can persist official card facts too. A
     # cancellation must settle those writes before another worker takes reg.
     await db_stage(ns,"reservation",check_reservation,ns,reg)
@@ -1527,6 +1547,22 @@ async def _inspect_one(ns,reg):
             "note":"Документ не подтверждён квитанцией ЕИС; в число установленных нарушений не включено"
         })
     audit_funnel.observe("outcomes_general",accepted,checks)
+    from payment_finding_reassessment import prepare_assessment
+    # The input fingerprint describes this pass's verified documents, including
+    # its coverage. The SQL token fences concurrent metadata/receipt-row changes.
+    from vp_inspection_engine import document_fingerprint
+    payment_source_after=await db_stage(ns,"payment_source",payment_source_snapshot)
+    payment_complete=(not source_incomplete and not unreadable and
+        (expected is None or received == expected) and payment_source_before == payment_source_after)
+    payment_source_version=hashlib.sha256(json.dumps(
+        [document_fingerprint(docs),expected,received,unreadable,bool(source_incomplete)],
+        ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+    payment_assessment=prepare_assessment(reg,
+        accepted + [{**item,"kind":"violation","code":item.get("field_path") or item.get("code"),
+                     "title":item.get("item") or item.get("title")}
+                    for item in checks if item.get("status")=="violation"],
+        engine_signature=engine_signature(),source_version=payment_source_version,
+        db_token=payment_source_after,state="completed" if payment_complete else "retry")
     token=uuid.uuid4().hex
     await full_recheck_runtime.prepare_receipt(ns,reg,{
         "documents_found":len(docs)+unreadable,"documents_read":counted,
@@ -1534,7 +1570,7 @@ async def _inspect_one(ns,reg):
         "original_expected":expected,"original_received":received,"source_incomplete":source_incomplete})
     # Keep the computed evidence and token while a short write lock clears.
     # Retrying the whole inspection would needlessly rerun legal analyzers.
-    new_f,new_c=await db_stage(ns,"persist",persist,ns,reg,accepted,checks,token,source["_reconciled_rows"])
+    new_f,new_c=await db_stage(ns,"persist",persist,ns,reg,accepted,checks,token,source["_reconciled_rows"],payment_assessment)
     # Publish the sheet only after the underlying evidence was committed.
     # Atomic report writes and legal evaluation hold no SQLite transaction.
     inspection=ns.get("_vp_save_snapshot")

@@ -333,6 +333,13 @@ def _watermark(ns,reg):
     finally:c.close()
 
 
+def _payment_source_token(ns,reg):
+    from payment_finding_reassessment import db_source_token
+    c=_open(ns)
+    try:return db_source_token(c,reg)
+    finally:c.close()
+
+
 def _release_items(ns,items,failed=False):
     """Return only this cycle's still-owned work after cancellation/save error."""
     c=_open(ns)
@@ -372,6 +379,14 @@ async def _one(ns,item,sem,pending=None):
             except OriginalCatalogueError as exc:
                 item["source_error"]=str(exc)
                 for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
+            # Payment conclusions depend on the whole applicable contract set.
+            # Retain a pre-analysis SQL token for cheap saved-view invalidation;
+            # the real semantic watermark still verifies the source contents.
+            payment_scope=bool(set(item.get("categories") or ()) &
+                               {"sme_payment","payment_223","sme","contract"})
+            item.pop("_payment_sources_stable",None)
+            if payment_scope:
+                item["_payment_db_token"]=await _retry_file(_payment_source_token,ns,item["reg"])
             # Reuse is still a newly owned attempt: queued -> running and a
             # fresh pre-analysis source/engine snapshot are mandatory. A cached
             # result never carries the released reservation into this attempt.
@@ -391,6 +406,19 @@ async def _one(ns,item,sem,pending=None):
             audit_funnel.observe("outcomes_thematic",findings)
             audit_funnel.bind(item)
             if item.get("source_error"):state="retry"
+            if payment_scope and state=="completed" and item.get("_payment_db_token"):
+                # Never certify an unread replacement that arrived mid-audit.
+                # This bounded file work is outside every SQLite writer and is
+                # absent from card, count, memo and account request handlers.
+                try:
+                    after_version,after_engine=await _retry_file(_watermark,ns,item["reg"])
+                    after_db=await _retry_file(_payment_source_token,ns,item["reg"])
+                    item["_payment_sources_stable"]=(
+                        after_version==item.get("semantic_version") and
+                        after_engine==item.get("engine_signature") and
+                        after_db==item["_payment_db_token"])
+                except (OriginalCatalogueError,SemanticSnapshotError,OSError,sqlite3.Error):
+                    item["_payment_sources_stable"]=False
             description={
               "completed":"Проверено по сохранённым оригиналам ЕИС",
               "waiting_originals":"Ожидаются подтверждённые оригиналы ЕИС",
@@ -439,8 +467,10 @@ def _reuse_pending_result(item,pending):
             and all(item.get(field) for field in ("source_version","semantic_version","engine_signature"))
             and all(saved.get(field)==item.get(field) for field in (
                 "source_version","semantic_version","engine_signature","doc_id","ready",
-                "originals_ready","analysis_version","categories","campaign_guard")))
+                "originals_ready","analysis_version","categories","campaign_guard","_payment_db_token")))
         if same:
+            if "_payment_sources_stable" in saved:
+                item["_payment_sources_stable"]=saved["_payment_sources_stable"]
             entry["reuses"]+=1
             print(f"THEMATIC_RESULT_REUSED batch={item['batch']} reg={item['reg']} "
                   f"attempt={entry['reuses']}",flush=True)
@@ -484,6 +514,7 @@ def _thematic_result_snapshot(c,batch,reg):
 def _plan_thematic_results(results,snapshots,diagnostic_events=None):
     from v333_dedup_ui import _same_finding
     from v348_cross_document_legal import local_event_refines
+    from payment_finding_reassessment import is_payment_finding,prepare_assessment
     previous_by_key={key:list(rows) for key,rows in snapshots.items()}
     planned=[]
     for item,state,findings,detail in results:
@@ -491,6 +522,17 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
         previous=previous_by_key[(item["batch"],item["reg"])]
         before=list(previous)
         inserted=[]
+        planned_item=dict(item)
+        if state in ("completed","retry") and any(is_payment_finding(f) for f in before+list(findings)):
+            # Use the fresh output before append-only deduplication. A fully
+            # rechecked existing quotation remains confirmed even when it does
+            # not insert a new historical row; a missing one requires review.
+            planned_item["_payment_assessment"]=prepare_assessment(item["reg"],findings,
+                scope="thematic",batch=item["batch"],
+                engine_signature=item.get("engine_signature"),
+                source_version=item.get("semantic_version"),
+                db_token=item.get("_payment_db_token"),
+                state=state if item.get("_payment_sources_stable") else "requires_review")
         if state in ("completed","retry"):
             # All pairwise documentary/regex comparisons happen before the
             # sole SQLite writer is reserved. A full archive can yield many
@@ -511,7 +553,7 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
                 inserted.append(f)
                 previous.append(f)
                 if all(value is not None for value in key):unique_keys.add(key)
-        planned.append((item,state,inserted,detail,before,list(previous),diagnostic))
+        planned.append((planned_item,state,inserted,detail,before,list(previous),diagnostic))
     return planned
 
 
@@ -596,6 +638,9 @@ def _persist(ns,results):
                 audit_funnel.increment(diagnostic,"counts","persisted_confirmed",added)
                 if added:
                     saved_events.append((batch,reg,before,after,item.get("analysis_version",ANALYSIS_VERSION)))
+                if item.get("_payment_assessment"):
+                    from payment_finding_reassessment import record_assessment
+                    record_assessment(c,item["_payment_assessment"])
             attempts=(int(row["retry_attempts"])+1) if state=="retry" else 0
             delay=min(MAX_RETRY_SECONDS,RECHECK_SECONDS*2**min(5,max(0,attempts-1)))
             retry_at=time.time()+delay if state in ("retry","waiting_originals","waiting_engine") else 0
@@ -853,6 +898,8 @@ async def _faster_tick(ns):
 def install(ns):
     c=_open(ns)
     try:
+        from payment_finding_reassessment import initialize as initialize_payment_assessments
+        initialize_payment_assessments(c)
         c.execute("BEGIN IMMEDIATE")
         cols={x[1] for x in c.execute("PRAGMA table_info(thematic_items)")}
         if "last_doc_id" not in cols:

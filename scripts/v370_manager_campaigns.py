@@ -235,16 +235,25 @@ def staff_campaign_violations(request:Request,response:Response):
             "SELECT id,categories FROM thematic_batches WHERE id IN ("+placeholders+")",ids)}
         from scripts.v384_thematic_findings import canonical_item
         from scripts.v385_msp_reassessment import apply_reassessments
+        from payment_finding_reassessment import apply_thematic_reassessments
         contexts={}
         for item in recent:
             if item["category"] in selected.get(item["batch_id"],[]):
                 contexts.setdefault((item["batch_id"],item["reg"]),[]).append(item)
         canonical=[]
         for (batch,reg),raw in contexts.items():
+            # Classify each exact payment source before episode collapse. An
+            # old unsupported template must not absorb a current confirmed
+            # contract merely because their titles/quotations are similar.
+            raw=apply_thematic_reassessments(con,batch,reg,raw)
             limited=[{**canonical_item(reg,item),"source_rowid":item["source_rowid"]}
                      for item in collapse_legal_events(raw)]
+            classified=apply_reassessments(con,batch,reg,limited,same_incident=True)
+            # The SME overlay defaults unrelated rules to confirmed. Restore
+            # the exact payment assessment after it, preserving both histories.
+            classified=apply_thematic_reassessments(con,batch,reg,classified)
             canonical.extend({**item,"batch_id":batch,"reg":reg} for item in
-                apply_reassessments(con,batch,reg,limited,same_incident=True))
+                classified)
         canonical.sort(key=lambda item:item["source_rowid"],reverse=True)
         revised=[item for item in canonical if item["effective_status"]!="confirmed"]
         # Overlay per batch BEFORE cross-batch deduplication; one correction

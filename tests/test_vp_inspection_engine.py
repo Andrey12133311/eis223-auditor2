@@ -179,7 +179,7 @@ def test_real_existing_analyzers_produce_usable_sheet_marks():
 
 
 def test_general_procurement_sme_payment_does_not_require_exclusive_sme_scope():
-    text = "Срок оплаты составляет 30 календарных дней с даты приёмки товара."
+    text = "Срок оплаты составляет 30 рабочих дней со дня подписания заказчиком документа о приемке товара."
     general = purchase(fact_evidence={"sme_only": {"source": "official_eis_card", "value": False}})
     item = finding(code="sme_payment", evidence=text, law="ПП РФ № 1352, п. 14(3)")
     unresolved = row(evaluate(general, [doc(text)], [item]), "sme_payment")
@@ -190,6 +190,13 @@ def test_general_procurement_sme_payment_does_not_require_exclusive_sme_scope():
         "source_url": "https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=32612345678"}
     confirmed = row(evaluate(general, [doc(text)], [item]), "sme_payment")
     assert confirmed["applicable"] is True and confirmed["has_violation"] == "✓"
+    # Scope alone cannot prove a seven-working-day breach from an unbound
+    # calendar term; the legal rule and documentary proof remain separate.
+    ambiguous = "Срок оплаты составляет 30 календарных дней с даты приёмки товара."
+    limited = row(evaluate(general, [doc(ambiguous)],
+        [{**item, "evidence": ambiguous}]), "sme_payment")
+    assert limited["applicable"] is True and limited["status"] == "unknown"
+    assert not limited["has_violation"] and not limited["no_violation"]
 
 
 def load_tests(loader, tests, pattern):

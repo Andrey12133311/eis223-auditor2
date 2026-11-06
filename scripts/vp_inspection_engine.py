@@ -567,11 +567,78 @@ def _source_context(item, docs, body_cache=None):
             "methodology_reasons": ["Источник не подтверждает конкретное действие или условие: "+REASON_LABELS.get(value, value)+"." for value in codes]}
 
 
-def _qualify_with_context(item, docs, body_cache=None):
+def _payment_context(p, item, docs, body_cache, all_docs):
+    """Recheck a claimed SME payment term against the complete input snapshot.
+
+    A saved rule label is not proof of a currently applicable contract clause.
+    This also catches legacy analyzers which bypass the precise payment rule.
+    """
+    if "sme_payment" not in criterion_keys(item):
+        return {}
+    reported = {**item, "kind": item.get("reported_kind", item.get("kind")),
+                "status": item.get("reported_status", item.get("status"))}
+    if _status(reported) != "violation" and not item.get("payment_assessment"):
+        return {}
+    from payment_terms import assess_payment_term, collect_payment_terms
+    from v341_precise_legal import PAYMENT_DAYS, _payment_acceptance_clause
+    support = _source_support(item, docs, body_cache)
+    assessment = None
+    if support:
+        doc, excerpt = support
+        body = str(doc.get("text") or "").replace("\xa0", " ")
+        position = item.get("source_position")
+        # Treat an offset as evidence only when it is an actual integer and
+        # the cited fragment begins there. The generic locator falls back to
+        # the first occurrence for other rules, which is unsafe for alternatives.
+        relative = (_fragment_bounds(body[position:], excerpt)
+                    if isinstance(position, int) and not isinstance(position, bool)
+                    and 0 <= position < len(body) else None)
+        bound_position = bool(relative and relative[0] == 0)
+        bounds = ((position, position + relative[1]) if bound_position
+                  else _fragment_bounds(body, excerpt))
+        matches = [match for match in PAYMENT_DAYS.finditer(body)
+                   if int(match["days"]) > 7 and _payment_acceptance_clause(body, match)
+                   and bounds and match.start() < bounds[1] and match.end() > bounds[0]]
+        # Repeated identical clauses need an occurrence-specific citation.
+        # Choosing the first could select a quoted/obsolete alternative.
+        if not bound_position and _text(body).count(_text(excerpt)) > 1:
+            matches = []
+        if len(matches) == 1:
+            if "payment_terms" not in body_cache:
+                body_cache["payment_terms"] = collect_payment_terms(all_docs)
+            match = matches[0]
+            assessment = assess_payment_term(p or {}, all_docs, doc,
+                match.start(), match.end(), int(match["days"]),
+                terms=body_cache["payment_terms"])
+    if assessment is None:
+        assessment = {"status": "review", "reasons": ["payment_clause_unverified"],
+            "reason_labels": ["Не подтверждено конкретное применимое условие оплаты от приёмки в однозначно определённом оригинале."],
+            "related_terms": [], "phase": "unknown"}
+    limited = assessment.get("status") != "confirmed"
+    return {"payment_assessment": assessment,
+            "methodology_reason_codes": list(assessment.get("reasons") or []) if limited else [],
+            "methodology_reasons": list(assessment.get("reason_labels") or []) if limited else []}
+
+
+def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None):
     result = qualify_record(item)
     if not isinstance(result, dict) or not criterion_keys(result):
         return result
+    if body_cache is None:
+        body_cache = {}
     context = _source_context(result, docs, body_cache)
+    payment = _payment_context(p, result, docs, body_cache, docs if all_docs is None else all_docs)
+    if payment:
+        result["payment_assessment"] = payment["payment_assessment"]
+        for field in ("methodology_reasons", "methodology_reason_codes"):
+            context[field] = list(dict.fromkeys(context[field] + payment[field]))
+        # Legacy database rows preserve note but not arbitrary JSON fields.
+        # Keep the reason visible after persistence and in generated reports.
+        note = str(result.get("note") or "")
+        for reason in payment["methodology_reasons"]:
+            if reason not in note:
+                note = (note + " " + reason).strip()
+        result["note"] = note
     for field in ("source_context_available", "source_fragment_context_available", "source_context_eligible", "source_context"):
         result[field] = context[field]
     result["decision_basis"] = {**result["decision_basis"],
@@ -591,16 +658,17 @@ def _qualify_with_context(item, docs, body_cache=None):
 
 def qualify_outcomes(p, docs, findings=(), checks=()):
     """Common pure pipeline stage: retain unsupported claims as review items."""
-    originals = [doc for doc in list(docs or ()) if isinstance(doc, dict) and verified(doc)]
+    docs = [doc for doc in list(docs or ()) if isinstance(doc, dict)]
+    originals = [doc for doc in docs if verified(doc)]
     qualified_findings, qualified_checks, body_cache = [], [], {}
     for item in list(findings or ()):
-        result = _qualify_with_context(item, originals, body_cache)
+        result = _qualify_with_context(item, originals, body_cache, p=p, all_docs=docs)
         if isinstance(result, dict) and criterion_keys(result) and result.get("methodology_reasons"):
             qualified_checks.append(result)
         else:
             qualified_findings.append(result)
     for item in list(checks or ()):
-        qualified_checks.append(_qualify_with_context(item, originals, body_cache))
+        qualified_checks.append(_qualify_with_context(item, originals, body_cache, p=p, all_docs=docs))
     return qualified_findings, qualified_checks
 
 
@@ -769,7 +837,7 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
         keys = criterion_keys(item)
         if not keys:
             continue
-        item = _qualify_with_context(item, originals, body_cache)
+        item = _qualify_with_context(item, originals, body_cache, p=p, all_docs=docs)
         support = _source_support(item, originals, body_cache)
         status = _status(item)
         for key in keys:
@@ -812,6 +880,7 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
                 "source_fragment_context_available": item.get("source_fragment_context_available", False),
                 "source_context_eligible": item.get("source_context_eligible"),
                 "source_context": item.get("source_context") or [],
+                "payment_assessment": item.get("payment_assessment") or {},
                 # Administrative qualification requires its own dated event
                 # investigation. Never copy obsolete blanket mappings.
                 "administrative_basis": _administrative_basis(item, key) if qualified_status == "violation" else ""}

@@ -237,16 +237,15 @@ def _read_only_status(ns, entries):
         conn.execute("PRAGMA busy_timeout=1500")
         conn.execute("PRAGMA query_only=ON")
         regs=[r["reg_number"] for r in entries]
-        counts=load_counts(conn,regs)
+        labels_by_reg={}
+        counts=load_counts(conn,regs,labels=labels_by_reg)
         tables={r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         purchase_columns=({x[1] for x in conn.execute("PRAGMA table_info(purchases)")}
                           if "purchases" in tables else set())
         available_name=[c for c in ("customer","customer_name") if c in purchase_columns]
         has_inn="customer_inn" in purchase_columns
-        finding_columns={col[1] for col in conn.execute("PRAGMA table_info(findings)")} if "findings" in tables else set()
-        check_columns={col[1] for col in conn.execute("PRAGMA table_info(checks)")} if "checks" in tables else set()
-        purchases, jobs, audits, labels_by_reg = {}, {}, {}, {}
+        purchases, jobs, audits = {}, {}, {}
         # Bound SQLite parameters and read shared facts once per batch, rather
         # than opening up to six queries for each account procurement.
         unique_regs=list(dict.fromkeys(regs))
@@ -266,20 +265,6 @@ def _read_only_status(ns, entries):
                     "PARTITION BY reg ORDER BY updated_at DESC) AS latest "
                     "FROM v332_audit_queue WHERE reg IN ("+marks+")) WHERE latest=1",batch):
                     audits[row["reg"]]=row
-            for table,label,state,columns in (
-                    ("findings","title","kind",finding_columns),
-                    ("checks","item","status",check_columns)):
-                if not {label,state,"reg_number"}<=columns:continue
-                # Keep the previous per-source cap; deterministic ordering makes
-                # the displayed labels stable across repeated refreshes.
-                for row in conn.execute(
-                    "SELECT reg_number,label FROM (SELECT reg_number,label,"
-                    "ROW_NUMBER() OVER (PARTITION BY reg_number ORDER BY label) AS n "
-                    "FROM (SELECT DISTINCT reg_number,"+label+" AS label FROM "+table+
-                    " WHERE reg_number IN ("+marks+") AND "+state+
-                    " IN ('violation','нарушение'))) WHERE n<=40",batch):
-                    if row["label"]:
-                        labels_by_reg.setdefault(row["reg_number"],set()).add(str(row["label"]).strip()[:160])
         job_ids=list(dict.fromkeys(e["job_id"] for e in entries if e["job_id"]))
         if "v301_search_jobs" in tables:
             for offset in range(0,len(job_ids),350):

@@ -98,9 +98,19 @@ class ManualReadTests(unittest.TestCase):
                 db.execute('INSERT INTO findings VALUES(?,?,?,?,?,?,?,?)',
                            (self.entries[0]['reg_number'],f'Type {n:02d}','','','','','','нарушение'))
         row=self.read(self.entries[:1])[0]
-        self.assertEqual(len(row['violation_types']),40)
+        # Labels now share the confirmed-count input; legacy display labels
+        # which do not count as confirmed findings must not reappear here.
+        self.assertEqual(row['violation_types'],['Контроль','Срок'])
         self.assertEqual(row['customer'],'Заказчик 0')
         self.assertEqual(row['violations'],2)
+        with sqlite3.connect(self.path) as db:
+            for n in range(50):
+                db.execute('INSERT INTO findings VALUES(?,?,?,?,?,?,?,?)',
+                           (self.entries[0]['reg_number'],f'Confirmed type {n:02d}',
+                            '223-ФЗ, ст. 4',f'Доказательство эпизода {n}',
+                            'Оригинал','https://zakupki.gov.ru/','test','violation'))
+        row=self.read(self.entries[:1])[0]
+        self.assertEqual(len(row['violation_types']),40)
 
     def test_empty_input_does_not_connect(self):
         self.assertEqual(self.read([]),[])

@@ -615,11 +615,16 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
        "submissionEnd":p["submission_end"],
        "source":"official_eis_getDocsIP",
     }
+    received_originals = await run_file_io(
+        lambda: sum(bool(saved_document(reg, uid)) for uid in allowed))
+    p.update(original_expected=len(allowed), original_received=received_originals,
+             source_incomplete=(received_originals < len(allowed) or any(
+                 doc.get("status") in ("downloaded_no_text", "archive_unreadable") or
+                 bool((doc.get("meta") or {}).get("archive_warnings")) for doc in docs)))
     if collect_only:
         return {"p":p,"docs":docs,"card":card,"detail":detail,
                 "originals_expected":len(allowed),
-                "originals_received":sum(bool(saved_document(reg,uid))
-                                         for uid in allowed),
+                "originals_received":received_originals,
                 "source":"verified_official_eis_locals"}
     analyze=ns.get("analyze")
     build_checks=ns.get("build_checks")

@@ -370,6 +370,8 @@ def evaluate(p, docs):
     competitive = competitive_rule_scope(p) is True
     from v383_msp_scope import resolve
     sme_scope = resolve(p,docs)["value"] is True
+    from payment_terms import assess_payment_term, collect_payment_terms
+    payment_terms = collect_payment_terms(docs) if sme_scope else []
     for doc in docs[:650]:
         if not verified(doc):
             continue
@@ -478,10 +480,37 @@ def evaluate(p, docs):
                         "В закупке только для субъектов МСП установлен срок оплаты свыше семи рабочих дней",
                         "Постановление Правительства РФ № 1352, Положение, п. 28",
                         f"Условие об оплате: {days} рабочих дней. {snippet}",payment,
-                        "https://www.consultant.ru/document/cons_doc_LAW_172683/")
+                        "https://www.consultant.ru/document/cons_doc_LAW_172109/6d4f89e8690d09fef93b1c64f4541294c780d052/")
+                    assessment = assess_payment_term(p, docs, doc,
+                        payment.start(), payment.end(), days, terms=payment_terms)
+                    payment_finding.update(source_position=payment.start(),
+                        decision_kind="contract_condition", payment_assessment=assessment)
                     payment_finding['note'] = ("Проверено условие об оплате в рабочих днях от подписания "
-                        "или утверждения документа о приёмке; подтверждены оригинал ЕИС и закупка только для МСП.")
-                    findings.append(payment_finding)
+                        "или утверждения документа о приёмке; подтверждены оригинал ЕИС и закупка только для МСП. "
+                        "Условие проекта договора не устанавливает факт подписания договора или фактической просрочки оплаты.")
+                    if assessment["status"] == "confirmed":
+                        findings.append(payment_finding)
+                    else:
+                        # Keep the original claim and competing sources as a
+                        # review; neither a missing file nor an unrelated seven
+                        # day clause establishes a definitive legal outcome.
+                        reasons = list(assessment.get("reason_labels") or [])
+                        payment_finding["note"] += " " + " ".join(reasons)
+                        related = assessment.get("related_terms") or []
+                        for term in related[:3]:
+                            source = term.get("source") or term
+                            if isinstance(source, dict):
+                                quote = source.get("excerpt") or term.get("excerpt") or ""
+                                name = source.get("document") or source.get("name") or ""
+                                if quote:
+                                    payment_finding["note"] += f" Сопоставлено: {name}: {quote}"
+                        checks.append({**payment_finding, "kind": "review", "status": "check",
+                            "reported_kind": "violation", "reported_status": None,
+                            "scope": "Сопоставление условий оплаты и редакций договора",
+                            "item": "Сверить применимое условие оплаты по закупке для МСП",
+                            "field_path": payment_finding["code"], "source": doc.get("name"),
+                            "methodology_reasons": reasons,
+                            "methodology_reason_codes": list(assessment.get("reasons") or [])})
         # Protocol signing and EIS publication must each be explicitly named.
         # Templates and draft/sample originals do not establish actual event
         # dates, even when their fields contain concrete example values.
@@ -619,5 +648,5 @@ def install(ns):
 
     enriched_analyze.__v341__ = True
     ns["analyze"], ns["build_checks"] = enriched_analyze, enriched_checks
-    print("V341 LEGAL_FACTS_READY clarification_workdays=True protocols=True source_metadata=True", flush=True)
+    print("V341 LEGAL_FACTS_READY clarification_workdays=True protocols=True source_metadata=True payment_cross_document=True", flush=True)
 

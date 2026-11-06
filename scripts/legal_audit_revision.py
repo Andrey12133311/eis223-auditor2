@@ -29,6 +29,8 @@ ANALYZER_REGISTRY = {
     "vp_inspection_engine": ("install", "evaluate", "criterion_keys"),
 }
 DEPENDENCY_REGISTRY = {
+    "payment_terms": ("assess_payment_term", "collect_payment_terms", "detect_payment_coverage"),
+    "payment_finding_reassessment": ("prepare_assessment", "apply_general_reassessments", "apply_thematic_reassessments"),
     "legal_document_context": ("document_context", "local_context"),
     "vp_inspection_criteria": ("CRITERIA", "inspection_rows"),
     "legal_applicability": ("competitive_scope", "competitive_rule_scope"),

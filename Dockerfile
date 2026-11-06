@@ -103,6 +103,8 @@ COPY tests/test_protocol_document_context.py tests/test_vp_sme_application.py te
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_protocol_document_context test_vp_sme_application test_vp_methodology_decisions test_methodology_export test_methodology_pipeline
 COPY tests/test_dashboard_async_read.py tests/test_dashboard_read_recovery.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_dashboard_async_read test_dashboard_read_recovery
+COPY tests/test_payment_terms.py tests/test_payment_source_binding.py tests/test_payment_finding_reassessment.py tests/test_payment_terms_pipeline.py tests/test_payment_staff_view.py tests/test_payment_case_view.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_payment_terms test_payment_source_binding test_payment_finding_reassessment test_payment_terms_pipeline test_payment_staff_view test_payment_case_view
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

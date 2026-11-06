@@ -55,6 +55,8 @@ def _legal_items(ns,reg):
                     item=dict(r)
                     item["title"]=item.get("item") or "Нарушение"
                     rows.append(item)
+        from payment_finding_reassessment import apply_general_reassessments
+        rows=apply_general_reassessments(c,reg,rows)
         result=[]
         for item in collapse_legal_events(rows):
             legal=str(item.get("law") or "").strip()
@@ -66,7 +68,7 @@ def _legal_items(ns,reg):
                 json.dumps([reg,title,legal,evidence,document,url],
                            ensure_ascii=False,separators=(",",":")).encode("utf-8")
             ).hexdigest()
-            warnings=[]
+            warnings=list(item.get("warnings") or [])
             if not legal:warnings.append("Не указана правовая норма")
             if not evidence:warnings.append("Отсутствует текст доказательства")
             if not (document or url):warnings.append("Не определён источник доказательства")
@@ -79,6 +81,9 @@ def _legal_items(ns,reg):
                 "supporting_sources":item.get("supporting_sources",[]),
                 "source_representations":int(item.get("raw_count",1)),
                 "warnings":warnings,
+                **({"effective_status":item["effective_status"],
+                    "payment_reassessment":item.get("payment_reassessment")}
+                   if "payment_reassessment" in item else {}),
             })
         return result
     finally:

@@ -41,7 +41,10 @@ class ManualInputTests(unittest.TestCase):
                     title TEXT,source TEXT,customer_inn TEXT,org_form TEXT,price_num REAL,
                     last_seen TEXT,documents_found INT,documents_checked INT,
                     violations INT,risks INT);
-                CREATE TABLE findings(reg_number TEXT,kind TEXT,code TEXT,title TEXT);
+                CREATE TABLE findings(reg_number TEXT,kind TEXT,code TEXT,title TEXT,
+                    law TEXT,evidence TEXT,document TEXT,source_url TEXT);
+                CREATE TABLE checks(reg_number TEXT,status TEXT,item TEXT,
+                    law TEXT,evidence TEXT,document TEXT,source_url TEXT,field_path TEXT);
                 CREATE TABLE requests_v233(reg TEXT PRIMARY KEY,lane TEXT,
                     status TEXT,requested_at TEXT);
                 CREATE TABLE document_priorities_v233(reg TEXT PRIMARY KEY,

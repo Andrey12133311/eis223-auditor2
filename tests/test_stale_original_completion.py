@@ -291,7 +291,8 @@ class StaleOriginalCompletion(DatabaseFixture, unittest.IsolatedAsyncioTestCase)
         for case, reg in purchases:
             with self.subTest(case=case):
                 calls = []
-                def racing_persist(ns, claimed, findings, checks, token=None, reconciled_rows=()):
+                def racing_persist(ns, claimed, findings, checks, token=None, reconciled_rows=(),
+                                   payment_assessment=None):
                     self.assertEqual(str(claimed), reg)
                     self.assertEqual(len(reconciled_rows), 1)
                     with self.connect() as db:
@@ -315,7 +316,8 @@ class StaleOriginalCompletion(DatabaseFixture, unittest.IsolatedAsyncioTestCase)
                         else:
                             db.execute("UPDATE docs SET url=? WHERE id=?", (URL + "F" * 32, row["id"]))
                     calls.append(case)
-                    return real_persist(ns, claimed, findings, checks, token, reconciled_rows)
+                    return real_persist(ns, claimed, findings, checks, token, reconciled_rows,
+                                        payment_assessment)
                 with patch.object(general, "_persist_reserved", side_effect=racing_persist):
                     self.assertTrue(await runtime.run_one(self.ns, {}))
                 self.assertEqual(calls, [case])

@@ -165,6 +165,9 @@ def _read_purchase(ns,reg):
             "ORDER BY id DESC LIMIT 180",(reg,))
         names=[d[0] for d in cur.description]
         findings=[dict(zip(names,x)) for x in cur.fetchall()]
+        from payment_finding_reassessment import apply_general_reassessments
+        findings=[item for item in apply_general_reassessments(c,reg,findings)
+                  if item.get("effective_status","confirmed")=="confirmed"]
         # Distinct facts survive; repeated representations do not enter the memo.
         from v352_dashboard_truth import collapse_legal_events
         from v365_consultant_refs import enrich

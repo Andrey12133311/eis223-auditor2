@@ -61,6 +61,7 @@ Historical evidence stays in this result. Callers count only confirmed items
 and display the others as revised/review evidence, never as new violations.
 """
     from v352_dashboard_truth import collapse_legal_events
+    from payment_finding_reassessment import apply_thematic_reassessments
     try:
         from scripts.v385_msp_reassessment import apply_reassessments
     except ModuleNotFoundError as exc:
@@ -87,9 +88,17 @@ and display the others as revised/review evidence, never as new violations.
             grouped.setdefault(item["reg"], []).append(item)
     result = []
     for number, raw in grouped.items():
+        # Compare effective payment status before choosing a representative.
+        # Otherwise an older quote can hide a currently confirmed condition
+        # from another original (or hide the revised historical evidence).
+        raw = apply_thematic_reassessments(db, batch, number, raw)
         canonical = [canonical_item(number, item) for item in collapse_legal_events(raw)]
-        result.extend({**item, "batch_id": batch} for item in
-                      apply_reassessments(db, batch, number, canonical))
+        classified = apply_reassessments(db, batch, number, canonical)
+        # Canonical identity and the MSP journal keep their existing semantics.
+        # That overlay defaults to confirmed, so reapply payment classification
+        # afterwards instead of letting it restore an unreconfirmed quote.
+        classified = apply_thematic_reassessments(db, batch, number, classified)
+        result.extend({**item, "batch_id": batch} for item in classified)
     return result
 
 

@@ -127,6 +127,9 @@ def read(ns,reg):
           """SELECT *
              FROM checks WHERE reg_number=? AND status IN ('violation','check')
              ORDER BY id DESC LIMIT 350""",(reg,))]
+        from payment_finding_reassessment import apply_general_reassessments
+        findings=apply_general_reassessments(c,reg,findings)
+        checks=apply_general_reassessments(c,reg,checks)
         docs=[dict(r) for r in c.execute(
           """SELECT name,doc_type,status,url,text_chars FROM docs WHERE reg_number=?
              ORDER BY id DESC LIMIT 80""",(reg,))]
@@ -358,7 +361,7 @@ def render_thematic_panel(reg,thematic,account_review=False):
     if account_review:
         from scripts.account_memo_requisites_ui_v1 import render_memo_requisites_editor
         result.append(render_memo_requisites_editor(reg))
-    if rows:
+    if any(item.get("effective_status","confirmed")=="confirmed" for item in rows):
         result.append('<p><a class="action" href="/api/v304/thematic-memo/'+esc(batch)+'/'+
           esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>')
         result.append('<p class="meta">Проект формируется по сохранённым тематическим нарушениям; '+
@@ -391,6 +394,9 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
     unique=[]
     for item in grouped:
         gaps=presentation_gaps(item)
+        gaps=list(dict.fromkeys([*gaps,*(item.get("presentation_gaps") or [])]))
+        if item.get("effective_status","confirmed") != "confirmed" and not gaps:
+            gaps=["Сохранённое условие оплаты требует повторной проверки применимости договора и редакции."]
         if gaps:
             incomplete.append({**item,"item":item.get("title"),"status":"check",
                                "presentation_gaps":gaps})
@@ -439,7 +445,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
     thematic_html=render_thematic_panel(reg,thematic,account_review=account_review)
     export_label=('Скачать ODT сохранённых результатов · требуется сверка' if incomplete
                   else 'Сформировать служебную записку ODT')
-    actions='<p class="card-actions"><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">'+export_label+'</a></p>' if candidates else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
+    actions='<p class="card-actions"><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">'+export_label+'</a></p>' if any(item.get("effective_status","confirmed")=="confirmed" for item in candidates) else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
     if thematic:actions=''
     inspection_actions=('<p class="card-actions"><a class="action" href="/api/inspection/'+esc(reg)+
                         '.odt">Лист внеплановой проверки ODT</a></p>')

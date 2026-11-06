@@ -185,6 +185,12 @@ async def independent_review(ns,reg,categories):
     if value is not None and value != "" and (not p.get(key) or key in ("method","published","submission_end","submission_start",
                                                    "deadline","price","price_num","price_kind")):
        p[key]=value
+ # Preserve collection coverage before filtering out unreadable originals.
+ # Otherwise the legal engine sees a deceptively complete, readable subset.
+ p.update(source_incomplete=bool(source["source_incomplete"]),
+          documents_unreadable=unreadable,
+          original_expected=source.get("original_expected"),
+          original_received=source.get("original_received"))
  verified=[d for d in docs if is_official(d) and str(d.get("text") or "").strip()]
  audit_funnel.observe("documents_thematic",docs,unreadable,verified)
  audit_funnel.observe("incomplete",incomplete)
@@ -442,7 +448,8 @@ def _thematic_history_records(ns, permitted_ids=None):
    except ModuleNotFoundError as exc:
     if exc.name != "scripts":raise
     from v385_msp_reassessment import revision as reassessment_revision
-   stamp=(int(item["stored_rows"]),int(rev),reassessment_revision(c,batch))
+   from payment_finding_reassessment import revision as payment_revision
+   stamp=(int(item["stored_rows"]),int(rev),reassessment_revision(c,batch),payment_revision(c,batch))
    cached=_HISTORY_COUNT_CACHE.get(batch)
    if cached and cached[0]==stamp:
     unique,titles,revised_count=cached[1:]
