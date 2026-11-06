@@ -143,6 +143,95 @@ class DashboardIntegration(unittest.TestCase):
         with self.database() as c:
             self.assertEqual(c.execute('SELECT COUNT(*) FROM purchases').fetchone()[0], before)
 
+    def test_explicit_default_page_reuses_the_same_calculation(self):
+        import v352_dashboard_truth as truth
+        self.purchase(1,'АО Тест')
+        with patch.object(truth,'dashboard_counts',wraps=truth.dashboard_counts) as count:
+            first=self.get().json()
+            second=self.get('/api/v257/dashboard?offset=0&limit=100').json()
+        self.assertEqual(first['purchases'],second['purchases'])
+        self.assertEqual(count.call_count,1)
+
+    def test_continuous_collector_writes_do_not_starve_results_or_restore_manual_rows(self):
+        import v352_dashboard_truth as truth
+        reg=self.purchase(1,'АО Тест')
+        with self.database() as c:
+            c.execute('PRAGMA journal_mode=WAL')
+            c.execute('CREATE TABLE fixture_heartbeats(id INTEGER PRIMARY KEY,value INTEGER)')
+            c.execute('INSERT INTO fixture_heartbeats VALUES(1,0)')
+        actual_cache=features.DashboardReadCoordinator
+        caches=[]
+        def cache(**kwargs):
+            result=actual_cache(wait=.025,**kwargs)
+            caches.append(result)
+            return result
+        self.ns['app']=FastAPI()
+        with patch.object(features,'DashboardReadCoordinator',side_effect=cache):
+            features.install(self.ns)
+        entered=threading.Event()
+        release_first,release_refresh=threading.Event(),threading.Event()
+        calls=[];threads=[]
+        actual=truth.dashboard_counts
+        def held_read(*args):
+            calls.append(1);threads.append(threading.current_thread());entered.set()
+            release=release_first if len(calls)==1 else release_refresh
+            if not release.wait(5):raise RuntimeError('fixture read did not release')
+            return actual(*args)
+        def heartbeat():
+            with self.database() as c:
+                c.execute('UPDATE fixture_heartbeats SET value=value+1')
+        with patch.object(truth,'dashboard_counts',side_effect=held_read):
+            try:
+                self.assertEqual(self.get().status_code,503)
+                self.assertTrue(entered.wait(1))
+                for _ in range(3):
+                    heartbeat()
+                    self.assertEqual(self.get().status_code,503)
+                self.assertEqual(len(calls),1)
+                release_first.set()
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline:
+                    heartbeat();reply=self.get()
+                    if reply.status_code==200:break
+                self.assertEqual(reply.status_code,200,reply.text)
+                data=reply.json()
+                self.assertTrue(data['dashboard_stale'])
+                self.assertEqual(data['stats']['purchases'],1)
+                self.assertEqual(data['purchases'][0]['reg_number'],reg)
+                for _ in range(3):
+                    heartbeat();reply=self.get()
+                    self.assertEqual(reply.status_code,200)
+                    self.assertTrue(reply.json()['dashboard_stale'])
+                self.assertEqual(len(calls),2)
+                # Explicit manual membership invalidates even a usable stale
+                # snapshot while the replacement read is still held.
+                with self.database() as c:
+                    c.execute('INSERT INTO v319_manual_inputs VALUES(?,?,?,?)',
+                              (reg,'2026-11-05','number_field',''))
+                blocked=self.get()
+                self.assertEqual(blocked.status_code,503)
+                self.assertNotIn('purchases',blocked.json())
+                release_refresh.set()
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline:
+                    reply=self.get()
+                    if reply.status_code==200:break
+                self.assertEqual(reply.status_code,200,reply.text)
+                self.assertEqual(reply.json()['stats']['purchases'],0)
+                self.assertEqual(reply.json()['purchases'],[])
+            finally:
+                release_first.set();release_refresh.set()
+                for thread in threads:thread.join(2)
+
+    def test_cache_query_normalization_preserves_duplicate_parameter_semantics(self):
+        from starlette.datastructures import QueryParams
+        key=features._dashboard_cache_key
+        self.assertEqual(key(QueryParams('limit=100&offset=0')),'')
+        self.assertEqual(key(QueryParams('q=one&limit=20')),
+                         key(QueryParams('limit=20&q=one')))
+        self.assertNotEqual(key(QueryParams('limit=20&limit=100')),
+                            key(QueryParams('limit=100&limit=20')))
+
     def test_cold_failure_is_503_retry_after_not_fake_empty_success(self):
         self.purchase(1, 'АО Тест')
         def bad(): raise OSError('private fixture')

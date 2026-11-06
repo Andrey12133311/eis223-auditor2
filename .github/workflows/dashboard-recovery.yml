@@ -37,7 +37,7 @@ jobs:
           NODE_PATH: /tmp/dashboard-jsdom/node_modules
           EIS_REQUIRE_BROWSER_TESTS: '1'
         run: |
-          python -m unittest test_dashboard_read_recovery test_dashboard_load_ui test_dashboard_private_headers test_page_response_performance test_full_recheck_cohort_contract test_dashboard_filter_reset test_eis_vps_only_offline test_legal_audit_revision
+          python -m unittest test_dashboard_async_read test_dashboard_read_recovery test_dashboard_load_ui test_dashboard_private_headers test_page_response_performance test_full_recheck_cohort_contract test_dashboard_filter_reset test_eis_vps_only_offline test_legal_audit_revision
           python -m unittest test_recheck_contention_improvements test_explanation_supported_format test_explanation_quarantine_identity test_customer_name_completion test_customer_metadata_lock_scope test_general_db_stage_retry test_price_provenance_chain
           python -m unittest test_full_recheck_request test_full_recheck_runtime test_full_recheck_capacity test_full_recheck_originals
-          python -m unittest test_eis223_soap_archive test_eis_mixed_soap_quarantine test_eis_server_worker test_audit_persistence_lock_scope test_thematic_persist_lock_scope
+          python -m unittest test_eis223_soap_archive test_eis_mixed_soap_quarantine test_eis_server_worker test_audit_persistence_lock_scope test_thematic_persist_lock_scope test_intake_compat_responsiveness

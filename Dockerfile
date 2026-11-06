@@ -91,8 +91,8 @@ COPY tests/test_protocol_date_label_recall.py tests/test_clarification_date_labe
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_protocol_date_label_recall test_clarification_date_label_recall test_amendment_date_label_recall test_date_label_pipeline_parity test_docx_event_separators
 COPY tests/test_local_numbered_event_recall.py tests/test_local_event_pipeline_parity.py tests/test_amendment_revised_deadline_evidence.py tests/test_sme_payment_clause_recall.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_local_numbered_event_recall test_local_event_pipeline_parity test_amendment_revised_deadline_evidence test_sme_payment_clause_recall
-COPY tests/test_intake_sqlite_pressure.py tests/
-RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_intake_sqlite_pressure
+COPY tests/test_intake_sqlite_pressure.py tests/test_intake_compat_responsiveness.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_intake_sqlite_pressure test_intake_compat_responsiveness
 COPY tests/test_legal_fact_write_contention.py tests/test_parenthesized_event_date_labels.py tests/test_ingestion_metadata_contention.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_legal_fact_write_contention test_parenthesized_event_date_labels test_ingestion_metadata_contention
 COPY tests/test_vp_inspection_criteria.py tests/test_vp_inspection_engine.py tests/test_vp_inspection_export.py tests/test_vp_thematic_alignment.py tests/test_vp_pipeline.py tests/
@@ -101,6 +101,8 @@ COPY tests/test_staff_compact_ui.py tests/test_manager_compact_ui.py tests/test_
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_staff_compact_ui test_manager_compact_ui test_cabinet_shell_compact
 COPY tests/test_protocol_document_context.py tests/test_vp_sme_application.py tests/test_vp_methodology_decisions.py tests/test_methodology_export.py tests/test_methodology_pipeline.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_protocol_document_context test_vp_sme_application test_vp_methodology_decisions test_methodology_export test_methodology_pipeline
+COPY tests/test_dashboard_async_read.py tests/test_dashboard_read_recovery.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_dashboard_async_read test_dashboard_read_recovery
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

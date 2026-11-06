@@ -1281,7 +1281,9 @@ def install(ns):
         async def enriched_discovery(client,reg,card=None):
             from_source=[] if vps_only() else await discovery(client,reg,card)
             present={x.get("url") for x in from_source if isinstance(x,dict)}
-            for uid,item in allowed_documents(reg).items():
+            from v381_audit_scheduling import run_file_io
+            allowed=await run_file_io(allowed_documents,reg)
+            for uid,item in allowed.items():
                 if item["url"] in present:continue
                 present.add(item["url"])
                 from_source.append({"name":item["name"],"desc":"Официальный XML ЕИС (RI223)",
@@ -1295,31 +1297,32 @@ def install(ns):
     original_batch_download=ns.get("download_all_documents")
     if original_batch_download is not None or vps_only():
         async def deduplicated_batch(client,reg,docs):
+            from v381_audit_scheduling import run_file_io
             if vps_only():
                 cache_loader=ns.get("_cache_docs")
-                cache=await asyncio.to_thread(cache_loader,reg) if callable(cache_loader) else {}
+                cache=await run_file_io(cache_loader,reg) if callable(cache_loader) else {}
                 for document in docs:
                     await ns["download_doc"](client,reg,document,cache)
             else:
                 await original_batch_download(client,reg,docs)
-            if not allowed_documents(reg):return
+            if not await run_file_io(allowed_documents,reg):return
             original_count=len(docs)
             unique=[]
             fingerprints={}
             for d in docs:
                 local=d.get("local") if isinstance(d,dict) else None
-                if d.get("status")!="checked" or not local or not Path(local).is_file():
+                if d.get("status")!="checked" or not local:
                     unique.append(d)
                     continue
                 try:
                     p=Path(local)
-                    if p.stat().st_size>MAX_BYTES:
+                    def digest_file(path):
+                        if not path.is_file() or path.stat().st_size>MAX_BYTES:return None
+                        with path.open("rb") as f:return hashlib.file_digest(f,"sha256").hexdigest()
+                    sha=await run_file_io(digest_file,p)
+                    if sha is None:
                         unique.append(d)
                         continue
-                    def digest_file(path):
-                        with path.open("rb") as f:return hashlib.file_digest(f,"sha256").hexdigest()
-                    from v381_audit_scheduling import run_file_io
-                    sha=await run_file_io(digest_file,p)
                 except OSError:
                     unique.append(d)
                     continue
@@ -1344,24 +1347,25 @@ def install(ns):
 
     if (downloader is not None and extractor is not None) or vps_only():
         async def downloaded_from_local(client,reg,d,cache=None):
+            from v381_audit_scheduling import run_file_io
             uid=uid_from_url(d.get("url",""))
-            if uid and uid in allowed_documents(reg):
-                item=saved_document(reg,uid)
-                if item:
-                    path,receipt=item
-                    from v381_audit_scheduling import run_file_io
-                    txt=await run_file_io(extractor,path) if callable(extractor) else ""
-                    text=str(txt or "")
-                    chars=len(text.strip())
-                    d["local"]=str(path)
-                    d["text"]=text
-                    d["final_url"]=d["url"]
-                    d["status"]="checked" if chars>=3 else "downloaded_no_text"
-                    d["error"]=None if chars>=3 else "Файл получен, но текст не извлечён"
-                    d.setdefault("meta",{})["source"]="official_eis_getDocsIP"
-                    d["meta"]["sha256"]=receipt["sha256"]
-                    print(f"V295 LOCAL_EIS_ORIGINAL reg={reg} uid={uid} chars={chars} status={d['status']}",flush=True)
-                    return
+            def saved_original():
+                return saved_document(reg,uid) if uid in allowed_documents(reg) else None
+            item=await run_file_io(saved_original) if uid else None
+            if item:
+                path,receipt=item
+                txt=await run_file_io(extractor,path) if callable(extractor) else ""
+                text=str(txt or "")
+                chars=len(text.strip())
+                d["local"]=str(path)
+                d["text"]=text
+                d["final_url"]=d["url"]
+                d["status"]="checked" if chars>=3 else "downloaded_no_text"
+                d["error"]=None if chars>=3 else "Файл получен, но текст не извлечён"
+                d.setdefault("meta",{})["source"]="official_eis_getDocsIP"
+                d["meta"]["sha256"]=receipt["sha256"]
+                print(f"V295 LOCAL_EIS_ORIGINAL reg={reg} uid={uid} chars={chars} status={d['status']}",flush=True)
+                return
             if vps_only():
                 # Previously saved originals remain available for local analysis,
                 # including files predating the authenticated receipt pipeline.
@@ -1372,8 +1376,7 @@ def install(ns):
                 for local in candidates:
                     if not local:continue
                     path=Path(local)
-                    if not path.is_file():continue
-                    from v381_audit_scheduling import run_file_io
+                    if not await run_file_io(path.is_file):continue
                     txt=await run_file_io(extractor,path) if callable(extractor) else ""
                     text=str(txt or "")
                     chars=len(text.strip())
