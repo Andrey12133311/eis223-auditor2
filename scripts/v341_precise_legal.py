@@ -373,12 +373,16 @@ def evaluate(p, docs):
     # Conflicting payment terms across official originals require contract-version
     # reconciliation. A seven-day clause in another contract is not proof that
     # the longer clause is superseded, but prevents an automatic confirmed finding.
+    from legal_document_context import document_context
     payment_terms_by_doc = {}
     if sme_scope:
         for candidate in docs[:650]:
             if not verified(candidate):
                 continue
-            candidate_text = str(candidate.get("text") or "")[:750000].replace("\\xa0", " ")
+            context = document_context(candidate)
+            if context["role"] not in {"contract", "project_contract"} or context["version_status"] in {"superseded", "cancelled"}:
+                continue
+            candidate_text = str(candidate.get("text") or "")[:750000].replace("\xa0", " ")
             payment_terms_by_doc[id(candidate)] = [
                 int(term["days"]) for term in list(PAYMENT_DAYS.finditer(candidate_text))[:15]
                 if _payment_acceptance_clause(candidate_text, term)
@@ -487,6 +491,11 @@ def evaluate(p, docs):
                 days = int(payment["days"])
                 snippet = _payment_acceptance_clause(text, payment) if days > 7 else None
                 if snippet:
+                    # Do not promote a draft, template, or an explicitly
+                    # superseded contract to an established current violation.
+                    context = document_context(doc)
+                    if context["role"] not in {"contract", "project_contract"} or context["version_status"] in {"superseded", "cancelled"}:
+                        continue
                     conflicting = [
                         other for other in docs[:650]
                         if other is not doc and verified(other)
