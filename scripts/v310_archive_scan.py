@@ -20,7 +20,9 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
+import threading
 
 ARCHIVE_EXT={".zip",".rar",".7z",".tar",".gz",".tgz",".bz2",".xz",".tbz2",".txz",".cab"}
 DOC_EXT={".pdf",".docx",".doc",".xlsx",".xlsm",".xls",".odt",".ods",".rtf",".xml",".txt",".csv"}
@@ -28,6 +30,108 @@ MAX_MEMBER=12*1024*1024
 MAX_EXPANDED=72*1024*1024
 MAX_MEMBERS=100
 MAX_DEPTH=2
+
+# Repeated legal checks must not repeatedly decompress the same solid archive.
+# Only immutable expansion descriptors are retained here, never source bytes,
+# text, legal findings, provenance or successful-completion flags.
+_EXPANSION_VERSION="eis223-archive-expansion-20261110"
+_EXPANSION_CACHE_LIMIT=64
+_EXPANSION_CACHE_METADATA_LIMIT=128*1024
+_expansion_cache=OrderedDict()
+_expansion_guard=threading.Lock()
+_expansion_locks=tuple(threading.RLock() for _ in range(32))
+
+
+def _file_signature(path):
+    state=path.stat()
+    return (state.st_dev,state.st_ino,state.st_size,state.st_mtime_ns,state.st_ctime_ns)
+
+
+def _expansion_identity(path,root):
+    """Hash current original bytes; names matter for standalone gzip members."""
+    before=_file_signature(path)
+    with path.open("rb") as stream:
+        digest=hashlib.file_digest(stream,"sha256").hexdigest()
+    if before!=_file_signature(path):
+        return None,None
+    return (str(path.absolute()),str(root.absolute()),digest,path.suffix.lower(),
+            _EXPANSION_VERSION,MAX_MEMBER,MAX_EXPANDED,MAX_MEMBERS,MAX_DEPTH,
+            tuple(sorted(DOC_EXT)),tuple(sorted(ARCHIVE_EXT))),before
+
+
+def _verified_member_signature(member,digest,size):
+    """Verify bounded current bytes and ensure they did not change while read."""
+    if member.is_symlink() or not member.is_file() or not 0<size<=MAX_MEMBER:
+        return None
+    before=_file_signature(member)
+    if before[2]!=size:return None
+    with member.open("rb") as stream:
+        actual=hashlib.sha256()
+        total=0
+        while chunk:=stream.read(min(65536,size+1-total)):
+            actual.update(chunk)
+            total+=len(chunk)
+            if total>size:return None
+    if total!=size or actual.hexdigest()!=digest or before!=_file_signature(member):
+        return None
+    return before
+
+
+def _valid_expansion(events,root):
+    """A filename/hash in an earlier descriptor never authenticates its bytes."""
+    try:
+        resolved_root=root.resolve()
+        checked=set()
+        for event in events:
+            if event[0]!="document":continue
+            _,_,raw_path,digest,size,_=event
+            identity=(raw_path,digest,size)
+            if identity in checked:continue
+            member=Path(raw_path)
+            if (not member.resolve().is_relative_to(resolved_root) or
+                _verified_member_signature(member,digest,size) is None):
+                return False
+            checked.add(identity)
+        return True
+    except (OSError,ValueError):
+        return False
+
+
+def _expanded_members(path,root):
+    try:
+        identity,signature=_expansion_identity(path,root)
+    except (OSError,ValueError):
+        identity=signature=None
+    if identity is None:
+        return _expand_members(path,root)[0]
+    lock=_expansion_locks[int(identity[2][:8],16)%len(_expansion_locks)]
+    with lock:
+        with _expansion_guard:
+            cached=_expansion_cache.get(identity)
+        if cached is not None and _valid_expansion(cached,root):
+            try:
+                unchanged=signature==_file_signature(path)
+            except OSError:
+                unchanged=False
+            if unchanged:
+                with _expansion_guard:
+                    if identity in _expansion_cache:_expansion_cache.move_to_end(identity)
+                return cached
+        events,cacheable=_expand_members(path,root)
+        try:
+            cacheable=cacheable and signature==_file_signature(path)
+        except OSError:
+            cacheable=False
+        # Abnormally large warning inventories remain readable but are not
+        # retained. Both entry count and metadata size have fixed bounds.
+        metadata_size=sum(len(str(value).encode("utf-8")) for event in events for value in event)
+        with _expansion_guard:
+            _expansion_cache.pop(identity,None)
+            if cacheable and len(events)<=512 and metadata_size<=_EXPANSION_CACHE_METADATA_LIMIT:
+                _expansion_cache[identity]=events
+                while len(_expansion_cache)>_EXPANSION_CACHE_LIMIT:
+                    _expansion_cache.popitem(last=False)
+        return events
 
 def archive_kind(path:Path):
     ext=path.suffix.lower()
@@ -128,35 +232,36 @@ def _read_member(path,name,entry_index=None):
         with lzma.open(path,"rb") as inp:return _read_stream(inp)
     return _bsdtar_read(path,name)
 
-def extract_members(archive_path,reg,uid,data_dir,extractor):
-    """Return (real, independently readable document records, warnings).
-
-    A record is counted as checked ONLY when its own extracted text is
-    nonempty. The archive itself stays stored as one official source file.
-    """
-    path=Path(archive_path)
-    root=Path(data_dir)/"eis223_archive_members"/str(reg)/str(uid)
-    records=[]
-    warnings=[]
+def _expand_members(path,root):
+    """Expand real bytes once, retaining the source order of files/warnings."""
+    events=[]
+    cacheable=True
     stats={"files":0,"bytes":0}
     seen=set()
 
+    def warn(message):
+        events.append(("warning",message))
+
     def visit(current,prefix,depth,ancestry=()):
+        nonlocal cacheable
         if depth>MAX_DEPTH:
-            warnings.append("Превышена глубина вложенных архивов");return
+            warn("Превышена глубина вложенных архивов");return
         try:
             members,notes=_list(current)
         except (OSError,ValueError,RuntimeError,tarfile.TarError,
                 zipfile.BadZipFile,subprocess.SubprocessError) as exc:
-            warnings.append("Не удалось открыть архив: "+type(exc).__name__);return
-        warnings.extend(notes)
+            cacheable=False
+            warn("Не удалось открыть архив: "+type(exc).__name__);return
+        for note in notes:
+            warn(note)
+            if note=="Архив libarchive не прочитан":cacheable=False
         counts={}
         for name,_,_ in members:counts[name]=counts.get(name,0)+1
         for name,size,entry_index in members:
             if stats["files"]>=MAX_MEMBERS:
-                warnings.append("Лимит числа вложений исчерпан");break
+                warn("Лимит числа вложений исчерпан");break
             if not safe_member(name):
-                warnings.append("Пропущен небезопасный путь внутри архива");continue
+                warn("Пропущен небезопасный путь внутри архива");continue
             extension=Path(name).suffix.lower()
             if extension not in DOC_EXT and extension not in ARCHIVE_EXT:continue
             duplicate=counts[name]>1
@@ -164,17 +269,17 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
                 # Name-based libarchive extraction cannot prove which occurrence
                 # was returned. Never concatenate or invent its source identity.
                 if entry_index is None:
-                    warnings.append("Повторяющееся имя внутри архива: "+name[:80])
+                    warn("Повторяющееся имя внутри архива: "+name[:80])
                     continue
                 # A resolved ZIP/TAR occurrence is not incomplete coverage.
                 # Its displayed source name below carries the disambiguation;
                 # a warning would incorrectly force endless collection retry.
             if size>MAX_MEMBER:
-                warnings.append("Слишком крупный вложенный документ");continue
+                warn("Слишком крупный вложенный документ");continue
             try:
                 data=_read_member(current,name,entry_index)
                 if not data or stats["bytes"]+len(data)>MAX_EXPANDED:
-                    warnings.append("Превышен допустимый объём распаковки");continue
+                    warn("Превышен допустимый объём распаковки");continue
                 stats["files"]+=1
                 stats["bytes"]+=len(data)
                 sha=hashlib.sha256(data).hexdigest()
@@ -217,24 +322,65 @@ def extract_members(archive_path,reg,uid,data_dir,extractor):
                     visit(temp_file,internal,depth+1,ancestry+((name,entry_index),))
                     continue
                 if extension not in DOC_EXT:continue
-                try:
-                    if extension in (".txt",".csv"):
-                        decoded=data.decode("utf-8-sig","replace")
-                        if decoded.count("\ufffd")>len(decoded)*.08:
-                            decoded=data.decode("cp1251","replace")
-                        text=decoded[:2000000]
-                    else:
-                        text=str(extractor(temp_file) or "")[:2000000]
-                except Exception as exc:
-                    warnings.append("Не извлечён текст: "+name[:80]);continue
-                if len(text.strip())<3:
-                    warnings.append("Нет читаемого текста: "+name[:80]);continue
-                records.append({"name":internal,"path":temp_file,"sha256":sha,
-                                "text":text,"bytes":len(data)})
+                events.append(("document",internal,str(temp_file),sha,len(data),name))
             except (OSError,ValueError,KeyError,IndexError,RuntimeError,tarfile.TarError,
                     zipfile.BadZipFile,subprocess.SubprocessError,EOFError) as exc:
-                warnings.append("Ошибка вложения "+name[:70]+": "+type(exc).__name__)
+                cacheable=False
+                warn("Ошибка вложения "+name[:70]+": "+type(exc).__name__)
     visit(path,"",0)
+    return tuple(events),cacheable
+
+
+def extract_members(archive_path,reg,uid,data_dir,extractor):
+    """Return (real, independently readable document records, warnings).
+
+    Reuse only unchanged, freshly hash-checked expanded members. The current
+    extractor still runs for each document (and owns its text-cache revision),
+    including every previously unreadable file. Structural warnings persist;
+    a partial archive never becomes complete merely because of a cache hit.
+    """
+    path=Path(archive_path)
+    root=Path(data_dir)/"eis223_archive_members"/str(reg)/str(uid)
+    records=[]
+    warnings=[]
+    for event in _expanded_members(path,root):
+        if event[0]=="warning":
+            warnings.append(event[1])
+            continue
+        _,internal,raw_path,sha,size,name=event
+        temp_file=Path(raw_path)
+        # Keep legacy warning wording (the leaf member's original name) while
+        # every successful record retains its full disambiguated source path.
+        try:
+            if temp_file.suffix.lower() in (".txt",".csv"):
+                if temp_file.is_symlink():raise ValueError("Replaced archive member")
+                before=_file_signature(temp_file)
+                with temp_file.open("rb") as stream:
+                    data=_read_stream(stream)
+                # Decode exactly the bytes authenticated for this record. A
+                # replacement after expansion must not borrow the old SHA256.
+                if (len(data)!=size or hashlib.sha256(data).hexdigest()!=sha or
+                    before!=_file_signature(temp_file)):
+                    raise ValueError("Changed archive member")
+                decoded=data.decode("utf-8-sig","replace")
+                if decoded.count("\ufffd")>len(decoded)*.08:
+                    decoded=data.decode("cp1251","replace")
+                text=decoded[:2000000]
+            else:
+                before=_verified_member_signature(temp_file,sha,size)
+                if before is None:raise ValueError("Changed archive member")
+                text=str(extractor(temp_file) or "")[:2000000]
+                # Parsers open the filename themselves. Bind their output to
+                # the same file generation that was hash-checked immediately
+                # before extraction, including atomic replacement/in-place edits.
+                if temp_file.is_symlink() or before!=_file_signature(temp_file):
+                    raise ValueError("Archive member changed during extraction")
+        except Exception:
+            warnings.append("Не извлечён текст: "+name[:80]);continue
+        if len(text.strip())<3:
+            warnings.append("Нет читаемого текста: "+name[:80]);continue
+        records.append({"name":internal,"path":temp_file,"sha256":sha,
+                        "text":text,"bytes":size})
     # Member display names feed the stored URL fragment. Reserve every proposed
     # name first, then disambiguate collisions with nested/literal paths without
     # stealing a genuine member's name. Work is bounded by MAX_MEMBERS.

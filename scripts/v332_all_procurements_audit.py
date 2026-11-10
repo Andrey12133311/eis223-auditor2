@@ -1067,7 +1067,10 @@ def _plan_audit_results(reg,findings,checks,snapshot,diagnostic=None):
         scope=str(ck.get("scope") or "")[:200]
         item=str(ck.get("item") or "")[:450]
         path=str(ck.get("field_path") or "")[:170]
-        document=str(ck.get("document") or "")[:255]
+        # The stored document identity is complete, including archive ancestry.
+        # A truncated lookup never matches a previously saved long name and
+        # can also mistake an unrelated shorter/prefix-only source for it.
+        document=str(ck.get("document") or "")
         if status=="violation":
             found=duplicate({**ck,"title":item,"code":path})
         else:

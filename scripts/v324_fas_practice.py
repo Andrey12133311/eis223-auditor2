@@ -77,42 +77,51 @@ _AGREEMENT = re.compile(
     r"о\s+(?:совместн\w*\s+деятельност\w*|партнёрств\w*|партнерств\w*)))",
     re.I,
 )
+_OBLIGATION = r"(?:должен|должн[аоы]|обязан[аоы]?)"
+_SUBMISSION_VERB = r"(?:представить|представлять|предоставить|предоставлять|приложить|прикладывать|включить|включать)"
 _DUTY = re.compile(
-    r"(?:должн\w*\s+(?:иметь|заключить|представ\w*|предостав\w*)|"
-    r"обязан\w*\s+(?:иметь|заключить|представ\w*|предостав\w*)|"
+    rf"(?:{_OBLIGATION}\s+(?:иметь|заключить|{_SUBMISSION_VERB}|содержать)|"
     r"обязательн\w*\s+(?:наличи\w*|представлени\w*|предоставлени\w*)|"
     r"требует\w*\s+(?:соглашени\w*|договора\w*|представлени\w*))",
     re.I,
 )
-_APPLY = re.compile(r"\bзаявк\w*|\bпредложени\w*\s+на\s+участи\w*", re.I)
-_SUBMIT = re.compile(
-    r"\b(?:представ\w*|предостав\w*|прилож\w*|прикладыва\w*|"
-    r"пода\w*|переда\w*|включ\w*)", re.I,
+_PART = r"(?:(?:первой|второй|1-й|2-й)\s+)?части"
+_BID_LOCATION = (
+    rf"(?:в\s+составе?(?:\s+{_PART})?|во?\s+{_PART}|в|к)\s+заявк\w*"
+    r"(?:\s+на\s+участи\w*(?:\s+в\s+(?:конкурс\w*|аукцион\w*|закупк\w*))?)?"
 )
-# Directly ties a required agreement to the tender APPLICATION.  Merely
-# "must have an agreement" is an attention signal, not a proven 19.3 breach.
-_REQUIRE_IN_BID = (
-    re.compile(r"(?:состав\w*|подач\w*|приложени\w*|част\w*)\s+"
-               r"заявк\w*.{0,250}?"
-               r"(?:соглашени\w*|договор\w*\s+(?:простого|о\s+совместн))",re.I|re.S),
-    re.compile(r"(?:соглашени\w*|договор\w*\s+(?:простого|о\s+совместн))"
-               r".{0,260}?"
-               r"(?:в\s+состав[еа]?\s+заявк\w*|к\s+заявк\w*|"
-               r"в\s+заявк\w*|подач\w*\s+заявк\w*)",re.I|re.S),
-    re.compile(r"(?:представ\w*|предостав\w*|прилож\w*).{0,100}?"
-               r"(?:соглашени\w*|договор\w*\s+(?:простого|о\s+совместн))"
-               r".{0,110}?(?:в\s+состав[еа]?\s+заявк\w*|к\s+заявк\w*|"
-               r"в\s+заявк\w*)",re.I|re.S),
+_COLLECTIVE_SUBJECT = (
+    r"(?:коллективн\w*\s+участник\w*(?:\s+закупк\w*)?|член\w*\s+объединени\w*)"
+)
+_AGREEMENT_OBJECT = rf"(?:(?:копи[юи]|оригинал)\s+)?(?P<agreement>{_AGREEMENT.pattern})"
+_AGREEMENT_DESCRIPTION = (
+    r"(?:\s+(?:о\s+совместн\w*\s+деятельност\w*|"
+    r"между\s+(?:всеми\s+)?(?:член\w*\s+объединени\w*|участник\w*|собой))){0,2}"
+)
+# Closed grammatical links, not co-occurring keywords: the submitted object
+# must be the agreement itself. "Have an agreement" plus price details in an
+# application, or a letter ABOUT an agreement, proves no such duty.
+_SUBMIT_AGREEMENT = re.compile(
+    rf"\b(?:(?P<before>{_BID_LOCATION})\s+)?{_COLLECTIVE_SUBJECT}\s+"
+    rf"{_OBLIGATION}\s+{_SUBMISSION_VERB}\s+"
+    rf"(?:(?P<inside>{_BID_LOCATION})\s+)?{_AGREEMENT_OBJECT}"
+    rf"(?P<after>{_AGREEMENT_DESCRIPTION}\s+{_BID_LOCATION})?", re.I,
+)
+_BID_CONTAINS_AGREEMENT = re.compile(
+    r"\b(?:заявка|(?:первая|вторая)\s+часть\s+заявки)\s+"
+    r"коллективного\s+участника(?:\s+закупки)?\s+"
+    rf"должна\s+(?:содержать|включать(?:\s+в\s+себя)?)\s+{_AGREEMENT_OBJECT}", re.I,
 )
 _NEGATED = re.compile(
-    r"(?:не\s+(?:требует\w*|обязан\w*|должн\w*|нужно|представля\w*)|"
+    rf"(?:не\s+(?:требует\w*|{_OBLIGATION}|нужно|представля\w*)|"
     r"отсутстви\w*\s+обязанност\w*|не\s+является\s+обязательн\w*)",re.I,
 )
+_VOLUNTARY = re.compile(r"\b(?:вправе|может|могут|по\s+желанию|добровольн\w*)\b", re.I)
 # Avoid classifying a regulation quotation or a discussion of a later
 # contract as an additional application document.
 _NON_BID = re.compile(
     r"(?:после\s+(?:проведени\w*\s+)?закупк\w*|"
-    r"при\s+заключении\s+договора\s+с\s+заказчик\w*)",re.I,
+    r"(?:при\s+заключении|после\s+заключения)\s+договора\s+с\s+заказчик\w*)",re.I,
 )
 
 def _plain(value,limit=650_000):
@@ -150,15 +159,32 @@ def _candidate_chunks(doc):
             continue
         yield match,section,text
 
+def _application_duty(section, agreement_position=None):
+    """Return one exact direct requirement, tied to this agreement mention.
+
+    A PDF line wrap may continue a duty. A sentence or paragraph boundary
+    cannot supply another duty or another lot's application context.
+    """
+    for sentence in re.finditer(r"[^.!?;\n]+(?:\n(?![ \t\r]*\n)[^.!?;\n]+)*", section):
+        if (agreement_position is not None and
+                not sentence.start() <= agreement_position < sentence.end()):
+            continue
+        clause=sentence.group(0)
+        if (_NEGATED.search(clause) or _VOLUNTARY.search(clause) or _NON_BID.search(clause)):
+            continue
+        for pattern in (_SUBMIT_AGREEMENT, _BID_CONTAINS_AGREEMENT):
+            for match in pattern.finditer(clause):
+                if (agreement_position is not None and
+                        sentence.start()+match.start("agreement") != agreement_position):
+                    continue
+                if pattern is _SUBMIT_AGREEMENT and not any(
+                        match.group(key) for key in ("before", "inside", "after")):
+                    continue
+                return match.group(0)
+    return ""
+
 def _classification(section):
-    # In practice a tender-specific mandatory submission can be worded in
-    # multiple ways. Both the application context and an affirmative duty
-    # must be present within the SAME bounded extract.
-    requires=bool(_APPLY.search(section) and _SUBMIT.search(section)
-                  and any(p.search(section) for p in _REQUIRE_IN_BID))
-    if requires and not _NON_BID.search(section):
-        return "violation"
-    return "review"
+    return "violation" if _application_duty(section) else "review"
 
 def _cases(p,docs):
     scope,scope_evidence=_sme_scope(p,docs)
@@ -167,16 +193,19 @@ def _cases(p,docs):
     for doc in docs:
         if not _verified(doc):continue
         for m,section,text in _candidate_chunks(doc):
-            classification=_classification(section) if scope else "needs_scope"
+            start=max(0,m.start()-320)
+            duty=_application_duty(section,m.start()-start)
+            classification=("violation" if duty else "review") if scope else "needs_scope"
             # The excerpts are identical in successive versions of the
             # documentation; report the substantive issue once per purchase.
-            canonical=re.sub(r"\W+","",section.casefold().replace("ё","е"))
+            canonical=re.sub(r"\W+","",(duty or section).casefold().replace("ё","е"))
             digest=hashlib.sha256(canonical.encode()).hexdigest()[:16]
             if digest in dedup:continue
             dedup.add(digest)
             matches.append({"doc":doc,"section":section.strip()[:900],
                             "scope":scope,"scope_evidence":scope_evidence,
                             "classification":classification,
+                            "source_excerpt":duty,
                             "location":f"Оригинал: {doc.get('name')}; примерное смещение {m.start()+1}",
                             "seed":m.group(0)[:100]})
             if len(matches)>=12:return matches
@@ -347,6 +376,7 @@ def _finding(record):
                 "специального законного основания."),
         "document":d.get("name"),"source_url":(d.get("meta") or {}).get("source_url"),
         "location":record["location"],"match_text":record["seed"],
+        "source_excerpt":record.get("source_excerpt") or "",
     }
 
 def _check(record):

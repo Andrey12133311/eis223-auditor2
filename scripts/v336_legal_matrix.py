@@ -102,7 +102,9 @@ NEG=re.compile(r"(?:не\s+требуется|не\s+установлено|не
                r"не\s+допускается\s+установлени\w*|запрещается\s+требовать)",
                re.I)
 BID_LABEL=(r"(?:размер\s+)?обеспечени\w*\s+заявк\w*"
-           r"(?:\s+на\s+участие\s+в\s+(?:конкурентн\w*\s+)?закупк\w*)?")
+           r"(?:\s+на\s+участие\s+в\s+"
+           r"(?:(?:конкурентн\w*|электронн\w*|открыт\w*|закрыт\w*)\s+){0,2}"
+           r"(?:закупк\w*|аукцион\w*|конкурс\w*|запрос\w*\s+(?:котировок|предложений)))?")
 # A value belongs to this exact requirement field. Do not scan arbitrary
 # characters until a number: that borrowed a neighbouring contract-security
 # amount, while rejecting ordinary DOCX label/value cells on separate lines.
@@ -110,11 +112,11 @@ BID_CLAUSE=re.compile(
  BID_LABEL+
  r"(?P<prefix>[\s:：|=–—]{0,60}"
  r"(?:(?:устанавливается|установлен[оа]?|составляет|предусмотрен[оа]?|"
- r"требуется|размером)\s*)?(?:в\s+размере\s*)?[\s:：|=–—]{0,20})"
+ r"требуется|размером)\s*)?(?:(?:в\s+(?:размере|сумме)|сумму)\s*)?[\s:：|=–—]{0,20})"
  r"(?P<amount>\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[,.]\d{1,2})?"
  r"|\d{4,15}(?:[,.]\d{1,2})?|\d{1,3}(?:[,.]\d{1,3})?)"
  r"\s*(?:\((?P<written>[а-яё -]{1,180})\)\s*)?"
- r"(?P<unit>%|процент(?:а|ов)?|руб(?:ль|лей|ля|\.|\b)|₽)",re.I)
+ r"(?P<unit>%|процент(?:а|ов)?\b|руб(?:ль|ля|лей)\b|руб\b\.?|RUB\b|₽)",re.I)
 BID_ABSENT=re.compile(BID_LABEL+r"[\s:：|=–—]{0,60}(?:не\s+(?:требуется|устанавливается|"
                       r"установлено|предусмотрено)|отсутствует)\b",re.I)
 # Only accept actual money and percentage with units, never paragraph numbering.
@@ -127,6 +129,11 @@ CONTRACT_LINE=re.compile(r"обеспечени\w*\s+(?:исполнени\w*\s+
 COMPETITIVE=re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)|конкурентн\w*\s+закупк",re.I)
 SECURITY_LABEL=re.compile(BID_LABEL+r"|"+CONTRACT_LINE.pattern,re.I)
 CLAUSE_END=re.compile(r"[!?;]|(?<!\d)\.(?!\d)|(?<=\d)\.(?!\d)")
+PERCENT_NMCD_BASE=re.compile(
+    r"\s*(?:от\s+)?(?:нмц[дк]\b|начальн\w*\s*"
+    r"(?:\(\s*максимальн\w*\s*\)\s*|максимальн\w*\s+)?"
+    r"цен\w*\s+(?:договора|контракта|лота)\b)", re.I)
+PERCENT_NMCD_SUFFIX=re.compile(r"\s*(?:\(\s*(?:НМЦ[ДК]|цен[аы]\s+лота)\s*\)\s*)?[,|:\s]*",re.I)
 GENERIC_SECURITY=re.compile(
     r"\b(?:если|например|образец|пример|допустим|предположим)\b|"
     r"\bв\s+случае\b|\bпри\s+(?:проведении|осуществлении|условии)\b|"
@@ -210,6 +217,35 @@ def _decimal(raw):
         return x if x.is_finite() and x>=0 else None
     except (InvalidOperation,ValueError):
         return None
+
+
+def _security_unit(value):
+    return "money" if re.fullmatch(RUBLE_TOKEN+r"|RUB|₽",str(value or ""),re.I) else "percent"
+
+
+def _security_percent_basis(body,match):
+    """A percentage needs its own explicit denominator, never a nearby price.
+
+    The evidence remains tied to the exact requirement. No clause after a
+    sentence/field boundary can repair an unspecified or different base.
+    """
+    start=match.end()
+    end=min(len(body),start+240)
+    for pattern in (CLAUSE_END,SECURITY_LABEL):
+        boundary=pattern.search(body,start,end)
+        if boundary:end=boundary.start()
+    tail=body[start:end]
+    basis=PERCENT_NMCD_BASE.match(tail)
+    # Only a complete simple base is known. Caps, deductions, VAT qualifiers,
+    # another lot and historical procurement references require a calculation
+    # and source relationship which this numerical rule cannot establish.
+    modified=bool(tail.strip(" \r\n\t,|:") and
+                  (basis is None or not PERCENT_NMCD_SUFFIX.fullmatch(tail[basis.end():])))
+    kind="nmcd" if basis and not modified else "unverified"
+    proof_end=start+basis.end() if kind=="nmcd" else end
+    return {"kind":kind,"modified_formula":modified,"start":start,"end":proof_end,
+            "excerpt":body[start:proof_end]}
+
 
 def _evidence(d,m,law,title,code,qualified):
     body=str(d.get("text") or "")
@@ -376,6 +412,7 @@ SECURITY_CONTEXT_LABELS={
     "security_relation_unresolved":"Не установлена связь противоречащих условий обеспечения с одним лотом",
     "security_conditional_clause":"Фрагмент является условным, отрицательным или справочным, а не установленным размером обеспечения",
     "security_amount_conflict":"Числовой размер обеспечения не согласован с его написанием прописью",
+    "security_percent_basis_unverified":"Не подтверждено, что процент обеспечения рассчитан именно от НМЦД проверяемого лота",
     "security_collection_limited":"Сопоставление условий обеспечения ограничено объёмом доступного текста",
 }
 
@@ -436,7 +473,8 @@ def _security_terms(docs):
                 absent=pattern is BID_ABSENT
                 value=Decimal(0) if absent else _decimal(match["amount"])
                 if value is None:continue
-                unit="money" if absent or (match["unit"].casefold().startswith("руб") or match["unit"]=="₽") else "percent"
+                unit="money" if absent else _security_unit(match["unit"])
+                percent_basis=_security_percent_basis(body,match) if unit=="percent" else None
                 segment=_bid_context(body,match)
                 local=local_context(body,match.start(),match.end())
                 variant=clause_variant_context(body,match.start(),match.end(),context_index=context_index)
@@ -452,7 +490,7 @@ def _security_terms(docs):
                 if len(matches)>100 or len(str(doc.get("text") or ""))>MAX_TEXT or len(docs)>MAX_DOCS:
                     reasons.append("security_collection_limited")
                 terms.append({"doc":doc,"start":match.start(),"end":match.end(),"value":value,
-                              "unit":unit,"absent":absent,"variant":variant,
+                              "unit":unit,"absent":absent,"variant":variant,"percent_basis":percent_basis,
                               "context_index":context_index,
                               "reasons":list(dict.fromkeys(reasons))})
     return terms
@@ -505,6 +543,15 @@ def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=
             # An unscoped clause cannot borrow a price belonging to another lot.
             if (scope["lots"]!=price_scope["lots"] or scope["lot_ids"]!=price_scope["lot_ids"]):
                 reasons.append("security_price_lot_unbound")
+        if source["unit"]=="percent":
+            result["percent_basis"]=source["percent_basis"]
+            # At/below 5m, a positive bid-security requirement itself is the
+            # supported breach. The 2%/5% comparison needs an exact NMCD base.
+            if (source["percent_basis"].get("modified_formula") or
+                    (price is not None and price>Decimal("5000000")) or
+                    str(rule_code or "").upper().endswith(("OVER-FIVE-PERCENT","OVER-TWO-PERCENT"))):
+                if source["percent_basis"]["kind"]!="nmcd":
+                    reasons.append("security_percent_basis_unverified")
         if str(rule_code or "").upper()=="223-SME-BID-SECURITY-OVER-TWO-PERCENT":
             result["sme_scope"]=sme
             if sme["value"] is not True:reasons.append("security_sme_scope_unverified")
@@ -517,7 +564,11 @@ def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=
             if peer["reasons"]:continue
             peer_scope=source_scope_context(selected,peer["doc"],peer["start"],context_index=peer["context_index"])
             if not peer_scope["eligible_actual"]:continue
-            if peer["unit"]==source["unit"]:
+            unbound_percent=any(term["unit"]=="percent" and term["percent_basis"]["kind"]!="nmcd"
+                                for term in (peer,source))
+            if unbound_percent:
+                equal=False
+            elif peer["unit"]==source["unit"]:
                 equal=peer["value"]==source["value"]
             elif price is not None:
                 first=source["value"]*price/100 if source["unit"]=="percent" else source["value"]
@@ -586,7 +637,7 @@ def security_findings(p,docs):
             if match.group("written") and _written_value(match["written"])!=amount:continue
             # Non-monetary shorthand and accidental narrative percentages do
             # not pass; require explicit units.
-            if unit.startswith("руб") or unit=="₽":
+            if _security_unit(unit)=="money":
                 value=amount
                 is_percent=False
             elif unit.startswith("%") or unit.startswith("процент"):
@@ -599,10 +650,11 @@ def security_findings(p,docs):
             selected=_security_purchase(p,doc,match.start())
             verified_nmcd,sme_classification=_security_scope_facts(selected,docs,scope_cache)
             sme_only=sme_classification["value"] is True
+            percent_basis=_security_percent_basis(body,match) if is_percent else None
             if verified_nmcd is not None:
                 price,price_doc,_=verified_nmcd
-                ratio=value if is_percent else value/price*Decimal("100")
-                if price>Decimal("5000000") and ratio<=Decimal("2"):
+                ratio=(value if percent_basis["kind"]=="nmcd" else None) if is_percent else value/price*Decimal("100")
+                if price>Decimal("5000000") and ratio is not None and ratio<=Decimal("2"):
                     # This candidate cannot violate any supported numerical
                     # threshold. Skipping peer comparisons makes no statement
                     # about whole-procurement compliance. A conflicting larger
@@ -661,7 +713,7 @@ def security_findings(p,docs):
                 "law_url":LAW_URL,
                 "evidence":f"{evidence} НМЦД: {price:,.2f} руб.; "
                            f"обеспечение: {value}{'%' if is_percent else ' руб.'}; "
-                           f"отношение: {ratio:.3f}%. "
+                           + (f"отношение: {ratio:.3f}%. " if ratio is not None else "База процента не установлена. ")+
                            f"Сверено с {price_doc.get('name')}.",
                 "note":"Проверено по двум фрагментам сохранённых официальных оригиналов ЕИС. "
                        "Перед правоприменительным решением сверить действующую редакцию, "
