@@ -172,8 +172,11 @@ def match_legal_category(f,categories):
  return None
 
 async def independent_review(ns,reg,categories):
- from v332_all_procurements_audit import existing,as_procurement,collect_saved_evidence,is_official
- purchase,rows=await asyncio.to_thread(existing,ns,reg)
+ from v332_all_procurements_audit import existing,as_procurement,collect_saved_evidence,is_official,thread_call
+ # The outer item timeout cancels this coroutine, not a running executor
+ # thread. Keep its reservation/capacity until that physical stage settles,
+ # including report writes, so a retry cannot overlap abandoned legal work.
+ purchase,rows=await thread_call(existing,ns,reg)
  p=as_procurement(purchase)
  if not business_company(p.get("customer")):
     audit_funnel.observe("gate","company_excluded")
@@ -201,7 +204,7 @@ async def independent_review(ns,reg,categories):
     from pathlib import Path
     available=bool(source["original_received"] or source["source_error"])
     if not available and unreadable:
-       available=await asyncio.to_thread(lambda:any(Path(r["local_path"]).is_file()
+       available=await thread_call(lambda:any(Path(r["local_path"]).is_file()
            for r in rows if r.get("local_path")))
     return ("retry" if available else "waiting_originals"),[]
  # Both halves of the general engine can establish violations. Running
@@ -222,12 +225,12 @@ async def independent_review(ns,reg,categories):
          "submissionStart":p.get("submission_start") or "",
          "submissionEnd":p.get("submission_end") or ""}
  detail.update(source["detail"])
- findings=await asyncio.to_thread(analyzer,p,verified)
+ findings=await thread_call(analyzer,p,verified)
  audit_funnel.observe("analyzer_results",findings)
- checks=await asyncio.to_thread(checker,p,detail,card,verified)
+ checks=await thread_call(checker,p,detail,card,verified)
  qualify=ns.get("vp_methodology_qualify")
  if callable(qualify):
-    findings,checks=await asyncio.to_thread(qualify,p,verified,findings,checks)
+    findings,checks=await thread_call(qualify,p,verified,findings,checks)
  audit_funnel.observe("checklist_results",checks)
  audit_funnel.observe("thematic_reviews",checks)
  findings=list(findings) if isinstance(findings,(list,tuple)) else []
@@ -244,7 +247,7 @@ async def independent_review(ns,reg,categories):
  confirmed_criteria=set()
  if any(key in CATEGORIES for key in categories):
     from vp_inspection_engine import evaluate as evaluate_inspection
-    projection=await asyncio.to_thread(evaluate_inspection,p,verified,findings,(),detail,card)
+    projection=await thread_call(evaluate_inspection,p,verified,findings,(),detail,card)
     confirmed_criteria={(result["source_index"],key)
        for key,results in projection["outcomes"].items() for result in results
        if result.get("status")=="violation"}
@@ -307,7 +310,7 @@ async def independent_review(ns,reg,categories):
  # A failed save propagates so this item is retried rather than called filled.
  save_sheet=ns.get("_vp_save_snapshot")
  if callable(save_sheet):
-    await asyncio.to_thread(save_sheet,p,verified,findings,checks,detail,card)
+    await thread_call(save_sheet,p,verified,findings,checks,detail,card)
  return ("retry" if incomplete else "completed"),collapse_legal_events(selected)
 
 def read_db(ns):

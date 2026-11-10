@@ -129,6 +129,18 @@ CONTRACT_LINE=re.compile(r"обеспечени\w*\s+(?:исполнени\w*\s+
 COMPETITIVE=re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)|конкурентн\w*\s+закупк",re.I)
 SECURITY_LABEL=re.compile(BID_LABEL+r"|"+CONTRACT_LINE.pattern,re.I)
 CLAUSE_END=re.compile(r"[!?;]|(?<!\d)\.(?!\d)|(?<=\d)\.(?!\d)")
+# Original DOCX table rows are preserved as newlines and pipe-separated cells.
+# An exact next field is a boundary, unlike a line-wrapped cap/alternative in
+# the current amount. Requiring a full label plus separator avoids promoting
+# arbitrary prose (or a formula continuation) to an independent field.
+SECURITY_NEXT_FIELD=re.compile(
+    r"(?:\r\n|[\r\n\t])[ \t|]*"
+    r"(?:\d{1,3}(?:\.\d{1,3})*[.)]?[ \t]*(?:\|[ \t]*)?)?"
+    r"(?:(?:порядок|сроки?|форм[аы]|способы?)\s+"
+    r"(?:предоставления|внесения|возврата)\s+(?:обеспечения\s+заявки|денежных\s+средств)|"
+    r"(?:порядок|сроки?|дата)\s+(?:подачи|окончания\s+подачи)\s+заявок|"
+    r"адрес\s+электронной\s+площадки|"+BID_LABEL+r"|"+CONTRACT_LINE.pattern+r")"
+    r"[ \t]*(?=[:：|]|\r?\n|$)",re.I)
 PERCENT_NMCD_BASE=re.compile(
     r"\s*(?:от\s+)?(?:нмц[дк]\b|начальн\w*\s*"
     r"(?:\(\s*максимальн\w*\s*\)\s*|максимальн\w*\s+)?"
@@ -204,8 +216,9 @@ def _bid_context(body,match):
         # The words before this label describe a separate security subject.
         left=match.start()
     right=min(len(body),match.end()+160)
-    following=SECURITY_LABEL.search(body,match.end(),right)
-    if following:right=following.start()
+    for pattern in (SECURITY_NEXT_FIELD,SECURITY_LABEL):
+        following=pattern.search(body,match.end(),right)
+        if following:right=following.start()
     boundary=CLAUSE_END.search(body,match.end(),right)
     if boundary:right=boundary.end()
     return body[left:right]
@@ -223,17 +236,31 @@ def _security_unit(value):
     return "money" if re.fullmatch(RUBLE_TOKEN+r"|RUB|₽",str(value or ""),re.I) else "percent"
 
 
+def _security_requirement_tail(body,match):
+    """Return the bounded continuation of this requirement, not a new field."""
+    start=match.end()
+    end=min(len(body),start+240)
+    for pattern in (SECURITY_NEXT_FIELD,SECURITY_LABEL):
+        boundary=pattern.search(body,start,end)
+        if boundary:end=boundary.start()
+    for boundary in CLAUSE_END.finditer(body,start,end):
+        # The dot in "00 коп., но не более ..." abbreviates a unit; it
+        # cannot remove the continuing cap from the exact amount evidence.
+        if (boundary[0]=="." and re.search(r"\bкоп$",body[start:boundary.start()],re.I)
+                and body[boundary.end():end].lstrip().startswith(",")):
+            continue
+        end=boundary.start()
+        break
+    return start,end
+
+
 def _security_percent_basis(body,match):
     """A percentage needs its own explicit denominator, never a nearby price.
 
     The evidence remains tied to the exact requirement. No clause after a
     sentence/field boundary can repair an unspecified or different base.
     """
-    start=match.end()
-    end=min(len(body),start+240)
-    for pattern in (CLAUSE_END,SECURITY_LABEL):
-        boundary=pattern.search(body,start,end)
-        if boundary:end=boundary.start()
+    start,end=_security_requirement_tail(body,match)
     tail=body[start:end]
     basis=PERCENT_NMCD_BASE.match(tail)
     # Only a complete simple base is known. Caps, deductions, VAT qualifiers,
@@ -245,6 +272,23 @@ def _security_percent_basis(body,match):
     proof_end=start+basis.end() if kind=="nmcd" else end
     return {"kind":kind,"modified_formula":modified,"start":start,"end":proof_end,
             "excerpt":body[start:proof_end]}
+
+
+def _security_money_basis(body,match):
+    """Do not mistake the first RUB operand for a complete, fixed obligation.
+
+    Caps, deductions, alternatives and unknown suffixes require interpretation.
+    Keep their original text for both a fresh finding and legacy reassessment.
+    """
+    start,end=_security_requirement_tail(body,match)
+    tail=body[start:end].strip(" \r\n\t,|:")
+    value=_decimal(match["amount"])
+    # Explicit zero kopecks add no amount. Nonzero/inconsistent fractions are
+    # retained for review, never truncated before comparing legal thresholds.
+    zero_kopecks=bool(re.fullmatch(r"0{1,2}\s+коп(?:еек|ейки|ейка)?\b\.?",tail,re.I))
+    fixed=not tail or (zero_kopecks and value is not None and value==value.to_integral_value())
+    return {"kind":"fixed" if fixed else "unverified", "start":start,"end":end,
+            "excerpt":body[start:end]}
 
 
 def _evidence(d,m,law,title,code,qualified):
@@ -413,6 +457,7 @@ SECURITY_CONTEXT_LABELS={
     "security_conditional_clause":"Фрагмент является условным, отрицательным или справочным, а не установленным размером обеспечения",
     "security_amount_conflict":"Числовой размер обеспечения не согласован с его написанием прописью",
     "security_percent_basis_unverified":"Не подтверждено, что процент обеспечения рассчитан именно от НМЦД проверяемого лота",
+    "security_money_amount_unverified":"Не подтверждён однозначный денежный размер обеспечения с учётом ограничений и иных условий формулы",
     "security_collection_limited":"Сопоставление условий обеспечения ограничено объёмом доступного текста",
 }
 
@@ -475,6 +520,7 @@ def _security_terms(docs):
                 if value is None:continue
                 unit="money" if absent else _security_unit(match["unit"])
                 percent_basis=_security_percent_basis(body,match) if unit=="percent" else None
+                money_basis=_security_money_basis(body,match) if unit=="money" and not absent else None
                 segment=_bid_context(body,match)
                 local=local_context(body,match.start(),match.end())
                 variant=clause_variant_context(body,match.start(),match.end(),context_index=context_index)
@@ -487,10 +533,13 @@ def _security_terms(docs):
                     reasons.append("security_conditional_clause")
                 if not absent and match["written"] and _written_value(match["written"])!=value:
                     reasons.append("security_amount_conflict")
+                if money_basis and money_basis["kind"]!="fixed":
+                    reasons.append("security_money_amount_unverified")
                 if len(matches)>100 or len(str(doc.get("text") or ""))>MAX_TEXT or len(docs)>MAX_DOCS:
                     reasons.append("security_collection_limited")
                 terms.append({"doc":doc,"start":match.start(),"end":match.end(),"value":value,
                               "unit":unit,"absent":absent,"variant":variant,"percent_basis":percent_basis,
+                              "money_basis":money_basis,
                               "context_index":context_index,
                               "reasons":list(dict.fromkeys(reasons))})
     return terms
@@ -527,6 +576,7 @@ def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=
     else:
         reasons.extend(source["reasons"])
         result["variant_context"]=source["variant"]
+        if source["money_basis"] is not None:result["money_basis"]=source["money_basis"]
         scope=source_scope_context(p,source_doc,source["start"],context_index=source["context_index"])
         reasons.extend(scope["reasons"])
         result["source_scope"]=scope
@@ -561,12 +611,17 @@ def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=
             # A nonselected/template/historical peer cannot contradict an
             # operative requirement. Unselected alternatives remain in the
             # source assessment itself, without choosing the lower amount.
-            if peer["reasons"]:continue
+            # An operative but unresolved amount is possible contradictory
+            # evidence; it cannot simply disappear because its formula needs
+            # interpretation. Nonoperative/template sources still stay out.
+            if any(reason!="security_money_amount_unverified" for reason in peer["reasons"]):continue
             peer_scope=source_scope_context(selected,peer["doc"],peer["start"],context_index=peer["context_index"])
             if not peer_scope["eligible_actual"]:continue
             unbound_percent=any(term["unit"]=="percent" and term["percent_basis"]["kind"]!="nmcd"
                                 for term in (peer,source))
-            if unbound_percent:
+            unbound_money=any(term["money_basis"] and term["money_basis"]["kind"]!="fixed"
+                              for term in (peer,source))
+            if unbound_percent or unbound_money:
                 equal=False
             elif peer["unit"]==source["unit"]:
                 equal=peer["value"]==source["value"]
@@ -651,10 +706,12 @@ def security_findings(p,docs):
             verified_nmcd,sme_classification=_security_scope_facts(selected,docs,scope_cache)
             sme_only=sme_classification["value"] is True
             percent_basis=_security_percent_basis(body,match) if is_percent else None
+            money_basis=None if is_percent else _security_money_basis(body,match)
             if verified_nmcd is not None:
                 price,price_doc,_=verified_nmcd
                 ratio=(value if percent_basis["kind"]=="nmcd" else None) if is_percent else value/price*Decimal("100")
-                if price>Decimal("5000000") and ratio is not None and ratio<=Decimal("2"):
+                fixed_value=is_percent or money_basis["kind"]=="fixed"
+                if price>Decimal("5000000") and fixed_value and ratio is not None and ratio<=Decimal("2"):
                     # This candidate cannot violate any supported numerical
                     # threshold. Skipping peer comparisons makes no statement
                     # about whole-procurement compliance. A conflicting larger

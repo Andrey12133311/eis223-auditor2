@@ -399,8 +399,9 @@ async def _one(ns,item,sem,pending=None):
             from audit_write_guard import background_write_guard
             with background_audit(), background_write_guard(lambda c:_require_item_reservation(c,item)):
                 # Include waiting for a physical file permit and both legal
-                # engine stages. Their own file timeout begins after acquire;
-                # without an outer deadline one stuck item held the cycle open.
+                # engine stages. Their own file timeout begins after acquire.
+                # A running legal/report thread drains before cancellation
+                # releases this item; the deadline cannot force-kill a thread.
                 state,findings=await asyncio.wait_for(
                     original.independent_review(ns,item["reg"],item["categories"]),
                     timeout=ITEM_TIMEOUT_SECONDS)
@@ -431,8 +432,9 @@ async def _one(ns,item,sem,pending=None):
         except asyncio.TimeoutError:
             audit_funnel.observe("gate","analysis_timeout")
             for key in ("source_version","semantic_version","engine_signature"):item.pop(key,None)
-            # Extraction threads retain their real physical permits until they
-            # exit. This cancelled read-only review cannot persist a late result.
+            # Extraction threads retain their physical permits until they exit;
+            # legal/report threads have drained before this item can be retried.
+            # No cancelled attempt is returned as a completed legal result.
             print(f"THEMATIC_REVIEW_TIMEOUT batch={item['batch']} reg={item['reg']} "
                   f"timeout_seconds={ITEM_TIMEOUT_SECONDS}",flush=True)
             return item,"retry",[],"Превышено время проверки оригиналов; запланирован повтор"

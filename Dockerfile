@@ -106,9 +106,11 @@ RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_dashboard_as
 COPY tests/test_payment_terms.py tests/test_payment_source_binding.py tests/test_payment_finding_reassessment.py tests/test_payment_terms_pipeline.py tests/test_payment_staff_view.py tests/test_payment_case_view.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_payment_terms test_payment_source_binding test_payment_finding_reassessment test_payment_terms_pipeline test_payment_staff_view test_payment_case_view
 COPY tests/test_cancellation_event_evidence.py tests/test_legal_finding_reassessment.py tests/test_security_context_evidence.py tests/test_legal_evidence_qualification.py tests/test_amendment_decision_evidence.py tests/test_clarification_deadline_evidence.py tests/test_clarification_deadline_pipeline.py tests/test_clarification_xml_evidence.py tests/test_v385_msp_reassessment.py tests/
-RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_cancellation_event_evidence test_legal_finding_reassessment test_security_context_evidence test_legal_evidence_qualification test_amendment_decision_evidence test_clarification_deadline_evidence test_clarification_deadline_pipeline test_v385_msp_reassessment
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_cancellation_event_evidence test_legal_finding_reassessment test_security_context_evidence test_legal_evidence_qualification test_amendment_decision_evidence test_clarification_deadline_evidence test_clarification_deadline_pipeline test_clarification_xml_evidence test_v385_msp_reassessment
 COPY tests/test_archive_expansion_cache.py tests/test_checklist_document_identity.py tests/test_bid_security_requirement_recall.py tests/test_collective_agreement_application_duty.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_expansion_cache test_checklist_document_identity test_bid_security_requirement_recall test_collective_agreement_application_duty
+COPY tests/test_archive_first_pass.py tests/test_security_field_boundaries.py tests/test_thematic_analysis_cancellation.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_first_pass test_security_field_boundaries test_thematic_analysis_cancellation
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

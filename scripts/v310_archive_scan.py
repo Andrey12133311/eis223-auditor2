@@ -21,6 +21,7 @@ import tempfile
 import time
 import zipfile
 from collections import OrderedDict
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import threading
 
@@ -34,7 +35,7 @@ MAX_DEPTH=2
 # Repeated legal checks must not repeatedly decompress the same solid archive.
 # Only immutable expansion descriptors are retained here, never source bytes,
 # text, legal findings, provenance or successful-completion flags.
-_EXPANSION_VERSION="eis223-archive-expansion-20261110"
+_EXPANSION_VERSION="eis223-archive-expansion-20261110-reader"
 _EXPANSION_CACHE_LIMIT=64
 _EXPANSION_CACHE_METADATA_LIMIT=128*1024
 _expansion_cache=OrderedDict()
@@ -155,18 +156,41 @@ def safe_member(name):
     if clean.startswith("/") or ":" in clean.split("/")[0]:return False
     return not any(x in ("",".","..") for x in clean.split("/")) and not any(ord(x)<32 for x in clean)
 
-def _list(path):
+@contextmanager
+def _archive_reader(path):
+    """Keep one bounded ZIP/TAR reader per active archive recursion level.
+
+    In compressed TARs, reopening and listing for every member repeatedly
+    decompresses the entire input. Listing and reading share this handle;
+    it is closed before returning from a nested archive, including failures.
+    Other supported formats retain the existing bounded libarchive path.
+    """
+    if archive_kind(path)==".zip" or zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as reader:
+            yield reader
+    elif tarfile.is_tarfile(path):
+        with tarfile.open(path,"r:*") as reader:
+            yield reader
+    else:
+        yield None
+
+
+def _list(path,reader=None):
     kind=archive_kind(path)
-    if kind==".zip":
-        with zipfile.ZipFile(path) as z:
+    if isinstance(reader,zipfile.ZipFile) or kind==".zip":
+        with (nullcontext(reader) if reader is not None else zipfile.ZipFile(path)) as z:
             items=z.infolist()
             if len(items)>MAX_MEMBERS:return [],["Слишком много файлов в ZIP"]
             return [(i.filename,i.file_size,index) for index,i in enumerate(items) if not i.is_dir() and not
                     (i.external_attr>>16 & 0o170000)==0o120000],[]
-    if tarfile.is_tarfile(path):
-        with tarfile.open(path,"r:*") as t:
-            m=t.getmembers()
-            if len(m)>MAX_MEMBERS:return [],["Слишком много файлов в TAR"]
+    if isinstance(reader,tarfile.TarFile) or tarfile.is_tarfile(path):
+        with (nullcontext(reader) if reader is not None else tarfile.open(path,"r:*")) as t:
+            # Stop metadata enumeration as soon as the archive is ineligible;
+            # getmembers() otherwise retains an unbounded inventory first.
+            m=[]
+            for member in t:
+                m.append(member)
+                if len(m)>MAX_MEMBERS:return [],["Слишком много файлов в TAR"]
             return [(i.name,i.size,index) for index,i in enumerate(m) if i.isfile()],[]
     # RAR/7z/CAB handled by libarchive's audited bsdtar utility.
     if kind in (".gz",".bz2",".xz") and not tarfile.is_tarfile(path):
@@ -208,17 +232,17 @@ def _bsdtar_read(path,name):
             proc.kill()
             proc.wait(timeout=3)
 
-def _read_member(path,name,entry_index=None):
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as z:
+def _read_member(path,name,entry_index=None,reader=None):
+    if isinstance(reader,zipfile.ZipFile) or (reader is None and zipfile.is_zipfile(path)):
+        with (nullcontext(reader) if reader is not None else zipfile.ZipFile(path)) as z:
             info=z.infolist()[entry_index] if entry_index is not None else z.getinfo(name)
             if info.filename!=name:raise ValueError("Запись ZIP изменилась после перечисления")
             if (info.file_size>MAX_MEMBER or info.flag_bits&1 or info.is_dir() or
                     (info.external_attr>>16 & 0o170000)==0o120000):
                 raise ValueError("Большой, зашифрованный или небезопасный ZIP")
             with z.open(info) as inp:return _read_stream(inp)
-    if tarfile.is_tarfile(path):
-        with tarfile.open(path,"r:*") as t:
+    if isinstance(reader,tarfile.TarFile) or tarfile.is_tarfile(path):
+        with (nullcontext(reader) if reader is not None else tarfile.open(path,"r:*")) as t:
             member=t.getmembers()[entry_index] if entry_index is not None else t.getmember(name)
             if member.name!=name:raise ValueError("Запись TAR изменилась после перечисления")
             if not member.isfile() or member.size>MAX_MEMBER:raise ValueError("Небезопасный TAR")
@@ -247,11 +271,16 @@ def _expand_members(path,root):
         if depth>MAX_DEPTH:
             warn("Превышена глубина вложенных архивов");return
         try:
-            members,notes=_list(current)
+            with _archive_reader(current) as reader:
+                visit_open(current,prefix,depth,ancestry,reader)
         except (OSError,ValueError,RuntimeError,tarfile.TarError,
                 zipfile.BadZipFile,subprocess.SubprocessError) as exc:
             cacheable=False
             warn("Не удалось открыть архив: "+type(exc).__name__);return
+
+    def visit_open(current,prefix,depth,ancestry,reader):
+        nonlocal cacheable
+        members,notes=_list(current,reader)
         for note in notes:
             warn(note)
             if note=="Архив libarchive не прочитан":cacheable=False
@@ -277,7 +306,7 @@ def _expand_members(path,root):
             if size>MAX_MEMBER:
                 warn("Слишком крупный вложенный документ");continue
             try:
-                data=_read_member(current,name,entry_index)
+                data=_read_member(current,name,entry_index,reader)
                 if not data or stats["bytes"]+len(data)>MAX_EXPANDED:
                     warn("Превышен допустимый объём распаковки");continue
                 stats["files"]+=1

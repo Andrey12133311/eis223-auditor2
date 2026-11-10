@@ -418,8 +418,17 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(task.done(), "The fast result must commit before the blocked review finishes")
                 self.assertEqual(self.item(quick)["status"], "completed")
                 self.assertEqual(self.item(slow)["status"], "running")
+                # A timeout cancels the review but cannot kill its Python
+                # thread. Keep ownership until the stage really settles so
+                # a subsequent cycle cannot stack another physical analyzer.
+                await asyncio.sleep(1.1)
+                self.assertFalse(task.done(), "The timed-out review must drain its physical worker")
+                self.assertFalse(finished.is_set())
+                self.assertEqual(self.item(slow)["status"], "running")
+                self.assertEqual(self.findings(slow), [])
+                release.set()
                 self.assertEqual(await asyncio.wait_for(task, 3), 2)
-                self.assertFalse(finished.is_set(), "The physical analyzer thread should still be blocked")
+                self.assertTrue(finished.is_set(), "A retry must not release a still-running physical worker")
                 self.assertEqual((self.item(slow)["status"], self.item(slow)["retry_attempts"]), ("retry", 1))
                 self.assertEqual(self.item(slow)["last_analysis_version"], 0)
                 self.assertEqual(self.findings(slow), [])
@@ -431,7 +440,7 @@ class ThematicRecovery(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(task, return_exceptions=True)
         await self.wait_event(finished)
         self.assertEqual(self.item(slow)["status"], "retry")
-        self.assertEqual(self.findings(slow), [], "A late detached analyzer may not save a completed result")
+        self.assertEqual(self.findings(slow), [], "A cancelled analyzer may not save a completed result")
         self.assertFalse(any(call[0] == "checklist" and call[1] == slow for call in self.calls))
         self.age(slow, 100)
         self.assertEqual(await fast.faster_tick(self.ns), 1)
