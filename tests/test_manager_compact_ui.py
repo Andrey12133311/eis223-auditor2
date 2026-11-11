@@ -60,7 +60,7 @@ class CompactManager(unittest.TestCase):
             self.assertEqual(len(ids), len(set(ids)))
             referenced = set(re.findall(r'\$\(["\'](mgr-[^"\']+)["\']\)', SCRIPT))
             self.assertFalse(referenced - set(ids), referenced - set(ids))
-            self.assertLess(render_manager(role).index('id="eis223-account-polish"'),
+            self.assertGreater(render_manager(role).index('id="eis223-account-polish"'),
                             render_manager(role).index('id="eis223-manager-compact"'))
 
     def test_role_routes_and_guard_are_preserved(self):

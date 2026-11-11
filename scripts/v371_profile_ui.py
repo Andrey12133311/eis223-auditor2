@@ -1,4 +1,6 @@
 """Accessible edit-profile page, no fake surname derived from email."""
+from scripts.account_visual_polish_v1 import profile_style
+
 CSS=r"""
 <style>
 *{box-sizing:border-box}body{font:14px/1.65 Inter,"Segoe UI",Arial,system-ui;color:#25465e;background:#f3f7fb;margin:0}
@@ -75,4 +77,4 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 </article></main>__SCRIPT__</body></html>"""
 
 def render_profile():
-    return PAGE.replace("__CSS__",CSS).replace("__SCRIPT__",SCRIPT)
+    return PAGE.replace("__CSS__",CSS+profile_style()).replace("__SCRIPT__",SCRIPT)

@@ -975,4 +975,4 @@ placeholder="Срок оплаты договора"></label>
 </main>__JS__</body></html>"""
 
 def render_workbench():
-    return PAGE.replace("__CSS__",CSS+account_page_style()+COMPACT_CSS).replace("__JS__",JS)
+    return PAGE.replace("__CSS__",CSS+COMPACT_CSS+account_page_style()).replace("__JS__",JS)

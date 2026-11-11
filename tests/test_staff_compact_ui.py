@@ -62,7 +62,7 @@ class CompactStaff(unittest.TestCase):
         self.assertTrue(page.xpath('//*[@id="staff-case-download"]'))
         self.assertTrue(page.xpath('//a[@href="/account/memos"]'))
         markup = render_workbench()
-        self.assertLess(markup.index('id="eis223-account-polish"'), markup.index('id="staff-compact-layout"'))
+        self.assertGreater(markup.index('id="eis223-account-polish"'), markup.index('id="staff-compact-layout"'))
         self.assertNotIn("loadToday", JS)
         self.assertIn('credentials:"same-origin"', JS)
 

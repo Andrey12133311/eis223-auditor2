@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from fastapi.responses import HTMLResponse
 from v342_identity import organization_display_name
 from saved_eis_dates import recovered_date
+from account_visual_polish_v1 import card_style
 
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
 STYLE="""<style id="eis-modern-audit-card">
@@ -485,7 +486,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         review_assets=review_style+review_script
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'
      '<meta name="viewport" content="width=device-width,initial-scale=1">'
-     '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+'</head><body>'
+     '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+card_style()+'</head><body>'
      '<header><h1>'+('Карточка тематической проверки № ' if thematic else 'Карточка проверки закупки № ')+esc(reg)+'</h1></header><main>'+nav
      +'<section class="panel"><h2>Сведения о закупке</h2>'+basic+'</section>'
      +inspection_actions

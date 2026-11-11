@@ -5,7 +5,7 @@ Private data is fetched from owner-scoped APIs only after authentication.
 """
 from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
-from scripts.account_visual_polish_v1 import workspace_style
+from scripts.account_visual_polish_v1 import workspace_style, signin_style
 
 
 _STYLE = """
@@ -266,7 +266,7 @@ def site_header(role="user"):
              if role == "admin" else "")
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + workspace_style() + _COMPACT_STYLE + (TEAM_SCRIPT if role == "admin" else "") + '''
+    return (_STYLE + _COMPACT_STYLE + workspace_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
 <div class="eis223-workspace eis223-compact-cabinet" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span></span></span>
@@ -850,47 +850,7 @@ refreshMyName();
 ''').encode("utf-8")
 
 
-_GATEWAY_STYLE = """
-<style id="eis223-signin-style">
-:root{font-family:Inter,"Segoe UI",system-ui,sans-serif;color:#2a4356;
- --auth-ink:#213f57;--auth-border:#dbe7ef;--auth-muted:#687e8e}
-*{box-sizing:border-box}
-html,body{margin:0;min-height:100%;font-family:inherit}
-body{background:linear-gradient(155deg,#eaf2f8 0%,#f4f7fa 42%,#edf3f8 100%);
- color:var(--auth-ink)}
-.layout{min-height:100vh;display:flex;justify-content:center;align-items:center;
- padding:26px 15px}
-.auth{position:relative;overflow:hidden;background:#fff;width:min(490px,100%);
- border:1px solid var(--auth-border);border-radius:14px;
- padding:clamp(23px,4vw,36px);box-shadow:0 16px 56px #204e7119}
-.auth:before{position:absolute;top:0;left:0;right:0;content:"";height:5px;
- background:linear-gradient(90deg,#174c76,#3483b7,#7fb4d4)}
-h1{font-size:clamp(24px,2.8vw,29px);line-height:1.17;
- font-weight:790;letter-spacing:-.035em;color:#204c70;margin:10px 0 11px}
-p{font-size:13px;color:var(--auth-muted);line-height:1.65}
-.tabs{display:flex;gap:4px;padding:4px;margin:22px 0 19px;
- border-radius:9px;background:#eef4f9}
-.tabs button{flex:1;min-height:43px;padding:9px;border:0;
- border-radius:7px;cursor:pointer;font:700 14px system-ui;
- background:transparent;color:#637d92}
-.tabs button[aria-selected=true]{background:#fff;color:#175b8b;box-shadow:0 1px 7px #244b6812}
-form[hidden]{display:none!important}
-label{display:block;margin:15px 0 6px;font-size:13px;color:#425f74;font-weight:670}
-input{width:100%;display:block;min-height:45px;border-radius:8px;
- background:#fff;color:#263f53;border:1px solid #cbdce8;
- padding:11px 13px;font:inherit}
-input:focus{outline:3px solid #c8e3f6;border-color:#3b80ae}
-.submit{min-height:46px;width:100%;border:1px solid #175f92;
- background:#175f92;color:#fff;border-radius:8px;
- font:700 14px system-ui;margin-top:21px;cursor:pointer}
-.submit:hover:not(:disabled){background:#104971}
-.submit:disabled{opacity:.55}
-#auth-status{min-height:24px;font-size:13px;color:#406985;margin:12px 0}
-.small{font-size:11px;text-align:center;color:#8598a8;margin-top:14px}
-:focus-visible{outline:3px solid #8dbfe0;outline-offset:2px}
-@media(max-width:500px){.layout{align-items:flex-start;padding-top:8vh}.auth{border-radius:11px}}
-</style>
-"""
+_GATEWAY_STYLE = signin_style()
 
 
 def login_portal(initial_tab="login"):

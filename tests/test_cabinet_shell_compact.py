@@ -55,7 +55,7 @@ class CompactCabinetShell(unittest.TestCase):
             targets = set(re.findall(r"q\(['\"](eis223-[^'\"]+)['\"]\)", script))
             self.assertFalse(targets - set(ids) - (admin_ids if role != "admin" else set()))
             markup = site_header(role).decode()
-            self.assertLess(markup.index('id="eis223-workspace-polish"'), markup.index('id="eis223-cabinet-compact"'))
+            self.assertGreater(markup.index('id="eis223-workspace-polish"'), markup.index('id="eis223-cabinet-compact"'))
             self.assertIn("controls.open=true", script)
 
 

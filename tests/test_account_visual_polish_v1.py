@@ -102,10 +102,10 @@ class VisualPolishTests(unittest.TestCase):
         self.assertIn('max-height:calc(100dvh - 28px)', account_page_style())
 
     def test_normal_text_and_active_navigation_color_contrast(self):
-        pairs = [('#263b4d', '#f3f6f9'), ('#536b7d', '#ffffff'),
-                 ('#536b7d', '#f3f6f9'), ('#ffffff', '#18384f'),
-                 ('#ffffff', '#175d8d'), ('#ffffff', '#28678f'),
-                 ('#174f78', '#e7f0f7'), ('#a34043', '#ffffff')]
+        pairs = [('#1d1d1f', '#f5f5f7'), ('#636366', '#ffffff'),
+                 ('#636366', '#f5f5f7'), ('#1d1d1f', '#ffffff'),
+                 ('#ffffff', '#0066cc'), ('#ffffff', '#0055ad'),
+                 ('#0055ad', '#eaf2ff'), ('#b42332', '#ffffff')]
         for foreground, background in pairs:
             with self.subTest(foreground=foreground, background=background):
                 self.assertGreaterEqual(contrast(foreground, background), 4.5)
