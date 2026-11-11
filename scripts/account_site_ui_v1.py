@@ -530,7 +530,7 @@ for(const item of purchases.slice(0,8)){
  if(item.card_available){const dossier=document.createElement('a');
  dossier.href='/me/cases/'+encodeURIComponent(item.reg_number);
  dossier.textContent='Электронное дело';actions.append(dossier);}
- const del=document.createElement('button');del.type='button';del.textContent='Убрать';
+ const del=document.createElement('button');del.type='button';del.textContent='Убрать из списка';
  del.title='Убрать из личного кабинета, не удаляя документы и результаты проверки';
  del.onclick=async()=>{
   if(!confirm('Убрать эту самостоятельную проверку из вашего кабинета? Оригиналы ЕИС и результаты не удалятся.'))return;

@@ -39,8 +39,10 @@ body.eis-shell-ready[data-eis-view=cabinet] .eis223-workspace .eis223-personal{m
 body.eis-shell-ready .eis223-cabinet-extra{scroll-margin-top:calc(var(--shell-bar) + 20px)}
 .eis-shell-nav{position:fixed;top:var(--shell-bar,64px);left:0;bottom:0;z-index:30;
  width:var(--shell-nav,220px);background:#f9f9fb;border-right:1px solid #dedee3;
- padding:20px 12px;overflow:auto;box-sizing:border-box;font:13px/1.45 var(--ui-font,system-ui);color:#1d1d1f}
-.eis-shell-group{margin:0 0 20px}.eis-shell-group>p{margin:0 10px 9px;color:#636366;
+ padding:20px 12px;overflow:auto;box-sizing:border-box;font:13px/1.45 var(--ui-font,system-ui);color:#1d1d1f;display:flex;flex-direction:column}
+.eis-shell-nav>nav{display:flex;flex-direction:column;flex:1 0 auto}
+.eis-shell-nav>button{flex-shrink:0}
+.eis-shell-group{margin:0 0 20px;flex-shrink:0}.eis-shell-group>p{margin:0 10px 9px;color:#636366;
  font-size:10px;letter-spacing:.07em;font-weight:600;text-transform:uppercase}
 .eis-shell-nav :is(a,button){display:flex;align-items:center;gap:10px;width:100%;min-height:40px;
  box-sizing:border-box;padding:9px 10px;margin:3px 0;border:1px solid transparent;border-radius:8px;
@@ -61,7 +63,7 @@ body.eis-shell-ready .eis-shell-nav button[aria-current=page]:hover{background:#
 body.eis-shell-ready .eis-quicklook-tabs button[aria-selected=true]{background:#eaf2ff!important;color:#0055ad!important}
 body.eis-shell-ready .eis-quicklook-heading button{background:#fff!important}
 body.eis-shell-ready .eis-quicklook-error button{background:#0066cc!important;color:#fff!important}
-.eis-shell-nav .eis-shell-nav-footer{border-top:1px solid #dedee3;padding-top:10px;margin-top:20px}
+.eis-shell-nav .eis-shell-nav-footer{border-top:1px solid #dedee3;padding-top:10px;margin-top:auto;flex-shrink:0}
 .eis-shell-ready .eis223-menu button#eis-shell-nav-toggle{width:34px;padding:7px!important;min-width:34px;
  background:transparent!important;border:1px solid #dedee3!important;color:#515154!important;flex:none}
 #eis-shell-nav-toggle svg{display:block;width:18px;height:18px}
@@ -369,9 +371,9 @@ def workspace_panels(role='user'):
     admin=link('/account/admin','Заявки на регистрацию','people') if role=='admin' else ''
     nav='''<aside id="eis-shell-nav" class="eis-shell-nav" hidden aria-label="Главные разделы">
 <button id="eis-shell-nav-close" type="button" aria-label="Закрыть меню">'''+icon('close')+'''</button>
-<nav aria-label="Рабочая область"><div class="eis-shell-group"><p>Рабочая область</p>'''+link('/','Реестр закупок','list',True,'eis-shell-registry')+'''
-<button type="button" id="eis-shell-overview" title="Мой кабинет" aria-label="Мой кабинет" aria-controls="eis223-cabinet" aria-pressed="false">'''+icon('grid')+'''<span class="eis-shell-label">Мой кабинет</span></button></div>
-<div class="eis-shell-group"><p>Моя работа</p>'''+link('/account/workbench','Задачи и поручения','check')+link('/account/home','Мои проверки','list')+link('/account/thematic','Тематические','layers')+link('/account/memos','Служебные записки','file')+'''
+<nav aria-label="Основные разделы"><div class="eis-shell-group" data-eis-group="primary"><p>Основное</p>'''+link('/','Реестр закупок','list',True,'eis-shell-registry')+'''
+<button type="button" id="eis-shell-overview" title="Мой кабинет" aria-label="Мой кабинет" aria-controls="eis223-cabinet" aria-pressed="false">'''+icon('grid')+'''<span class="eis-shell-label">Мой кабинет</span></button>
+'''+link('/account/workbench','Задачи и поручения','check')+link('/account/home','Мои проверки','list')+link('/account/thematic','Тематические проверки','layers')+link('/account/memos','Служебные записки','file')+'''
 <button type="button" id="eis-shell-favorites" title="Избранное" aria-label="Избранное">'''+icon('star')+'''<span class="eis-shell-label">Избранное</span></button></div>'''+('<div class="eis-shell-group"><p>Управление</p>'+manager+admin+'</div>' if manager or admin else '')+'''
 <div class="eis-shell-nav-footer">'''+link('/account/profile','Профиль','profile')+'</div></nav></aside>'
     panel='''<div id="eis-shell-shade" hidden></div>

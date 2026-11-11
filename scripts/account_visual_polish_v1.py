@@ -168,7 +168,7 @@ body.eis-shell-ready .eis223-workspace .eis223-row-actions a{font-weight:500!imp
 body.eis-shell-ready .eis223-workspace .eis223-row-actions .eis223-open-card{padding:7px 9px;border:1px solid var(--ui-line);
  border-radius:7px;background:#fff;line-height:1.4;min-height:32px;display:inline-flex;align-items:center}
 body.eis-shell-ready .eis223-workspace .eis223-tile li .eis223-row-actions button{margin:0;padding:5px 7px!important;
- border-color:transparent!important;min-height:30px!important;background:transparent!important;font-size:11px!important}
+ border-color:transparent!important;min-height:30px!important;background:transparent!important;color:var(--ui-muted)!important;font-size:11px!important}
 .eis223-legal-state::before{content:"";display:inline-block;width:5px;height:5px;margin:0 6px 1px 0;border-radius:50%;background:#7b7b80}
 .eis223-legal-state[data-tone=complete]::before{background:#216e45}
 .eis223-legal-state[data-tone=attention]::before{background:#b42332}
