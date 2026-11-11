@@ -3,9 +3,33 @@ from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
 
 from scripts.account_visual_polish_v1 import account_page_style
+from scripts.workspace_discovery_v1 import workspace_discovery
+from scripts.workspace_preferences_v1 import workspace_preferences
+from scripts.inspection_progress_v1 import manual_progress_runtime
 
 
 def page(title, body):
+    sections = (
+        ("Мои проверки", "/account/home"),
+        ("Тематические проверки", "/account/thematic"),
+        ("Служебные записки", "/account/memos"),
+    )
+    authenticated = title not in ("Регистрация", "Вход")
+    navigation = ""
+    tabs = ""
+    if authenticated:
+        navigation = ('<nav class="account-utilities" aria-label="Основная навигация">'
+                      '<a href="/">Реестр закупок</a>'
+                      '<a href="/#cabinet">Мой кабинет</a>'
+                      '<a href="/account/profile">Профиль</a></nav>')
+        tabs = '<nav class="account-sections" aria-label="Мои документы и проверки">'
+        for label, href in sections:
+            current = ' aria-current="page"' if title == label else ''
+            tabs += '<a href="' + href + '"' + current + '>' + label + '</a>'
+        tabs += '</nav>'
+    header = ('<header class="account-header"><div class="account-header-inner">'
+              '<a class="account-brand" href="/">ЕИС Аудитор'
+              '<span>Проверка закупок</span></a>' + navigation + '</div></header>')
     return """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>""" + escape(title) + """ · ЕИС Аудитор</title>
@@ -77,8 +101,72 @@ td button{margin:4px 5px 4px 0}
  th,td{padding:10px 11px}
 }
 @media(prefers-reduced-motion:reduce){button{transition:none}}
-</style>""" + account_page_style() + """</head><body><header>ЕИС Аудитор · Личный кабинет</header>
-<main><section class="panel">""" + body + """</section></main></body></html>"""
+</style>""" + account_page_style() + """
+<style id="eis223-account-pages-layout">
+body.account-page .account-header{padding:0;background:#fff;color:#1d1d1f;border-bottom:1px solid #e5e5ea}
+body.account-page .account-header-inner{width:min(100%,1110px);margin:auto;padding:15px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+body.account-page .account-brand{display:block;color:#1d1d1f;font-size:16px;font-weight:700;letter-spacing:-.025em;text-decoration:none;white-space:nowrap}
+body.account-page .account-brand span{display:block;color:#636366;font-size:11px;font-weight:500;letter-spacing:0;margin-top:2px}
+body.account-page .account-utilities{margin:0;padding:0;border:0;gap:4px}
+body.account-page .account-utilities a{display:inline-flex;align-items:center;min-height:40px;padding:7px 10px;border:0;background:transparent;color:#636366;font-size:12px;font-weight:550;white-space:nowrap}
+body.account-page .account-utilities a:hover{color:#1d1d1f;background:#f5f5f7;text-decoration:none}
+body.account-page main{margin-top:20px}
+body.account-page .account-sections{margin:0 0 18px;padding:0 0 9px;gap:4px;flex-wrap:nowrap;overflow-x:auto;border:0;max-width:100%}
+body.account-page .account-sections a{display:inline-flex;align-items:center;min-height:42px;padding:9px 13px;border:1px solid transparent;background:transparent;color:#636366;white-space:nowrap;font-size:13px;font-weight:550;text-decoration:none}
+body.account-page .account-sections a:hover{background:#ededf0;color:#1d1d1f}
+body.account-page .account-sections a[aria-current=page]{background:#fff;border-color:#dedee3;color:#1d1d1f;box-shadow:0 1px 3px #00000005}
+body.account-page .panel{box-shadow:0 2px 12px #00000003}
+body.account-page [hidden]{display:none!important}
+body.account-page .manual-head{margin-bottom:10px}
+body.account-page .manual-note{border-left:2px solid #b9cce1;background:#f5f7fa;color:#636366}
+body.account-page :is(.manual-filter-area,.memo-filters){background:#f5f5f7;border-color:#e5e5ea;padding:14px;gap:12px}
+body.account-page :is(.manual-form,.memo-archive-form){background:#fafafa;border-color:#e5e5ea}
+body.account-page :is(.manual-summary strong,#memo-count){font-size:12px;font-weight:550;color:#636366}
+body.account-page :is(#manual-filters-reset,#thematic-reset,.memo-filters button,#manual-refresh,.account-retry){background:#fff;color:#1d1d1f;border-color:#d6d6dc;box-shadow:none}
+body.account-page :is(#manual-empty,.eis-empty,.account-empty){background:#fafafa;border:1px solid #e5e5ea;border-radius:12px;padding:24px;text-align:center;color:#636366}
+body.account-page :is(#manual-empty,.eis-empty,.account-empty) p{margin:0 0 10px;color:#636366}
+body.account-page :is(.manual-actions,.memo-action){gap:6px}
+body.account-page :is(.manual-actions a,.memo-action a){background:#f5f5f7;color:#0055ad;border-color:#dedee3;min-height:40px;font-size:12px}
+body.account-page :is(.manual-actions button,.memo-action button){background:#fff;color:#636366;border-color:#dedee3;min-height:40px}
+body.account-page #manual-rows td:first-child{color:#1d1d1f}
+body.account-page :is(#manual-rows td small,#manual-inn-results td small,.eis-meta){color:#636366;font-size:12px;line-height:1.6}
+body.account-page .eis-my-check{border-radius:12px!important;box-shadow:none;background:#fff!important}
+body.account-page .eis-my-check h2{color:#1d1d1f!important;font-size:17px}
+body.account-page .eis-my-actions button{border-color:#dedee3!important;color:#636366!important}
+body.account-page #memo-create-panel{margin:20px 0;border:1px solid #dedee3;border-radius:12px;background:#fafafa}
+body.account-page #memo-create-panel summary{padding:15px 17px;font-weight:650;cursor:pointer;color:#0055ad;min-height:48px}
+body.account-page #memo-create-panel[open] summary{border-bottom:1px solid #e5e5ea}
+body.account-page #memo-create-panel .memo-archive-form{margin:0;padding:17px;border:0;background:transparent}
+body.account-page #memo-create-panel fieldset{border-color:#dedee3!important}
+body.account-page .account-retry{margin-top:0}
+body.account-page :is(summary,a,button,input,select):focus-visible{outline:3px solid #86b7ed;outline-offset:3px}
+@media(max-width:650px){
+ body.account-page .account-header-inner{padding:14px 16px;gap:6px;flex-wrap:wrap}
+ body.account-page .account-utilities{width:100%;gap:0;justify-content:space-between}
+ body.account-page .account-utilities a{padding:8px 6px;min-height:44px}
+ body.account-page main{margin-top:12px}
+ body.account-page .account-sections{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:12px;gap:2px;overflow:visible}
+ body.account-page .account-sections a{font-size:11px;padding:9px 5px;min-height:44px;white-space:normal;text-align:center;justify-content:center;line-height:1.4}
+ body.account-page :is(.manual-filter-area,.memo-filters){grid-template-columns:repeat(2,minmax(0,1fr));padding:12px;gap:10px}
+ body.account-page :is(.manual-filter-area,.memo-filters) label:first-child{grid-column:1/-1}
+ body.account-page .memo-action a,body.account-page .memo-action button{min-height:44px}
+ body.account-page :is(#manual-table,#manual-inn-table,#memo-table){display:block;width:100%;max-width:100%;border:0;background:transparent;overflow:visible}
+ body.account-page :is(#manual-table,#manual-inn-table,#memo-table) thead{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+ body.account-page :is(#manual-table,#manual-inn-table,#memo-table) tbody{display:grid;gap:12px}
+ body.account-page :is(#manual-table,#manual-inn-table,#memo-table) tbody tr{display:grid;gap:12px;border:1px solid #e5e5ea;border-radius:12px;padding:15px;background:#fff}
+ body.account-page :is(#manual-table,#manual-inn-table,#memo-table) td{display:block;min-width:0;padding:0;border:0;white-space:normal;overflow-wrap:anywhere;background:transparent}
+ body.account-page :is(#manual-table,#manual-inn-table,#memo-table) td[data-label]::before{content:attr(data-label);display:block;color:#636366;font-size:11px;font-weight:550;margin-bottom:4px}
+ body.account-page #memo-table td.account-empty{padding:8px 0}
+ body.account-page #memo-table .memo-action{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ body.account-page #memo-table .memo-action :is(a,button){width:100%;justify-content:center;margin:0;font-size:12px}
+ body.account-page #memo-table .memo-action :is(button,small){grid-column:1/-1}
+ body.account-page #manual-table .manual-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ body.account-page #manual-table .manual-actions :is(a,button){width:100%;min-height:44px;justify-content:center;margin:0;padding:8px 6px;font-size:12px}
+}
+@media(pointer:coarse){body.account-page :is(.manual-actions a,.manual-actions button,.memo-action a,.memo-action button){min-height:44px}}
+@media(prefers-reduced-motion:reduce){body.account-page *{scroll-behavior:auto!important}}
+</style></head><body class="account-page">""" + header + """
+<main>""" + tabs + """<section class="panel">""" + body + """</section></main>""" + (workspace_discovery() + workspace_preferences() if authenticated else "") + """</body></html>"""
 
 
 REGISTER = page("Регистрация", """
@@ -120,7 +208,7 @@ document.getElementById('login').addEventListener('submit',async e=>{
 });
 </script>""")
 
-HOME = page("Мои самостоятельные проверки", """
+HOME = page("Мои проверки", """
 <style>
 .manual-head{display:flex;flex-wrap:wrap;align-items:flex-start;
  justify-content:space-between;gap:10px;margin-bottom:16px}
@@ -167,10 +255,9 @@ HOME = page("Мои самостоятельные проверки", """
  td:last-child{min-width:160px}
 }
 </style>
-<p><a href="/">← На главную / В личный кабинет</a></p>
 <div class="manual-head"><div>
-<h1>Самостоятельные проверки</h1>
-<p>Здесь находятся закупки, проверку которых вы запустили под своей учётной записью.</p>
+<h1>Мои проверки</h1>
+<p>Запускайте проверку закупки и следите за загрузкой документов и результатами.</p>
 </div></div>
 <div class="manual-note">Сохранённый номер закупки сам по себе не считается проведённой проверкой.
 Статус задания, количество реально проверенных документов и подтверждённых нарушений показаны отдельно.</div>
@@ -182,8 +269,7 @@ HOME = page("Мои самостоятельные проверки", """
 </form>
 <section class="manual-inn-section" aria-labelledby="manual-inn-heading">
 <h2 id="manual-inn-heading">Поиск закупок по ИНН заказчика</h2>
-<p>Поиск в ЕИС, получение данных закупок и документов выполняются через VPS.
-Чтобы добавить найденную закупку в свои самостоятельные проверки, нажмите «Проверить».</p>
+<p>Найдите закупки заказчика в ЕИС. Чтобы добавить закупку в свои проверки, нажмите «Проверить».</p>
 <form id="manual-inn-search" class="manual-form">
 <label for="manual-inn">ИНН заказчика
 <input id="manual-inn" name="inn" inputmode="numeric" autocomplete="off" maxlength="12"
@@ -191,11 +277,11 @@ HOME = page("Мои самостоятельные проверки", """
 <button type="submit" id="manual-inn-submit">Проверить по ИНН</button>
 </form>
 <p id="manual-inn-message" class="message" role="status" aria-live="polite"></p>
-<table id="manual-inn-table" aria-label="Закупки, найденные по ИНН заказчика" hidden>
-<thead><tr><th>Закупка</th><th>Заказчик</th><th>Действие</th></tr></thead>
-<tbody id="manual-inn-results"></tbody></table>
+<table id="manual-inn-table" role="table" aria-label="Закупки, найденные по ИНН заказчика" hidden>
+<thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Закупка</th><th role="columnheader" scope="col">Заказчик</th><th role="columnheader" scope="col">Действие</th></tr></thead>
+<tbody id="manual-inn-results" role="rowgroup"></tbody></table>
 </section>
-<h2>Мои самостоятельные проверки</h2>
+<h2>История проверок</h2>
 <div class="manual-filter-area" aria-label="Фильтры самостоятельных проверок">
 <label>Поиск среди своих проверок<input type="search" id="manual-search" placeholder="Номер, заказчик или ИНН"></label>
 <label>Статус<select id="manual-status"><option value="">Все</option>
@@ -208,16 +294,22 @@ HOME = page("Мои самостоятельные проверки", """
 <label class="manual-only-confirmed"><input type="checkbox" id="manual-only-violations"> Есть нарушения</label>
 <button type="button" id="manual-filters-reset">Сбросить фильтры</button></div>
 <p id="manual-message" class="message" role="status" aria-live="polite"></p>
+<button type="button" id="manual-retry" class="account-retry" hidden>Повторить загрузку</button>
 <div class="manual-summary"><strong id="manual-total">Загрузка проверок…</strong>
 <button type="button" id="manual-refresh">Обновить данные</button></div>
 <div id="manual-empty" hidden>Вы ещё не запускали самостоятельных проверок через личный кабинет.</div>
-<table aria-label="История самостоятельных проверок" id="manual-table">
-<thead><tr><th>Закупка и дата</th><th>Состояние</th><th>Документы</th>
-<th>Нарушения</th><th>Действия</th></tr></thead>
-<tbody id="manual-rows"></tbody></table>
+<table aria-label="История самостоятельных проверок" id="manual-table" role="table">
+<thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Закупка и дата</th><th role="columnheader" scope="col">Состояние</th><th role="columnheader" scope="col">Документы</th>
+<th role="columnheader" scope="col">Нарушения</th><th role="columnheader" scope="col">Действия</th></tr></thead>
+<tbody id="manual-rows" role="rowgroup"></tbody></table>
+""" + manual_progress_runtime() + """
 <script>
 (()=>{
 const el=id=>document.getElementById(id);
+function displayCount(value){
+ if(typeof value==='string')value=/^[0-9]+$/.test(value.trim())?Number(value.trim()):NaN;
+ return typeof value==='number'&&Number.isSafeInteger(value)&&value>=0?value.toLocaleString('ru-RU'):'—';
+}
 const state={queued:'Ожидает загрузки',leased:'Загружаются данные ЕИС',
  done:'Загрузка завершена',completed:'Загрузка завершена',partial:'Частичная загрузка',
  deferred:'Ожидает источник',error:'Ошибка загрузки',failed:'Ошибка загрузки',unknown:'Статус загрузки уточняется'};
@@ -236,10 +328,11 @@ function retainedResults(item){
   (Number(item.documents_checked)>0||Number(item.violations)>0)?
   'Показаны сохранённые результаты предыдущей проверки. Новая проверка ещё не завершена.':'';
 }
-let manualCache=[],manualRefresh=null,manualRefreshQueued=false;
+let manualCache=[],manualRefresh=null,manualRefreshQueued=false,manualLoaded=false,manualLoadError=false;
 function refresh(force=false){
  if(manualRefresh){if(force===true)manualRefreshQueued=true;return manualRefresh}
  manualRefresh=(async()=>{
+  el('manual-table').setAttribute('aria-busy','true');el('manual-retry').hidden=true;
   do{
    manualRefreshQueued=false;
    try{
@@ -248,13 +341,19 @@ function refresh(force=false){
     if(!response.ok)throw Error('Не удалось загрузить проверки');
     const data=await response.json();
     if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
-    manualCache=data;renderManual();
-   }catch(error){el('manual-message').textContent=error.message}
+    manualCache=data;manualLoaded=true;renderManual();
+    if(manualLoadError)el('manual-message').textContent='Данные обновлены';manualLoadError=false;
+   }catch(error){
+    manualLoadError=true;el('manual-message').textContent=error.message+'. Попробуйте загрузить данные ещё раз.';
+    el('manual-retry').hidden=false;
+    if(!manualLoaded){el('manual-total').textContent='Данные не загружены';el('manual-table').hidden=true}
+   }
   }while(manualRefreshQueued);
- })().finally(()=>{manualRefresh=null});
+ })().finally(()=>{manualRefresh=null;el('manual-table').setAttribute('aria-busy','false')});
  return manualRefresh;
 }
 function renderManual(){
+ if(!manualLoaded)return;
  const allData=manualCache;
  const select=el('manual-violation-type'),selected=select.value;
  const kinds=[...new Set(allData.flatMap(x=>x.violation_types||[]))].sort((a,b)=>a.localeCompare(b,'ru'));
@@ -277,15 +376,25 @@ function renderManual(){
  const rows=el('manual-rows');rows.replaceChildren();
  el('manual-total').textContent='Показано: '+data.length+' из '+allData.length;
  el('manual-empty').hidden=!!data.length;
- el('manual-empty').textContent=allData.length?'По заданным фильтрам проверки не найдены.':'Вы ещё не запускали самостоятельных проверок через личный кабинет.';
+ const empty=el('manual-empty');empty.replaceChildren();
+ const emptyText=document.createElement('p');
+ emptyText.textContent=allData.length?'По выбранным фильтрам проверки не найдены.':'Здесь появятся закупки, проверку которых вы запустили.';
+ const emptyAction=document.createElement('button');emptyAction.type='button';
+ emptyAction.textContent=allData.length?'Сбросить фильтры':'Указать номер закупки';
+ emptyAction.onclick=()=>{if(allData.length)el('manual-filters-reset').onclick();else el('manual-add').elements.reg.focus()};
+ empty.append(emptyText,emptyAction);
  el('manual-table').hidden=!data.length;
  for(const item of data){
   const tr=document.createElement('tr'),reg=document.createElement('td'),
     status=document.createElement('td'),docs=document.createElement('td'),
     violations=document.createElement('td'),actions=document.createElement('td');
+  tr.setAttribute('role','row');
+  for(const [cell,label] of [[reg,'Закупка и дата'],[status,'Состояние'],[docs,'Документы'],[violations,'Нарушения'],[actions,'Действия']]){
+   cell.setAttribute('role','cell');cell.setAttribute('data-label',label);
+  }
   reg.textContent='№ '+item.reg_number;
   const date=document.createElement('small');const stamp=Date.parse(item.started_at||'');
-  date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'';
+  date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'}):'';
   reg.append(date);
   if(item.customer){const name=document.createElement('small');name.textContent=item.customer;reg.append(name)}
   if(item.customer_inn){const inn=document.createElement('small');inn.textContent='ИНН '+item.customer_inn;reg.append(inn)}
@@ -295,18 +404,22 @@ function renderManual(){
   if(['failed','error'].includes(item.job_status))label.classList.add('fail');
   status.append(label);
   const legal=document.createElement('small');legal.textContent=legalStatus(item);status.append(legal);
+  if(window.eis223InspectionProgress)status.append(window.eis223InspectionProgress.create(item));
   const previous=retainedResults(item);
   if(previous){const note=document.createElement('small');note.textContent=previous;status.append(note)}
-  docs.textContent=String(Math.max(0,Number(item.documents_checked||0)))+' проверено';
-  violations.textContent=String(Math.max(0,Number(item.violations||0)));
+  const checked=displayCount(item.documents_checked);
+  docs.textContent=checked==='—'?'—':checked+' проверено';
+  docs.title=checked==='—'?'Количество проверенных документов пока неизвестно':'';
+  violations.textContent=displayCount(item.violations);
+  violations.title=violations.textContent==='—'?'Количество подтверждённых нарушений пока неизвестно':'';
   const wrapper=document.createElement('div');wrapper.className='manual-actions';
   const open=document.createElement('a');
-  open.href=item.card_available?'/check-new/'+encodeURIComponent(item.reg_number):'/';
-  open.textContent=item.card_available?'Открыть проверку':'На главную';
+  open.href=item.card_available?'/check-new/'+encodeURIComponent(item.reg_number):'/#cabinet';
+  open.textContent=item.card_available?'Открыть карточку':'Мой кабинет';
   const dossier=document.createElement('a');
   dossier.href='/me/cases/'+encodeURIComponent(item.reg_number);
   dossier.textContent='Электронное дело';
-  const remove=document.createElement('button');remove.type='button';remove.textContent='Убрать';
+  const remove=document.createElement('button');remove.type='button';remove.textContent='Убрать из списка';
   remove.title='Убрать из личного кабинета; сохранённые оригиналы и результаты остаются';
   remove.onclick=async()=>{
     if(!confirm('Убрать эту самостоятельную проверку из кабинета? Документы и результаты сохранятся.'))return;
@@ -334,6 +447,7 @@ function renderManual(){
 }
 async function refreshAfterAction(){await refresh(true)}
 el('manual-refresh').onclick=refresh;
+el('manual-retry').onclick=()=>refresh(true);
 const filterNames=['manual-search','manual-status','manual-date-start','manual-date-end',
                    'manual-violation-type','manual-only-violations'];
 let filterTimer;
@@ -365,6 +479,10 @@ function renderInnResults(items){
   seen.add(number);
   const row=document.createElement('tr'),purchase=document.createElement('td'),
    customer=document.createElement('td'),action=document.createElement('td');
+  row.setAttribute('role','row');
+  for(const [cell,label] of [[purchase,'Закупка'],[customer,'Заказчик'],[action,'Действие']]){
+   cell.setAttribute('role','cell');cell.setAttribute('data-label',label);
+  }
   purchase.textContent='№ '+number;
   if(item.title){const title=document.createElement('small');title.textContent=item.title;purchase.append(title)}
   customer.textContent=item.customer||'Заказчик';
@@ -390,7 +508,7 @@ function innStatus(data,initial=false){
  const pending=Number(data.verification_pending||0),pages=Number(data.search_pages_pending||0);
  let message,complete=false;
  if(status==='error'){
-  message='Поиск не завершён: '+(data.job?.detail||'VPS не смог получить ответ ЕИС. Повторите поиск позже.');complete=true;
+  message='Поиск не завершён: '+(data.job?.detail||'Не удалось получить ответ ЕИС. Повторите поиск позже.');complete=true;
  }else if(!initial&&['done','partial'].includes(status)&&pending===0&&pages===0){
   complete=true;
   if(status==='partial'||data.pagination_limited||Number(data.search_pages_failed||0)>0||Number(data.unresolved_candidates||0)>0){
@@ -399,17 +517,17 @@ function innStatus(data,initial=false){
    message=count?'Поиск по ИНН завершён. Найдено закупок: '+count+'.':'Поиск завершён. Закупки с подтверждённым ИНН заказчика не найдены.';
   }
  }else if(bridge.server_active===false){
-  message='Поиск сохранён. VPS сейчас не на связи; задание продолжится после подключения.';
+  message='Поиск сохранён. Сервис загрузки временно недоступен; задание продолжится после восстановления соединения.';
  }else if(bridge.inn_search_available===false){
-  message='Поиск сохранён. Для выполнения требуется обновление загрузчика VPS.';
+  message='Поиск сохранён. Сервис загрузки пока не поддерживает поиск по ИНН.';
  }else if(pending>0){
-  message='Найдены кандидаты: VPS проверяет ИНН заказчика по данным ЕИС. Ожидают подтверждения: '+pending+'.';
+  message='Проверяем ИНН заказчика в найденных закупках ЕИС. Ожидают подтверждения: '+pending+'.';
  }else if(status==='done'&&pages>0){
-  message='VPS ищет закупки на следующих страницах ЕИС.';
+  message='Поиск продолжается на следующих страницах ЕИС.';
  }else if(status==='leased'){
-  message='VPS ищет закупки по ИНН заказчика в ЕИС.';
+  message='Ищем закупки по ИНН заказчика в ЕИС.';
  }else{
-  message='Поиск сохранён в очереди VPS. Данные закупок и документы будут получены автоматически.';
+  message='Поиск сохранён в очереди. Данные закупок и документы будут получены автоматически.';
  }
  if(!complete&&count)message+=' Уже подтверждено закупок: '+count+'.';
  el('manual-inn-message').textContent=message;
@@ -456,7 +574,7 @@ async function resumeInnSearch(){
   const last=Array.isArray(recent.searches)?recent.searches[0]:null;
   if(!last||!(/^(?:[0-9]{10}|[0-9]{12})$/.test(last.inn))||
      !/^[0-9a-f]{24}$/.test(last.id)){
-   el('manual-inn-message').textContent='Укажите ИНН и нажмите «Проверить по ИНН», чтобы создать задание для VPS.';
+   el('manual-inn-message').textContent='Укажите ИНН и нажмите «Проверить по ИНН», чтобы найти закупки заказчика.';
    return;
   }
   el('manual-inn').value=last.inn;
@@ -595,7 +713,7 @@ async function loadRoles(){
 loadRoles();
 </script>""")
 
-THEMATIC = page("Мои тематические проверки", """
+THEMATIC = page("Тематические проверки", """
 <style>
 .manual-filter-area{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:9px;
  padding:13px;background:#f7fafc;border:1px solid #dfe9f2;border-radius:10px}
@@ -617,9 +735,8 @@ THEMATIC = page("Мои тематические проверки", """
  font-size:12px;font-weight:700}
 @media(max-width:650px){.eis-my-check{padding:16px}.eis-my-actions a,.eis-my-actions button{flex:1;justify-content:center}}
 </style>
-<p><a href="/">← На главную</a></p>
-<h1>Мои тематические проверки</h1>
-<p>Здесь автоматически отображаются только реальные тематические проверки, которые вы запускали под своей учётной записью. Никаких идентификаторов или отдельных очередей создавать не требуется.</p>
+<h1>Тематические проверки</h1>
+<p>Проверки, которые вы запустили: выбранные темы, период закупок и сохранённые результаты.</p>
 <p class="eis-my-actions"><a href="/thematic">Новая тематическая проверка</a></p>
 <div id="thematic-filters" class="manual-filter-area" aria-label="Фильтры тематических проверок">
 <label>Заказчик<input id="thematic-customer" type="search" placeholder="Наименование заказчика"></label>
@@ -629,6 +746,7 @@ THEMATIC = page("Мои тематические проверки", """
 <label>Вид нарушения<select id="thematic-type"><option value="">Все</option></select></label>
 <button type="button" id="thematic-reset">Сбросить фильтры</button></div>
 <p id="thematic-status" role="status" aria-live="polite">Загружаем ваши проверки…</p>
+<button type="button" id="thematic-retry" class="account-retry" hidden>Повторить загрузку</button>
 <div id="real-thematic-list" class="eis-my-checks" aria-label="Тематические проверки"></div>
 <section id="unassigned-section" hidden style="margin-top:28px;border-top:1px solid #e4edf5;padding-top:21px">
 <h2>Ранее запущенные проверки</h2>
@@ -639,10 +757,15 @@ THEMATIC = page("Мои тематические проверки", """
 (()=>{
 const holder=document.getElementById('real-thematic-list');
 const status=document.getElementById('thematic-status');
+function displayCount(value){
+ if(typeof value==='string')value=/^[0-9]+$/.test(value.trim())?Number(value.trim()):NaN;
+ return typeof value==='number'&&Number.isSafeInteger(value)&&value>=0?value.toLocaleString('ru-RU'):'—';
+}
+const states={active:'Выполняется',stopped:'Остановлена',completed:'Завершена'};
 const labels={dates:'Сроки закупки и разъяснений',docs:'Документация',national:'Национальный режим',
  security:'Обеспечение',sme:'МСП',access:'Требования к участникам',protocols:'Протоколы',
  contract:'Договоры',notices:'Извещения',evaluation:'Оценка заявок'};
-let thematicCache=[],thematicRefresh=null,thematicRefreshQueued=false;
+let thematicCache=[],thematicRefresh=null,thematicRefreshQueued=false,thematicLoaded=false;
 function thematicPeriod(check){
  const day=value=>String(value||'').slice(0,10).split('-').reverse().join('.');
  const from=day(check.date_from),to=day(check.date_to);
@@ -651,6 +774,7 @@ function thematicPeriod(check){
 function refresh(force=false){
  if(thematicRefresh){if(force===true)thematicRefreshQueued=true;return thematicRefresh}
  thematicRefresh=(async()=>{
+  holder.setAttribute('aria-busy','true');document.getElementById('thematic-retry').hidden=true;
   do{
    thematicRefreshQueued=false;
    try{
@@ -658,14 +782,16 @@ function refresh(force=false){
     if(response.status===401){location.assign('/account/login');return}
     if(!response.ok)throw Error('Не удалось получить тематические проверки');
     const data=await response.json();
-    thematicCache=Array.isArray(data.batches)?data.batches:[];
+    if(!data||!Array.isArray(data.batches))throw Error('Некорректный ответ сервера');
+    thematicCache=data.batches;thematicLoaded=true;
     renderThematic();
-   }catch(error){status.textContent=error.message}
+   }catch(error){status.textContent=error.message+'. Попробуйте загрузить данные ещё раз.';document.getElementById('thematic-retry').hidden=false}
   }while(thematicRefreshQueued);
- })().finally(()=>{thematicRefresh=null});
+ })().finally(()=>{thematicRefresh=null;holder.setAttribute('aria-busy','false')});
  return thematicRefresh;
 }
 function renderThematic(){
+ if(!thematicLoaded)return;
  const allBatches=thematicCache;
   const control=document.getElementById('thematic-type'),previous=control.value;
   const types=[...new Set(allBatches.flatMap(b=>b.violation_types||[]))]
@@ -690,7 +816,13 @@ function renderThematic(){
   status.textContent='Показано: '+batches.length+' из '+allBatches.length;
   if(!batches.length){
    const empty=document.createElement('div');empty.className='eis-empty';
-   empty.textContent='Проверки, запущенные вами в разделе «Тематическая проверка», появятся здесь автоматически.';
+   const text=document.createElement('p');
+   text.textContent=allBatches.length?'По выбранным фильтрам проверки не найдены.':'Вы ещё не запускали тематических проверок. Выберите темы и период закупок, чтобы начать.';
+   const action=document.createElement(allBatches.length?'button':'a');
+   action.textContent=allBatches.length?'Сбросить фильтры':'Новая тематическая проверка';
+   if(allBatches.length){action.type='button';action.onclick=()=>document.getElementById('thematic-reset').onclick()}
+   else action.href='/thematic';
+   empty.append(text,action);
    holder.append(empty);return;
   }
   for(const check of batches){
@@ -699,11 +831,11 @@ function renderThematic(){
    const categories=(check.categories||[]).map(id=>labels[id]||id);
    title.textContent=categories.length?categories.join(' · '):'Тематическая проверка';
    const state=document.createElement('span');state.className='eis-pill';
-   state.textContent=check.status==='active'?'Выполняется':'Остановлена';
+   state.textContent=states[check.status]||'Состояние уточняется';
    const meta=document.createElement('p');meta.className='eis-meta';
    const timestamp=Date.parse(check.created_at);
-   meta.textContent=(Number.isFinite(timestamp)?'Запущена: '+new Date(timestamp).toLocaleString('ru-RU')+' · ':'')+
-     'Закупок: '+Number(check.purchases||0)+' · Подтверждённых нарушений: '+Number(check.violations||0)+
+   meta.textContent=(Number.isFinite(timestamp)?'Запущена: '+new Date(timestamp).toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'})+' · ':'')+
+     'Закупок: '+displayCount(check.purchases)+' · Подтверждённых нарушений: '+displayCount(check.violations)+
      ((check.customers||[]).length?' · Заказчики: '+check.customers.slice(0,2).join(', '):'');
    const period=document.createElement('p');period.className='eis-meta';
    period.textContent='Дата размещения в ЕИС: '+thematicPeriod(check);
@@ -751,8 +883,8 @@ async function fetchHistorical(){
    h.textContent=cats.length?cats.join(' · '):'Тематическая проверка';
    const meta=document.createElement('p');meta.className='eis-meta';
    const date=Date.parse(check.created_at);
-   meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleString('ru-RU')+' · ':'')+
-      'Закупок: '+Number(check.purchases||0)+' · Нарушений: '+Number(check.violations||0);
+   meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'})+' · ':'')+
+      'Закупок: '+displayCount(check.purchases)+' · Нарушений: '+displayCount(check.violations);
    const period=document.createElement('p');period.className='eis-meta';
    period.textContent='Дата размещения в ЕИС: '+thematicPeriod(check);
    const btn=document.createElement('button');btn.type='button';btn.textContent='Привязать к моему кабинету';
@@ -781,12 +913,13 @@ document.getElementById('thematic-reset').onclick=()=>{
   document.getElementById(id).value='';
  renderThematic();
 };
+document.getElementById('thematic-retry').onclick=()=>refresh(true);
 setInterval(()=>{if(!document.hidden){refresh();loadHistorical()}},30000);
 refresh();loadHistorical();
 })();
 </script>""")
 
-MEMOS = page("Архив служебных записок", """
+MEMOS = page("Служебные записки", """
 <style>
 .memo-archive-form{display:flex;align-items:end;gap:11px;flex-wrap:wrap;padding:16px;
  border:1px solid #dae7f1;border-radius:10px;background:#f8fbfe;margin:17px 0}
@@ -805,12 +938,12 @@ MEMOS = page("Архив служебных записок", """
 .memo-legacy{font-size:12px;color:#946a2e}
 @media(max-width:700px){.memo-archive-form button{flex:1}#memo-table td:last-child{min-width:190px}}
 </style>
-<p><a href="/">← На главную / Личный кабинет</a></p>
-<h1>Архив служебных записок</h1>
-<p>Здесь сохраняются подготовленные по проверенным нарушениям документы в формате ODT.
-Для сохранённых оригиналов доступно скачивание ODT и преобразование в PDF через LibreOffice.</p>
+<h1>Служебные записки</h1>
+<p>Создавайте записки по подтверждённым нарушениям и следите за согласованием.
+Скачайте ODT для редактирования или PDF для отправки.</p>
+<details id="memo-create-panel"><summary>Создать служебную записку</summary>
 <form id="memo-save" class="memo-archive-form">
-<label>Создать и сохранить служебную записку по закупке
+<label>Номер закупки ЕИС
 <input type="text" name="reg" inputmode="numeric" pattern="3[0-9]{10}" maxlength="11"
  required autocomplete="off" placeholder="Введите номер ЕИС"></label>
 <fieldset id="memo-requisites" disabled style="flex:1 1 100%;border:1px solid #cedeeb;border-radius:8px;padding:12px">
@@ -824,7 +957,10 @@ MEMOS = page("Архив служебных записок", """
 </fieldset>
 <button type="submit" id="memo-create">Сформировать и сохранить</button>
 </form>
+</details>
 <p id="memo-status" role="status" aria-live="polite">Загружаем архив…</p>
+<button type="button" id="memo-retry" class="account-retry" hidden>Повторить загрузку</button>
+<h2>Архив записок</h2>
 <div class="memo-filters" aria-label="Поиск в архиве">
 <label>Номер закупки<input id="memo-search" type="search" placeholder="Номер ЕИС"></label>
 <label>Дата с<input id="memo-from" type="date"></label>
@@ -832,14 +968,16 @@ MEMOS = page("Архив служебных записок", """
 <button type="button" id="memo-reset">Сбросить фильтры</button>
 </div>
 <div id="memo-count" role="status"></div>
-<table id="memo-table" aria-label="Архив служебных записок">
-<thead><tr><th>Закупка</th><th>Дата создания</th><th>Документ</th><th>Действия</th></tr></thead>
-<tbody id="memo-rows"></tbody></table>
+<table id="memo-table" role="table" aria-label="Архив служебных записок">
+<thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Закупка</th><th role="columnheader" scope="col">Дата создания</th><th role="columnheader" scope="col">Документ</th><th role="columnheader" scope="col">Действия</th></tr></thead>
+<tbody id="memo-rows" role="rowgroup"></tbody></table>
 <script>
 (()=>{
 const el=id=>document.getElementById(id);
-let cache=[],busy=false,decisions={},requisitesReg='',requisitesSequence=0;
+let cache=[],busy=false,memoLoaded=false,memoFilterState='',decisions={},requisitesReg='',requisitesSequence=0;
 const regInput=el('memo-save').elements.reg;
+function openMemoForm(){el('memo-create-panel').open=true;regInput.focus();el('memo-save').scrollIntoView({block:'nearest'})}
+const memoFilterKey=()=>JSON.stringify(['memo-search','memo-from','memo-to'].map(id=>el(id).value.trim()));
 async function loadRequisites(){
  const reg=regInput.value.trim(),sequence=++requisitesSequence;
  requisitesReg='';el('memo-requisites').disabled=true;
@@ -868,6 +1006,8 @@ el('memo-save-requisites').onclick=async()=>{
  catch(e){el('memo-status').textContent=e.message}finally{button.disabled=false}
 };
 function render(){
+ if(!memoLoaded)return;
+ memoFilterState=memoFilterKey();
  const search=el('memo-search').value.trim(),from=el('memo-from').value,to=el('memo-to').value;
  const data=cache.filter(x=>{
    const day=(x.created_at||'').slice(0,10);
@@ -880,9 +1020,13 @@ function render(){
   const tr=document.createElement('tr'),reg=document.createElement('td'),
    date=document.createElement('td'),state=document.createElement('td'),
    action=document.createElement('td');
+  tr.setAttribute('role','row');
+  for(const [cell,label] of [[reg,'Закупка'],[date,'Дата создания'],[state,'Документ'],[action,'Действия']]){
+   cell.setAttribute('role','cell');cell.setAttribute('data-label',label);
+  }
   reg.textContent='№ '+item.reg_number;
   const stamp=Date.parse(item.created_at);
-  date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'—';
+  date.textContent=Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'}):'—';
   const actions=document.createElement('div');actions.className='memo-action';
   if(item.downloadable){
    const decision=decisions[item.id];
@@ -892,11 +1036,12 @@ function render(){
    for(const fmt of ['odt','pdf']){
     const link=document.createElement('a');link.href='/me/memo-archive/'+encodeURIComponent(item.id)+'/'+fmt;
     link.textContent='Скачать '+fmt.toUpperCase();link.setAttribute('download','memo_'+item.reg_number+'.'+fmt);
+    link.title=fmt==='odt'?'Редактируемый документ ODT':'Документ PDF для отправки и печати';
     link.onclick=async event=>{
      event.preventDefault();link.style.pointerEvents='none';
      try{
       const r=await fetch(link.href,{credentials:'same-origin',cache:'no-store'});
-      if(!r.ok)throw Error(fmt==='pdf'?'Не удалось создать PDF. Проверьте LibreOffice.':'Документ временно недоступен');
+      if(!r.ok)throw Error(fmt==='pdf'?'Не удалось подготовить PDF. Попробуйте позже или скачайте ODT.':'Документ временно недоступен. Попробуйте скачать его позже.');
       const data=await r.blob();
       const objectURL=URL.createObjectURL(data);
       const a=document.createElement('a');a.href=objectURL;
@@ -949,24 +1094,29 @@ function render(){
    state.textContent='Старый архив: файл не был сохранён';
    state.className='memo-legacy';
    const button=document.createElement('button');button.type='button';button.textContent='Создать заново';
-   button.onclick=()=>{regInput.value=item.reg_number;loadRequisites();
-     el('memo-save').scrollIntoView({behavior:'smooth',block:'center'})};
+   button.onclick=()=>{regInput.value=item.reg_number;loadRequisites();openMemoForm()};
    actions.append(button);
   }
   action.append(actions);tr.append(reg,date,state,action);rows.append(tr);
  }
  if(!data.length){const tr=document.createElement('tr'),td=document.createElement('td');
-   td.colSpan=4;td.textContent=cache.length?'По фильтрам документы не найдены':'Архив пока пуст';
+   tr.setAttribute('role','row');td.setAttribute('role','cell');
+   td.colSpan=4;td.className='account-empty';
+   const text=document.createElement('p');text.textContent=cache.length?'По выбранным фильтрам записки не найдены.':'В архиве пока нет служебных записок.';
+   const action=document.createElement('button');action.type='button';
+   action.textContent=cache.length?'Сбросить фильтры':'Создать служебную записку';
+   action.onclick=()=>{if(cache.length)el('memo-reset').onclick();else openMemoForm()};
+   td.append(text,action);
    tr.append(td);rows.append(tr)}
 }
 async function refresh(){
- if(busy)return;busy=true;
+ if(busy)return;busy=true;el('memo-table').setAttribute('aria-busy','true');el('memo-retry').hidden=true;
  try{
   const r=await fetch('/me/memo-archive',{credentials:'same-origin',cache:'no-store'});
   if(r.status===401){location.replace('/account/login');return}
   if(!r.ok)throw Error('Не удалось получить архив');
   const data=await r.json();if(!Array.isArray(data))throw Error('Некорректный ответ сервера');
-  cache=data;
+  cache=data;memoLoaded=true;
   try{
    const reviews=await fetch('/me/assignments/memos',{credentials:'same-origin',cache:'no-store'});
    if(reviews.ok){
@@ -975,17 +1125,19 @@ async function refresh(){
    }
   }catch{}
   render();
-  el('memo-status').textContent='Архив вашей учётной записи. Доступ к чужим запискам закрыт.';
- }catch(error){el('memo-status').textContent=error.message}
- finally{busy=false}
+  el('memo-status').textContent='Показаны записки вашей учётной записи.';
+ }catch(error){el('memo-status').textContent=error.message+'. Попробуйте загрузить данные ещё раз.';el('memo-retry').hidden=false}
+ finally{busy=false;el('memo-table').setAttribute('aria-busy','false')}
 }
 for(const id of ['memo-search','memo-from','memo-to']){
- el(id).addEventListener('input',render);el(id).addEventListener('change',render)
+ const update=()=>{if(memoFilterKey()!==memoFilterState)render()};
+ el(id).addEventListener('input',update);el(id).addEventListener('change',update)
 }
 el('memo-reset').onclick=()=>{
  for(const id of ['memo-search','memo-from','memo-to'])el(id).value='';
  render();
 };
+el('memo-retry').onclick=refresh;
 el('memo-save').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
  const reg=String(new FormData(form).get('reg')||'').trim();

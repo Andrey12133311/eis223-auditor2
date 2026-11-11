@@ -77,15 +77,15 @@ class VisualPolishTests(unittest.TestCase):
                 markup = site_header(role).decode()
                 parser = Tags()
                 parser.feed(markup)
-                workbench_links = [attrs for tag, attrs in parser.items
-                                   if tag == 'a' and attrs.get('href') == '/account/workbench']
-                self.assertEqual(len(workbench_links), 2)
+                from lxml import html
+                document = html.fromstring(markup)
+                workbench_links = document.xpath('//a[@href="/account/workbench"][not(ancestor::*[@id="eis-attention"])]')
+                self.assertEqual(len(workbench_links), 3)  # Existing navigation; the attention action is contextual.
                 self.assertIn('<a href="/account/workbench">Рабочее место сотрудника</a>', markup)
                 self.assertIn('href="/account/workbench">Все нарушения и тематические проверки →</a>', markup)
-                manual_actions = markup.split('id="eis223-my-procurements"', 1)[1].split(
-                    '<form id="eis223-add-procurement">', 1)[0]
-                self.assertIn('href="/account/home"', manual_actions)
-                self.assertNotIn('/account/workbench', manual_actions)
+                tile = document.get_element_by_id('eis223-my-procurements').getparent()
+                self.assertIn('/account/home', tile.xpath('.//a/@href'))
+                self.assertNotIn('/account/workbench', tile.xpath('.//a/@href'))
                 self.assertIn('id="eis223-add-procurement"', markup)
 
     def test_narrow_layout_keyboard_motion_and_input_safety(self):
@@ -102,10 +102,10 @@ class VisualPolishTests(unittest.TestCase):
         self.assertIn('max-height:calc(100dvh - 28px)', account_page_style())
 
     def test_normal_text_and_active_navigation_color_contrast(self):
-        pairs = [('#263b4d', '#f3f6f9'), ('#536b7d', '#ffffff'),
-                 ('#536b7d', '#f3f6f9'), ('#ffffff', '#18384f'),
-                 ('#ffffff', '#175d8d'), ('#ffffff', '#28678f'),
-                 ('#174f78', '#e7f0f7'), ('#a34043', '#ffffff')]
+        pairs = [('#1d1d1f', '#f5f5f7'), ('#636366', '#ffffff'),
+                 ('#636366', '#f5f5f7'), ('#1d1d1f', '#ffffff'),
+                 ('#ffffff', '#0066cc'), ('#ffffff', '#0055ad'),
+                 ('#0055ad', '#eaf2ff'), ('#b42332', '#ffffff')]
         for foreground, background in pairs:
             with self.subTest(foreground=foreground, background=background):
                 self.assertGreaterEqual(contrast(foreground, background), 4.5)

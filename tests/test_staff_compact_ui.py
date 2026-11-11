@@ -52,6 +52,13 @@ class CompactStaff(unittest.TestCase):
                 self.assertTrue(all(parent.get("open") is None for parent in parents))
                 self.assertTrue(all(parent.xpath('./summary') for parent in parents))
 
+    def test_header_returns_to_specific_workspace_context(self):
+        page = self.page()
+        self.assertTrue(page.xpath('//header//a[@href="/#cabinet" and normalize-space()="Мой кабинет"]'))
+        self.assertTrue(page.xpath('//header//a[@href="/" and normalize-space()="Реестр закупок"]'))
+        self.assertTrue(page.xpath('//header//a[@href="/account/profile"]'))
+        self.assertEqual(page.xpath('//section[@data-staff-section="overview"]//h2/text()')[0], "Поручения и ход проверок")
+
     def test_javascript_controls_remain_unique_and_existing_links_are_preserved(self):
         page = self.page()
         ids = page.xpath('//*[@id]/@id')
@@ -62,7 +69,7 @@ class CompactStaff(unittest.TestCase):
         self.assertTrue(page.xpath('//*[@id="staff-case-download"]'))
         self.assertTrue(page.xpath('//a[@href="/account/memos"]'))
         markup = render_workbench()
-        self.assertLess(markup.index('id="eis223-account-polish"'), markup.index('id="staff-compact-layout"'))
+        self.assertGreater(markup.index('id="eis223-account-polish"'), markup.index('id="staff-compact-layout"'))
         self.assertNotIn("loadToday", JS)
         self.assertIn('credentials:"same-origin"', JS)
 

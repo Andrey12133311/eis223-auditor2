@@ -4,6 +4,7 @@ from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
 
 from scripts.account_visual_polish_v1 import account_page_style
+from scripts.workspace_discovery_v1 import workspace_discovery
 
 STYLE=r"""
 <style>
@@ -29,6 +30,7 @@ button:disabled{cursor:wait;opacity:.55}
 .mgr-tab:hover{background:#f2f7fb}
 .mgr-tab[aria-selected=true]{background:#e9f3fa;border-color:#d6e7f2;color:#155986}
 .mgr-tab-icon{height:20px;width:20px;flex:none;display:grid;place-items:center;font-size:15px}
+.mgr-tab-icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .mgr-work{padding:clamp(18px,3vw,38px);min-width:0}
 .mgr-head{display:flex;align-items:end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:21px}
 .mgr-head h1{font-size:clamp(23px,2.4vw,32px);margin:0 0 4px;letter-spacing:-.04em;color:#204d70}
@@ -39,6 +41,15 @@ button:disabled{cursor:wait;opacity:.55}
 .mgr-kpi small{display:block;color:#637c8f;font-size:12px;font-weight:650;line-height:1.5}
 .mgr-kpi strong{display:block;color:#21547c;font-size:clamp(25px,2.3vw,34px);line-height:1.4;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
 .mgr-kpi span{font-size:10px;color:#7b91a1}
+.mgr-kpi-action{display:block;width:100%;text-align:left;color:inherit;appearance:none;cursor:pointer;font:inherit}
+.mgr-kpi-action:hover{background:#f5f8ff;border-color:#b9d3f4}
+.mgr-kpi-action:focus-visible{outline:3px solid #0066cc;outline-offset:3px}
+.mgr-kpi-action .mgr-kpi-link{display:block;margin-top:6px;color:#0066cc;font-size:11px;font-weight:500}
+.mgr-filter-summary{margin:0 0 10px;font-size:12px;line-height:1.5}
+.mgr-filter-row>input,.mgr-filter-row>select{min-height:36px;min-width:0;max-width:100%;padding:7px 10px;border:1px solid var(--edge);border-radius:8px;background:#fff;color:var(--ink);font-size:12px}
+.mgr-filter-row>input{flex:1 1 240px}
+.mgr-filter-reset{margin-left:auto;white-space:nowrap}
+.mgr-empty-action{margin-top:7px}
 .mgr-panels{display:grid;grid-template-columns:1.5fr 1fr;gap:13px}
 .mgr-card{background:#fff;border:1px solid var(--edge);border-radius:12px;padding:19px;margin-bottom:15px;box-shadow:0 5px 17px #224d7009;min-width:0}
 .mgr-card h2{color:#204f74;font-size:18px;letter-spacing:-.03em;margin:0 0 13px}
@@ -108,6 +119,7 @@ body>header.mgr-top{padding:10px clamp(14px,2.5vw,34px);border-bottom-width:2px}
 .mgr-tab-icon{font-size:14px;width:18px;height:18px}
 .mgr-work{padding:20px 24px}.mgr-head{margin-bottom:13px}.mgr-head h1{font-size:25px;margin-bottom:3px}
 .mgr-head p{font-size:12px}.mgr-head .mgr-row{margin:0}.mgr-role{padding:6px 9px}
+.mgr-work .mgr-refresh-status{font-size:12px;line-height:1.5;color:var(--muted);margin:-3px 0 12px}
 .mgr-shell .mgr-card,.mgr-shell .mgr-entry{padding:14px;box-shadow:none;border-radius:9px;margin-bottom:11px}
 .mgr-card h2{font-size:16px;margin-bottom:10px}.mgr-card p{margin-bottom:10px;line-height:1.5}
 .mgr-grid{gap:9px;margin-bottom:11px}.mgr-shell .mgr-kpi{padding:12px 14px;box-shadow:none;border-radius:9px}
@@ -154,7 +166,12 @@ let currentTab="overview",findingSequence=0;
 let findingQueueRequest=null,findingQueueQueued=false;
 const tag=(name,cls="",value="")=>{const x=document.createElement(name);if(cls)x.className=cls;if(value!==undefined)x.textContent=String(value);return x};
 const status=(s)=>{const text=labels[s]||s||"Неизвестно";const cls=["completed","approved"].includes(s)?"good":["returned","cancelled","rejected"].includes(s)?"bad":["submitted"].includes(s)?"warn":"";return tag("span","mgr-chip "+cls,text)};
-const fmt=d=>d?new Date(d).toLocaleDateString("ru-RU"):"—";
+// Preserve the saved calendar day instead of shifting it through a browser timezone.
+const fmt=value=>{
+ if(!value)return '—';
+ const raw=String(value),parts=/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(raw);
+ return parts?parts[3]+'.'+parts[2]+'.'+parts[1]:raw;
+};
 function thematicPeriod(check){
  const day=value=>String(value||'').slice(0,10).split('-').reverse().join('.');
  const from=day(check.date_from),to=day(check.date_to);
@@ -174,15 +191,25 @@ function mountRows(id,items){const root=$(id);root.replaceChildren();for(const x
 function link(href,label){const a=tag("a","mgr-body-link",label);a.href=href;return a}
 function action(label,cls,callback){const b=tag("button",cls,label);b.type="button";b.onclick=async()=>{b.disabled=true;try{await callback()}catch(e){toast(e.message)}finally{b.disabled=false}};return b}
 function cell(content){const td=tag("td");if(content&&typeof content==="object"&&content.nodeType)td.append(content);else td.textContent=String(content??"—");return td}
-function show(name){
+function show(name,focus=false){
  currentTab=name;
  document.querySelectorAll(".mgr-tab").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.tab===name)));
  document.querySelectorAll(".mgr-section").forEach(x=>x.classList.toggle("mgr-hidden",x.dataset.section!==name));
  const titles={overview:"Панель управления",tasks:"Поручения и сроки",findings:"Согласование нарушений",thematic:"Тематические проверки подразделения",quality:"Контроль качества",memos:"Служебные записки",team:"Сотрудники",reports:"Отчёт руководителя",history:"Журнал действий"};
  $("mgr-title").textContent=titles[name]||"Кабинет руководителя";
  if(name==="findings"){fillFindingTarget();loadFindingQueue()}
+ if(focus)$("mgr-title").focus({preventScroll:true});
 }
 document.querySelectorAll(".mgr-tab").forEach(x=>x.onclick=()=>show(x.dataset.tab));
+document.querySelectorAll("[data-mgr-shortcut]").forEach(button=>button.onclick=()=>{
+ const target=button.dataset.mgrShortcut;
+ if(target==="pending"||target==="overdue"){
+  $("mgr-task-search").value="";$("mgr-task-status").value=target==="pending"?"submitted":"overdue";
+  renderTasks();show("tasks",true);
+ }else if(target==="memos"){
+  $("mgr-memo-status").value="submitted";renderMemos();show("memos",true);
+ }else if(target==="team")show("team",true);
+});
 function metrics(d){
  for(const [name,value] of [["staff",d.staff],["tasks",d.tasks_total],["overdue",d.tasks_overdue],
    ["pending",d.tasks_pending],["findings",d.real_confirmed_findings],
@@ -222,7 +249,7 @@ function populateWorkers(){
 function renderTasks(){
  const body=$("mgr-task-rows"),items=[];
  const raw=$("mgr-task-search").value.trim().toLowerCase(),filter=$("mgr-task-status").value;
- for(const t of cache.tasks.filter(x=>(!filter||x.status===filter)&&(!raw||
+ for(const t of cache.tasks.filter(x=>(!filter||(filter==="overdue"?x.overdue===true:x.status===filter))&&(!raw||
     [x.employee,x.reg_number,x.title].join(" ").toLowerCase().includes(raw)))){
   const row=tag("tr");
   const title=tag("div");
@@ -254,10 +281,17 @@ function renderTasks(){
  }
  mountRows("mgr-task-rows",items);
  $("mgr-task-empty").classList.toggle("mgr-hidden",!!items.length);
+ const filtered=!!(raw||filter);
+ $("mgr-task-empty-text").textContent=filtered?"Поручений по выбранным условиям нет.":"Поручения ещё не назначены.";
+ $("mgr-task-empty-reset").classList.toggle("mgr-hidden",!filtered);
+ $("mgr-task-reset").disabled=!filtered;
+ let count="Показано: "+items.length+" из "+cache.tasks.length+" загруженных поручений.";
+ if(cache.dashboard?.tasks_total>cache.tasks.length)count+=" Показатели обзора учитывают все поручения; в списке — последние "+cache.tasks.length+".";
+ $("mgr-task-count").textContent=count;
 }
 function renderMemos(){
- const rows=[];
- for(const memo of cache.memos){
+ const rows=[],filter=$("mgr-memo-status").value;
+ for(const memo of cache.memos.filter(item=>!filter||item.status===filter)){
   const tr=tag("tr");
   tr.append(cell("№ "+memo.reg_number),cell(memo.employee),cell(fmt(memo.submitted_at)),cell(status(memo.status)));
   const commands=tag("div","mgr-actions");
@@ -281,6 +315,9 @@ function renderMemos(){
  }
  mountRows("mgr-memo-rows",rows);
  $("mgr-memo-empty").classList.toggle("mgr-hidden",!!rows.length);
+ $("mgr-memo-empty-text").textContent=filter?"Записок с выбранным решением нет.":"Служебные записки ещё не поступали.";
+ $("mgr-memo-empty-reset").classList.toggle("mgr-hidden",!filter);
+ $("mgr-memo-count").textContent="Показано: "+rows.length+" из "+cache.memos.length+" загруженных записок.";
 }
 function renderTeam(){
  const rows=[];
@@ -290,7 +327,7 @@ function renderTeam(){
     cell(person.manager_email||"Не назначен"),cell(person.status));
   const commands=tag("div","mgr-actions");
   commands.append(action("Поручения","mgr-outline",async()=>{
-    $("mgr-task-search").value=person.email;show("tasks");renderTasks();
+    $("mgr-task-search").value=person.email;$("mgr-task-status").value="";show("tasks");renderTasks();
   }));
   tr.append(cell(commands));rows.push(tr);
  }
@@ -701,6 +738,15 @@ async function renderDiscussion(employee,reg,sequence=findingSequence){
 $("mgr-finding-load").onclick=()=>loadFindings().catch(e=>toast(e.message));
 $("mgr-task-search").oninput=renderTasks;
 $("mgr-task-status").onchange=renderTasks;
+function resetTaskFilters(){
+ $("mgr-task-search").value="";$("mgr-task-status").value="";renderTasks();$("mgr-task-search").focus();
+}
+$("mgr-task-reset").onclick=resetTaskFilters;
+$("mgr-task-empty-reset").onclick=resetTaskFilters;
+$("mgr-memo-status").onchange=renderMemos;
+$("mgr-memo-empty-reset").onclick=()=>{
+ $("mgr-memo-status").value="";renderMemos();$("mgr-memo-status").focus();
+};
 $("mgr-task-create").onsubmit=async e=>{
  e.preventDefault();const form=e.target,button=form.querySelector("button");button.disabled=true;
  const fd=new FormData(form);
@@ -732,12 +778,18 @@ $("mgr-attach-self").onclick=async()=>{
  }catch(error){status.textContent=error.message}
  finally{selfAttachBusy=false;select.disabled=false;button.disabled=!select.value}
 };
-let reloadRequest=null,reloadQueued=false;
+let reloadRequest=null,reloadQueued=false,lastRefreshComplete=false;
 function reload(){
  if(reloadRequest){reloadQueued=true;return reloadRequest}
+ const status=$("mgr-refresh-status"),button=$("mgr-refresh"),label=button.textContent;
+ status.textContent="Обновляем основные списки…";status.setAttribute("aria-busy","true");
+ button.disabled=true;button.textContent="Обновляем…";
  reloadRequest=(async()=>{
   do{reloadQueued=false;await reloadData()}while(reloadQueued);
- })().finally(()=>{reloadRequest=null});
+ })().catch(error=>{
+  status.textContent="Не удалось обновить списки. Повторите обновление.";
+  throw error;
+ }).finally(()=>{reloadRequest=null;status.setAttribute("aria-busy","false");button.disabled=false;button.textContent=label});
  return reloadRequest;
 }
 async function reloadData(){
@@ -748,14 +800,16 @@ async function reloadData(){
  if(ROLE==="admin")paths.push(["users","/manager/admin/users"]);
  const mailStatus=renderMailStatus();
  const all=await Promise.allSettled(paths.map(async([key,url])=>[key,await api(url)]));
+ lastRefreshComplete=all.every(result=>result.status==="fulfilled");
  for(const a of all){
   if(a.status==="fulfilled")cache[a.value[0]]=a.value[1];
-  else toast("Некоторые данные временно недоступны");
  }
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
  renderSelfAttach();populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
  await Promise.all([mailStatus,loadFindingQueue(true)]);
+ $("mgr-refresh-status").textContent=lastRefreshComplete?"Основные списки обновлены.":
+  "Часть списков не обновлена. Показаны доступные данные; повторите обновление.";
 }
 if(ROLE==="admin"){
  const mailTest=$("mgr-mail-test");
@@ -775,16 +829,29 @@ const mgrToday=new Date();
 $("mgr-report-form").elements.namedItem("to").value=mgrToday.toISOString().slice(0,10);
 const mgrPast=new Date(mgrToday.getTime()-29*86400000);
 $("mgr-report-form").elements.namedItem("from").value=mgrPast.toISOString().slice(0,10);
-$("mgr-refresh").onclick=async()=>{const btn=$("mgr-refresh");btn.disabled=true;try{await reload();toast("Сведения обновлены")}finally{btn.disabled=false}};
+$("mgr-refresh").onclick=async()=>{try{await reload();if(lastRefreshComplete)toast("Основные списки обновлены")}catch(error){toast(error.message)}};
 $("mgr-history-refresh").onclick=async()=>{
  try{renderHistory(await api("/manager/history"));toast("Журнал актуален")}
  catch(e){toast(e.message)}
 };
 refreshOwnName();
-reload();
+reload().catch(error=>toast(error.message));
 })();
 </script>
 """
+
+
+_NAV_ICON_PATHS = {
+    "overview": '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    "tasks": '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6M9 14h6M9 18h4"/>',
+    "thematic": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M12 9h5M12 13h5M12 17h3"/>',
+    "findings": '<path d="M10.4 4.4 2.7 18a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.6 4.4a1.8 1.8 0 0 0-3.2 0ZM12 9v5M12 17h.01"/>',
+    "memos": '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9ZM14 3v6h6M8 13h8M8 17h6"/>',
+    "team": '<circle cx="9" cy="8" r="3"/><path d="M3 21v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M17 15a5 5 0 0 1 4 4v2"/>',
+    "quality": '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6ZM8 12l3 3 5-6"/>',
+    "reports": '<path d="M4 3v18h17M8 17v-5M13 17V8M18 17V5"/>',
+    "history": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+}
 
 
 def render_manager(role):
@@ -797,36 +864,37 @@ __STYLE__</head><body>
 <header class="mgr-top"><div class="mgr-brand"><div class="mgr-logo">223</div>
 <div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя</small>
 <small id="mgr-my-name">ФИО: загрузка…</small></div></div>
-<div class="mgr-actions">__ADMIN_REGISTRATION_LINK__<a href="/account/profile">Моё ФИО</a>
-<a href="/">← Главная страница</a></div></header>
+<div class="mgr-actions">__ADMIN_REGISTRATION_LINK__<a href="/account/profile">Профиль</a>
+<a href="/#cabinet">Мой кабинет</a><a href="/">Реестр закупок</a></div></header>
 <div class="mgr-shell">
 <nav class="mgr-side" aria-label="Разделы руководителя">
 <span class="mgr-side-heading">УПРАВЛЕНИЕ</span>
-<button type="button" class="mgr-tab" data-tab="overview" aria-selected="true"><span class="mgr-tab-icon">▦</span>Обзор</button>
-<button type="button" class="mgr-tab" data-tab="tasks" aria-selected="false"><span class="mgr-tab-icon">☷</span>Поручения</button>
-<button type="button" class="mgr-tab" data-tab="thematic" aria-selected="false"><span class="mgr-tab-icon">◈</span>Тематические</button>
-<button type="button" class="mgr-tab" data-tab="findings" aria-selected="false"><span class="mgr-tab-icon">⚖</span>Нарушения</button>
-<button type="button" class="mgr-tab" data-tab="memos" aria-selected="false"><span class="mgr-tab-icon">▤</span>Записки</button>
-<button type="button" class="mgr-tab" data-tab="team" aria-selected="false"><span class="mgr-tab-icon">♙</span>Сотрудники</button>
+<button type="button" class="mgr-tab" data-tab="overview" aria-selected="true"><span class="mgr-tab-icon" aria-hidden="true">__ICON_overview__</span>Обзор</button>
+<button type="button" class="mgr-tab" data-tab="tasks" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_tasks__</span>Поручения</button>
+<button type="button" class="mgr-tab" data-tab="thematic" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_thematic__</span>Тематические</button>
+<button type="button" class="mgr-tab" data-tab="findings" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_findings__</span>Нарушения</button>
+<button type="button" class="mgr-tab" data-tab="memos" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_memos__</span>Записки</button>
+<button type="button" class="mgr-tab" data-tab="team" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_team__</span>Сотрудники</button>
 <details class="mgr-nav-more"><summary>Ещё разделы</summary>
-<button type="button" class="mgr-tab" data-tab="quality" aria-selected="false"><span class="mgr-tab-icon">✓</span>Качество</button>
-<button type="button" class="mgr-tab" data-tab="reports" aria-selected="false"><span class="mgr-tab-icon">▥</span>Отчёты</button>
-<button type="button" class="mgr-tab" data-tab="history" aria-selected="false"><span class="mgr-tab-icon">◷</span>Журнал действий</button>
+<button type="button" class="mgr-tab" data-tab="quality" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_quality__</span>Качество</button>
+<button type="button" class="mgr-tab" data-tab="reports" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_reports__</span>Отчёты</button>
+<button type="button" class="mgr-tab" data-tab="history" aria-selected="false"><span class="mgr-tab-icon" aria-hidden="true">__ICON_history__</span>Журнал действий</button>
 </details>
 </nav>
-<main class="mgr-work"><div class="mgr-head"><div><h1 id="mgr-title">Панель управления</h1>
+<main class="mgr-work"><div class="mgr-head"><div><h1 id="mgr-title" tabindex="-1">Панель управления</h1>
 <p>Поручения, согласования и сотрудники</p></div>
 <div class="mgr-row"><span class="mgr-role">__LABEL__</span>
-<button type="button" id="mgr-refresh" class="mgr-outline">Обновить ↻</button></div></div>
+<button type="button" id="mgr-refresh" class="mgr-outline">Обновить данные</button></div></div>
+<p id="mgr-refresh-status" class="mgr-refresh-status" role="status" aria-live="polite">Загружаем основные списки…</p>
 <details class="mgr-guidance"><summary>Как учитываются результаты</summary><p>Числа получены из сохранённых заданий и проверенных данных ЕИС.
 Выявленное программой нарушение и согласованное руководителем нарушение показываются отдельно.
 Поручение само по себе не запускает проверку ЕИС.</p></details>
 <section class="mgr-section" data-section="overview">
 <div class="mgr-grid">
-<div class="mgr-kpi"><small>Ожидают решения</small><strong id="mgr-kpi-pending">—</strong><span>Поручения сотрудников</span></div>
-<div class="mgr-kpi"><small>Просрочены</small><strong id="mgr-kpi-overdue">—</strong><span>Поручения с истёкшим сроком</span></div>
-<div class="mgr-kpi"><small>Записки на согласовании</small><strong id="mgr-kpi-memos">—</strong><span>Ожидают рассмотрения</span></div>
-<div class="mgr-kpi"><small>Сотрудники</small><strong id="mgr-kpi-staff">—</strong><span>Ваше подразделение</span></div>
+<button type="button" class="mgr-kpi mgr-kpi-action" data-mgr-shortcut="pending"><small>Ожидают решения</small><strong id="mgr-kpi-pending">—</strong><span>Поручения сотрудников</span><span class="mgr-kpi-link">Посмотреть поручения →</span></button>
+<button type="button" class="mgr-kpi mgr-kpi-action" data-mgr-shortcut="overdue"><small>Просрочены</small><strong id="mgr-kpi-overdue">—</strong><span>Поручения с истёкшим сроком</span><span class="mgr-kpi-link">Посмотреть просроченные →</span></button>
+<button type="button" class="mgr-kpi mgr-kpi-action" data-mgr-shortcut="memos"><small>Записки на согласовании</small><strong id="mgr-kpi-memos">—</strong><span>Ожидают рассмотрения</span><span class="mgr-kpi-link">Перейти к рассмотрению →</span></button>
+<button type="button" class="mgr-kpi mgr-kpi-action" data-mgr-shortcut="team"><small>Сотрудники</small><strong id="mgr-kpi-staff">—</strong><span>Ваше подразделение</span><span class="mgr-kpi-link">Открыть подразделение →</span></button>
 </div>
 <div class="mgr-card"><h2>Требуют внимания</h2>
 <div id="mgr-alerts"><p>Получаем события...</p></div></div>
@@ -855,14 +923,16 @@ __STYLE__</head><body>
 <button class="mgr-primary" type="submit">Назначить поручение</button>
 </form></details>
 <div class="mgr-card"><h2>Поручения подразделения</h2>
-<div class="mgr-row"><input id="mgr-task-search" type="search" placeholder="Поиск по номеру, теме или сотруднику" aria-label="Поиск поручений">
+<div class="mgr-row mgr-filter-row"><input id="mgr-task-search" type="search" placeholder="Поиск по номеру, теме или сотруднику" aria-label="Поиск поручений">
 <select id="mgr-task-status" aria-label="Фильтр статуса">
-<option value="">Все статусы</option><option value="assigned">Назначены</option><option value="in_progress">В работе</option><option value="submitted">Сданы</option><option value="returned">Возвращены</option><option value="completed">Завершены</option><option value="cancelled">Отменены</option>
-</select></div>
+<option value="">Все статусы</option><option value="overdue">Просроченные активные</option><option value="assigned">Назначены</option><option value="in_progress">В работе</option><option value="submitted">На согласовании</option><option value="returned">Возвращены</option><option value="completed">Завершены</option><option value="cancelled">Отменены</option>
+</select><button type="button" class="mgr-outline mgr-filter-reset" id="mgr-task-reset">Сбросить фильтры</button></div>
+<p id="mgr-task-count" class="mgr-muted mgr-filter-summary" role="status" aria-live="polite"></p>
 <div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
 <th>Поручение / закупка</th><th>Исполнитель</th><th>Срок</th><th>Статус</th><th>Действия</th>
 </tr></thead><tbody id="mgr-task-rows"></tbody></table></div>
-<p class="mgr-muted mgr-hidden" id="mgr-task-empty">Поручений пока нет.</p></div>
+<div class="mgr-muted mgr-hidden" id="mgr-task-empty"><p id="mgr-task-empty-text">Поручения ещё не назначены.</p>
+<button type="button" id="mgr-task-empty-reset" class="mgr-outline mgr-empty-action mgr-hidden">Показать все поручения</button></div></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="thematic">
 <details class="mgr-card mgr-disclosure" id="mgr-new-goal"><summary>Новое тематическое поручение</summary>
@@ -928,13 +998,17 @@ __STYLE__</head><body>
 </details>
 </section>
 <section class="mgr-section mgr-hidden" data-section="memos">
-<div class="mgr-card"><h2>Служебные записки на согласовании</h2>
+<div class="mgr-card"><h2>Служебные записки подразделения</h2>
 <p>Руководитель рассматривает сохранённые оригиналы ODT, может получить PDF,
 согласовать документ или вернуть на доработку с замечаниями.</p>
+<div class="mgr-row mgr-filter-row"><label for="mgr-memo-status" class="mgr-muted">Решение</label>
+<select id="mgr-memo-status"><option value="">Все решения</option><option value="submitted">На согласовании</option><option value="approved">Согласованы</option><option value="returned">На доработке</option><option value="rejected">Отклонены</option></select></div>
+<p id="mgr-memo-count" class="mgr-muted mgr-filter-summary" role="status" aria-live="polite"></p>
 <div class="mgr-table-wrap"><table class="mgr-table"><thead><tr>
 <th>Закупка</th><th>Автор</th><th>Дата подачи</th><th>Решение</th><th>Действия</th>
 </tr></thead><tbody id="mgr-memo-rows"></tbody></table></div>
-<p id="mgr-memo-empty" class="mgr-muted mgr-hidden">Записок на согласовании нет.</p></div>
+<div id="mgr-memo-empty" class="mgr-muted mgr-hidden"><p id="mgr-memo-empty-text">Служебные записки ещё не поступали.</p>
+<button type="button" id="mgr-memo-empty-reset" class="mgr-outline mgr-empty-action mgr-hidden">Показать все записки</button></div></div>
 </section>
 <section class="mgr-section mgr-hidden" data-section="team">
 <details class="mgr-card mgr-disclosure mgr-hidden" id="mgr-self-attach">
@@ -1000,7 +1074,10 @@ __STYLE__</head><body>
 </main></div>
 <div id="mgr-toast" class="mgr-toast mgr-hidden" role="status" aria-live="polite"></div>
 __SCRIPT__</body></html>"""
-    return (shell.replace("__STYLE__",STYLE+account_page_style()+COMPACT_STYLE)
+    for name, paths in _NAV_ICON_PATHS.items():
+        icon='<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'+paths+'</svg>'
+        shell=shell.replace('__ICON_'+name+'__',icon)
+    return (shell.replace("__STYLE__",STYLE+COMPACT_STYLE+account_page_style())
                  .replace("__ADMIN_REGISTRATION_LINK__",'<a href="/account/admin">Заявки на регистрацию</a>' if role=="admin" else "")
-                 .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role)))
+                 .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role))+workspace_discovery())
                  .replace("__LABEL__","Роль: "+("Администратор" if role=="admin" else "Руководитель")))

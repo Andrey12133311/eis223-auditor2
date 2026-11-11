@@ -30,6 +30,21 @@ class CompactCabinetShell(unittest.TestCase):
                 self.assertIsNone(details.get("open"))
                 self.assertTrue(details.xpath('./summary'))
 
+    def test_cabinet_has_one_named_entry_action_and_accessible_identity(self):
+        page = self.page()
+        title = page.get_element_by_id('eis223-cabinet-title')
+        self.assertEqual(title.text_content(), 'Мой кабинет')
+        action = page.get_element_by_id('eis223-start-check')
+        self.assertEqual(action.get('type'), 'submit')
+        self.assertEqual(action.xpath('ancestor::form/@id'), ['eis223-add-procurement'])
+        self.assertEqual(action.text_content(), 'Проверить закупку')
+        identity = page.xpath('//*[@class="eis223-auth-user"]//a[@href="/account/profile"]')
+        self.assertEqual(len(identity), 1)
+        for identifier in ('eis223-topbar-fullname', 'eis223-topbar-role'):
+            self.assertTrue(identity[0].xpath('.//*[@id="'+identifier+'"]'))
+        self.assertEqual(page.xpath('//*[contains(@class,"eis223-cabinet-heading")]//form/@id'), ['eis223-add-procurement'])
+        self.assertFalse(page.xpath('//*[contains(@class,"eis223-tile-main")]//form'))
+
     def test_admin_grouping_preserves_role_gates_and_opening_control(self):
         for role in ("user", "manager"):
             page = self.page(role)
@@ -51,11 +66,11 @@ class CompactCabinetShell(unittest.TestCase):
             page = self.page(role)
             ids = page.xpath('//*[@id]/@id')
             self.assertEqual(len(ids), len(set(ids)))
-            script = page.xpath('//script/text()')[-1]
+            script = page.xpath('//script[@id="eis223-account-runtime"]/text()')[0]
             targets = set(re.findall(r"q\(['\"](eis223-[^'\"]+)['\"]\)", script))
             self.assertFalse(targets - set(ids) - (admin_ids if role != "admin" else set()))
             markup = site_header(role).decode()
-            self.assertLess(markup.index('id="eis223-workspace-polish"'), markup.index('id="eis223-cabinet-compact"'))
+            self.assertGreater(markup.index('id="eis223-workspace-polish"'), markup.index('id="eis223-cabinet-compact"'))
             self.assertIn("controls.open=true", script)
 
 

@@ -5,7 +5,12 @@ Private data is fetched from owner-scoped APIs only after authentication.
 """
 from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
-from scripts.account_visual_polish_v1 import workspace_style
+from scripts.account_visual_polish_v1 import workspace_style, signin_style, cabinet_clarity_style
+from scripts.workspace_panels_v1 import workspace_panels
+from scripts.workspace_attention_v1 import workspace_attention
+from scripts.workspace_discovery_v1 import workspace_discovery
+from scripts.workspace_preferences_v1 import workspace_preferences
+from scripts.inspection_progress_v1 import STYLE as inspection_progress_style
 
 
 _STYLE = """
@@ -266,11 +271,11 @@ def site_header(role="user"):
              if role == "admin" else "")
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + workspace_style() + _COMPACT_STYLE + (TEAM_SCRIPT if role == "admin" else "") + '''
+    return (_STYLE + _COMPACT_STYLE + workspace_style() + cabinet_clarity_style() + inspection_progress_style + (TEAM_SCRIPT if role == "admin" else "") + '''
 <div class="eis223-workspace eis223-compact-cabinet" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span></span></span>
-<span class="eis223-auth-user" aria-label="Авторизованный пользователь"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></span>
+<span class="eis223-auth-user" aria-label="Авторизованный пользователь"><a class="eis223-identity-link" href="/account/profile" aria-label="Открыть мой профиль"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></a></span>
 <button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет <span id="eis223-unread" class="eis223-notification-dot" hidden aria-label="Новые уведомления"></span></button>
 ''' + admin + director + '''
 <button type="button" id="eis223-logout">Выйти</button>
@@ -290,11 +295,21 @@ def site_header(role="user"):
   </div>
  </form>
 </div>
-<section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
+<section class="eis223-personal" id="eis223-cabinet" aria-labelledby="eis223-cabinet-title" hidden>
 <div class="eis223-cabinet-heading">
-<div><h2>Личный кабинет</h2>
+<div><h2 id="eis223-cabinet-title" tabindex="-1">Мой кабинет</h2>
+<p id="eis223-cabinet-note" class="eis223-cabinet-note">Продолжите проверку или добавьте закупку по номеру ЕИС.</p>
 <p class="eis223-subtle" id="eis223-owner-fullname">Загрузка ФИО…</p></div>
-<a class="eis223-all-checks" href="/account/profile">Профиль</a></div>
+<div class="eis223-cabinet-actions">
+<form id="eis223-add-procurement" class="eis223-start-form" aria-label="Проверить закупку по номеру ЕИС" aria-busy="false" novalidate>
+<label for="eis223-check-reg">Номер закупки ЕИС</label>
+<div class="eis223-start-controls"><input id="eis223-check-reg" aria-describedby="eis223-start-help eis223-add-status" placeholder="11 цифр, начинается с 3"
+name="reg" required inputmode="numeric" pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
+<button id="eis223-start-check" type="submit">Проверить закупку</button></div>
+<p id="eis223-start-help">Введите номер из карточки закупки в ЕИС.</p>
+<p role="status" aria-live="polite" id="eis223-add-status"></p>
+</form><a class="eis223-all-checks eis223-cabinet-profile" href="/account/profile">Профиль</a></div></div>
+''' + workspace_attention() + '''
 ''' + ('''
 <details class="eis223-feature eis223-cabinet-extra" id="eis223-admin-controls" aria-label="Управление пользователями">
 <summary>Администрирование пользователей</summary>
@@ -317,23 +332,18 @@ def site_header(role="user"):
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
 <span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
-<div class="eis223-tile"><div class="eis223-tile-head">
-<div><h3>Самостоятельные проверки</h3><p class="eis223-tile-sub">Закупки, которые вы запустили на проверку</p></div></div>
+<div class="eis223-tile eis223-tile-main"><div class="eis223-tile-head">
+<div><h3>Мои проверки</h3><p class="eis223-tile-sub">Добавленные вами закупки и сохранённые результаты</p></div></div>
 <ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
-<a class="eis223-all-checks" href="/account/home">Все самостоятельные проверки →</a>
-<form id="eis223-add-procurement">
-<input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
-name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
-<button type="submit">Запустить проверку</button></form>
-<p role="status" id="eis223-add-status"></p>
+<a class="eis223-all-checks" href="/account/home">Все мои проверки →</a>
 </div>
-<div class="eis223-tile"><div class="eis223-tile-head">
+<div class="eis223-tile eis223-tile-thematic"><div class="eis223-tile-head">
 <div><h3>Тематические проверки</h3><p class="eis223-tile-sub">Запущенные под вашей учётной записью</p></div></div>
 <ul id="eis223-my-batches"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/thematic">Посмотреть все мои проверки →</a>
 <p role="status" id="eis223-batch-status"></p>
 </div>
-<div class="eis223-tile"><div class="eis223-tile-head">
+<div class="eis223-tile eis223-tile-memos"><div class="eis223-tile-head">
 <div><h3>Служебные записки</h3><p class="eis223-tile-sub">Сохранённые документы и проекты</p></div></div>
 <ul id="eis223-my-memos"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/memos">Посмотреть служебные записки →</a>
@@ -372,7 +382,7 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <p id="eis223-thematic-status" role="status"></p>
 </details>
 </div></section></div>
-<script>
+<script id="eis223-account-runtime">
 (()=>{
 const q=id=>document.getElementById(id);
 const navAdmin=q('eis223-admin-nav');
@@ -438,10 +448,17 @@ const pendingRequests=new Map();
 async function get(url){
  if(pendingRequests.has(url))return pendingRequests.get(url);
  const task=(async()=>{
+  try{
   const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
   if(response.status===401){location.replace('/account/login');throw Error('Требуется вход')}
   if(!response.ok)throw Error('Ошибка загрузки: '+response.status);
-  return response.json();
+  const data=await response.json();
+  if(typeof CustomEvent==='function'&&document.dispatchEvent)document.dispatchEvent(new CustomEvent('eis:workspace-data',{detail:{path:url,data}}));
+  return data;
+  }catch(error){
+   if(typeof CustomEvent==='function'&&document.dispatchEvent)document.dispatchEvent(new CustomEvent('eis:workspace-error',{detail:{path:url}}));
+   throw error;
+  }
  })();
  pendingRequests.set(url,task);
  try{return await task}finally{pendingRequests.delete(url)}
@@ -455,6 +472,11 @@ function legalStatus(item){
  if(state==='completed')return Number(item.legal_review_documents)>0?
   'Юридическая проверка завершена':'Юридическая проверка не завершена: нет проверенных документов';
  return 'Юридическая проверка ещё не завершена';
+}
+function displayCount(value){
+ if(typeof value==='string'){const text=value.trim();if(!/^[0-9]+$/.test(text))return '—';value=Number(text)}
+ else if(typeof value!=='number')return '—';
+ return Number.isSafeInteger(value)&&value>=0?String(value):'—';
 }
 function retainedResults(item){
  return ['pending','queued','running','processing','failed','error'].includes(item.legal_review_state)&&
@@ -474,7 +496,7 @@ const memos=memoResponse.status==='fulfilled'&&Array.isArray(memoResponse.value)
 const realBatches=Array.isArray(batches.batches)?batches.batches:[];
 const overview=q('eis223-personal-summary');overview.replaceChildren();
 const counters=[
- ['Самостоятельные',sumResponse.status==='fulfilled'?
+ ['Мои проверки',sumResponse.status==='fulfilled'?
   summary.manual_checks:(manualResponse.status==='fulfilled'?purchases.length:undefined)],
  ['Тематические проверки',batchResponse.status==='fulfilled'?realBatches.length:undefined],
  ['Служебные записки',sumResponse.status==='fulfilled'?
@@ -482,8 +504,7 @@ const counters=[
 for(const [label,value] of counters){
  const chip=document.createElement('span'),number=document.createElement('b');
  const caption=document.createElement('small');
- const numberValue=Number(value);
- number.textContent=Number.isFinite(numberValue)&&numberValue>=0?String(numberValue):'—';
+ number.textContent=displayCount(value);
  caption.textContent=label;chip.append(number,caption);overview.append(chip);
 }
 const pl=q('eis223-my-procurements');pl.replaceChildren();
@@ -504,22 +525,26 @@ for(const item of purchases.slice(0,8)){
  const meta=document.createElement('small');
  const stamp=Date.parse(item.started_at||'');
  const when=Number.isFinite(stamp)?new Date(stamp).toLocaleDateString('ru-RU')+' · ':'';
- const checked=Math.max(0,Number(item.documents_checked||0));
- const found=Math.max(0,Number(item.violations||0));
- meta.textContent=when+(statusLabels[item.job_status]||'Задание ЕИС')+
- ' · Документов: '+checked+' · Нарушений: '+found;
- const legal=document.createElement('small');legal.textContent=legalStatus(item);
- body.append(num,meta,legal);
+ const checked=displayCount(item.documents_checked),found=displayCount(item.violations);
+ meta.className='eis223-source-state';
+ meta.textContent=when+(statusLabels[item.job_status]||'Статус получения документов уточняется');
+ const results=document.createElement('small');results.className='eis223-result-line';
+ results.textContent='Документов проверено: '+checked+' · Нарушений: '+found;
+ const legal=document.createElement('small');legal.className='eis223-legal-state';legal.textContent=legalStatus(item);
+ legal.dataset.tone=item.legal_review_state==='completed'&&Number(item.legal_review_documents)>0?'complete':
+  ['failed','error'].includes(item.legal_review_state)?'attention':'pending';
+ body.append(num,meta,results,legal);
  const previous=retainedResults(item);
  if(previous){const note=document.createElement('small');note.textContent=previous;body.append(note)}
  li.append(body);
+ const actions=document.createElement('div');actions.className='eis223-row-actions';
  const open=document.createElement('a');open.href=item.card_available?
  '/check-new/'+encodeURIComponent(item.reg_number):'/account/home';
- open.textContent=item.card_available?'Карточка':'Подробности';li.append(open);
+ open.textContent=item.card_available?'Открыть карточку':'Подробности';open.className='eis223-open-card';actions.append(open);
  if(item.card_available){const dossier=document.createElement('a');
  dossier.href='/me/cases/'+encodeURIComponent(item.reg_number);
- dossier.textContent='Электронное дело';li.append(dossier);}
- const del=document.createElement('button');del.type='button';del.textContent='Убрать';
+ dossier.textContent='Электронное дело';actions.append(dossier);}
+ const del=document.createElement('button');del.type='button';del.textContent='Убрать из списка';
  del.title='Убрать из личного кабинета, не удаляя документы и результаты проверки';
  del.onclick=async()=>{
   if(!confirm('Убрать эту самостоятельную проверку из вашего кабинета? Оригиналы ЕИС и результаты не удалятся.'))return;
@@ -531,7 +556,7 @@ for(const item of purchases.slice(0,8)){
    await refresh();
   }catch{del.disabled=false;show('eis223-add-status','Не удалось убрать проверку')}
  };
- li.append(del);pl.append(li);
+ actions.append(del);li.append(actions);pl.append(li);
 }
 const bl=q('eis223-my-batches');bl.replaceChildren();
 if(!realBatches.length){const li=document.createElement('li');
@@ -555,8 +580,8 @@ for(const item of realBatches){
  const meta=document.createElement('small');
  const date=Date.parse(item.created_at);
  meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleDateString('ru-RU')+' · ':'')+
- 'Закупок: '+Number(item.purchases||0)+' · Нарушений: '+Number(item.violations||0)+
- (item.status==='active'?' · Выполняется':' · Остановлена');
+ 'Закупок: '+displayCount(item.purchases)+' · Нарушений: '+displayCount(item.violations)+
+ ' · '+({active:'Выполняется',stopped:'Остановлена',completed:'Завершена'}[item.status]||'Состояние уточняется');
  const period=document.createElement('small');
  period.textContent='Дата размещения в ЕИС: '+thematicPeriod(item);
  summary.append(title,meta,period);li.append(summary);
@@ -830,67 +855,44 @@ location.replace('/account/login');
 }catch{button.disabled=false;show('eis223-logout-status','Не удалось выйти. Повторите попытку.')}
 });
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
-q('eis223-add-procurement').addEventListener('submit',async event=>{
+document.addEventListener?.('eis:workspace-refresh',()=>{refresh();refreshAssignments()});
+const startForm=q('eis223-add-procurement'),startInput=q('eis223-check-reg'),startStatus=q('eis223-add-status');
+function startMessage(message,kind){startStatus.textContent=message;startStatus.dataset.kind=kind}
+startInput.addEventListener('input',()=>{startInput.removeAttribute('aria-invalid');if(startStatus.dataset.kind==='invalid')startMessage('','')});
+startForm.addEventListener('submit',async event=>{
 event.preventDefault();const form=event.currentTarget;
+if(form.dataset.busy==='1')return;
 const reg=String(new FormData(form).get('reg')||'').trim();
-if(!/^3[0-9]{10}$/.test(reg))return show('eis223-add-status','Некорректный номер ЕИС');
-const btn=form.querySelector('button');btn.disabled=true;
+if(!/^3[0-9]{10}$/.test(reg)){
+ startInput.setAttribute('aria-invalid','true');startMessage('Введите 11 цифр номера закупки, начиная с 3.','invalid');startInput.focus();return;
+}
+startInput.removeAttribute('aria-invalid');
+const btn=q('eis223-start-check');form.dataset.busy='1';form.setAttribute('aria-busy','true');
+btn.disabled=true;btn.textContent='Запускаем…';startInput.readOnly=true;
+startMessage('Отправляем запрос на проверку № '+reg+'…','pending');
 try{
-const r=await fetch('/me/manual-checks/'+encodeURIComponent(reg),
-{method:'POST',credentials:'same-origin'});
-show('eis223-add-status',r.ok?'Самостоятельная проверка запущена':'Не удалось запустить проверку');
-if(r.ok){form.reset();await refresh()}
-}catch{show('eis223-add-status','Ошибка соединения')}finally{btn.disabled=false}
+ const r=await fetch('/me/manual-checks/'+encodeURIComponent(reg),{method:'POST',credentials:'same-origin'});
+ if(r.ok){form.reset();startMessage('Запрос на проверку № '+reg+' принят. Обновляем список…','pending');await refresh();
+  startMessage('Запрос на проверку № '+reg+' принят. Состояние доступно в списке «Мои проверки».','success');
+ }else{
+  const errors={401:'Войдите снова, затем повторите запуск.',403:'Нет доступа к запуску проверки.',
+   422:'Проверьте номер: 11 цифр, первая — 3.',429:'Слишком много запросов. Повторите позже.'};
+  startMessage(errors[r.status]||'Не удалось подтвердить запуск. Проверьте список и повторите попытку.','error');
+  if(r.status===401){const link=document.createElement('a');link.href='/account/login';link.textContent='Открыть вход';startStatus.append(' ',link)}
+ }
+}catch{startMessage('Ошибка соединения. Номер остался в поле — повторите попытку.','error')}
+finally{form.dataset.busy='0';form.setAttribute('aria-busy','false');btn.disabled=false;btn.textContent='Проверить закупку';startInput.readOnly=false}
 });
 
 // Defer expensive private dashboard requests until the user opens the cabinet.
+try{const requested=new URL(document.baseURI).searchParams.get('check');if(/^3[0-9]{10}$/.test(requested||''))startInput.value=requested}catch{}
 refreshMyName();
 })();
 </script>
-''').encode("utf-8")
+''' + workspace_panels(role) + workspace_discovery() + workspace_preferences()).encode("utf-8")
 
 
-_GATEWAY_STYLE = """
-<style id="eis223-signin-style">
-:root{font-family:Inter,"Segoe UI",system-ui,sans-serif;color:#2a4356;
- --auth-ink:#213f57;--auth-border:#dbe7ef;--auth-muted:#687e8e}
-*{box-sizing:border-box}
-html,body{margin:0;min-height:100%;font-family:inherit}
-body{background:linear-gradient(155deg,#eaf2f8 0%,#f4f7fa 42%,#edf3f8 100%);
- color:var(--auth-ink)}
-.layout{min-height:100vh;display:flex;justify-content:center;align-items:center;
- padding:26px 15px}
-.auth{position:relative;overflow:hidden;background:#fff;width:min(490px,100%);
- border:1px solid var(--auth-border);border-radius:14px;
- padding:clamp(23px,4vw,36px);box-shadow:0 16px 56px #204e7119}
-.auth:before{position:absolute;top:0;left:0;right:0;content:"";height:5px;
- background:linear-gradient(90deg,#174c76,#3483b7,#7fb4d4)}
-h1{font-size:clamp(24px,2.8vw,29px);line-height:1.17;
- font-weight:790;letter-spacing:-.035em;color:#204c70;margin:10px 0 11px}
-p{font-size:13px;color:var(--auth-muted);line-height:1.65}
-.tabs{display:flex;gap:4px;padding:4px;margin:22px 0 19px;
- border-radius:9px;background:#eef4f9}
-.tabs button{flex:1;min-height:43px;padding:9px;border:0;
- border-radius:7px;cursor:pointer;font:700 14px system-ui;
- background:transparent;color:#637d92}
-.tabs button[aria-selected=true]{background:#fff;color:#175b8b;box-shadow:0 1px 7px #244b6812}
-form[hidden]{display:none!important}
-label{display:block;margin:15px 0 6px;font-size:13px;color:#425f74;font-weight:670}
-input{width:100%;display:block;min-height:45px;border-radius:8px;
- background:#fff;color:#263f53;border:1px solid #cbdce8;
- padding:11px 13px;font:inherit}
-input:focus{outline:3px solid #c8e3f6;border-color:#3b80ae}
-.submit{min-height:46px;width:100%;border:1px solid #175f92;
- background:#175f92;color:#fff;border-radius:8px;
- font:700 14px system-ui;margin-top:21px;cursor:pointer}
-.submit:hover:not(:disabled){background:#104971}
-.submit:disabled{opacity:.55}
-#auth-status{min-height:24px;font-size:13px;color:#406985;margin:12px 0}
-.small{font-size:11px;text-align:center;color:#8598a8;margin-top:14px}
-:focus-visible{outline:3px solid #8dbfe0;outline-offset:2px}
-@media(max-width:500px){.layout{align-items:flex-start;padding-top:8vh}.auth{border-radius:11px}}
-</style>
-"""
+_GATEWAY_STYLE = signin_style()
 
 
 def login_portal(initial_tab="login"):

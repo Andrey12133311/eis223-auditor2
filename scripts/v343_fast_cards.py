@@ -7,10 +7,14 @@ import asyncio
 import html
 import re
 import sqlite3
+from datetime import date
 from urllib.parse import urlsplit
 from fastapi.responses import HTMLResponse
 from v342_identity import organization_display_name
 from saved_eis_dates import recovered_date
+from account_visual_polish_v1 import card_style
+from workspace_discovery_v1 import workspace_discovery
+from inspection_progress_v1 import render_inspection_progress
 
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
 STYLE="""<style id="eis-modern-audit-card">
@@ -78,6 +82,96 @@ tbody tr:last-child td{border-bottom:0}
 }
 </style>"""
 
+CARD_EXPERIENCE_STYLE = r"""<style id="eis223-card-experience">
+.card-summary{padding:20px!important}
+.card-summary-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.card-summary .card-eyebrow{font-size:11px;font-weight:600;letter-spacing:.055em;
+ color:var(--ui-muted,#636366);text-transform:uppercase;margin:0 0 7px}
+.card-summary h2{font-size:clamp(19px,2vw,24px);line-height:1.3;margin:0 0 7px;max-width:900px}
+.card-summary-customer{font-size:13px;color:var(--ui-muted,#636366);line-height:1.5;margin:0;overflow-wrap:anywhere}
+.card-summary-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;
+ margin:18px 0 0;padding-top:15px;border-top:1px solid var(--edge)}
+.card-summary-grid div{min-width:0}.card-summary-grid dt{font-size:12px;color:var(--ui-muted,#636366);margin-bottom:4px}
+.card-summary-grid dd{font-size:15px;font-weight:600;margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.card-summary-grid .card-summary-price{white-space:normal}
+.card-state-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;
+ margin-top:18px;padding-top:15px;border-top:1px solid var(--edge)}
+.card-state-grid>div{min-width:0}.card-state-label{font-size:11px;color:var(--ui-muted,#636366);display:block;margin-bottom:5px}
+.card-state-grid strong{font-size:13px;font-weight:600;display:block;line-height:1.45}
+.card-state-grid .meta{font-size:12px;margin:5px 0 0}
+.card-state-grid [data-legal-review-state]{color:var(--ui-ink,#1d1d1f);font-size:13px;font-weight:600;line-height:1.45;margin:0}
+.card-result-strip{display:flex;align-items:center;flex-wrap:wrap;gap:9px 22px;margin-top:18px;padding-top:14px;border-top:1px solid var(--edge);font-size:12px}
+.card-result-strip>span{display:inline-flex;gap:7px;align-items:baseline}.card-result-strip b{font-size:21px;line-height:1.2;font-weight:600;font-variant-numeric:tabular-nums}
+.card-result-strip .card-result-confirmed{color:var(--ui-danger,#b42332)}
+.card-result-strip .card-result-review{color:var(--ui-warning,#865b00)}
+.card-result-strip .card-result-caption{color:var(--ui-muted,#636366);font-size:11px}
+.panel.card-requisites-panel{padding:8px 20px!important}
+.card-requisites{padding:0;border:0;background:transparent}
+.card-requisites>summary{cursor:pointer;min-height:38px;display:flex;align-items:center;gap:9px;
+ color:var(--ui-ink,#1d1d1f);font-weight:600;list-style:none}
+.card-requisites>summary::-webkit-details-marker{display:none}
+.card-requisites>summary:before{content:'›';font-size:20px;color:var(--ui-muted,#636366);transition:transform .15s}
+.card-requisites[open]>summary:before{transform:rotate(90deg)}
+.card-requisites[open]>summary{margin-bottom:14px}
+.card-requisites .grid{gap:14px 22px}.card-requisites .grid>div{min-width:0;overflow-wrap:anywhere;font-size:13px}
+.card-documents{table-layout:auto}.card-documents td:first-child{font-weight:500}
+.card-documents td:last-child a{display:inline-flex;align-items:center;min-height:32px}
+.card-output-actions{display:flex;flex-wrap:wrap;align-items:start;gap:8px 14px;margin:16px 0}
+.card-output-actions .card-actions{margin:0;max-width:100%}
+.card-export-action{gap:12px;justify-content:space-between;text-align:left}
+.card-export-action .card-format{flex:none;padding:2px 6px;border:1px solid currentColor;
+ border-radius:5px;font-size:10px;font-weight:600;letter-spacing:.035em;line-height:1.5;opacity:.85}
+.card-export-note{display:block;font-size:11px;font-weight:400;line-height:1.5;margin-top:3px}
+.card-output-actions>.meta{flex-basis:100%;margin:2px 0 0}
+.source-fragment{background:#f6f6f8;border-left-width:2px;border-radius:0 8px 8px 0;padding:11px 14px;font-size:13px}
+.finding-evidence-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;
+ margin-top:14px;padding-top:14px;border-top:1px solid var(--ui-line,#dedee3)}
+.finding-evidence-grid>section{min-width:0}
+.finding-evidence-grid .finding-section-title{margin:0 0 10px;font-size:11px;font-weight:600;
+ color:var(--ui-muted,#636366);letter-spacing:.02em}
+.finding-evidence-grid :is(.evidence,.finding-law,.finding-source){font-size:13px;line-height:1.65;margin:8px 0}
+.finding-evidence-grid .finding-original{padding:0 0 0 18px;border-left:1px solid var(--ui-line,#dedee3)}
+.finding-evidence-grid .source-fragment{margin:12px 0 0;color:var(--ui-ink,#1d1d1f)}
+.finding-evidence-grid .source-fragment-label{display:block;color:var(--ui-muted,#636366);font-size:11px;font-weight:600;margin-bottom:6px}
+.finding-evidence-grid .source-fragment-text{display:block;white-space:pre-wrap;overflow-wrap:anywhere}
+.finding-evidence-grid .finding-source a{font-weight:500}
+.finding-evidence-grid .finding-source-location{display:block;color:var(--ui-muted,#636366);font-size:12px;margin-top:5px}
+.finding-evidence-grid .finding-original-note{font-size:12px;margin:10px 0 0}
+.finding-review-explanation{margin-top:14px;padding-top:12px;border-top:1px solid var(--ui-line,#dedee3)}
+@media(max-width:660px){
+ .card-summary{padding:16px!important}.card-summary h2{font-size:19px}
+ .card-summary-grid{gap:14px;margin-top:14px;padding-top:12px}
+ .card-summary-grid dd{font-size:14px}
+ .card-state-grid{grid-template-columns:1fr;gap:12px;margin-top:14px;padding-top:12px}
+ .card-state-grid>div{display:grid;grid-template-columns:76px minmax(0,1fr);column-gap:12px;align-items:start}
+ .card-state-grid .card-state-label{grid-row:1/3;padding-top:1px}
+ .card-state-grid .meta{grid-column:2}.card-state-grid strong{grid-column:2}
+ .card-result-strip{margin-top:14px;padding-top:12px;gap:8px 16px}
+ .card-result-strip .card-result-caption{flex-basis:100%}
+ .card-requisites .grid{grid-template-columns:1fr;gap:12px}
+ .panel.card-requisites-panel{padding:8px 15px!important}
+ table.card-documents{display:block;max-width:100%;overflow:visible;border:0;background:transparent;border-radius:0}
+ .card-documents thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+ .card-documents tbody{display:block}
+ .card-documents tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 14px;
+  border-bottom:1px solid var(--edge);padding:14px 0;background:transparent}
+ .card-documents tr:first-child{padding-top:0}.card-documents tr:last-child{border-bottom:0;padding-bottom:0}
+ .card-documents td,.card-documents th{display:block;min-width:0!important;width:auto;border:0;padding:0;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+ .card-documents td:first-child,.card-documents td:last-child{grid-column:1/-1}
+ .card-documents td:first-child{font-weight:600}
+ .card-documents td:not(:first-child):before{content:attr(data-label);display:block;font-size:11px;font-weight:400;color:var(--ui-muted,#636366);margin-bottom:3px}
+ .card-documents td:last-child{display:flex;justify-content:space-between;align-items:center;gap:10px}
+ .card-documents td:last-child:before{margin:0}
+ .card-documents td:last-child a{min-height:40px;border:1px solid var(--edge);border-radius:8px;padding:7px 11px}
+ .card-output-actions{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+ .card-export-action{width:100%}
+ .finding-evidence-grid{grid-template-columns:minmax(0,1fr);gap:14px;margin-top:12px;padding-top:12px}
+ .finding-evidence-grid .finding-original{padding:14px 0 0;border-left:0;border-top:1px solid var(--ui-line,#dedee3)}
+}
+@media(pointer:coarse){.card-requisites>summary,.card-documents td:last-child a{min-height:44px}}
+@media(prefers-reduced-motion:reduce){.card-requisites>summary:before{transition:none}}
+</style>"""
+
 def esc(x):
     return html.escape(str(x if x is not None else ""), quote=True)
 
@@ -99,8 +193,96 @@ def source_link(url, title):
 def text(x):
     return esc(x) if x not in (None,"") else "Не указано"
 
+def document_state(value):
+    """Describe file retrieval/extraction, independently of legal conclusions."""
+    names={"checked":"Текст получен", "metadata":"Ожидается получение файла",
+           "downloaded_no_text":"Файл сохранён, текст не извлечён",
+           "waiting_for_originals":"Ожидается оригинал ЕИС",
+           "error":"Ошибка получения или обработки"}
+    if not isinstance(value,str):return "Состояние не уточнено"
+    saved=value.strip()
+    if saved in names:return names[saved]
+    # Older records may already contain human-readable Russian states.
+    return saved if re.search(r"[А-Яа-яЁё]",saved) else "Состояние не уточнено"
+
+
+def export_action(url,label,note=""):
+    return ('<p class="card-actions"><a class="action card-export-action" href="'+esc(url)+'">'
+            '<span>'+esc(label)+
+            ('<small class="card-export-note">'+esc(note)+'</small>' if note else '')+
+            '</span><span class="card-format">ODT</span></a></p>')
+
 def val(p,key):
     return p.get(key) if p is not None else None
+
+
+def display_date(value):
+    """Format only a saved ISO date prefix; retain its original time/zone."""
+    if value is None:return None
+    raw=str(value)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ].*)?",raw):return value
+    try:
+        saved=date.fromisoformat(raw[:10])
+    except ValueError:
+        return value
+    suffix=raw[10:]
+    if suffix.startswith("T"):suffix=" "+suffix[1:]
+    return saved.strftime("%d.%m.%Y")+suffix
+
+
+def saved_count(value):
+    """A missing or malformed display count is unknown, rather than zero."""
+    if value is None or isinstance(value,bool):return None
+    raw=str(value).strip()
+    return int(raw) if re.fullmatch(r"[0-9]+",raw) else None
+
+
+def document_progress(p,dtotal):
+    checked=saved_count(val(p,"documents_checked"))
+    found=saved_count(val(p,"documents_found"))
+    if checked is None:
+        label="Число проверенных документов не указано"
+    elif found is None:
+        label="Проверено документов: "+str(checked)+"; общее число не указано"
+    else:
+        label="Проверено "+str(checked)+" из "+str(found)
+    saved=saved_count(dtotal)
+    note=("В сохранённой записи: "+str(saved) if saved is not None
+          else "Число сохранённых документов не указано")
+    return ('<div data-eis-status="documents"><span class="card-state-label">Документы</span>'
+            '<strong>'+esc(label)+'</strong><p class="meta">'+esc(note)+'</p></div>')
+
+
+def compact_summary(reg,p,confirmed,review,dtotal,legal_review,has_previous,thematic=None,progress_html=""):
+    title=val(p,"title") or "Сведения о закупке пока не сохранены"
+    customer=organization_display_name(val(p,"customer")) if p else ""
+    price=val(p,"price")
+    if price in (None,""):price=val(p,"price_num")
+    deadline=display_date(recovered_date(p,"submission_end")) if p else None
+    if thematic:
+        names={"queued":"В очереди","completed":"Проверено",
+          "waiting_originals":"Ожидаются оригиналы ЕИС",
+          "waiting_engine":"Ожидается обработчик","retry":"Повторная попытка",
+          "excluded_company":"Форма заказчика не соответствует выборке"}
+        state=thematic.get("state") or "queued"
+        audit_notice='<p class="meta" data-legal-review-state="1">Тематическая проверка: '+esc(names.get(state,"Состояние не указано"))+'</p>'
+    else:
+        audit_notice=legal_state_notice(legal_review,has_previous)
+    review_label="Пересмотрено" if thematic else "Требует проверки"
+    return ('<section class="panel card-summary" data-eis-section="summary" data-eis-reg="'+esc(reg)+'">'
+        '<div class="card-summary-heading"><div><p class="card-eyebrow">'+
+        ('Тематическая проверка' if thematic else 'Проверка закупки')+' · '+esc(reg)+'</p>'
+        '<h2 data-eis-summary="title">'+esc(title)+'</h2>'+
+        ('<p class="card-summary-customer" data-eis-summary="customer">'+esc(customer)+'</p>' if customer else '')+
+        '</div></div><dl class="card-summary-grid"><div><dt>Стоимость закупки</dt>'
+        '<dd class="card-summary-price" data-eis-summary="price">'+text(price)+'</dd></div>'
+        '<div><dt>Окончание подачи заявок</dt><dd data-eis-summary="deadline">'+text(deadline)+'</dd></div></dl>'
+        '<div class="card-state-grid">'+document_progress(p,dtotal)+
+        '<div data-eis-status="legal"><span class="card-state-label">Проверка</span>'+audit_notice+'</div></div>'
+        '<div class="card-result-strip"><span class="card-result-caption">В сохранённых результатах</span>'
+        '<span>Подтверждено <b data-eis-count="confirmed"'+(' class="card-result-confirmed"' if confirmed else '')+'>'+str(confirmed)+'</b></span>'
+        '<span>'+review_label+' <b data-eis-count="review"'+(' class="card-result-review"' if review else '')+'>'+str(review)+'</b></span>'
+        '</div>'+progress_html+'</section>')
 
 def recovered_submission_start(p):
     """Recover a missing start date only from an explicit saved official-card field.
@@ -273,7 +455,8 @@ def presentation_gaps(item):
 def result_accordion(key,label,count,body):
     # Native details/summary supplies click, Enter and Space handling, exposes
     # its state to assistive technology, and works without JavaScript.
-    return ('<details class="panel result-group" id="'+esc(key)+'">'
+    section="findings" if key=="audit-violations" else "review"
+    return ('<details class="panel result-group" id="'+esc(key)+'" data-eis-section="'+section+'">'
             '<summary><h2>'+esc(label)+'</h2><span class="result-count">'+str(count)+
             '</span></summary><div class="result-body">'+body+'</div></details>')
 
@@ -283,7 +466,9 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
     if review_reg and kind=="legal":
         from scripts.v382_finding_review_ui import finding_control
         review_control=finding_control(review_reg,item,review_batch)
-    supporting=(item or {}).get("supporting_sources") or []
+    saved_supporting=(item or {}).get("supporting_sources") or []
+    supporting=([origin for origin in saved_supporting if isinstance(origin,dict)]
+                if isinstance(saved_supporting,(list,tuple)) else [])
     extra=""
     if len(supporting)>1:
         labels=[]
@@ -301,8 +486,8 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
         heading+='<p class="meta msp-reassessment"><b>Перепроверка применимости правил МСП:</b> '+esc(reassessment.get("reason"))+\
             ' <span>Дата: '+esc(reassessment.get("created_at"))+'</span></p>'
     origin=source_link(source,document or "Оригинал ЕИС")
-    source_html=('<p class="finding-source"><b>Источник:</b> '+(origin or esc(document))+
-                 ('. '+esc((item or {}).get("location")) if (item or {}).get("location") else '')+
+    source_html=('<p class="finding-source"><b>Документ:</b> '+(origin or esc(document))+
+                 ('<span class="finding-source-location">'+esc((item or {}).get("location"))+'</span>' if (item or {}).get("location") else '')+
                  '</p>') if origin or document else ''
     fragment=(item or {}).get("match_text")
     note=(item or {}).get("note")
@@ -319,17 +504,25 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
         basis_html=('<p class="finding-law"><b>Применённая норма:</b> '+esc(law)+'</p>'
                     if law and not refs else '')
     return ('<article class="'+kind+'">'+heading+'<h3>'+esc(title or "Нарушение")+'</h3>'
+      +'<div class="finding-evidence-grid"><section class="finding-conclusion" aria-label="Вывод и правовое основание">'
+      +'<p class="finding-section-title">Вывод и правовое основание</p>'
       +('<p class="evidence"><b>Факты и обстоятельства:</b> '+linked_evidence(evidence)+'</p>' if evidence else '')
       +basis_html
       +legal_links(item,law,link)
+      +('<p class="meta"><b>Пояснение проверки:</b> '+esc(note)+'</p>' if note else '')
+      +'</section><section class="finding-original" aria-label="Оригинал документа">'
+      +'<p class="finding-section-title">Оригинал документа</p>'
       +source_html
       +('<p class="meta">Проверяемая ссылка на оригинал ЕИС в сохранённой записи отсутствует. '
         'Сверьте указанный документ и приведённый фрагмент.</p>' if missing_link else '')
-      +('<p class="source-fragment"><b>Фрагмент оригинала:</b> '+esc(fragment)+'</p>' if fragment else '')
-      +('<p class="meta"><b>Пояснение проверки:</b> '+esc(note)+'</p>' if note else '')
-      +('<p class="meta"><b>Почему требует проверки:</b> '+esc('; '.join(gaps))+'. '
+      +('<blockquote class="source-fragment"><span class="source-fragment-label">Фрагмент оригинала:</span>'
+        '<span class="source-fragment-text">'+esc(fragment)+'</span></blockquote>' if fragment else
+        '<p class="meta finding-original-note">Точный фрагмент оригинала не сохранён. '
+        'Сверьте приведённые факты с документом ЕИС.</p>')
+      +extra+'</section></div>'
+      +('<p class="meta finding-review-explanation"><b>Почему требует проверки:</b> '+esc('; '.join(gaps))+'. '
         'В этой карточке запись не включена в подтверждённые нарушения. Сохранённая запись не изменена.</p>' if gaps else '')
-      +extra+review_control
+      +review_control
       +'</article>')
 
 def render_thematic_panel(reg,thematic,account_review=False):
@@ -346,7 +539,7 @@ def render_thematic_panel(reg,thematic,account_review=False):
       "waiting_originals":"Ожидаются оригиналы ЕИС",
       "waiting_engine":"Ожидается обработчик","retry":"Повторная попытка",
       "excluded_company":"Форма заказчика не соответствует выборке"}
-    result=['<section class="panel" id="thematic-results">',
+    result=['<section class="panel" id="thematic-results" data-eis-section="findings" data-eis-audit="thematic">',
       '<h2>Нарушения: '+str(sum(item.get("effective_status","confirmed")=="confirmed" for item in rows))+'</h2>',
       '<div class="grid"><div><b>Состояние проверки:</b> '+esc(names.get(state,state))+
       '</div><div><b>Выбранные направления:</b> '+
@@ -362,8 +555,8 @@ def render_thematic_panel(reg,thematic,account_review=False):
         from scripts.account_memo_requisites_ui_v1 import render_memo_requisites_editor
         result.append(render_memo_requisites_editor(reg))
     if any(item.get("effective_status","confirmed")=="confirmed" for item in rows):
-        result.append('<p><a class="action" href="/api/v304/thematic-memo/'+esc(batch)+'/'+
-          esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>')
+        result.append(export_action('/api/v304/thematic-memo/'+str(batch)+'/'+str(reg)+'.odt',
+                                    'Сформировать служебную записку'))
         result.append('<p class="meta">Проект формируется по сохранённым тематическим нарушениям; '+
           'перед подписанием необходима юридическая сверка с оригиналами ЕИС.</p>')
     else:
@@ -414,9 +607,9 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         keys=[
           ('Предмет закупки',val(p,'title')),('Заказчик',organization_display_name(val(p,'customer'))),
           ('ИНН заказчика',val(p,'customer_inn')),('Способ закупки',val(p,'method')),
-          ('Стоимость закупки',val(p,'price')),('Дата размещения',recovered_date(p,'published')),
-          ('Начало подачи заявок',recovered_submission_start(p)),
-          ('Окончание подачи заявок',recovered_date(p,'submission_end'))]
+          ('Стоимость закупки',val(p,'price')),('Дата размещения',display_date(recovered_date(p,'published'))),
+          ('Начало подачи заявок',display_date(recovered_submission_start(p))),
+          ('Окончание подачи заявок',display_date(recovered_date(p,'submission_end')))]
         if not val(p,'price') and val(p,'price_num') is not None:
             keys[4]=('Стоимость закупки',val(p,'price_num'))
         from v383_msp_scope import display as msp_display
@@ -428,13 +621,21 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         current_msp=scope_display((thematic or {}).get('findings') or [])
         keys.append(('Закупка только для МСП',current_msp or msp_display(p)))
         basic='<div class="grid">'+''.join('<div><b>'+esc(k)+':</b> '+text(v)+'</div>' for k,v in keys)+'</div>'
-        basic+='<p class="meta">Документы: проверено '+str(int(val(p,'documents_checked') or 0))+' из '+str(int(val(p,'documents_found') or dtotal))+'</p>'
         eis=source_link(p.get('url'),'Открыть карточку ЕИС')
         if eis:basic+='<p>'+eis+'</p>'
     else:
         basic='<p>Карточка закупки пока не сохранена. После получения сведений ЕИС она появится здесь автоматически. Ранее найденные нарушения, если они есть в базе, показаны ниже.</p>'
-    if not thematic:
-        basic+=legal_state_notice(legal_review,bool(findings or checks or int(val(p,'documents_checked') or 0)))
+    has_previous=bool(findings or checks or (saved_count(val(p,'documents_checked')) or 0))
+    summary_confirmed,summary_review=len(violation),len(reviews)
+    if thematic:
+        thematic_rows=(list(thematic.get("findings",[])) if thematic.get("findings_canonical")
+                       else collapse_legal_events(thematic.get("findings",[])))
+        summary_confirmed=sum(item.get("effective_status","confirmed")=="confirmed" for item in thematic_rows)
+        summary_review=sum(item.get("effective_status","confirmed")!="confirmed" for item in thematic_rows)
+    progress=render_inspection_progress(purchase=p,documents=docs,document_total=dtotal,
+                                       legal_review=legal_review,has_previous=has_previous,thematic=thematic)
+    summary=compact_summary(reg,p,summary_confirmed,summary_review,dtotal,legal_review,has_previous,thematic,
+                            progress_html=progress)
     # The shared account shell is injected only on the homepage, not this
     # read-only card. Keep a single quiet return path, not three duplicate
     # button-style section links; the sections remain in the main navigation.
@@ -443,19 +644,24 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         nav=('<nav><a href="/thematic#'+esc(thematic["batch"])+
              '">← К тематической очереди</a></nav>')
     thematic_html=render_thematic_panel(reg,thematic,account_review=account_review)
-    export_label=('Скачать ODT сохранённых результатов · требуется сверка' if incomplete
-                  else 'Сформировать служебную записку ODT')
-    actions='<p class="card-actions"><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">'+export_label+'</a></p>' if any(item.get("effective_status","confirmed")=="confirmed" for item in candidates) else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
+    export_label=('Скачать сохранённые результаты' if incomplete
+                  else 'Сформировать служебную записку')
+    actions=(export_action('/api/v304/memo/'+str(reg)+'.odt',export_label,
+                          'Требуется сверка перед подписанием' if incomplete else '')
+             if any(item.get("effective_status","confirmed")=="confirmed" for item in candidates)
+             else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>')
     if thematic:actions=''
-    inspection_actions=('<p class="card-actions"><a class="action" href="/api/inspection/'+esc(reg)+
-                        '.odt">Лист внеплановой проверки ODT</a></p>')
+    output_actions=('<section class="card-output-actions" aria-label="Документы проверки">'+
+                    export_action('/api/inspection/'+str(reg)+'.odt','Лист внеплановой проверки')+
+                    actions+'</section>')
     checked='<p class="meta">'+str(len(reviews))+' вопросов требуют дополнительной юридической проверки.</p>'
     for x in reviews[:50]:
         checked+=detail_block(x,'review',x.get('item'),x.get('law'),x.get('evidence'),x.get('document'),x.get('source_url'),x.get('law_url'))
     if len(reviews)>50:checked+='<p>Показаны первые 50 из '+str(len(reviews))+' вопросов для проверки.</p>'
-    docs_html='<table><thead><tr><th>Документ</th><th>Вид</th><th>Состояние</th><th>Источник</th></tr></thead><tbody>'
+    # Explicit native roles survive the mobile record-grid presentation.
+    docs_html='<table class="card-documents" role="table" aria-label="Документы закупки"><thead role="rowgroup"><tr role="row"><th role="columnheader">Документ</th><th role="columnheader">Вид</th><th role="columnheader">Состояние</th><th role="columnheader">Источник</th></tr></thead><tbody role="rowgroup">'
     for d in docs:
-        docs_html+='<tr><td>'+text(d.get('name'))+'</td><td>'+text(d.get('doc_type'))+'</td><td>'+text(d.get('status'))+'</td><td>'+source_link(d.get('url'),'ЕИС')+'</td></tr>'
+        docs_html+='<tr role="row"><td role="cell" data-label="Документ">'+text(d.get('name'))+'</td><td role="cell" data-label="Вид">'+text(d.get('doc_type'))+'</td><td role="cell" data-label="Состояние">'+esc(document_state(d.get('status')))+'</td><td role="cell" data-label="Источник">'+source_link(d.get('url'),'Открыть в ЕИС')+'</td></tr>'
     docs_html+='</tbody></table>'
     if dtotal>len(docs):docs_html+='<p class="meta">Показаны последние '+str(len(docs))+' из '+str(dtotal)+' документов.</p>'
     if not docs:docs_html='<p>Оригиналы документов пока не сохранены.</p>'
@@ -473,7 +679,8 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
                 'поэтому эти эпизоды необходимо сверить перед подписанием.</p>')
     # The thematic card is its own audit. Never append general findings or
     # general "review" cards underneath the thematic violations.
-    general_section=('' if thematic else actions+notes+
+    if notes:notes='<section class="card-result-notices" data-eis-section="notices">'+notes+'</section>'
+    general_section=('' if thematic else notes+
         result_accordion('audit-violations','Нарушения',len(violation),
         '<p class="meta">'+esc(status)+'</p>'+(''.join(violation) if violation else
         '<p>Подтверждённых нарушений в сохранённых результатах пока нет. '
@@ -485,14 +692,15 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         review_assets=review_style+review_script
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'
      '<meta name="viewport" content="width=device-width,initial-scale=1">'
-     '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+'</head><body>'
+     '<title>'+('Тематическая проверка ' if thematic else 'Карточка проверки ')+esc(reg)+'</title>'+STYLE+card_style()+CARD_EXPERIENCE_STYLE+'</head><body>'
      '<header><h1>'+('Карточка тематической проверки № ' if thematic else 'Карточка проверки закупки № ')+esc(reg)+'</h1></header><main>'+nav
-     +'<section class="panel"><h2>Сведения о закупке</h2>'+basic+'</section>'
-     +inspection_actions
+     +summary
+     +'<section class="panel card-requisites-panel" data-eis-section="overview"><details class="card-requisites"><summary>Сведения о закупке</summary>'+basic+'</details></section>'
+     +output_actions
      +thematic_html
      +general_section+review_section
-     +'<section class="panel"><h2>Документы ЕИС ('+str(dtotal)+')</h2>'+docs_html+'</section>'
-     +'</main>'+review_assets+'</body></html>')
+     +'<section class="panel" data-eis-section="documents"><h2>Документы ЕИС ('+str(dtotal)+')</h2><p class="meta">Состояние показывает получение файла и извлечение текста. Юридические выводы — в результатах проверки.</p>'+docs_html+'</section>'
+     +'</main>'+review_assets+workspace_discovery()+'</body></html>')
 
 def read_and_render(ns, reg, account_review=False):
     # Legal reconciliation and HTML construction can take longer than the

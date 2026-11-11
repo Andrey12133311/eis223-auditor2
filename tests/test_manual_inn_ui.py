@@ -45,6 +45,7 @@ async function journey(){
  let reads=0,added=false;
  const ui=await start(call=>{
   if(call.url==='/me/manual-checks')return added?[purchase]:[];
+  if(call.url==='/me/inn-search'&&call.method==='GET')return {searches:[]};
   if(call.url==='/me/manual-checks/'+purchase.reg_number){added=true;return {accepted:true}};
   if(call.method==='POST')return {id:'search-one',status:'queued',existing:[],search_pages_pending:1,
     bridge:{server_active:true,inn_search_available:true}};
@@ -55,14 +56,14 @@ async function journey(){
  });
  assert.equal(ui.el('manual-inn-submit').textContent,'Проверить по ИНН');
  await ui.submit('7707083893');
- const post=ui.calls.find(c=>c.url==='/me/inn-search');
+ const post=ui.calls.find(c=>c.url==='/me/inn-search'&&c.method==='POST');
  assert.equal(post.method,'POST');
  assert.deepEqual(JSON.parse(post.options.body),{inn:'7707083893'});
  assert.equal(post.options.credentials,'same-origin');
- assert.match(ui.el('manual-inn-message').textContent,/сохранён в очереди VPS/);
+ assert.match(ui.el('manual-inn-message').textContent,/сохранён в очереди/);
  assert.doesNotMatch(ui.el('manual-inn-message').textContent,/следующих страницах/);
  await ui.tick();
- assert.match(ui.el('manual-inn-message').textContent,/проверяет ИНН заказчика/);
+ assert.match(ui.el('manual-inn-message').textContent,/Проверяем ИНН заказчика/);
  assert.equal(ui.timers.size,1,'verification must continue polling after root discovery completed');
  await ui.tick();
  assert.match(ui.el('manual-inn-message').textContent,/завершён.*Найдено закупок: 1/);
@@ -80,14 +81,14 @@ async function journey(){
 
 async function waiting(){
  for(const [bridge,expected] of [
-  [{server_active:false,inn_search_available:false},/VPS сейчас не на связи/],
-  [{server_active:true,inn_search_available:false},/требуется обновление/],
+  [{server_active:false,inn_search_available:false},/Сервис загрузки временно недоступен/],
+  [{server_active:true,inn_search_available:false},/пока не поддерживает поиск по ИНН/],
  ]){
   const ui=await start(call=>call.url==='/me/manual-checks'?[]:{id:'waiting',job:{status:'done'},
    existing:[],search_pages_pending:2,verification_pending:1,bridge});
   await ui.submit('7707083893');await ui.tick();
   assert.match(ui.el('manual-inn-message').textContent,expected);
-  assert.doesNotMatch(ui.el('manual-inn-message').textContent,/следующих страницах|проверяет ИНН/);
+  assert.doesNotMatch(ui.el('manual-inn-message').textContent,/следующих страницах|Проверяем ИНН/);
   assert.equal(ui.timers.size,1,'offline or old workers leave a saved request polling');
   ui.dom.window.close();
  }

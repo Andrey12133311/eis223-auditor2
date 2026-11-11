@@ -60,7 +60,7 @@ class CompactManager(unittest.TestCase):
             self.assertEqual(len(ids), len(set(ids)))
             referenced = set(re.findall(r'\$\(["\'](mgr-[^"\']+)["\']\)', SCRIPT))
             self.assertFalse(referenced - set(ids), referenced - set(ids))
-            self.assertLess(render_manager(role).index('id="eis223-account-polish"'),
+            self.assertGreater(render_manager(role).index('id="eis223-account-polish"'),
                             render_manager(role).index('id="eis223-manager-compact"'))
 
     def test_role_routes_and_guard_are_preserved(self):
@@ -68,6 +68,43 @@ class CompactManager(unittest.TestCase):
         self.assertTrue(self.page("admin").xpath('//header//a[@href="/account/admin"]'))
         with self.assertRaises(ValueError):
             render_manager("user")
+
+    def test_action_metrics_are_native_keyboard_controls_with_existing_destinations(self):
+        page = self.page()
+        shortcuts = page.xpath('//*[@data-mgr-shortcut]')
+        self.assertEqual([node.get('data-mgr-shortcut') for node in shortcuts],
+                         ['pending', 'overdue', 'memos', 'team'])
+        self.assertTrue(all(node.tag == 'button' and node.get('type') == 'button'
+                            for node in shortcuts))
+        self.assertTrue(all(node.xpath('./strong[@id]') for node in shortcuts))
+        self.assertEqual(page.get_element_by_id('mgr-title').get('tabindex'), '-1')
+        statuses = page.get_element_by_id('mgr-task-status').xpath('./option/@value')
+        self.assertIn('overdue', statuses)
+        self.assertIn('submitted', statuses)
+        self.assertEqual(page.get_element_by_id('mgr-task-count').get('role'), 'status')
+        self.assertEqual(page.get_element_by_id('mgr-memo-count').get('role'), 'status')
+        for identifier in ('mgr-task-reset', 'mgr-task-empty-reset', 'mgr-memo-empty-reset'):
+            self.assertEqual(page.get_element_by_id(identifier).get('type'), 'button')
+
+    def test_header_and_refresh_state_keep_context_visible(self):
+        page = self.page()
+        self.assertTrue(page.xpath('//header//a[@href="/#cabinet" and normalize-space()="Мой кабинет"]'))
+        self.assertTrue(page.xpath('//header//a[@href="/" and normalize-space()="Реестр закупок"]'))
+        self.assertTrue(page.xpath('//header//a[@href="/account/profile" and normalize-space()="Профиль"]'))
+        state = page.get_element_by_id('mgr-refresh-status')
+        self.assertEqual(state.get('role'), 'status')
+        self.assertEqual(state.get('aria-live'), 'polite')
+
+    def test_navigation_icons_are_decorative_local_vectors(self):
+        page = self.page()
+        icons = page.xpath('//nav[@aria-label="Разделы руководителя"]//span[@class="mgr-tab-icon"]')
+        self.assertEqual(len(icons), 9)
+        for icon in icons:
+            self.assertEqual(icon.get('aria-hidden'), 'true')
+            self.assertEqual(len(icon.xpath('./svg')), 1)
+            self.assertEqual(icon.xpath('./svg/@focusable'), ['false'])
+            self.assertFalse(icon.text and icon.text.strip())
+        self.assertNotIn('__ICON_', render_manager('manager'))
 
 
 if __name__ == "__main__":
