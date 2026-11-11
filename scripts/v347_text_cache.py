@@ -24,6 +24,15 @@ _m={"hits":0,"misses":0,"extracted":0,"skipped":0}
 def cache_stats():
     with _guard:return dict(_m)
 
+def _same_source(path, before, source):
+    try:
+        if Path(source).resolve(strict=True)!=path:return False
+        after=path.stat()
+        return (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(
+            after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+    except OSError:
+        return False
+
 def cached_extract(source, original, *, namespace=CACHE_VERSION, data_root=None):
     """Reuse extraction by bytes, format and parser revision, never provenance.
 
@@ -42,6 +51,7 @@ def cached_extract(source, original, *, namespace=CACHE_VERSION, data_root=None)
             raise ValueError("Unsupported cache source")
         with path.open("rb") as original_bytes:
             sha=hashlib.file_digest(original_bytes,"sha256").hexdigest()
+        if not _same_source(path,before,source):return ""
         key=hashlib.sha256((namespace+":"+path.suffix.lower()+":"+sha).encode()).hexdigest()
     except (OSError,ValueError,TypeError):
         with _guard:_m["skipped"]+=1
@@ -49,26 +59,30 @@ def cached_extract(source, original, *, namespace=CACHE_VERSION, data_root=None)
     target=Path(tempfile.gettempdir())/"eis223_extracted_text_cache_v347"/key[:2]/(key+".txt")
     lock=_locks[int(key[:8],16)%len(_locks)]
     with lock:
+        # Waiting for another parser must not release a result for a source
+        # replaced after hashing. The caller retries with freshly verified bytes.
+        if not _same_source(path,before,source):return ""
         try:
             # Check size before allocating a cache file, including corrupt files.
             if 0<target.stat().st_size<=MAX_TEXT:
                 text=target.read_text(encoding="utf-8")
                 if len(text.strip())>=3:
+                    if not _same_source(path,before,source):return ""
                     with _guard:_m["hits"]+=1
                     return text
         except (OSError,UnicodeError):
             pass
         with _guard:_m["misses"]+=1
-        text=original(source)
+        # Parse the same resolved file whose bytes/format made the key, rather
+        # than following a source alias again after it may have been retargeted.
+        text=original(path)
         if not isinstance(text,str):text=str(text or "")
+        # A result from a disappearing/changing source is incomplete evidence,
+        # even when it would not have been written into the cache.
+        if not _same_source(path,before,source):return ""
         if len(text.strip())<3 or len(text.encode("utf-8"))>MAX_TEXT:
             return text
         try:
-            after=path.stat()
-            # A replacement during extraction must never poison the old key.
-            if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(
-                after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
-                return text
             target.parent.mkdir(parents=True,exist_ok=True)
             tmp=target.with_name(target.name+".tmp."+str(os.getpid())+"."+str(threading.get_ident()))
             tmp.write_text(text,encoding="utf-8")

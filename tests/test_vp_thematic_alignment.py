@@ -78,7 +78,7 @@ class ThematicProofAndSheet(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(selected,keys)
 
     async def review(self,categories,*,unverified=False,save=None,finding_changes=None):
-        doc=official("Разъяснение.pdf","Дата поступления запроса: 01.10.2026. Ответ размещён 07.10.2026. "
+        doc=official("Разъяснение.pdf","Дата поступления запроса: 01.10.2026. Дата публикации разъяснения в ЕИС: 07.10.2026. "
             "Срок подачи заявок по извещению, действовавшему на дату запроса: 30.10.2026.")
         if unverified:doc["meta"]["source"]="existing_local_unverified"
         purchase={"reg_number":"32616412317","customer":"ООО Пример","method":"Открытый конкурс"}

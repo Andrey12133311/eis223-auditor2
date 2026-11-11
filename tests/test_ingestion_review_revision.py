@@ -41,12 +41,18 @@ class ReviewRevision(unittest.IsolatedAsyncioTestCase):
         self.state_path=self.root/"eis223_official_review_jobs"/(REG+".json")
 
     async def wait_completed(self,calls=1):
-        for _ in range(100):
-            if (len(self.calls)>=calls and self.state_path.exists()
-                    and json.loads(self.state_path.read_text()).get("status")=="completed"):
-                return
-            await asyncio.sleep(.005)
-        self.fail("Expected completion was not reached")
+        await self.wait_state("completed",calls)
+
+    async def wait_state(self,status,calls=0):
+        try:
+            async with asyncio.timeout(3):
+                while True:
+                    if (len(self.calls)>=calls and self.state_path.exists()
+                            and json.loads(self.state_path.read_text()).get("status")==status):
+                        return
+                    await asyncio.sleep(.005)
+        except TimeoutError:
+            self.fail(f"Expected review state {status!r} was not reached")
 
     async def test_replaced_current_original_reopens_completed_review(self):
         self.enqueue(REG);await self.wait_completed()
@@ -177,14 +183,14 @@ class ReviewRevision(unittest.IsolatedAsyncioTestCase):
     async def test_distinct_unreadable_original_cannot_be_hidden_by_duplicate_coverage(self):
         self.second_source(self.second)
         self.enqueue(REG)
-        await asyncio.sleep(.05)
+        await self.wait_state("partial")
         self.assertEqual(json.loads(self.state_path.read_text())["status"],"partial")
         self.assertIsNone(originals._verified_unique_original_count(REG))
 
     async def test_archive_sources_never_infer_complete_member_coverage(self):
         self.second_source(self.first,ext=".zip")
         self.enqueue(REG)
-        await asyncio.sleep(.05)
+        await self.wait_state("partial")
         self.assertEqual(json.loads(self.state_path.read_text())["status"],"partial")
         self.assertIsNone(originals._verified_unique_original_count(REG))
 
@@ -192,7 +198,7 @@ class ReviewRevision(unittest.IsolatedAsyncioTestCase):
         second=self.second_source()
         originals.saved_document(REG,second["uid"])[0].write_bytes(b"!"*len(self.first))
         self.enqueue(REG)
-        await asyncio.sleep(.05)
+        await self.wait_state("partial")
         self.assertEqual(json.loads(self.state_path.read_text())["status"],"partial")
 
     async def test_original_repair_reopens_completed_review_even_with_same_expected_hash(self):

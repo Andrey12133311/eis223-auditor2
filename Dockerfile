@@ -111,6 +111,8 @@ COPY tests/test_archive_expansion_cache.py tests/test_checklist_document_identit
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_expansion_cache test_checklist_document_identity test_bid_security_requirement_recall test_collective_agreement_application_duty
 COPY tests/test_archive_first_pass.py tests/test_security_field_boundaries.py tests/test_thematic_analysis_cancellation.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_first_pass test_security_field_boundaries test_thematic_analysis_cancellation
+COPY tests/test_archive_expansion_budget.py tests/test_security_formula_continuations.py tests/test_text_cache_source_stability.py tests/test_clarification_event_scope.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_expansion_budget test_security_formula_continuations test_text_cache_source_stability test_clarification_event_scope
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

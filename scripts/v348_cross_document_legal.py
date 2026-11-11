@@ -18,7 +18,8 @@ from v295_eis_originals import uid_from_url
 from v341_eis_facts import DATE_TOKEN
 from v341_precise_legal import (matches,REQUEST,ANSWER,SIGNED,PROTOCOL_PUBLISHED,
                                  shifted,day,COMPETITIVE,LAW32,LAW4,federal_workday,
-                                 clarification_deadline,clarification_deadline_review)
+                                 clarification_deadline,clarification_deadline_review,
+                                 clarification_event_scope,clarification_scope_review)
 
 EVENT_DOC=re.compile(r"разъяснен|запрос",re.I)
 EXCLUDE=re.compile(r"образец|пример|шаблон|проект|инструкци",re.I)
@@ -131,6 +132,10 @@ def _clarification_outcomes(p,docs):
         request_source=original.get("source_url") or qdoc.get("url") or ""
         reply_source=reply.get("source_url") or adoc.get("url") or ""
         if not request_source or not reply_source:continue
+        scope_proof=clarification_event_scope(p,qdoc,request,adoc,response)
+        if scope_proof["state"]!="confirmed":
+            checks.append(clarification_scope_review(qdoc,request,scope_proof,cross_original=True))
+            continue
         deadline_proof=clarification_deadline(p,qdoc,request,received)
         proof_text=(request[0]+". Источник запроса: "+request_source+"; "+response[0]+
                     ". Источник ответа: "+reply_source+". "+deadline_proof.get("evidence_text", ""))

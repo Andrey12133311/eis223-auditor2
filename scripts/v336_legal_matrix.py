@@ -129,6 +129,9 @@ CONTRACT_LINE=re.compile(r"обеспечени\w*\s+(?:исполнени\w*\s+
 COMPETITIVE=re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)|конкурентн\w*\s+закупк",re.I)
 SECURITY_LABEL=re.compile(BID_LABEL+r"|"+CONTRACT_LINE.pattern,re.I)
 CLAUSE_END=re.compile(r"[!?;]|(?<!\d)\.(?!\d)|(?<=\d)\.(?!\d)")
+FORMULA_CONTINUATION=re.compile(
+    r"\s*[,;:]?\s*(?:\(\s*)?(?:но\s+)?(?:не\s+(?:более|менее|выше|ниже)\b|"
+    r"за\s+вычетом\b|(?:уменьш|увелич)\w*\b|или\b|либо\b)",re.I)
 # Original DOCX table rows are preserved as newlines and pipe-separated cells.
 # An exact next field is a boundary, unlike a line-wrapped cap/alternative in
 # the current amount. Requiring a full label plus separator avoids promoting
@@ -244,10 +247,14 @@ def _security_requirement_tail(body,match):
         boundary=pattern.search(body,start,end)
         if boundary:end=boundary.start()
     for boundary in CLAUSE_END.finditer(body,start,end):
-        # The dot in "00 коп., но не более ..." abbreviates a unit; it
-        # cannot remove the continuing cap from the exact amount evidence.
+        following=body[boundary.end():end]
+        # A unit abbreviation may precede an attached parenthetical as well
+        # as a comma. Neither it nor a semicolon before an explicit formula
+        # continuation can turn the first operand into a fixed obligation.
         if (boundary[0]=="." and re.search(r"\bкоп$",body[start:boundary.start()],re.I)
-                and body[boundary.end():end].lstrip().startswith(",")):
+                and following.lstrip().startswith((",",";",":","("))):
+            continue
+        if boundary[0] in ".;" and FORMULA_CONTINUATION.match(following):
             continue
         end=boundary.start()
         break

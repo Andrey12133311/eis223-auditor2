@@ -334,6 +334,41 @@ def clarification_deadline_review(doc, request, assessment, evidence, *, cross_o
     return item
 
 
+def clarification_event_scope(p, request_doc, request, response_doc, response):
+    """Veto contradictory source scopes at the two actual event positions.
+
+    A request number and nearby dates do not establish a common lot. Missing
+    labels remain unspecified; explicit conflicting identities cannot be joined.
+    """
+    from legal_document_context import source_scope_context
+    request_scope = source_scope_context(p, request_doc, request.start())
+    response_scope = source_scope_context(p, response_doc, response.start())
+    compatible = (request_scope["eligible_actual"] and response_scope["eligible_actual"] and
+        all(not request_scope[key] or not response_scope[key] or request_scope[key] == response_scope[key]
+            for key in ("purchase_ids", "lots", "lot_ids")))
+    evidence = []
+    for doc, match in ((request_doc, request), (response_doc, response)):
+        source = str((doc.get("meta") or {}).get("source_url") or doc.get("url") or "")
+        evidence.append(match[0] + ". Источник: " + source)
+    return {"state": "confirmed" if compatible else "requires_review",
+            "reason_code": "" if compatible else "clarification_event_scope_mismatch",
+            "reason": "" if compatible else
+                "Запрос и публикация разъяснения относятся к разным или неоднозначным закупкам/лотам; общий номер запроса не подтверждает одну цепочку событий.",
+            "request_scope": request_scope, "response_scope": response_scope,
+            "evidence_text": "; ".join(evidence)}
+
+
+def clarification_scope_review(doc, request, assessment, *, cross_original=False):
+    code = "v341-clarification-cross-doc-scope" if cross_original else "v341-clarification-event-scope"
+    item = review(doc, code, "Сверить закупку и лот запроса и публикации разъяснения",
+                  assessment["evidence_text"], "223-ФЗ, ст. 3.2 ч. 3", request)
+    item.update(match_text=request[0], source_excerpt=request[0], source_position=request.start(),
+        decision_kind="actual_event", clarification_scope_assessment=assessment,
+        methodology_reason_codes=[assessment["reason_code"]], methodology_reasons=[assessment["reason"]],
+        note=assessment["reason"])
+    return item
+
+
 def _distinct_numbered_events(left, right):
     """Only independently established, different event numbers defeat dedup.
 
@@ -469,6 +504,11 @@ def evaluate(p, docs):
                 checks.append(review(doc, "v341-clarification-applicability", "Проверить обязанность и срок ответа на запрос разъяснений",
                                      snippet, "223-ФЗ, ст. 3.2 ч. 3", request))
                 continue
+            if not xml_reply:
+                scope_proof = clarification_event_scope(p, doc, request, doc, peers[0])
+                if scope_proof["state"] != "confirmed":
+                    checks.append(clarification_scope_review(doc, request, scope_proof))
+                    continue
             deadline_proof = clarification_deadline(p, doc, request, received)
             if deadline_proof.get("evidence_text"):
                 snippet += " " + deadline_proof["evidence_text"]

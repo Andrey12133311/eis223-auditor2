@@ -768,7 +768,11 @@ def _security_context(p, item, docs, body_cache, all_docs):
 
 
 def _clarification_context(p, item, docs, body_cache):
-    """Rebind the actual request and its historical deadline without source I/O."""
+    """Rebind both current events and the request's historical deadline.
+
+    Textual date pairs need no source I/O. When the binary has no publication
+    label, only fresh authentication of its saved original and XML can replace it.
+    """
     code = str(item.get("code") or item.get("field_path") or "").upper()
     if code not in {"223-3.2-3-CLARIFICATION-RESPONSE-LATE", "223-3.2-3-CLARIFICATION-CROSS-DOC-LATE"}:
         return {}
@@ -780,7 +784,8 @@ def _clarification_context(p, item, docs, body_cache):
     source = item.get("clarification_request_source") if cross_original else item
     support = _source_support(source, docs, body_cache) if isinstance(source, dict) else None
     bounds, ambiguous = _source_occurrence(source, support, body_cache) if support else (None, False)
-    request = None
+    request, response, response_doc = None, None, None
+    scope_assessment = {}
     if support and bounds and not ambiguous:
         from v341_precise_legal import matches, REQUEST
         body = str(support[0].get("text") or "").replace("\xa0", " ")
@@ -800,6 +805,64 @@ def _clarification_context(p, item, docs, body_cache):
                 not source.get("source_url") or
                 str(source["source_url"]) not in str(item.get("evidence") or "")):
             request = None
+        else:
+            from v341_precise_legal import ANSWER
+            answer_bounds, answer_ambiguous = _source_occurrence(item, answer_support, body_cache)
+            if answer_bounds and not answer_ambiguous:
+                response_doc = answer_support[0]
+                answers = [match for match in matches(ANSWER, str(response_doc.get("text") or "").replace("\xa0", " "))
+                           if answer_bounds[0] <= match.start() and match.end() <= answer_bounds[1]]
+                if len(answers) == 1:
+                    response = answers[0]
+    elif request is not None:
+        from v341_precise_legal import ANSWER
+        all_requests, answers = matches(REQUEST, body), matches(ANSWER, body)
+        next_request = min([match.start() for match in all_requests if match.start() > request.start()] + [len(body)])
+        peers = [match for match in answers
+                 if request.end() <= match.start() < next_request and match.start()-request.end() <= 1500]
+        if (not peers and len(all_requests) == len(answers) == 1 and
+                0 <= request.start()-answers[0].end() <= 1500):
+            peers = [answers[0]]
+        if len(peers) == 1:
+            response_doc, response = support[0], peers[0]
+    if request is not None and response is not None:
+        from v341_precise_legal import clarification_event_scope, day, shifted, ANSWER
+        scope_assessment = clarification_event_scope(p, support[0], request, response_doc, response)
+        if scope_assessment["state"] == "confirmed":
+            published, due = day(response["date"]), shifted(day(request["date"]), 3)
+            recorded = {day(match["date"]) for match in matches(ANSWER, str(item.get("evidence") or ""))}
+            if published is None or due is None or published <= due:
+                scope_assessment.update(state="requires_review",
+                    reason_code="clarification_response_not_late",
+                    reason="Текущая дата публикации не подтверждает просрочку ответа; прежняя дата в сохранённом выводе не заменяет актуальное доказательство.")
+            elif not cross_original and recorded != {published}:
+                scope_assessment.update(state="requires_review",
+                    reason_code="clarification_response_source_changed",
+                    reason="Дата публикации в текущем оригинале отличается от доказательства сохранённого вывода; требуется новая оценка актуальной цепочки событий.")
+    elif request is not None:
+        xml_response = False
+        # A previous finding's quoted date/hash is descriptive, not current
+        # publication proof. Do not use XML to repair ambiguous textual pairs.
+        if (not cross_original and not answers and len(all_requests) == 1 and
+                support[0].get("local")):
+            from v348_cross_document_legal import _document_event_identity, EXCLUDE
+            if (not _document_event_identity(support[0], "CLARIFICATION")[1] and
+                    not EXCLUDE.search(str(support[0].get("name") or ""))):
+                if "clarification_publication_verifier" not in body_cache:
+                    from official_publication_evidence import clarification_publication_verifier
+                    body_cache["clarification_publication_verifier"] = clarification_publication_verifier(p or {})
+                proof = body_cache["clarification_publication_verifier"](support[0])
+                from v341_precise_legal import day, shifted
+                received = day(request["date"])
+                published, due = day(proof.get("publication_date")), shifted(received, 3)
+                xml_response = (proof.get("state") == "confirmed" and
+                    day(proof.get("request_date")) == received and
+                    published is not None and due is not None and published > due)
+        if not xml_response:
+            scope_assessment = {"state": "requires_review",
+                "reason_code": "clarification_response_source_unverified",
+                "reason": "Текущий оригинал не подтверждает единственную публикацию ответа на этот запрос; прежний вывод и срок подачи заявок не заменяют доказательство ответа.",
+                "evidence_text": request[0]}
     if request is None:
         assessment = {"state": "requires_review", "deadline": None,
             "reason_code": "clarification_request_source_unverified",
@@ -819,9 +882,13 @@ def _clarification_context(p, item, docs, body_cache):
                     "reason": "Запрос поступил после предельной даты обязательного ответа по действовавшему сроку подачи заявок."
                         if latest else "Не подтверждён производственный календарь для срока ответа на этот запрос."}
     limited = assessment["state"] != "confirmed"
+    scope_limited = scope_assessment.get("state") == "requires_review"
     return {"clarification_deadline_assessment": assessment,
-            "methodology_reason_codes": [assessment["reason_code"]] if limited else [],
-            "methodology_reasons": [assessment["reason"]] if limited else []}
+            "clarification_scope_assessment": scope_assessment,
+            "methodology_reason_codes": ([assessment["reason_code"]] if limited else []) +
+                ([scope_assessment["reason_code"]] if scope_limited else []),
+            "methodology_reasons": ([assessment["reason"]] if limited else []) +
+                ([scope_assessment["reason"]] if scope_limited else [])}
 
 
 def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None):
@@ -848,6 +915,11 @@ def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None)
     clarification = _clarification_context(p, result, docs, body_cache)
     if clarification:
         result["clarification_deadline_assessment"] = clarification["clarification_deadline_assessment"]
+        scope = clarification.get("clarification_scope_assessment")
+        if scope:
+            result["clarification_scope_assessment"] = scope
+            if scope["state"] == "requires_review" and scope["evidence_text"] not in str(result.get("evidence") or ""):
+                result["evidence"] = (str(result.get("evidence") or "") + " " + scope["evidence_text"]).strip()
         for field in ("methodology_reasons", "methodology_reason_codes"):
             context[field] = list(dict.fromkeys(context[field] + clarification[field]))
     # Legacy database rows preserve note but not arbitrary JSON fields. Keep

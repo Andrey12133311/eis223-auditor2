@@ -7,6 +7,7 @@ from v348_cross_document_legal import cross_doc_protocols
 from v353_episode_guard import same_episode,event_dates
 from v352_dashboard_truth import collapse_legal_events
 from v332_all_procurements_audit import persist
+from payment_finding_reassessment import evidence_key
 
 REG="32615969056"
 EIS="https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid="+"A"*32
@@ -80,6 +81,12 @@ def run():
           "evidence":text,"document":"Договор.pdf","source_url":EIS}
         assert persist(ns,REG,[fee],[])==(1,0)
         alias={**fee,"evidence":"Условие: "+text,"document":"Копия договора.docx"}
+        # One legal event can retain distinct exact source observations for
+        # reassessment; semantic grouping must not discard the new journal key.
+        assert same_episode(fee,alias)
+        assert len(collapse_legal_events([fee,alias]))==1
+        assert evidence_key(fee)!=evidence_key(alias)
+        assert persist(ns,REG,[alias],[])==(1,0)
         assert persist(ns,REG,[alias],[])==(0,0)
         new_term={**fee,"evidence":text.replace("15 рабочих","25 рабочих")}
         assert persist(ns,REG,[new_term],[])==(1,0)
@@ -89,7 +96,7 @@ def run():
             "source_url":EIS,"field_path":fee["code"]}
         assert persist(ns,REG,[],[ck])==(0,0)
         c=connect()
-        assert c.execute("SELECT COUNT(*) FROM findings").fetchone()[0]==4
+        assert c.execute("SELECT COUNT(*) FROM findings").fetchone()[0]==5
         assert c.execute("SELECT COUNT(*) FROM checks").fetchone()[0]==0
         c.close()
     print("V353_UNIQUE_EVIDENCE_SELFTEST_OK cross_original_protocol=True "
