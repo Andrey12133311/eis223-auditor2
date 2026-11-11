@@ -31,3 +31,14 @@ def test_sme_unknown_is_not_no_violation():
                          "document":"EIS contract","legal_basis_verified":True}}
     assert not next(x for x in inspection_rows(item) if x["key"]=="sme_payment")["has_violation"]
     assert next(x for x in inspection_rows(item,sme_status=True) if x["key"]=="sme_payment")["has_violation"]=="✓"
+
+
+def load_tests(loader, tests, pattern):
+    import unittest
+    return unittest.TestSuite(unittest.FunctionTestCase(value)
+        for name, value in globals().items() if name.startswith("test_") and callable(value))
+
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()

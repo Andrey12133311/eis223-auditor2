@@ -198,8 +198,12 @@ def test_general_procurement_sme_payment_does_not_require_exclusive_sme_scope():
     general["fact_evidence"]["supplier_sme"] = {"source": "official_eis_card", "value": True,
         "verified": True, "supplier_inn": "7701234567",
         "source_url": "https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=32612345678"}
-    confirmed = row(evaluate(general, [doc(text)], [item]), "sme_payment")
-    assert confirmed["applicable"] is True and confirmed["has_violation"] == "✓"
+    scoped = row(evaluate(general, [doc(text)], [item]), "sme_payment")
+    assert scoped["applicable"] is True
+    # Establishing the supplier's SME status establishes applicability, not a
+    # substantive detector. A sheet-row identifier cannot certify a breach.
+    assert scoped["status"] == "unknown" and not scoped["has_violation"]
+    assert "unregistered_decision_rule" in scoped["methodology_reason_codes"]
     # Scope alone cannot prove a seven-working-day breach from an unbound
     # calendar term; the legal rule and documentary proof remain separate.
     ambiguous = "Срок оплаты составляет 30 календарных дней с даты приёмки товара."

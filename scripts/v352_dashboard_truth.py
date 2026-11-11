@@ -15,6 +15,8 @@ import threading
 from v333_dedup_ui import issue_key, _proof, _different_fact
 from v365_consultant_refs import legal_identity
 from v342_identity import organization_display_name
+from security_episode_identity import (distinct_condition_lots, condition_evidence_text,
+                                       condition_scope_key, condition_scopes_conflict)
 from v348_cross_document_legal import (finding_clarification_number,
                                      finding_protocol_number, finding_original_identity,
                                      same_original_identity, event_evidence_text,distinct_local_events,
@@ -51,6 +53,7 @@ def _common_event(a,b):
     Different dates, money/payment terms or independently established clauses
     cannot be merged solely because a title, law article or detector is shared.
     """
+    if distinct_condition_lots(a,b):return False
     # A current legal conclusion and its unreconfirmed historical evidence
     # are separate display records even when the clauses are textually equal.
     # Choosing the better-looking quote must not replace either classification.
@@ -73,7 +76,8 @@ def _common_event(a,b):
     same_title=bool(ta and ta==tb)
     la,lb=_normalized_law(a),_normalized_law(b)
     if la and lb and la!=lb:return False
-    pa,pb=_normalized_proof(event_occurrence_text(a)),_normalized_proof(event_occurrence_text(b))
+    pa=_normalized_proof(condition_evidence_text(a,event_occurrence_text(a)))
+    pb=_normalized_proof(condition_evidence_text(b,event_occurrence_text(b)))
     if not pa or not pb:
         return (same_title and pa==pb and bool(pa) and
                 a.get("document")==b.get("document") and
@@ -111,6 +115,7 @@ def _choose(a,b):
     def quality(d):
         from v348_cross_document_legal import finding_local_event
         return (int(bool(finding_local_event(d)))*100000+
+                int(bool(condition_scope_key(d)))*100000+
                 int(bool(d.get("document")))*2000+
                 int(bool(d.get("source_url")))*2000+
                 int(bool(d.get("law")))*1000+
@@ -135,6 +140,7 @@ def collapse_legal_events(rows):
         identity=_numbered_identity(row)
         origin=finding_original_identity(row)
         binary=finding_binary_identity(row)
+        condition_scope=condition_scope_key(row)
         keys=["title:"+title]
         if norm:keys.append("law:"+norm)
         eligible=[]
@@ -148,13 +154,16 @@ def collapse_legal_events(rows):
                       if ((origin and origin in c["origins"]) or (binary and binary in c["binaries"]) or
                           not any(family in c["identities"] and c["identities"][family]!=number
                                   for family,number in identity.items()))
+                      and not any(condition_scopes_conflict(condition_scope, prior)
+                                  for prior in c["condition_scopes"])
                       and _common_event(c["best"],row)),None)
         src={"document":str(row.get("document") or ""),
              "url":str(row.get("source_url") or "")}
         if matched is None:
             matched={"best":row,"sources":[src] if any(src.values()) else [],
                      "raw_count":1,"identities":dict(identity),"origins":{origin} if origin else set(),
-                     "binaries":{binary} if binary else set()}
+                     "binaries":{binary} if binary else set(),
+                     "condition_scopes":{condition_scope} if condition_scope else set()}
             clusters.append(matched)
         else:
             matched["raw_count"]+=1
@@ -164,6 +173,7 @@ def collapse_legal_events(rows):
             for family,number in identity.items():matched["identities"].setdefault(family,number)
             if origin:matched["origins"].add(origin)
             if binary:matched["binaries"].add(binary)
+            if condition_scope:matched["condition_scopes"].add(condition_scope)
         for key in keys:
             if all(x is not matched for x in by_key[key]):
                 by_key[key].append(matched)

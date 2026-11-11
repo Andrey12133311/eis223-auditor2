@@ -26,9 +26,15 @@ ANALYZER_REGISTRY = {
     "v348_cross_document_legal": ("install",),
     "v372_auto_regulation_protocols": ("install",),
     "vp_sme_application": ("install",),
+    "contract_conclusion_terms": ("install",),
     "vp_inspection_engine": ("install", "evaluate", "criterion_keys"),
 }
 DEPENDENCY_REGISTRY = {
+    "contract_conclusion_terms": ("prepare_assessment", "assess_finding", "finding_excerpt"),
+    "security_episode_identity": ("security_scope_evidence", "contract_scope_evidence",
+        "finding_security_scope", "finding_contract_scope", "finding_condition_scope",
+        "condition_scope_key", "condition_scopes_conflict", "distinct_condition_lots",
+        "same_condition_original_scope", "condition_evidence_text"),
     "payment_terms": ("assess_payment_term", "collect_payment_terms", "detect_payment_coverage"),
     "payment_finding_reassessment": ("prepare_assessment", "apply_general_reassessments", "apply_thematic_reassessments"),
     "legal_document_context": ("document_context", "local_context", "source_scope_context",

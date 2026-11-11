@@ -14,6 +14,8 @@ from functools import wraps
 from xml.etree import ElementTree as ET
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from security_episode_identity import (distinct_condition_lots, same_condition_original_scope,
+                                       condition_evidence_text, condition_scope_key)
 
 ODF_TABLE="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
 ODF_TEXT="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
@@ -56,6 +58,7 @@ def _different_fact(a,b):
 
 
 def _same_finding(a,b,field):
+    if distinct_condition_lots(a,b):return False
     a_status=a.get("status") or a.get("kind")
     b_status=b.get("status") or b.get("kind")
     if a_status and b_status and a_status!=b_status:return False
@@ -66,7 +69,7 @@ def _same_finding(a,b,field):
                                            same_original_identity, event_occurrence_text,distinct_local_events)
     left_code = str(a.get("code") or a.get("field_path") or "")
     right_code = str(b.get("code") or b.get("field_path") or "")
-    same_origin=False
+    same_origin=same_condition_original_scope(a,b)
     for family, identifier in (("PROTOCOL-", finding_protocol_number),
                                ("CLARIFICATION-", finding_clarification_number)):
         if family in left_code and family in right_code:
@@ -81,7 +84,8 @@ def _same_finding(a,b,field):
         x=str(a.get(attr) or "").strip().casefold()
         y=str(b.get(attr) or "").strip().casefold()
         if x and y and x!=y:return False
-    ea=_proof(event_occurrence_text(a));eb=_proof(event_occurrence_text(b))
+    ea=_proof(condition_evidence_text(a,event_occurrence_text(a)))
+    eb=_proof(condition_evidence_text(b,event_occurrence_text(b)))
     if not ea or not eb:return ea==eb and bool(str(a.get("code") or a.get("field_path") or "").strip()) and bool(str(b.get("code") or b.get("field_path") or "").strip())
     if _different_fact(ea,eb):return False
     if ea==eb:return True
@@ -113,6 +117,7 @@ def collapse(items,field="title",violation_only=False):
             def quality(obj):
                 from v348_cross_document_legal import finding_local_event
                 return (int(bool(finding_local_event(obj)))*100000+
+                        int(bool(condition_scope_key(obj)))*100000+
                         sum(bool(obj.get(k)) for k in
                             ("document","source_url","law","location","note"))*1000
                         +min(len(str(obj.get("evidence") or "")),1500))

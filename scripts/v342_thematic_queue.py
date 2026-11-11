@@ -288,11 +288,13 @@ async def independent_review(ns,reg,categories):
     selected.append({
       "title":str(f.get("title") or "")[:500],
       "law":str(f.get("law") or "")[:500],
-      "evidence":str(f.get("evidence") or "")[:3000],
+      # These fields form the registered evidence key. Display limits must
+      # not replace the source or quotation before persistence/reassessment.
+      "evidence":str(f.get("evidence") or ""),
       "category":category,
       "code":str(f.get("code") or "")[:150],
-      "document":str(f.get("document") or "")[:255],
-      "source_url":str(f.get("source_url") or "")[:2000],
+      "document":str(f.get("document") or ""),
+      "source_url":str(f.get("source_url") or ""),
       "law_url":str(f.get("law_url") or "")[:1000],
       "note":str(f.get("note") or "")[:3000],
       "decision_kind":str(f.get("decision_kind") or "")[:100],

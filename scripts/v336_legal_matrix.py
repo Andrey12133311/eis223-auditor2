@@ -458,6 +458,8 @@ SECURITY_CONTEXT_LABELS={
     "security_source_not_requirement":"Источник не устанавливает требование к обеспечению заявки этой закупки",
     "security_nmcd_unverified":"Не подтверждена НМЦД для проверяемого условия обеспечения заявки",
     "security_price_lot_unbound":"Не подтверждено, что НМЦД и условие обеспечения относятся к одному лоту",
+    "security_lot_identity_conflict":"Номер лота и идентификатор лота в проверенных источниках противоречат друг другу",
+    "security_lot_identity_unavailable":"Не удалось сохранить подтверждённую привязку условия обеспечения к конкретному лоту",
     "security_sme_scope_unverified":"Режим участия только субъектов МСП для этого условия не подтверждён",
     "security_conflicting_terms":"В оригиналах есть разные условия обеспечения заявки; применимая редакция не установлена",
     "security_relation_unresolved":"Не установлена связь противоречащих условий обеспечения с одним лотом",
@@ -613,7 +615,7 @@ def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=
             result["sme_scope"]=sme
             if sme["value"] is not True:reasons.append("security_sme_scope_unverified")
         for peer in terms:
-            if (_security_identity(peer["doc"])==_security_identity(source_doc) and
+            if (peer["doc"] is source_doc and
                     peer["start"]==source["start"] and peer["end"]==source["end"]):continue
             # A nonselected/template/historical peer cannot contradict an
             # operative requirement. Unselected alternatives remain in the
@@ -623,6 +625,17 @@ def assess_security_context(p,docs,source_doc,start,end,*,rule_code="",prepared=
             # interpretation. Nonoperative/template sources still stay out.
             if any(reason!="security_money_amount_unverified" for reason in peer["reasons"]):continue
             peer_scope=source_scope_context(selected,peer["doc"],peer["start"],context_index=peer["context_index"])
+            if not set(peer_scope["reasons"])-{"source_other_lot"}:
+                same_number=bool(scope["lots"] and scope["lots"]==peer_scope["lots"])
+                same_id=bool(scope["lot_ids"] and scope["lot_ids"]==peer_scope["lot_ids"])
+                incompatible_id=bool(scope["lot_ids"] and peer_scope["lot_ids"] and
+                                     scope["lot_ids"]!=peer_scope["lot_ids"])
+                incompatible_number=bool(scope["lots"] and peer_scope["lots"] and
+                                         scope["lots"]!=peer_scope["lots"])
+                if (same_number and incompatible_id) or (same_id and incompatible_number):
+                    reasons.append("security_lot_identity_conflict")
+                    if len(related)<12:related.append(_security_source(peer["doc"],peer["start"],peer["end"]))
+                    continue
             if not peer_scope["eligible_actual"]:continue
             unbound_percent=any(term["unit"]=="percent" and term["percent_basis"]["kind"]!="nmcd"
                                 for term in (peer,source))
@@ -677,6 +690,7 @@ def security_findings(p,docs):
     """
     finding=[]
     checks=[]
+    seen=set()
     if competitive_rule_scope(p) is not True:
         return finding,checks
     docs=list(docs or ())
@@ -690,7 +704,10 @@ def security_findings(p,docs):
         # Examples/negative clauses at the beginning of a document do not
         # consume the actual requirement's chance to be examined. Text and
         # document limits remain bounded; findings are still deduplicated.
-        for match in BID_CLAUSE.finditer(body):
+        for candidate_index,match in enumerate(BID_CLAUSE.finditer(body)):
+            # The prepared context covers the first 100 clauses; candidates
+            # outside that bounded inventory cannot obtain a proven scope.
+            if candidate_index>=100:break
             segment=_bid_context(body,match)
             if NEG.search(segment) or GENERIC_SECURITY.search(segment):continue
             unit=(match.group("unit") or "").strip().lower()
@@ -770,6 +787,19 @@ def security_findings(p,docs):
                                + ("Официальные сведения противоречат друг другу." if sme_classification["state"]=="conflict" else "Нужно проверить извещение и условия участия."),
                         "sme_scope":sme_classification})
                 continue
+            scope=assessment.get("source_scope") or {}
+            identity=(code,tuple(scope.get("lots") or ()),tuple(scope.get("lot_ids") or ()))
+            if identity in seen:continue
+            from security_episode_identity import security_scope_evidence
+            scope_evidence=security_scope_evidence(p,assessment)
+            if (scope.get("lots") or scope.get("lot_ids")) and not scope_evidence:
+                reason="security_lot_identity_unavailable"
+                assessment={**assessment,"status":"review",
+                    "reasons":list(assessment.get("reasons") or [])+[reason],
+                    "reason_labels":list(assessment.get("reason_labels") or [])+[SECURITY_CONTEXT_LABELS[reason]]}
+                checks.append(_security_context_review(doc,match,assessment))
+                continue
+            seen.add(identity)
             finding.append({
                 "code":code,
                 "kind":"violation",
@@ -778,7 +808,7 @@ def security_findings(p,docs):
                 "evidence":f"{evidence} НМЦД: {price:,.2f} руб.; "
                            f"обеспечение: {value}{'%' if is_percent else ' руб.'}; "
                            + (f"отношение: {ratio:.3f}%. " if ratio is not None else "База процента не установлена. ")+
-                           f"Сверено с {price_doc.get('name')}.",
+                           f"Сверено с {price_doc.get('name')}."+scope_evidence,
                 "note":"Проверено по двум фрагментам сохранённых официальных оригиналов ЕИС. "
                        "Перед правоприменительным решением сверить действующую редакцию, "
                        "способ закупки и предусмотренные законом исключения.",
@@ -788,12 +818,13 @@ def security_findings(p,docs):
                 "match_text":match.group(0),"source_position":match.start(),
                 "security_assessment":assessment
             })
-            return finding,checks
     # Coalesce repeated review hints into a single source-specific item,
     # not a multitude of warnings from several archived versions.
     unique={}
     for ck in checks:
-        unique.setdefault((ck.get("field_path"),ck.get("document")),ck)
+        scope=(ck.get("security_assessment") or {}).get("source_scope") or {}
+        unique.setdefault((ck.get("field_path"),ck.get("document"),ck.get("source_url"),
+                           tuple(scope.get("lots") or ()),tuple(scope.get("lot_ids") or ())),ck)
     return finding,list(unique.values())[:5]
 
 def install(ns):

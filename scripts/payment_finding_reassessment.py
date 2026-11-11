@@ -52,12 +52,25 @@ def is_payment_finding(item):
 
 
 def is_reassessable_finding(item):
-    """Registered decisions in the shared 19-criterion legal pipeline.
+    """Registered decisions and historical sheet labels need current review.
 
     Keep unrelated/unregistered findings outside this overlay; a new legal
     classification must not be inferred from a similar title or article.
     """
     if not isinstance(item, dict):
+        return False
+    from vp_inspection_criteria import BY_KEY
+    code = str(item.get("code") or item.get("field_path") or "").strip().lower()
+    return code in BY_KEY or _can_confirm_finding(item)
+
+
+def _can_confirm_finding(item):
+    """A retained row label cannot register a substantive rule via a journal."""
+    if not isinstance(item, dict):
+        return False
+    from vp_inspection_criteria import BY_KEY
+    code = str(item.get("code") or item.get("field_path") or "").strip().lower()
+    if code in BY_KEY:
         return False
     if is_payment_finding(item):
         return True
@@ -169,7 +182,7 @@ def prepare_assessment(reg, findings, *, scope="general", batch="", engine_signa
     if complete:
         seen = set()
         for item in findings:
-            if not is_reassessable_finding(item):
+            if not _can_confirm_finding(item):
                 continue
             if item.get("kind", "violation") != "violation" or item.get("status", "violation") != "violation":
                 continue
@@ -276,7 +289,7 @@ def _assessment(db, scope, batch, reg, current_engine=None):
         records = json.loads(event["confirmed_json"])
         if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
             raise ValueError("Invalid payment assessment")
-        result["confirmed_keys"] = {evidence_key(item) for item in records if is_reassessable_finding(item)}
+        result["confirmed_keys"] = {evidence_key(item) for item in records if _can_confirm_finding(item)}
         result["stale"] = False
     except (TypeError, ValueError):
         result["reason"] = "Сохранённая юридическая перепроверка недоступна. Требуется повторная проверка."
@@ -293,7 +306,8 @@ def _apply(db, scope, batch, reg, items):
         if not is_reassessable_finding(item):
             result.append(item)
             continue
-        confirmed = evidence_key(item) in assessment["confirmed_keys"] and not assessment["stale"]
+        confirmed = (_can_confirm_finding(item) and
+                     evidence_key(item) in assessment["confirmed_keys"] and not assessment["stale"])
         status = "confirmed" if confirmed else "requires_review"
         # A different applicable overlay may already have rejected this row.
         if item.get("effective_status", "confirmed") != "confirmed":

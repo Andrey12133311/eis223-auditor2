@@ -234,6 +234,8 @@ def _record(doc, quote, offset, *, reasons=()):
         "code": CODE, "title": title, "law": LAW, "law_url": LAW_URL,
         "document": str(doc.get("name") or ""),
         "source_url": str(meta.get("source_url") or doc.get("url") or ""),
+        "sha256": str(meta.get("sha256") or ""),
+        "archive_member": str(meta.get("archive_member") or meta.get("member") or ""),
         "evidence": "Условие документации: " + quote,
         "source_excerpt": quote, "match_text": quote,
         "source_position": offset,
@@ -241,6 +243,8 @@ def _record(doc, quote, offset, *, reasons=()):
         "criterion_keys": ["sme_application_requirements"],
         "legal_fact_type": "document_requirement",
         "decision_kind": "document_requirement",
+        "sme_application_assessment": {"status": "review" if reasons else "confirmed",
+            "phase": "document_requirement", "reason_labels": list(reasons)},
         "note": ("Проверяется требование к документам для оценки заявки, а не факт отклонения конкретной заявки. "
                  "Отсутствие документов для оценки не является основанием отклонения по ч. 19.2 ст. 3.4. "
                  + ("; ".join(reasons) if reasons else
@@ -281,7 +285,7 @@ def _scope_documents(p, documents, contexts, versions, local_context):
     return sources
 
 
-def evaluate(p, docs):
+def evaluate(p, docs, *, _source_occurrences=False):
     """Return explicit unlawful requirements and unresolved source-backed signals."""
     from legal_document_context import document_context, local_context
 
@@ -307,7 +311,10 @@ def evaluate(p, docs):
             local = local_context(body, start, end)
             if not local.get("eligible_actual"):
                 continue
-            identity = (_identity(doc), _text(quote))
+            # The audit emits one identical condition per original. A later
+            # evidence reassessment can request every occurrence to bind an
+            # already cited position without borrowing the first quotation.
+            identity = (_identity(doc), _text(quote), start if _source_occurrences else None)
             if identity in seen:
                 continue
             seen.add(identity)

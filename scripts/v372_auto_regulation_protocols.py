@@ -101,7 +101,7 @@ def _record(doc,code,title,law,law_url,fragment,pos,note="",violation=False):
         "law":law,
         "law_url":law_url,
         "evidence":fragment[:1600],
-        "document":str(doc.get("name") or "")[:255],
+        "document":str(doc.get("name") or ""),
         "source_url":_link(doc),
         "location":"Оригинал ЕИС «"+str(doc.get("name") or "")[:170]+"», позиция "+str(pos+1),
         "note":note or "Сопоставлено автоматически по оригиналу ЕИС; отсутствие ключевых слов само по себе не доказывает нарушение.",
@@ -109,7 +109,7 @@ def _record(doc,code,title,law,law_url,fragment,pos,note="",violation=False):
         **({"kind":"violation"} if violation else {
             "scope":"223-ФЗ / автоматическая проверка положения и протоколов",
             "item":title,"status":"check","field_path":code,
-            "source":str(doc.get("name") or "")[:255]
+            "source":str(doc.get("name") or "")
         })
     }
 

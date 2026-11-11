@@ -18,7 +18,7 @@ from v331_broad_legal import verified
 from v383_msp_scope import resolve as resolve_sme
 from legal_applicability import competitive_rule_scope
 
-REVISION = "inspection-sheet-19-v3"
+REVISION = "inspection-sheet-19-v4"
 
 # Exact rule identities take precedence over titles. In particular, a mention
 # of "documentation" in a payment finding cannot become a documentation defect.
@@ -122,6 +122,7 @@ _RULE_KEYS = {
     "vp-sme-purchase-list": ("sme_criteria",),
     "223-3.4-19.2-sme-evaluation-docs-rejection": ("sme_application_requirements",),
     "1352-28-sme-payment-over-seven-workdays": ("sme_payment",),
+    "223-3.2-15-contract-conclusion-term": ("contract_signing",),
 }
 
 _REQUIRED_EVIDENCE = {
@@ -328,11 +329,13 @@ def norm_matches_criterion(item, key):
 
 def _rule_known(item):
     code = str(item.get("code") or item.get("field_path") or "").strip().lower()
-    return (code in _RULE_KEYS or code in BY_KEY or code in {
+    # A checklist identifier classifies a question; it is not a substantive
+    # detector, even when the caller supplies an exact quote and verdict flags.
+    return (code not in BY_KEY and (code in _RULE_KEYS or code in {
         "223-3.2-3-clarification-response-late", "223-3.2-3-clarification-cross-doc-late",
         "223-3.2-6-cancellation-posted-late", "223-3.2-27-bid-security-low-nmcd",
         "223-3.2-27-bid-security-over-five-percent"} or
-        bool(re.fullmatch(r"223-4-(?:9|10)-\d+", code)))
+        bool(re.fullmatch(r"223-4-(?:9|10)-\d+", code))))
 
 
 def decision_qualification(item, key):
@@ -761,6 +764,16 @@ def _security_context(p, item, docs, body_cache, all_docs):
     assessment = assess_security_context(p or {}, all_docs, support[0], *bounds,
         rule_code=code, prepared=body_cache["security_terms"],
         scope_cache=body_cache.setdefault("security_scope_facts", {}))
+    from security_episode_identity import PREFIX, finding_security_scope
+    if PREFIX in str(item.get("evidence") or ""):
+        current = {**item, "reg": str((p or {}).get("reg") or (p or {}).get("reg_number") or ""),
+                   "reg_number": str((p or {}).get("reg_number") or (p or {}).get("reg") or ""),
+                   "security_assessment": assessment}
+        if finding_security_scope(current) is None:
+            reason = "Идентичность лота и источника в сохранённом выводе не совпадает с текущим условием обеспечения."
+            assessment = {**assessment, "status": "requires_review",
+                "reasons": list(assessment.get("reasons") or []) + ["security_scope_identity_unverified"],
+                "reason_labels": list(assessment.get("reason_labels") or []) + [reason]}
     limited = assessment.get("status") != "confirmed"
     return {"security_assessment": assessment,
             "methodology_reason_codes": list(assessment.get("reasons") or []) if limited else [],
@@ -891,6 +904,108 @@ def _clarification_context(p, item, docs, body_cache):
                 ([scope_assessment["reason"]] if scope_limited else [])}
 
 
+def _contract_conclusion_context(p, item, body_cache, all_docs):
+    """Reproduce the condition before treating a retained record as a verdict."""
+    from contract_conclusion_terms import CODE, finding_excerpt, prepare_assessment, assess_finding
+    if str(item.get("code") or item.get("field_path") or "").upper() != CODE:
+        return {}
+    if "contract_conclusion_terms" not in body_cache:
+        body_cache["contract_conclusion_terms"] = prepare_assessment(p or {}, all_docs)
+    candidate = dict(item)
+    excerpt = finding_excerpt(candidate)
+    if excerpt and not candidate.get("source_excerpt"):
+        candidate["source_excerpt"] = excerpt
+    assessment = assess_finding(candidate, body_cache["contract_conclusion_terms"])
+    codes, reasons = list(assessment.get("reason_codes") or []), list(assessment.get("reasons") or [])
+    requested = {**item, "kind": item.get("reported_kind", item.get("kind")),
+                 "status": item.get("reported_status", item.get("status"))}
+    if _status(requested) == "compliant":
+        codes.append("contract_term_cannot_confirm_compliance")
+        reasons.append("Проверка одного условия о сроке не подтверждает соблюдение всего пункта о заключении договора.")
+    if (item.get("decision_kind") not in (None, "", "contract_condition", "document_requirement") or
+            item.get("legal_fact_type") not in (None, "", "document_requirement", "contract_condition")):
+        codes.append("contract_term_actual_event_unproved")
+        reasons.append("Условие о сроке требует отдельного исследования фактической даты заключения договора.")
+    if assessment.get("state") != "confirmed" and not codes:
+        codes.append("contract_term_not_reproduced")
+        reasons.append("Текущие оригиналы не подтверждают заявленное условие о сроке заключения договора.")
+    from security_episode_identity import CONTRACT_PREFIX, PREFIX, finding_contract_scope
+    if (assessment.get("lots") or assessment.get("lot_ids") or
+            any(prefix in str(item.get("evidence") or "") for prefix in (CONTRACT_PREFIX, PREFIX))):
+        current = {**item,
+            "reg": str((p or {}).get("reg") or (p or {}).get("reg_number") or ""),
+            "reg_number": str((p or {}).get("reg_number") or (p or {}).get("reg") or ""),
+            "contract_conclusion_assessment": assessment}
+        if finding_contract_scope(current) is None:
+            codes.append("contract_term_scope_identity_unverified")
+            reasons.append("Идентичность лота и исходного условия о заключении договора не подтверждена текущими оригиналами.")
+    if codes:
+        assessment = {**assessment, "state": "requires_review",
+            "reason_codes": list(dict.fromkeys(codes)), "reasons": list(dict.fromkeys(reasons))}
+    return {"contract_conclusion_assessment": assessment, "source_excerpt": excerpt,
+            "methodology_reason_codes": list(dict.fromkeys(codes)),
+            "methodology_reasons": list(dict.fromkeys(reasons))}
+
+
+def _sme_application_context(p, item, docs, body_cache, all_docs):
+    """Reassess a retained SME requirement against its current exact clause.
+
+    A registered code and matching legal citation cannot replace the subject
+    rule's method, electronic form, effective-date, scoring and revision gates.
+    Reuse that pure rule once for this snapshot, then bind its result to the
+    same original and occurrence; a different unlawful clause cannot repair
+    an unsupported allegation.
+    """
+    from vp_sme_application import CODE, evaluate as assess_requirements
+    code = str(item.get("code") or item.get("field_path") or "").upper()
+    if code != CODE:
+        return {}
+    requested = {**item, "kind": item.get("reported_kind", item.get("kind")),
+                 "status": item.get("reported_status", item.get("status"))}
+    status = _status(requested)
+    if status not in {"violation", "compliant"} and not item.get("sme_application_assessment"):
+        return {}
+    codes, reasons = [], []
+    if status == "compliant":
+        codes.append("sme_application_rule_cannot_confirm_compliance")
+        reasons.append("Правило об условии отклонения не подтверждает отсутствие нарушений всего состава заявки МСП.")
+    if any(item.get(field) not in (None, "", "document_requirement")
+           for field in ("decision_kind", "legal_fact_type")):
+        codes.append("sme_application_completed_act_unproven")
+        reasons.append("Условие документации не устанавливает фактическое отклонение конкретной заявки.")
+    support = _source_support(item, docs, body_cache)
+    bounds, ambiguous = _source_occurrence(item, support, body_cache) if support else (None, False)
+    matched = []
+    if support and bounds and not ambiguous:
+        if "sme_application_current_outcomes" not in body_cache:
+            body_cache["sme_application_current_outcomes"] = assess_requirements(
+                p or {}, all_docs, _source_occurrences=True)
+        current_findings, current_reviews = body_cache["sme_application_current_outcomes"]
+        for confirmed, candidates in ((True, current_findings), (False, current_reviews)):
+            for candidate in candidates:
+                current = _source_support(candidate, docs, body_cache)
+                position = candidate.get("source_position")
+                excerpt = str(candidate.get("source_excerpt") or "")
+                if (current and _doc_identity(current[0]) == _doc_identity(support[0])
+                        and isinstance(position, int) and not isinstance(position, bool)
+                        and excerpt and bounds[0] <= position
+                        and position+len(excerpt) <= bounds[1]):
+                    matched.append((confirmed, candidate))
+    clause_confirmed = len(matched) == 1 and matched[0][0]
+    if not clause_confirmed:
+        codes.append("sme_application_requirement_unverified")
+        labels = [label for _, candidate in matched for label in
+                  (candidate.get("sme_application_assessment") or {}).get("reason_labels", [])]
+        reasons.extend(labels or ["Текущие оригиналы не подтверждают применение ч. 19.2 ст. 3.4 к конкретному условию об отклонении за отсутствие документов именно для оценки заявки."])
+    assessment = {"status": "review" if codes else "confirmed",
+        "phase": "document_requirement", "source_binding_verified": len(matched) == 1,
+        "current_requirement_confirmed": clause_confirmed,
+        "reasons": list(dict.fromkeys(codes)), "reason_labels": list(dict.fromkeys(reasons))}
+    return {"sme_application_assessment": assessment,
+            "methodology_reason_codes": assessment["reasons"],
+            "methodology_reasons": assessment["reason_labels"]}
+
+
 def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None):
     result = qualify_record(item)
     if not isinstance(result, dict) or not criterion_keys(result):
@@ -898,10 +1013,23 @@ def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None)
     if body_cache is None:
         body_cache = {}
     all_docs = docs if all_docs is None else all_docs
+    contract = _contract_conclusion_context(p, result, body_cache, all_docs)
+    if contract:
+        assessment = contract["contract_conclusion_assessment"]
+        result["contract_conclusion_assessment"] = assessment
+        if contract["source_excerpt"] and not result.get("source_excerpt"):
+            result["source_excerpt"] = contract["source_excerpt"]
+        for key, value in (assessment.get("source_binding") or {}).items():
+            if key in {"source_excerpt", "match_text", "source_position", "sha256", "archive_member"} and result.get(key) in (None, ""):
+                result[key] = value
+        result.setdefault("decision_kind", "contract_condition")
+        result.setdefault("legal_fact_type", "document_requirement")
     context = _source_context(result, docs, body_cache, p=p)
     evidence = _evidence_qualification(p, result, docs, body_cache, all_docs)
     for field in ("methodology_reasons", "methodology_reason_codes"):
         context[field] = list(dict.fromkeys(context[field] + evidence[field]))
+        if contract:
+            context[field] = list(dict.fromkeys(context[field] + contract[field]))
     payment = _payment_context(p, result, docs, body_cache, all_docs)
     if payment:
         result["payment_assessment"] = payment["payment_assessment"]
@@ -912,6 +1040,11 @@ def _qualify_with_context(item, docs, body_cache=None, *, p=None, all_docs=None)
         result["security_assessment"] = security["security_assessment"]
         for field in ("methodology_reasons", "methodology_reason_codes"):
             context[field] = list(dict.fromkeys(context[field] + security[field]))
+    sme_application = _sme_application_context(p, result, docs, body_cache, all_docs)
+    if sme_application:
+        result["sme_application_assessment"] = sme_application["sme_application_assessment"]
+        for field in ("methodology_reasons", "methodology_reason_codes"):
+            context[field] = list(dict.fromkeys(context[field] + sme_application[field]))
     clarification = _clarification_context(p, result, docs, body_cache)
     if clarification:
         result["clarification_deadline_assessment"] = clarification["clarification_deadline_assessment"]
@@ -1131,6 +1264,7 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
             continue
         item = _qualify_with_context(item, originals, body_cache, p=p, all_docs=docs)
         support = _source_support(item, originals, body_cache)
+        source_bounds, _ = _source_occurrence(item, support, body_cache)
         status = _status(item)
         for key in keys:
             applicable = _criterion_scope(key, scopes) is True
@@ -1152,6 +1286,9 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
             result = {"status": qualified_status, "source_index": source_index,
                 "evidence": _text(item.get("evidence"))[:3000],
                 "source_excerpt": excerpt, "document": str(doc.get("name") or item.get("document") or ""),
+                "source_position": source_bounds[0] if source_bounds else None,
+                "location": str(item.get("location") or
+                    ("Оригинал ЕИС, позиция " + str(source_bounds[0]+1) if source_bounds else "")),
                 "source_url": str((doc.get("meta") or {}).get("source_url") or item.get("source_url") or ""),
                 "sha256": str((doc.get("meta") or {}).get("sha256") or ""),
                 "archive_member": str((doc.get("meta") or {}).get("archive_member") or ""),
@@ -1171,6 +1308,8 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
                 "source_context": item.get("source_context") or [],
                 "payment_assessment": item.get("payment_assessment") or {},
                 "security_assessment": item.get("security_assessment") or {},
+                "sme_application_assessment": item.get("sme_application_assessment") or {},
+                "contract_conclusion_assessment": item.get("contract_conclusion_assessment") or {},
                 "clarification_deadline_assessment": item.get("clarification_deadline_assessment") or {},
                 "clarification_request_source": item.get("clarification_request_source") or {},
                 # Administrative qualification requires its own dated event
@@ -1198,12 +1337,15 @@ def evaluate(p, docs, findings=(), checks=(), detail=None, card=None):
         methodology_reasons = list(dict.fromkeys(reason for value in records for reason in value["methodology_reasons"]))
         row.update(status=status, applicable=applicable,
             results=outcomes[row["key"]], unresolved=unknown_items[row["key"]],
-            review_required=(status == "unknown"),
+            review_required=(status == "unknown" or
+                             status == "violation" and bool(unknown_items[row["key"]])),
             status_label={"violation": "Есть нарушение", "compliant": "Нет нарушения",
                 "not_applicable": "Не применяется", "unknown": "Требует проверки"}[status],
             reason=("Режим закупки не подтверждён" if applicable is None else
                 "Критерий не применяется к установленному режиму закупки" if applicable is False else
-                "Недостаточно подтверждённых данных для вывода по критерию" if status == "unknown" else ""),
+                "Недостаточно подтверждённых данных для вывода по критерию" if status == "unknown" else
+                "Установлено нарушение; проверка остальных обстоятельств этого пункта не завершена"
+                    if status == "violation" and unknown_items[row["key"]] else ""),
             required_evidence=_REQUIRED_EVIDENCE[row["key"]], comment="",
             methodology_reasons=methodology_reasons,
             methodology_reason_codes=list(dict.fromkeys(code for value in records for code in value["methodology_reason_codes"])),
