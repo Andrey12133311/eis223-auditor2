@@ -321,7 +321,7 @@ def workspace_panels(role='user'):
     nav='''<aside id="eis-shell-nav" class="eis-shell-nav" hidden aria-label="Главные разделы">
 <button id="eis-shell-nav-close" type="button" aria-label="Закрыть меню">'''+icon('close')+'''</button>
 <nav aria-label="Рабочая область"><div class="eis-shell-group"><p>Рабочая область</p>'''+link('/','Реестр закупок','list',True)+'''
-<button type="button" id="eis-shell-overview" title="Личный обзор" aria-label="Личный обзор">'''+icon('grid')+'''<span class="eis-shell-label">Личный обзор</span></button></div>
+<button type="button" id="eis-shell-overview" title="Мой кабинет" aria-label="Мой кабинет">'''+icon('grid')+'''<span class="eis-shell-label">Мой кабинет</span></button></div>
 <div class="eis-shell-group"><p>Моя работа</p>'''+link('/account/workbench','Рабочее место','check')+link('/account/home','Мои проверки','list')+link('/account/thematic','Тематические','layers')+link('/account/memos','Служебные записки','file')+'''
 <button type="button" id="eis-shell-favorites" title="Избранное" aria-label="Избранное">'''+icon('star')+'''<span class="eis-shell-label">Избранное</span></button></div>'''+('<div class="eis-shell-group"><p>Управление</p>'+manager+admin+'</div>' if manager or admin else '')+'''
 <div class="eis-shell-nav-footer">'''+link('/account/profile','Профиль','profile')+'</div></nav></aside>'
