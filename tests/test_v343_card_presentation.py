@@ -145,6 +145,27 @@ class CardPresentationTests(unittest.TestCase):
         self.assertNotIn("Проверено 0 из 0", summary.content())
         self.assertIn("Юридическая проверка ещё не завершена", summary.content())
 
+    def test_four_stages_stay_inside_the_saved_summary_for_quicklook(self):
+        original=data()
+        before=copy.deepcopy(original)
+        dom=DOM(card.render(REG,original,legal_review={"state":"completed","documents_read":1})).root
+        summary=dom.find("section", **{"data-eis-section":"summary"})[0]
+        progress=summary.find("section", **{"class":"inspection-progress"})
+        self.assertEqual(len(progress),1)
+        self.assertEqual(len(progress[0].find("ol")[0].find("li")),4)
+        self.assertEqual([node.content() for node in progress[0].find("span", **{"class":"inspection-step-title"})],
+                         ["Запрос принят","Документы получены","Текст извлечён","Юридическая проверка"])
+        self.assertEqual(original,before)
+
+    def test_new_legal_run_does_not_mark_saved_document_stages_as_newly_complete(self):
+        markup=card.render(REG,data(),legal_review={"state":"running","documents_read":1})
+        progress=DOM(markup).root.find("section", **{"class":"inspection-progress"})[0]
+        stages=progress.find("ol")[0].find("li")
+        self.assertEqual(stages[1].attrs["class"],"inspection-step-unknown")
+        self.assertEqual(stages[2].attrs["class"],"inspection-step-unknown")
+        self.assertEqual(stages[3].attrs["class"],"inspection-step-current")
+        self.assertIn("новый запуск ещё не завершён",stages[1].content())
+
     def test_thematic_summary_never_inherits_general_findings_or_completion(self):
         thematic = {"batch": "a" * 24, "state": "queued", "findings": []}
         dom = DOM(card.render(REG, data(), thematic=thematic,
@@ -355,6 +376,55 @@ class CardPresentationTests(unittest.TestCase):
         self.assertTrue(any(x.attrs["href"].startswith("https://www.consultant.ru/document/") for x in links))
         self.assertTrue(any(x.attrs["href"] == SOURCE and x.content() == FINDING["document"] for x in links))
 
+    def test_finding_pairs_its_conclusion_with_the_saved_original(self):
+        original=data()
+        before=copy.deepcopy(original)
+        finding=DOM(card.render(REG,original,account_review=True)).root.find(
+            "article", **{"class":"legal"})[0]
+        grid=finding.find("div", **{"class":"finding-evidence-grid"})[0]
+        conclusion=grid.find("section", **{"class":"finding-conclusion"})[0]
+        source=grid.find("section", **{"class":"finding-original"})[0]
+        self.assertIn(FINDING["evidence"],conclusion.content())
+        self.assertIn("Применённая норма:",conclusion.content())
+        self.assertIn(FINDING["note"],conclusion.content())
+        self.assertIn(FINDING["document"],source.content())
+        self.assertIn(FINDING["location"],source.content())
+        self.assertEqual(source.find("span", **{"class":"source-fragment-text"})[0].content(),
+                         FINDING["match_text"])
+        self.assertEqual(source.find("a")[0].attrs["href"],SOURCE)
+        controls=[node for node in finding.find("div") if "data-finding-review" in node.attrs]
+        self.assertEqual(len(controls),1)
+        self.assertFalse(any("data-finding-review" in node.attrs for node in grid.find("div")))
+        self.assertEqual(original,before)
+
+    def test_original_quote_keeps_literal_multiline_text_without_creating_markup_or_location(self):
+        quote='  Пункт 4.2. <script>alert("x")</script>\nОплата: 30 дней & 10 дней.\n'
+        source=SOURCE+'#saved-fragment'
+        item={**FINDING,"match_text":quote,"source_url":source,"location":"пункт 4.2"}
+        finding=DOM(card.render(REG,data([item]))).root.find("article", **{"class":"legal"})[0]
+        original=finding.find("section", **{"class":"finding-original"})[0]
+        fragment=original.find("blockquote", **{"class":"source-fragment"})[0]
+        self.assertEqual(fragment.find("span", **{"class":"source-fragment-text"})[0].content(),quote)
+        self.assertFalse(fragment.find("script"))
+        self.assertEqual(original.find("a")[0].attrs["href"],source)
+        self.assertFalse(any('#page=' in node.attrs.get('href','') for node in original.find('a')))
+
+    def test_missing_literal_quote_is_explained_without_inventing_one(self):
+        item={**FINDING,"match_text":""}
+        finding=DOM(card.render(REG,data([item]))).root.find("article", **{"class":"legal"})[0]
+        original=finding.find("section", **{"class":"finding-original"})[0]
+        self.assertFalse(original.find("blockquote"))
+        self.assertIn("Точный фрагмент оригинала не сохранён",original.content())
+        self.assertEqual(original.find("a")[0].attrs["href"],SOURCE)
+        self.assertIn(FINDING["evidence"],finding.content())
+
+    def test_malformed_supporting_sources_do_not_become_active_links(self):
+        item={**FINDING,"supporting_sources":[None,"not-a-source",{"url":"javascript:alert(1)"},
+             {"url":OTHER_SOURCE,"document":"Другой оригинал.pdf"}]}
+        finding=DOM(card.render(REG,data([item]))).root.find("article", **{"class":"legal"})[0]
+        self.assertTrue(finding.find("a",href=SOURCE))
+        self.assertFalse(any(node.attrs.get('href','').startswith('javascript:') for node in finding.find('a')))
+
     def test_eis_urls_in_evidence_are_inline_links_with_wording_unchanged(self):
         evidence = "Запрос (" + SOURCE + "); ответ (" + OTHER_SOURCE + "). <не HTML>"
         rendered = card.linked_evidence(evidence)
@@ -512,6 +582,15 @@ class CardBrowserTests(unittest.TestCase):
                         self.assertTrue(details.evaluate("element => element.open"))
                         self.assertGreaterEqual(summary.bounding_box()["height"], 44)
                     self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
+                    conclusion=page.locator('#audit-violations .finding-conclusion').first.bounding_box()
+                    original=page.locator('#audit-violations .finding-original').first.bounding_box()
+                    if width>660:
+                        self.assertGreater(original['x'],conclusion['x']+conclusion['width'])
+                        self.assertLess(abs(original['y']-conclusion['y']),2)
+                    else:
+                        self.assertGreater(original['y'],conclusion['y']+conclusion['height'])
+                    self.assertEqual(page.locator('#audit-violations .source-fragment-text').first.inner_text(),
+                                     FINDING['match_text'])
                     page.close()
             finally:
                 browser.close()

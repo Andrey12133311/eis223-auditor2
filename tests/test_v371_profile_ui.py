@@ -71,7 +71,7 @@ class ProfileBrowserTests(unittest.TestCase):
                 self.assertEqual(len(puts),2)
                 self.assertEqual(unexpected,[])
                 self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),390)
-                for control in page.locator("input,button[type=submit],.profile-back").all():
+                for control in page.locator("#profile-edit input,#profile-edit button[type=submit],.profile-back").all():
                     self.assertGreaterEqual(control.bounding_box()["height"],44)
                 page.locator("input[name=first_name]").focus()
                 self.assertNotEqual(page.locator("input[name=first_name]").evaluate("e=>getComputedStyle(e).outlineStyle"),"none")

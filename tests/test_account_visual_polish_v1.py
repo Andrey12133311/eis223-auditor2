@@ -77,13 +77,13 @@ class VisualPolishTests(unittest.TestCase):
                 markup = site_header(role).decode()
                 parser = Tags()
                 parser.feed(markup)
-                workbench_links = [attrs for tag, attrs in parser.items
-                                   if tag == 'a' and attrs.get('href') == '/account/workbench']
-                self.assertEqual(len(workbench_links), 3)  # Two cabinet links plus the new main navigation.
+                from lxml import html
+                document = html.fromstring(markup)
+                workbench_links = document.xpath('//a[@href="/account/workbench"][not(ancestor::*[@id="eis-attention"])]')
+                self.assertEqual(len(workbench_links), 3)  # Existing navigation; the attention action is contextual.
                 self.assertIn('<a href="/account/workbench">Рабочее место сотрудника</a>', markup)
                 self.assertIn('href="/account/workbench">Все нарушения и тематические проверки →</a>', markup)
-                from lxml import html
-                tile = html.fromstring(markup).get_element_by_id('eis223-my-procurements').getparent()
+                tile = document.get_element_by_id('eis223-my-procurements').getparent()
                 self.assertIn('/account/home', tile.xpath('.//a/@href'))
                 self.assertNotIn('/account/workbench', tile.xpath('.//a/@href'))
                 self.assertIn('id="eis223-add-procurement"', markup)

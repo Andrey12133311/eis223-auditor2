@@ -13,6 +13,8 @@ from fastapi.responses import HTMLResponse
 from v342_identity import organization_display_name
 from saved_eis_dates import recovered_date
 from account_visual_polish_v1 import card_style
+from workspace_discovery_v1 import workspace_discovery
+from inspection_progress_v1 import render_inspection_progress
 
 CARD_RE=re.compile(r"^/check-new/([0-9]{10,20})/?$")
 STYLE="""<style id="eis-modern-audit-card">
@@ -122,6 +124,20 @@ CARD_EXPERIENCE_STYLE = r"""<style id="eis223-card-experience">
 .card-export-note{display:block;font-size:11px;font-weight:400;line-height:1.5;margin-top:3px}
 .card-output-actions>.meta{flex-basis:100%;margin:2px 0 0}
 .source-fragment{background:#f6f6f8;border-left-width:2px;border-radius:0 8px 8px 0;padding:11px 14px;font-size:13px}
+.finding-evidence-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;
+ margin-top:14px;padding-top:14px;border-top:1px solid var(--ui-line,#dedee3)}
+.finding-evidence-grid>section{min-width:0}
+.finding-evidence-grid .finding-section-title{margin:0 0 10px;font-size:11px;font-weight:600;
+ color:var(--ui-muted,#636366);letter-spacing:.02em}
+.finding-evidence-grid :is(.evidence,.finding-law,.finding-source){font-size:13px;line-height:1.65;margin:8px 0}
+.finding-evidence-grid .finding-original{padding:0 0 0 18px;border-left:1px solid var(--ui-line,#dedee3)}
+.finding-evidence-grid .source-fragment{margin:12px 0 0;color:var(--ui-ink,#1d1d1f)}
+.finding-evidence-grid .source-fragment-label{display:block;color:var(--ui-muted,#636366);font-size:11px;font-weight:600;margin-bottom:6px}
+.finding-evidence-grid .source-fragment-text{display:block;white-space:pre-wrap;overflow-wrap:anywhere}
+.finding-evidence-grid .finding-source a{font-weight:500}
+.finding-evidence-grid .finding-source-location{display:block;color:var(--ui-muted,#636366);font-size:12px;margin-top:5px}
+.finding-evidence-grid .finding-original-note{font-size:12px;margin:10px 0 0}
+.finding-review-explanation{margin-top:14px;padding-top:12px;border-top:1px solid var(--ui-line,#dedee3)}
 @media(max-width:660px){
  .card-summary{padding:16px!important}.card-summary h2{font-size:19px}
  .card-summary-grid{gap:14px;margin-top:14px;padding-top:12px}
@@ -149,6 +165,8 @@ CARD_EXPERIENCE_STYLE = r"""<style id="eis223-card-experience">
  .card-documents td:last-child a{min-height:40px;border:1px solid var(--edge);border-radius:8px;padding:7px 11px}
  .card-output-actions{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
  .card-export-action{width:100%}
+ .finding-evidence-grid{grid-template-columns:minmax(0,1fr);gap:14px;margin-top:12px;padding-top:12px}
+ .finding-evidence-grid .finding-original{padding:14px 0 0;border-left:0;border-top:1px solid var(--ui-line,#dedee3)}
 }
 @media(pointer:coarse){.card-requisites>summary,.card-documents td:last-child a{min-height:44px}}
 @media(prefers-reduced-motion:reduce){.card-requisites>summary:before{transition:none}}
@@ -235,7 +253,7 @@ def document_progress(p,dtotal):
             '<strong>'+esc(label)+'</strong><p class="meta">'+esc(note)+'</p></div>')
 
 
-def compact_summary(reg,p,confirmed,review,dtotal,legal_review,has_previous,thematic=None):
+def compact_summary(reg,p,confirmed,review,dtotal,legal_review,has_previous,thematic=None,progress_html=""):
     title=val(p,"title") or "Сведения о закупке пока не сохранены"
     customer=organization_display_name(val(p,"customer")) if p else ""
     price=val(p,"price")
@@ -264,7 +282,7 @@ def compact_summary(reg,p,confirmed,review,dtotal,legal_review,has_previous,them
         '<div class="card-result-strip"><span class="card-result-caption">В сохранённых результатах</span>'
         '<span>Подтверждено <b data-eis-count="confirmed"'+(' class="card-result-confirmed"' if confirmed else '')+'>'+str(confirmed)+'</b></span>'
         '<span>'+review_label+' <b data-eis-count="review"'+(' class="card-result-review"' if review else '')+'>'+str(review)+'</b></span>'
-        '</div></section>')
+        '</div>'+progress_html+'</section>')
 
 def recovered_submission_start(p):
     """Recover a missing start date only from an explicit saved official-card field.
@@ -448,7 +466,9 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
     if review_reg and kind=="legal":
         from scripts.v382_finding_review_ui import finding_control
         review_control=finding_control(review_reg,item,review_batch)
-    supporting=(item or {}).get("supporting_sources") or []
+    saved_supporting=(item or {}).get("supporting_sources") or []
+    supporting=([origin for origin in saved_supporting if isinstance(origin,dict)]
+                if isinstance(saved_supporting,(list,tuple)) else [])
     extra=""
     if len(supporting)>1:
         labels=[]
@@ -466,8 +486,8 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
         heading+='<p class="meta msp-reassessment"><b>Перепроверка применимости правил МСП:</b> '+esc(reassessment.get("reason"))+\
             ' <span>Дата: '+esc(reassessment.get("created_at"))+'</span></p>'
     origin=source_link(source,document or "Оригинал ЕИС")
-    source_html=('<p class="finding-source"><b>Источник:</b> '+(origin or esc(document))+
-                 ('. '+esc((item or {}).get("location")) if (item or {}).get("location") else '')+
+    source_html=('<p class="finding-source"><b>Документ:</b> '+(origin or esc(document))+
+                 ('<span class="finding-source-location">'+esc((item or {}).get("location"))+'</span>' if (item or {}).get("location") else '')+
                  '</p>') if origin or document else ''
     fragment=(item or {}).get("match_text")
     note=(item or {}).get("note")
@@ -484,17 +504,25 @@ def detail_block(item, kind, title, law, evidence, document, source, link, revie
         basis_html=('<p class="finding-law"><b>Применённая норма:</b> '+esc(law)+'</p>'
                     if law and not refs else '')
     return ('<article class="'+kind+'">'+heading+'<h3>'+esc(title or "Нарушение")+'</h3>'
+      +'<div class="finding-evidence-grid"><section class="finding-conclusion" aria-label="Вывод и правовое основание">'
+      +'<p class="finding-section-title">Вывод и правовое основание</p>'
       +('<p class="evidence"><b>Факты и обстоятельства:</b> '+linked_evidence(evidence)+'</p>' if evidence else '')
       +basis_html
       +legal_links(item,law,link)
+      +('<p class="meta"><b>Пояснение проверки:</b> '+esc(note)+'</p>' if note else '')
+      +'</section><section class="finding-original" aria-label="Оригинал документа">'
+      +'<p class="finding-section-title">Оригинал документа</p>'
       +source_html
       +('<p class="meta">Проверяемая ссылка на оригинал ЕИС в сохранённой записи отсутствует. '
         'Сверьте указанный документ и приведённый фрагмент.</p>' if missing_link else '')
-      +('<p class="source-fragment"><b>Фрагмент оригинала:</b> '+esc(fragment)+'</p>' if fragment else '')
-      +('<p class="meta"><b>Пояснение проверки:</b> '+esc(note)+'</p>' if note else '')
-      +('<p class="meta"><b>Почему требует проверки:</b> '+esc('; '.join(gaps))+'. '
+      +('<blockquote class="source-fragment"><span class="source-fragment-label">Фрагмент оригинала:</span>'
+        '<span class="source-fragment-text">'+esc(fragment)+'</span></blockquote>' if fragment else
+        '<p class="meta finding-original-note">Точный фрагмент оригинала не сохранён. '
+        'Сверьте приведённые факты с документом ЕИС.</p>')
+      +extra+'</section></div>'
+      +('<p class="meta finding-review-explanation"><b>Почему требует проверки:</b> '+esc('; '.join(gaps))+'. '
         'В этой карточке запись не включена в подтверждённые нарушения. Сохранённая запись не изменена.</p>' if gaps else '')
-      +extra+review_control
+      +review_control
       +'</article>')
 
 def render_thematic_panel(reg,thematic,account_review=False):
@@ -604,7 +632,10 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
                        else collapse_legal_events(thematic.get("findings",[])))
         summary_confirmed=sum(item.get("effective_status","confirmed")=="confirmed" for item in thematic_rows)
         summary_review=sum(item.get("effective_status","confirmed")!="confirmed" for item in thematic_rows)
-    summary=compact_summary(reg,p,summary_confirmed,summary_review,dtotal,legal_review,has_previous,thematic)
+    progress=render_inspection_progress(purchase=p,documents=docs,document_total=dtotal,
+                                       legal_review=legal_review,has_previous=has_previous,thematic=thematic)
+    summary=compact_summary(reg,p,summary_confirmed,summary_review,dtotal,legal_review,has_previous,thematic,
+                            progress_html=progress)
     # The shared account shell is injected only on the homepage, not this
     # read-only card. Keep a single quiet return path, not three duplicate
     # button-style section links; the sections remain in the main navigation.
@@ -669,7 +700,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
      +thematic_html
      +general_section+review_section
      +'<section class="panel" data-eis-section="documents"><h2>Документы ЕИС ('+str(dtotal)+')</h2><p class="meta">Состояние показывает получение файла и извлечение текста. Юридические выводы — в результатах проверки.</p>'+docs_html+'</section>'
-     +'</main>'+review_assets+'</body></html>')
+     +'</main>'+review_assets+workspace_discovery()+'</body></html>')
 
 def read_and_render(ns, reg, account_review=False):
     # Legal reconciliation and HTML construction can take longer than the

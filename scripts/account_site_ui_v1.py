@@ -7,6 +7,10 @@ from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
 from scripts.account_visual_polish_v1 import workspace_style, signin_style, cabinet_clarity_style
 from scripts.workspace_panels_v1 import workspace_panels
+from scripts.workspace_attention_v1 import workspace_attention
+from scripts.workspace_discovery_v1 import workspace_discovery
+from scripts.workspace_preferences_v1 import workspace_preferences
+from scripts.inspection_progress_v1 import STYLE as inspection_progress_style
 
 
 _STYLE = """
@@ -267,7 +271,7 @@ def site_header(role="user"):
              if role == "admin" else "")
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + _COMPACT_STYLE + workspace_style() + cabinet_clarity_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
+    return (_STYLE + _COMPACT_STYLE + workspace_style() + cabinet_clarity_style() + inspection_progress_style + (TEAM_SCRIPT if role == "admin" else "") + '''
 <div class="eis223-workspace eis223-compact-cabinet" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span></span></span>
@@ -305,6 +309,7 @@ name="reg" required inputmode="numeric" pattern="3[0-9]{10}" maxlength="11" auto
 <p id="eis223-start-help">Введите номер из карточки закупки в ЕИС.</p>
 <p role="status" aria-live="polite" id="eis223-add-status"></p>
 </form><a class="eis223-all-checks eis223-cabinet-profile" href="/account/profile">Профиль</a></div></div>
+''' + workspace_attention() + '''
 ''' + ('''
 <details class="eis223-feature eis223-cabinet-extra" id="eis223-admin-controls" aria-label="Управление пользователями">
 <summary>Администрирование пользователей</summary>
@@ -443,10 +448,17 @@ const pendingRequests=new Map();
 async function get(url){
  if(pendingRequests.has(url))return pendingRequests.get(url);
  const task=(async()=>{
+  try{
   const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
   if(response.status===401){location.replace('/account/login');throw Error('Требуется вход')}
   if(!response.ok)throw Error('Ошибка загрузки: '+response.status);
-  return response.json();
+  const data=await response.json();
+  if(typeof CustomEvent==='function'&&document.dispatchEvent)document.dispatchEvent(new CustomEvent('eis:workspace-data',{detail:{path:url,data}}));
+  return data;
+  }catch(error){
+   if(typeof CustomEvent==='function'&&document.dispatchEvent)document.dispatchEvent(new CustomEvent('eis:workspace-error',{detail:{path:url}}));
+   throw error;
+  }
  })();
  pendingRequests.set(url,task);
  try{return await task}finally{pendingRequests.delete(url)}
@@ -843,6 +855,7 @@ location.replace('/account/login');
 }catch{button.disabled=false;show('eis223-logout-status','Не удалось выйти. Повторите попытку.')}
 });
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
+document.addEventListener?.('eis:workspace-refresh',()=>{refresh();refreshAssignments()});
 const startForm=q('eis223-add-procurement'),startInput=q('eis223-check-reg'),startStatus=q('eis223-add-status');
 function startMessage(message,kind){startStatus.textContent=message;startStatus.dataset.kind=kind}
 startInput.addEventListener('input',()=>{startInput.removeAttribute('aria-invalid');if(startStatus.dataset.kind==='invalid')startMessage('','')});
@@ -872,10 +885,11 @@ finally{form.dataset.busy='0';form.setAttribute('aria-busy','false');btn.disable
 });
 
 // Defer expensive private dashboard requests until the user opens the cabinet.
+try{const requested=new URL(document.baseURI).searchParams.get('check');if(/^3[0-9]{10}$/.test(requested||''))startInput.value=requested}catch{}
 refreshMyName();
 })();
 </script>
-''' + workspace_panels(role)).encode("utf-8")
+''' + workspace_panels(role) + workspace_discovery() + workspace_preferences()).encode("utf-8")
 
 
 _GATEWAY_STYLE = signin_style()

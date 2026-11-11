@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'scripts')]
@@ -41,12 +41,12 @@ PURCHASE = {'reg_number': REG, 'title': 'Поставка лабораторно
             'started_at': STAMP, 'published': '2026-11-05', 'submission_end': '2026-11-19',
             'url': 'https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=' + REG}
 PURCHASE2 = {**PURCHASE, 'reg_number': REG2, 'title': 'Обслуживание инженерных систем здания',
-             'customer': 'Демонстрационный центр эксплуатации', 'price': '840 000,00 ₽',
+             'customer': 'Демонстрационный центр эксплуатации', 'customer_inn': '7710000000', 'price': '840 000,00 ₽',
              'documents_checked': 2, 'documents_found': 5, 'violations': 0,
              'job_status': 'leased', 'legal_review_state': 'running', 'legal_review_documents': 2,
              'url': PURCHASE['url'].replace(REG, REG2)}
 PURCHASE3 = {**PURCHASE, 'reg_number': REG3, 'title': 'Поставка офисной мебели',
-             'customer': 'Демонстрационное учреждение развития', 'price': '420 000,00 ₽',
+             'customer': 'Демонстрационное учреждение развития', 'customer_inn': '7720000000', 'price': '420 000,00 ₽',
              'documents_checked': 1, 'documents_found': 1, 'legal_review_documents': 1,
              'url': PURCHASE['url'].replace(REG, REG3)}
 TASK = {'id': 'preview-task', 'title': 'Проверить документацию и сроки размещения закупки',
@@ -61,7 +61,10 @@ TASK_OVERDUE = {**TASK, 'id': 'preview-task-overdue', 'reg_number': REG2,
                 'due_date': '2026-11-09', 'overdue': True}
 TASK_DONE = {**TASK, 'id': 'preview-task-done', 'status': 'completed',
              'title': 'Завершённое поручение по архивной закупке', 'due_date': '2026-11-08', 'overdue': False}
-TASKS = [TASK, TASK_PENDING, TASK_OVERDUE, TASK_DONE]
+TASK_RETURNED = {**TASK, 'id': 'preview-task-returned', 'reg_number': REG3, 'status': 'returned',
+                 'title': 'Уточнить доказательство по условиям оплаты мебели', 'overdue': False,
+                 'note': 'Демонстрационный возврат на доработку: сверьте фрагмент оригинала.'}
+TASKS = [TASK, TASK_PENDING, TASK_OVERDUE, TASK_RETURNED]
 BATCH = {'id': 'preview-batch', 'title': 'Проверка условий закупок оборудования', 'status': 'active',
          'categories': ['dates', 'docs'], 'purchases': 12, 'violations': 2,
          'created_at': STAMP, 'date_from': '2026-11-01', 'date_to': '2026-11-10'}
@@ -76,6 +79,28 @@ NOTIFICATION = {'id': 'preview-notification', 'title': 'Результаты п�
                 'created_at': STAMP, 'read': False}
 
 
+def search_fixture_rows():
+    """Native owner-search records used by both local and offline previews."""
+    rows = [{'kind': 'check', 'title': 'Самостоятельная закупка № ' + item['reg_number'],
+             'reg_number': item['reg_number'], 'status': 'Сохранена'}
+            for item in (PURCHASE, PURCHASE2, PURCHASE3)]
+    rows += [{'kind': 'task', 'title': item['title'], 'reg_number': item['reg_number'],
+              'status': item['status']} for item in TASKS]
+    rows += [{'kind': 'finding', 'title': 'Уточнить срок оплаты в проекте договора',
+              'reg_number': REG, 'status': 'submitted'},
+             {'kind': 'campaign', 'title': BATCH['title'], 'batch_id': BATCH['id'], 'status': BATCH['status']}]
+    return rows
+
+
+def search_fixture(query):
+    """Mirror owner search: saved number/title, with customer/INN client-side."""
+    needle = str(query).strip().casefold()
+    matches = [item for item in search_fixture_rows() if needle and any(needle in str(item.get(key, '')).casefold()
+               for key in ('title', 'reg_number', 'batch_id'))]
+    return {'results': matches[:60], 'scope': 'Только ваши сохранённые закупки, поручения и предложения',
+            'truncated': len(matches) > 60}
+
+
 def fixtures():
     return {
         '/me/profile': PERSON,
@@ -88,12 +113,12 @@ def fixtures():
         '/me/notifications': [NOTIFICATION],
         '/me/alerts': [NOTIFICATION],
         '/me/favorites': [],
-        '/me/assignments': [TASK],
+        '/me/assignments': [TASK, TASK_OVERDUE, TASK_RETURNED],
         '/me/assignments/memos': [],
         '/me/workbench/overview': {'checks_total': 12, 'reviews_completed': 8,
             'unique_confirmed_findings': 2, 'documents_checked': 48, 'attention_required': 1, 'memo_count': 1},
         '/me/center/dashboard': {'task_active': 3, 'campaign_active': 0, 'unread_notifications': 1,
-            'finding_decisions': {'confirmed': 2}, 'as_of': STAMP, 'tasks': [TASK, TASK_PENDING, TASK_OVERDUE],
+            'finding_decisions': {'confirmed': 2}, 'as_of': STAMP, 'tasks': [TASK, TASK_OVERDUE, TASK_RETURNED],
             'campaigns': [], 'memo_reviews': {'submitted': 1}},
         '/me/center/progress': {'available': True, 'note': 'Локальный демонстрационный набор.',
             'checks': [{**PURCHASE, 'stage': 'Проверка завершена', 'legal_review_completed': True}]},
@@ -123,7 +148,7 @@ def registry_markup():
         state_class = 'status-pending' if index == 1 else 'status-violation'
         rows += ('<tr data-reg="' + purchase['reg_number'] + '"><td><a href="/check-new/' + purchase['reg_number'] + '">№ '
             + purchase['reg_number'] + '</a><br><small>05.11.2026</small></td><td>'
-            + purchase['customer'] + '<br><small>ИНН 7700000000</small></td><td>' + purchase['title']
+            + purchase['customer'] + '<br><small>ИНН ' + purchase['customer_inn'] + '</small></td><td>' + purchase['title']
             + '</td><td>' + purchase['price'] + '</td><td class="' + state_class + '">' + state + '</td></tr>')
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" '
         'content="width=device-width,initial-scale=1"><title>Локальная демонстрация реестра</title>'
@@ -418,6 +443,253 @@ def account_archive_checks(browser, handler, check, results):
         context.close()
 
 
+def attention_checks(browser, handler, check, results, control):
+    """Available observations never turn failed/unknown data into an all-clear."""
+    for width in (1440,390):
+        context=browser.new_context(viewport={'width':width,'height':844},locale='ru-RU',
+            has_touch=width==390,is_mobile=width==390,reduced_motion='reduce')
+        context.route('**/*',handler);page=context.new_page();methods=[]
+        page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+        page.on('request',lambda request:methods.append(request.method))
+        page.goto(ORIGIN+'/');cabinet_view(page)
+        page.wait_for_function("document.getElementById('eis-attention-count').textContent==='2'")
+        rows=page.locator('#eis-attention-list>li')
+        check(f'attention-{width}-merges-procurement-reasons',rows.count()==2
+              and page.locator('#eis-attention-list>li[data-reg="'+REG2+'"]').count()==1)
+        pending=page.locator('#eis-attention-list>li[data-reg="'+REG2+'"]').inner_text()
+        check(f'attention-{width}-actual-overdue-and-legal-state','Срок поручения истёк' in pending
+              and 'Идёт юридическая проверка' in pending)
+        check(f'attention-{width}-returned-task-action',page.locator('#eis-attention-list>li[data-reg="'+REG3+'"]').locator('a[href="/account/workbench"]').count()==1)
+        check(f'attention-{width}-completed-check-excluded',page.locator('#eis-attention-list>li[data-reg="'+REG+'"]').count()==0)
+        page.evaluate("""() => {
+          for(const path of ['/me/manual-checks','/me/assignments'])
+            document.dispatchEvent(new CustomEvent('eis:workspace-data',{detail:{path,data:[]}}));
+          document.dispatchEvent(new CustomEvent('eis:workspace-error',{detail:{path:'/me/assignments'}}));
+        }""")
+        check(f'attention-{width}-failed-source-is-not-zero',page.locator('#eis-attention-count').inner_text()=='—'
+              and page.locator('#eis-attention-retry').is_visible()
+              and 'Часть данных' in page.locator('#eis-attention-status').inner_text())
+        page.locator('#eis-attention-retry').click()
+        page.wait_for_function("document.getElementById('eis-attention-count').textContent==='2'")
+        check(f'attention-{width}-retry-rereads-existing-data',page.locator('#eis-attention-retry').is_hidden()
+              and rows.count()==2)
+        check(f'attention-{width}-view-and-retry-are-read-only',all(method in ('GET','HEAD') for method in methods))
+        check(f'attention-{width}-no-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+        if width==390:
+            check('attention-mobile-actions44',all(node.bounding_box()['height']>=44
+                for node in page.locator('#eis-attention a').all() if node.is_visible()))
+        context.close()
+
+
+def discovery_checks(browser, handler, output, check, results, control):
+    """Search reads owned materials and keeps native modal/focus semantics."""
+    base_paths={'/me/manual-checks','/me/assignments','/me/memo-archive','/api/thematic/history'}
+    for width in (1440,390):
+        context=browser.new_context(viewport={'width':width,'height':844},locale='ru-RU',
+            has_touch=width==390,is_mobile=width==390,reduced_motion='reduce')
+        context.route('**/*',handler);page=context.new_page();requests=[]
+        page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+        page.on('request',lambda request:requests.append((request.method,urlsplit(request.url).path)))
+        page.goto(ORIGIN+'/');page.locator('#eis-global-search-open').wait_for()
+        check(f'search-{width}-initial-load-keeps-private-lists-lazy',not any(path in base_paths for _,path in requests))
+        opener=page.locator('#eis-global-search-open');opener.click()
+        dialog=page.locator('#eis-global-search-dialog');query=page.locator('#eis-global-search-input')
+        dialog.wait_for(state='visible')
+        check(f'search-{width}-native-modal-and-focus',dialog.evaluate("e=>e.tagName==='DIALOG'&&e.matches(':modal')")
+              and query.evaluate('e=>document.activeElement===e'))
+        for _ in range(15):page.keyboard.press('Tab')
+        check(f'search-{width}-focus-stays-in-modal',dialog.evaluate('e=>e.contains(document.activeElement)'))
+        for value,reg in ((REG,REG),('7710000000',REG2),('эксплуатации',REG2),('мебели',REG3)):
+            query.fill(value)
+            link=page.locator('#eis-global-search-results a[href="/check-new/'+reg+'"]').first
+            link.wait_for(state='visible')
+            check(f'search-{width}-query-{value}',link.is_visible())
+        query.fill('абсолютнонеизвестныйзапрос')
+        page.wait_for_function("document.getElementById('eis-global-search-results').querySelectorAll('a[href^=\"/check-new/\"]').length===0")
+        check(f'search-{width}-empty-query-result-is-explicit',bool(page.locator('#eis-global-search-status').inner_text().strip()))
+        page.keyboard.press('Escape')
+        check(f'search-{width}-escape-restores-opener',dialog.is_hidden() and opener.evaluate('e=>document.activeElement===e'))
+        page.keyboard.press('Control+k');dialog.wait_for(state='visible')
+        check(f'search-{width}-keyboard-shortcut',query.evaluate('e=>document.activeElement===e'))
+        page.locator('#eis-global-search-close').click()
+        page.locator('main table a[href="/check-new/'+REG+'"]').first.click()
+        page.locator('#eis-quicklook').wait_for(state='visible')
+        page.keyboard.press('Control+k');dialog.wait_for(state='visible')
+        check(f'search-{width}-opening-closes-inspector',page.locator('#eis-quicklook').is_hidden())
+        page.keyboard.press('Escape')
+        check(f'search-{width}-closed-inspector-focus-falls-back-to-opener',dialog.is_hidden()
+              and opener.evaluate('e=>document.activeElement===e'))
+        check(f'search-{width}-no-mutations',all(method in ('GET','HEAD') for method,_ in requests))
+        check(f'search-{width}-no-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+        if width==390:
+            check('search-mobile-open44',opener.bounding_box()['height']>=44)
+        context.close()
+
+    # A held old query cannot replace the result of the newer input.
+    context=browser.new_context(viewport={'width':1440,'height':900},locale='ru-RU',reduced_motion='reduce')
+    context.route('**/*',handler);page=context.new_page();held=[]
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    def hold_search(route):
+        query=parse_qs(urlsplit(route.request.url).query).get('q',[''])[0]
+        if query=='задержанный':held.append(route)
+        else:route.fallback()
+    page.route('**/me/center/search?*',hold_search)
+    page.goto(ORIGIN+'/');page.locator('#eis-global-search-open').click()
+    query=page.locator('#eis-global-search-input');query.fill('задержанный')
+    page.wait_for_function('true')
+    # Poll browser events rather than blocking the route callback.
+    page.wait_for_timeout(350)
+    check('search-held-query-issued',bool(held))
+    query.fill('мебели')
+    page.locator('#eis-global-search-results a[href="/check-new/'+REG3+'"]').first.wait_for(state='visible')
+    for route in held:
+        try:route.fulfill(status=200,content_type='application/json',body=json.dumps({'results':[
+            {'kind':'finding','title':'УСТАРЕВШИЙ РЕЗУЛЬТАТ','reg_number':REG,'status':'submitted'}], 'scope':'Локальный тест'}))
+        except Exception:pass  # The real AbortController may already have cancelled it.
+    page.wait_for_timeout(100)
+    check('search-stale-response-ignored','УСТАРЕВШИЙ РЕЗУЛЬТАТ' not in page.locator('#eis-global-search-results').inner_text())
+    page.locator('#eis-global-search-close').click();context.close()
+
+    context=browser.new_context(viewport={'width':1440,'height':900},locale='ru-RU',reduced_motion='reduce')
+    context.route('**/*',handler);page=context.new_page()
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    page.goto(ORIGIN+'/');page.locator('#eis-global-search-open').click()
+    query=page.locator('#eis-global-search-input');control['search_status']=503;query.fill('мебели')
+    page.wait_for_function("document.getElementById('eis-global-search-status').textContent.includes('Часть источников')")
+    check('search-partial-failure-keeps-local-matches',page.locator('#eis-global-search-results a[href="/check-new/'+REG3+'"]').count()==1
+          and page.locator('#eis-global-search-retry').is_visible())
+    control['search_status']=200;page.locator('#eis-global-search-retry').click()
+    page.wait_for_function("document.getElementById('eis-global-search-retry').hidden")
+    query.fill('срок оплаты')
+    page.locator('#eis-global-search-results').get_by_text('Уточнить срок оплаты в проекте договора',exact=True).wait_for(state='visible')
+    check('search-retry-restores-server-owned-material',page.locator('#eis-global-search-retry').is_hidden())
+    control['search_status']=403;query.fill(REG2)
+    page.locator('#eis-global-search-results a[href="/account/login"]').wait_for(state='visible')
+    check('search-denied-clears-previous-results',page.locator('#eis-global-search-results a[href^="/check-new/"]').count()==0
+          and 'Войдите снова' in page.locator('#eis-global-search-status').inner_text())
+    control['search_status']=200;context.close()
+
+    context=browser.new_context(viewport={'width':1440,'height':900},locale='ru-RU',reduced_motion='reduce')
+    context.route('**/*',handler);page=context.new_page()
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    def hostile_search(route):
+        route.fulfill(status=200,content_type='application/json',body=json.dumps({'results':[
+            {'kind':'finding','title':'<img src=x onerror="window.__searchInjected=1">опасный материал',
+             'reg_number':REG,'status':'submitted','url':'https://untrusted.example/exfiltrate'},
+            {'kind':'check','title':'опасный номер','reg_number':'javascript:alert(1)','url':'javascript:alert(1)'}],
+            'scope':'Локальная проверка недоверенного текста'}))
+    page.route('**/me/center/search?*',hostile_search)
+    page.goto(ORIGIN+'/');page.locator('#eis-global-search-open').click();page.locator('#eis-global-search-input').fill('опасный')
+    page.wait_for_function("document.getElementById('eis-global-search-results').textContent.includes('опасный материал')")
+    check('search-server-title-is-inert-text',page.locator('#eis-global-search-results img,#eis-global-search-results script').count()==0
+          and page.evaluate('window.__searchInjected===undefined'))
+    hrefs=page.locator('#eis-global-search-results a').evaluate_all('nodes=>nodes.map(node=>node.getAttribute("href"))')
+    check('search-builds-only-safe-owned-routes',hrefs==['/account/workbench'])
+    context.close()
+
+
+def inspection_stage_checks(browser, handler, check, results):
+    """Saved complete results, active rechecks and unknown list coverage differ."""
+    for width in (1440,390):
+        context=browser.new_context(viewport={'width':width,'height':844},locale='ru-RU',
+            has_touch=width==390,is_mobile=width==390,reduced_motion='reduce')
+        context.route('**/*',handler);page=context.new_page()
+        page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+        page.goto(ORIGIN+'/check-new/'+REG)
+        steps=page.locator('.card-summary .inspection-progress ol>li')
+        check(f'stages-{width}-four-persisted-stages',steps.count()==4
+              and steps.locator('.inspection-step-title').all_text_contents()==[
+                  'Запрос принят','Документы получены','Текст извлечён','Юридическая проверка'])
+        check(f'stages-{width}-complete-has-explicit-coverage',page.locator('.card-summary .inspection-step-complete').count()==4)
+        check(f'stages-{width}-no-fictional-percent','%' not in page.locator('.card-summary .inspection-progress').inner_text())
+        page.goto(ORIGIN+'/check-new/'+REG2)
+        check(f'stages-{width}-active-recheck-retains-uncertainty',page.locator('.card-summary .inspection-step-current').count()==1
+              and page.locator('.card-summary .inspection-step-unknown').count()==2
+              and page.locator('.card-summary [aria-current="step"] .inspection-step-title').inner_text()=='Юридическая проверка')
+        check(f'stages-{width}-new-run-does-not-reuse-old-middle-stage-proof','новый запуск' in page.locator('.card-summary .inspection-progress').inner_text())
+        page.goto(ORIGIN+'/account/home')
+        progress=page.locator('#manual-rows .inspection-progress-compact').first
+        progress.locator('summary').click()
+        check(f'stages-{width}-manual-counts-do-not-prove-files',progress.locator('ol>li').count()==4
+              and progress.locator('.inspection-step-unknown').count()==2)
+        check(f'stages-{width}-fit-viewport',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+        context.close()
+
+
+def preference_checks(browser, handler, check, results):
+    """Personal display choices never invent backend filters or start a check."""
+    for width in (1440,390):
+        context=browser.new_context(viewport={'width':width,'height':844},locale='ru-RU',
+            has_touch=width==390,is_mobile=width==390,reduced_motion='reduce')
+        context.route('**/*',handler)
+        context.add_init_script("""try{localStorage.setItem('eis223.display.v1.registry',JSON.stringify({
+          version:1,density:'wrong',hidden:['Номер закупки#0','Несуществующий столбец#99']}))}catch{}""")
+        page=context.new_page();methods=[]
+        page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+        page.on('request',lambda request:methods.append(request.method))
+        page.goto(ORIGIN+'/')
+        prefs=page.locator('.eis-view-preferences[data-eis-preference-surface="registry"]')
+        prefs.locator('summary').click()
+        table=page.locator('body>main table').first
+        identity=prefs.locator('.eis-preference-columns input').first
+        check(f'preferences-{width}-identity-cannot-be-hidden',identity.is_disabled() and identity.is_checked()
+              and table.locator('thead th').first.is_visible())
+        prefs.locator('[data-eis-density="compact"]').click()
+        check(f'preferences-{width}-density-changes-only-presentation',table.evaluate("e=>e.classList.contains('eis-density-compact')")
+              and table.locator('tbody>tr').count()==3)
+        price=prefs.locator('.eis-preference-column').filter(has_text='Стоимость').locator('input')
+        price.uncheck()
+        check(f'preferences-{width}-actual-column-hidden',table.locator('thead th').nth(3).is_hidden()
+              and table.locator('tbody>tr').first.locator('td').nth(3).is_hidden())
+        price.check()
+        check(f'preferences-{width}-actual-column-restored',table.locator('thead th').nth(3).is_visible())
+        # The existing apply control is observed; its real listener is retained.
+        page.locator('#preview-apply').evaluate("e=>e.addEventListener('click',()=>window.__previewApply=(window.__previewApply||0)+1)")
+        page.locator('main .filters input').first.fill('лабораторное')
+        page.locator('#preview-status').select_option('pending')
+        prefs.locator('.eis-preference-save input').fill('Мои ожидающие')
+        prefs.get_by_role('button',name='Сохранить фильтры',exact=True).click()
+        check(f'preferences-{width}-save-does-not-apply-or-submit',page.evaluate('(window.__previewApply||0)===0'))
+        page.locator('main .filters input').first.fill('другое')
+        page.locator('#preview-status').select_option('violations')
+        prefs.locator('.eis-preference-use').get_by_role('button',name='Применить',exact=True).click()
+        check(f'preferences-{width}-restores-supported-values-and-existing-apply',
+              page.locator('main .filters input').first.input_value()=='лабораторное'
+              and page.locator('#preview-status').input_value()=='pending'
+              and page.evaluate('window.__previewApply===1'))
+        page.keyboard.press('Escape')
+        check(f'preferences-{width}-escape-restores-summary',prefs.get_attribute('open') is None
+              and prefs.locator('summary').evaluate('e=>document.activeElement===e'))
+        check(f'preferences-{width}-no-mutating-requests',all(method in ('GET','HEAD') for method in methods))
+        check(f'preferences-{width}-no-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+        if width==390:
+            check('preferences-mobile-trigger44',prefs.locator('summary').bounding_box()['height']>=44)
+        context.close()
+
+
+def evidence_checks(browser, handler, check, results):
+    """The original quote stays intact beside the saved conclusion and source."""
+    quote='Оплата производится в течение 30 рабочих дней после подписания акта.'
+    for width in (1440,390):
+        context=browser.new_context(viewport={'width':width,'height':844},locale='ru-RU',
+            has_touch=width==390,is_mobile=width==390,reduced_motion='reduce')
+        context.route('**/*',handler);page=context.new_page()
+        page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+        page.goto(ORIGIN+'/check-new/'+REG)
+        page.locator('#audit-violations>summary').click()
+        evidence=page.locator('#audit-violations .finding-evidence-grid').first
+        check(f'evidence-{width}-exact-original-quote',evidence.locator('.source-fragment-text').inner_text()==quote)
+        check(f'evidence-{width}-saved-conclusion-and-source-adjacent',
+              evidence.locator('.finding-conclusion').count()==1
+              and evidence.locator('.finding-original').count()==1
+              and evidence.locator('a[href="'+PURCHASE['url']+'"]').count()>=1)
+        grid=evidence.evaluate('e=>getComputedStyle(e).gridTemplateColumns.split(" ").length')
+        check(f'evidence-{width}-responsive-columns',grid==(2 if width==1440 else 1))
+        check(f'evidence-{width}-no-invented-page-target',all('#page=' not in href
+              for href in evidence.locator('a').evaluate_all('nodes=>nodes.map(e=>e.href)')))
+        context.close()
+
+
 def panel_checks(browser, handler, output, check, results, control):
     """Exercise the real new sidebar, inspector and manager drill-down behavior."""
     context = browser.new_context(viewport={'width': 1440, 'height': 1000}, reduced_motion='reduce')
@@ -606,6 +878,8 @@ def capture_showcase(output: Path):
         parsed=urlsplit(route.request.url)
         if parsed.netloc!='preview.eis.test':route.abort();return
         if parsed.path in documents:route.fulfill(status=200,content_type='text/html',body=documents[parsed.path][1]);return
+        if parsed.path=='/me/center/search' and route.request.method=='GET':
+            route.fulfill(status=200,content_type='application/json',body=json.dumps(search_fixture(parse_qs(parsed.query).get('q',[''])[0])));return
         if route.request.method not in ('GET','HEAD') or parsed.path not in api:
             unknown.append(route.request.method+' '+parsed.path)
             route.fulfill(status=404,content_type='application/json',body=json.dumps({'detail':'Missing explicit local preview fixture'}));return
@@ -627,6 +901,20 @@ def capture_showcase(output: Path):
             filename=name+'-'+str(width)+'.png'
             page.screenshot(path=str(output/filename),full_page=True)
             if filename not in saved:saved.append(filename)
+    def discovery_surfaces(page,width):
+        page.goto(ORIGIN+'/');cabinet_view(page)
+        page.wait_for_function("document.getElementById('eis-attention-count').textContent==='2'")
+        page.locator('#eis-global-search-open').click();page.locator('#eis-global-search-input').fill('эксплуатации')
+        page.locator('#eis-global-search-results a[href="/check-new/'+REG2+'"]').first.wait_for(state='visible')
+        page.wait_for_function("document.getElementById('eis-global-search-results').getAttribute('aria-busy')==='false'")
+        name='search-'+str(width)+'.png';page.screenshot(path=str(output/name));saved.append(name)
+        page.locator('#eis-global-search-close').click();registry_view(page)
+        prefs=page.locator('.eis-view-preferences[data-eis-preference-surface="registry"]')
+        prefs.locator('summary').click();prefs.locator('[data-eis-density="compact"]').click()
+        page.evaluate('window.scrollTo(0,0)')
+        name='preferences-'+str(width)+'.png';page.screenshot(path=str(output/name),full_page=True);saved.append(name)
+        page.goto(ORIGIN+'/check-new/'+REG);page.locator('#audit-violations>summary').click()
+        name='card-evidence-'+str(width)+'.png';page.screenshot(path=str(output/name),full_page=True);saved.append(name)
     with sync_playwright() as p:
         browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True)
         desktop=browser.new_context(viewport={'width':1440,'height':1000},locale='ru-RU',reduced_motion='reduce')
@@ -656,6 +944,7 @@ def capture_showcase(output: Path):
         page.screenshot(path=str(output/'manager-1440.png'));saved.append('manager-1440.png')
         page.goto(ORIGIN+'/check-new/'+REG);page.screenshot(path=str(output/'card-1440.png'),full_page=True);saved.append('card-1440.png')
         secondary_surfaces(page,1440)
+        discovery_surfaces(page,1440)
         desktop.close()
         mobile=browser.new_context(viewport={'width':390,'height':844},locale='ru-RU',has_touch=True,is_mobile=True,reduced_motion='reduce')
         mobile.route('**/*',handler);page=mobile.new_page();page.goto(ORIGIN+'/')
@@ -677,6 +966,7 @@ def capture_showcase(output: Path):
         page.screenshot(path=str(output/'workspace-mobile-inspector.png'));saved.append('workspace-mobile-inspector.png')
         page.goto(ORIGIN+'/check-new/'+REG);page.screenshot(path=str(output/'card-390.png'),full_page=True);saved.append('card-390.png')
         secondary_surfaces(page,390)
+        discovery_surfaces(page,390)
         mobile.close();browser.close()
     (output/'showcase.json').write_text(json.dumps({'fixture_only':True,'source':'fresh local builders','screenshots':saved,'unknown_api_paths':unknown},ensure_ascii=False,indent=2))
     print('Captured',len(saved),'fresh showcase screenshots in',output)
@@ -694,7 +984,8 @@ def run(output: Path):
         (output / (name + '.html')).write_text(markup)
     results = {'fixture_only': True, 'registry_is_structural_fixture': True,
                'checks': [], 'failures': [], 'screenshots': [], 'page_errors': [], 'unknown_api_paths': []}
-    control = {'failure': None, 'html': None, 'card_requests': [], 'submission_status': 202, 'submission_requests': [], 'manual_reads': 0}
+    control = {'failure': None, 'html': None, 'card_requests': [], 'submission_status': 202,
+               'submission_requests': [], 'manual_reads': 0, 'api_failures': {}, 'search_status': 200}
     def check(name, ok, detail=None):
         record = {'name': name, 'ok': bool(ok)}
         if detail is not None:
@@ -727,6 +1018,14 @@ def run(output: Path):
                 return
         if parsed.path in documents:
             route.fulfill(status=200, content_type='text/html', body=documents[parsed.path][1])
+            return
+        if parsed.path in control['api_failures']:
+            route.fulfill(status=control['api_failures'][parsed.path],content_type='application/json',body=json.dumps({'detail':'Локальная ошибка чтения'}))
+            return
+        if parsed.path == '/me/center/search' and request.method == 'GET':
+            status=control['search_status']
+            route.fulfill(status=status,content_type='application/json',body=json.dumps(
+                search_fixture(parse_qs(parsed.query).get('q',[''])[0]) if status==200 else {'detail':'Локальная ошибка поиска'}))
             return
         payload = api.get(parsed.path)
         if payload is None or request.method not in ('GET','HEAD'):
@@ -791,6 +1090,11 @@ def run(output: Path):
         clarity_checks(browser, handler, output, check, results)
         submission_checks(browser, handler, output, check, results, control)
         account_archive_checks(browser, handler, check, results)
+        attention_checks(browser, handler, check, results, control)
+        discovery_checks(browser, handler, output, check, results, control)
+        inspection_stage_checks(browser, handler, check, results)
+        preference_checks(browser, handler, check, results)
+        evidence_checks(browser, handler, check, results)
         panel_checks(browser, handler, output, check, results, control)
         touch = browser.new_context(viewport={'width': 390, 'height': 844}, has_touch=True,
                                     is_mobile=True, reduced_motion='reduce')

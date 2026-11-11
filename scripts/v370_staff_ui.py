@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from scripts.account_visual_polish_v1 import account_page_style
+from scripts.workspace_discovery_v1 import workspace_discovery
 
 CSS=r"""
 <style>
@@ -997,4 +998,4 @@ placeholder="Срок оплаты договора"></label>
 </main>__JS__</body></html>"""
 
 def render_workbench():
-    return PAGE.replace("__CSS__",CSS+COMPACT_CSS+account_page_style()).replace("__JS__",JS)
+    return PAGE.replace("__CSS__",CSS+COMPACT_CSS+account_page_style()).replace("__JS__",JS+workspace_discovery())

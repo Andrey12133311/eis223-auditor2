@@ -125,6 +125,9 @@ body.eis-shell-ready .eis-quicklook h2{font-size:18px;line-height:1.35}
 .eis-quicklook :is(.legal,.review){border:1px solid #dedee3;border-left:3px solid #b42332;border-radius:9px;padding:10px 12px;margin:12px 0;background:#fffbfb}
 .eis-quicklook .review{border-left-color:#865b00;background:#fffdf7}
 .eis-quicklook :is(.evidence,.source-fragment){white-space:pre-wrap;overflow-wrap:anywhere}
+.eis-quicklook .finding-evidence-grid{display:grid;gap:12px;margin-top:12px}
+.eis-quicklook .finding-section-title{font-size:11px;color:#636366;font-weight:600;margin:0 0 7px}
+.eis-quicklook .source-fragment{margin:10px 0;padding:10px 12px;background:#f5f5f7;border-left:2px solid #c7c7ce;border-radius:0 7px 7px 0}
 .eis-quicklook table,.eis-quicklook tbody,.eis-quicklook tr,.eis-quicklook td{display:block;width:100%;box-sizing:border-box}
 .eis-quicklook table{border:0}.eis-quicklook thead{display:none}.eis-quicklook tr{padding:12px;border:1px solid #dedee3;border-radius:9px;margin-bottom:10px}
 .eis-quicklook td{padding:3px 0;min-width:0;border:0;overflow-wrap:anywhere;font-size:12px}
@@ -193,6 +196,7 @@ function syncModal(){
  toggle.setAttribute('aria-label',mobileNav.matches?'Открыть меню':body.classList.contains('eis-shell-collapsed')?'Развернуть меню':'Свернуть меню');
 }
 function closeNav(returnFocus=true){navOpen=false;syncModal();if(returnFocus&&lastNavFocus?.isConnected)lastNavFocus.focus({preventScroll:true})}
+document.addEventListener('eis:workspace-search-opening',()=>{closeNav(false);closePane(false)});
 toggle.addEventListener('click',()=>{
  if(mobileNav.matches){lastNavFocus=toggle;navOpen=!navOpen;syncModal();if(navOpen)by('eis-shell-nav-close').focus()}
  else{body.classList.toggle('eis-shell-collapsed');try{localStorage.setItem('eis223.nav.collapsed.v1',body.classList.contains('eis-shell-collapsed')?'1':'0')}catch{}syncModal()}
@@ -266,7 +270,9 @@ function clean(node){
  }
  if(node.hasAttribute('data-label'))out.setAttribute('data-label',node.getAttribute('data-label'));
  if(['table','rowgroup','row','cell','columnheader'].includes(node.getAttribute('role')))out.setAttribute('role',node.getAttribute('role'));
- if(node.localName==='table'&&node.hasAttribute('aria-label'))out.setAttribute('aria-label',node.getAttribute('aria-label'));
+ if(['table','ol'].includes(node.localName)&&node.hasAttribute('aria-label'))out.setAttribute('aria-label',node.getAttribute('aria-label'));
+ if(node.localName==='li'&&node.getAttribute('aria-current')==='step')out.setAttribute('aria-current','step');
+ if(node.localName==='span'&&node.classList.contains('inspection-step-marker')&&node.getAttribute('aria-hidden')==='true')out.setAttribute('aria-hidden','true');
  if(node.localName==='details'&&node.hasAttribute('open'))out.open=true;
  if(['td','th'].includes(node.localName)&&/^[1-9][0-9]?$/.test(node.getAttribute('colspan')||''))out.colSpan=Number(node.getAttribute('colspan'));
  for(const child of node.childNodes){const next=clean(child);if(next)out.append(next)}return out;
@@ -313,7 +319,7 @@ function openCard(url,trigger,row){
  title.textContent='Закупка № '+reg;full.href=url.href;pane.hidden=false;syncModal();by('eis-quicklook-close').focus({preventScroll:true});loadCard(url.href);
 }
 document.addEventListener('click',event=>{
- if(event.defaultPrevented||event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey||pane.contains(event.target)||nav.contains(event.target))return;
+ if(event.defaultPrevented||event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey||pane.contains(event.target)||nav.contains(event.target)||event.target.closest('[data-eis-search-result]'))return;
  const anchor=event.target.closest('a'),row=event.target.closest('body>main table tbody tr');
  if(anchor){if(anchor.target==='_blank'||anchor.hasAttribute('download'))return;const url=cardLink(anchor.href);if(url){event.preventDefault();openCard(url,anchor,row)}return}
  if(!row||event.target.closest('button,input,select,textarea,summary')||String(window.getSelection()||'').trim())return;
@@ -339,7 +345,9 @@ function prepareFilters(){
  for(const option of choices){const button=make('button',option.text);button.type='button';button.dataset.eisFilterValue=option.value;
   button.addEventListener('click',()=>{select.value=option.value;select.dispatchEvent(new Event('change',{bubbles:true}));apply.click()});group.append(button)}
  const sync=()=>{for(const b of group.querySelectorAll('button'))b.setAttribute('aria-pressed',String(b.dataset.eisFilterValue===select.value))};
- select.addEventListener('change',sync);filters.prepend(group);sync();
+ select.addEventListener('change',sync);
+ document.addEventListener('eis:filters-restored',event=>{if(event.detail?.surface==='registry')sync()});
+ filters.prepend(group);sync();
 }
 function decorate(){
  prepareFilters();

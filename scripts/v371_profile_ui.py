@@ -1,5 +1,6 @@
 """Accessible edit-profile page, no fake surname derived from email."""
 from scripts.account_visual_polish_v1 import profile_style
+from scripts.workspace_discovery_v1 import workspace_discovery
 
 CSS=r"""
 <style>
@@ -136,4 +137,4 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 </article></main>__SCRIPT__</body></html>"""
 
 def render_profile():
-    return PAGE.replace("__CSS__",CSS+profile_style()+PROFILE_EXPERIENCE_STYLE).replace("__SCRIPT__",SCRIPT)
+    return PAGE.replace("__CSS__",CSS+profile_style()+PROFILE_EXPERIENCE_STYLE).replace("__SCRIPT__",SCRIPT+workspace_discovery())

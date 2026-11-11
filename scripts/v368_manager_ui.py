@@ -4,6 +4,7 @@ from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
 
 from scripts.account_visual_polish_v1 import account_page_style
+from scripts.workspace_discovery_v1 import workspace_discovery
 
 STYLE=r"""
 <style>
@@ -1078,5 +1079,5 @@ __SCRIPT__</body></html>"""
         shell=shell.replace('__ICON_'+name+'__',icon)
     return (shell.replace("__STYLE__",STYLE+COMPACT_STYLE+account_page_style())
                  .replace("__ADMIN_REGISTRATION_LINK__",'<a href="/account/admin">Заявки на регистрацию</a>' if role=="admin" else "")
-                 .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role)))
+                 .replace("__SCRIPT__",TEAM_SCRIPT+SCRIPT.replace("__ROLE__",json.dumps(role))+workspace_discovery())
                  .replace("__LABEL__","Роль: "+("Администратор" if role=="admin" else "Руководитель")))

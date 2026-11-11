@@ -3,6 +3,9 @@ from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
 
 from scripts.account_visual_polish_v1 import account_page_style
+from scripts.workspace_discovery_v1 import workspace_discovery
+from scripts.workspace_preferences_v1 import workspace_preferences
+from scripts.inspection_progress_v1 import manual_progress_runtime
 
 
 def page(title, body):
@@ -163,7 +166,7 @@ body.account-page :is(summary,a,button,input,select):focus-visible{outline:3px s
 @media(pointer:coarse){body.account-page :is(.manual-actions a,.manual-actions button,.memo-action a,.memo-action button){min-height:44px}}
 @media(prefers-reduced-motion:reduce){body.account-page *{scroll-behavior:auto!important}}
 </style></head><body class="account-page">""" + header + """
-<main>""" + tabs + """<section class="panel">""" + body + """</section></main></body></html>"""
+<main>""" + tabs + """<section class="panel">""" + body + """</section></main>""" + (workspace_discovery() + workspace_preferences() if authenticated else "") + """</body></html>"""
 
 
 REGISTER = page("Регистрация", """
@@ -299,6 +302,7 @@ HOME = page("Мои проверки", """
 <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Закупка и дата</th><th role="columnheader" scope="col">Состояние</th><th role="columnheader" scope="col">Документы</th>
 <th role="columnheader" scope="col">Нарушения</th><th role="columnheader" scope="col">Действия</th></tr></thead>
 <tbody id="manual-rows" role="rowgroup"></tbody></table>
+""" + manual_progress_runtime() + """
 <script>
 (()=>{
 const el=id=>document.getElementById(id);
@@ -400,6 +404,7 @@ function renderManual(){
   if(['failed','error'].includes(item.job_status))label.classList.add('fail');
   status.append(label);
   const legal=document.createElement('small');legal.textContent=legalStatus(item);status.append(legal);
+  if(window.eis223InspectionProgress)status.append(window.eis223InspectionProgress.create(item));
   const previous=retainedResults(item);
   if(previous){const note=document.createElement('small');note.textContent=previous;status.append(note)}
   const checked=displayCount(item.documents_checked);

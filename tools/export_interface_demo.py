@@ -8,11 +8,28 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'tools'), str(ROOT / 'scripts')]
-from render_interface_preview import ORIGIN, fixtures, pages
+from render_interface_preview import ORIGIN, fixtures, pages, search_fixture_rows
+
+
+README = """ЕИС Аудитор — интерактивный предпросмотр
+
+Распакуйте архив и откройте preview.html в современном браузере. Интернет и сервер не нужны. Все данные вымышлены; рабочий сайт не изменяется.
+
+В меню сверху выберите нужный экран. Боковая панель переключает «Мой кабинет» и «Реестр закупок», сохраняя фильтры. Нажатие на закупку открывает быстрый просмотр; из него доступна полная карточка.
+
+Для демонстрации запуска в кабинете введите номер из 11 цифр, начинающийся с 3, например 32612345679, и нажмите «Проверить закупку» либо Enter. Видны проверка ввода, состояние отправки и подтверждение локального запроса. Настоящая проверка не запускается; список остаётся вымышленным.
+
+Поиск, список требующих внимания материалов, этапы проверки и настройки вида используют тот же демонстрационный набор. Неизвестные сведения не заменяются успешной проверкой. Где формат оригинала не позволяет указать точное место, ссылка открывает оригинал документа.
+
+Кнопка «Телефон» показывает узкую компоновку. Сенсорные размеры отдельно проверяются в настоящем touch-контексте браузера. Настройки и правки профиля в демонстрации могут сохраняться только в памяти текущего экрана, если браузер ограничивает локальное хранилище.
+
+Вход, выход, скачивание оригиналов, внешние ссылки и остальные действия рабочего сервера недоступны в автономном файле. Ошибки отсутствующих демонстрационных данных показываются явно.
+"""
 
 
 def safe_json(value):
@@ -23,7 +40,7 @@ def safe_json(value):
 BOOTSTRAP = r"""
 (() => {
  'use strict';
- const origin=__ORIGIN__, documents=__DOCUMENTS__, api=__API__;
+ const origin=__ORIGIN__, documents=__DOCUMENTS__, api=__API__, searchRows=__SEARCH_ROWS__;
  const notify=text=>parent.postMessage({type:'eis-demo-note',text},'*');
  const resolve=input=>new URL(typeof input==='string'?input:input.url,document.baseURI);
  // The real workspace announces an in-page switch. Keep the outer selector in
@@ -43,6 +60,11 @@ BOOTSTRAP = r"""
   if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
   const page=documents[url.pathname];
   if(page&&method==='GET')return response(page[1],'text/html; charset=utf-8',url.pathname);
+  if(url.pathname==='/me/center/search'&&method==='GET'){
+   const query=(url.searchParams.get('q')||'').trim().toLocaleLowerCase('ru');
+   const matching=query.length>=2?searchRows.filter(row=>[row.title,row.reg_number,row.batch_id].some(value=>String(value||'').toLocaleLowerCase('ru').includes(query))):[];
+   return response(JSON.stringify({results:matching.slice(0,60),scope:'Только ваши сохранённые закупки, поручения и предложения',truncated:matching.length>60}),'application/json',url.pathname);
+  }
   if(url.pathname.startsWith('/me/manual-checks/')&&method==='POST'){
    const reg=url.pathname.slice('/me/manual-checks/'.length);
    if(!/^3[0-9]{10}$/.test(reg))return response(JSON.stringify({detail:'Укажите номер ЕИС из 11 цифр.'}),'application/json',url.pathname,422);
@@ -74,13 +96,13 @@ BOOTSTRAP = r"""
   event.preventDefault();
   if(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey){notify('В демонстрации страницы открываются в этом окне.');return}
   if(url.origin===origin&&url.pathname==='/'&&url.hash==='#cabinet'){
-   parent.postMessage({type:'eis-demo-nav',path:'/#cabinet'},'*');return;
+   parent.postMessage({type:'eis-demo-nav',path:url.pathname+url.search+url.hash},'*');return;
   }
   if(url.origin===origin&&url.pathname===new URL(document.baseURI).pathname&&url.hash){
    try{document.querySelector(url.hash)?.scrollIntoView()}catch{}
    return;
   }
-  if(url.origin===origin&&documents[url.pathname])parent.postMessage({type:'eis-demo-nav',path:url.pathname},'*');
+  if(url.origin===origin&&documents[url.pathname])parent.postMessage({type:'eis-demo-nav',path:url.pathname+url.search+url.hash},'*');
   else notify('Это демонстрационный набор: оригиналы документов и дополнительные серверные действия здесь недоступны.');
  });
  document.addEventListener('submit',event=>{
@@ -119,7 +141,7 @@ iframe{width:100%;height:100%;border:0;background:#f5f5f7;box-shadow:0 0 20px #1
 <p id="demo-note" role="status" aria-live="polite"></p>
 <script>
 (()=>{
- const origin=__DEMO_ORIGIN_PAYLOAD__,documents=__DEMO_DOCS_PAYLOAD__,api=__DEMO_API_PAYLOAD__,bootstrap=__DEMO_BOOTSTRAP_PAYLOAD__;
+ const origin=__DEMO_ORIGIN_PAYLOAD__,documents=__DEMO_DOCS_PAYLOAD__,api=__DEMO_API_PAYLOAD__,searchRows=__DEMO_SEARCH_ROWS_PAYLOAD__,bootstrap=__DEMO_BOOTSTRAP_PAYLOAD__;
  const frame=document.getElementById('demo-frame'),routes=document.getElementById('demo-route'),stage=document.getElementById('demo-stage');
  const names={registry:'Реестр закупок',login:'Вход',register:'Регистрация',staff:'Задачи и поручения',manager:'Кабинет руководителя',profile:'Профиль',manual:'Мои проверки',thematic:'Тематические проверки',memos:'Служебные записки',card:'Карточка закупки',card2:'Карточка другой закупки','card-pending':'Карточка: проверка выполняется','card-incomplete':'Карточка: неполные доказательства'};
  const safe=value=>JSON.stringify(value).replace(/</g,'\\u003c');
@@ -136,9 +158,10 @@ iframe{width:100%;height:100%;border:0;background:#f5f5f7;box-shadow:0 0 20px #1
   current=key;routes.value=key;
   let html=documents[url.pathname][1];
   if(url.pathname==='/'&&!new DOMParser().parseFromString(html,'text/html').getElementById('eis361-heading'))html=html.replace(/(<main\b[^>]*>)/i,'$1<section class="eis361-heading" id="eis361-heading" aria-label="Общий реестр закупок"><div class="eis361-heading-text"><div><h2>Реестр закупок по 223-ФЗ</h2><p>Проверка документов и подтверждённые нарушения</p></div></div></section>');
-  const init=bootstrap.replace('__ORIGIN__',safe(origin)).replace('__DOCUMENTS__',safe(documents)).replace('__API__',safe(api));
+  const init=bootstrap.replace('__ORIGIN__',safe(origin)).replace('__DOCUMENTS__',safe(documents)).replace('__API__',safe(api)).replace('__SEARCH_ROWS__',safe(searchRows));
   // The adapter is injected before every product script, into the artifact only.
-  const prefix='<base href="'+origin+key+'"><script>'+init+'<'+ '/script>';
+  const base=new URL(url.pathname+url.search+url.hash,origin).href.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  const prefix='<base href="'+base+'"><script>'+init+'<'+ '/script>';
   html=html.replace(/(<head\b[^>]*>)/i,'$1'+prefix);
   frame.srcdoc=html;
  }
@@ -146,7 +169,7 @@ iframe{width:100%;height:100%;border:0;background:#f5f5f7;box-shadow:0 0 20px #1
  function width(mobile){stage.classList.toggle('is-mobile',mobile);document.getElementById('demo-mobile').setAttribute('aria-pressed',String(mobile));document.getElementById('demo-desktop').setAttribute('aria-pressed',String(!mobile))}
  document.getElementById('demo-mobile').onclick=()=>width(true);document.getElementById('demo-desktop').onclick=()=>width(false);
  window.addEventListener('message',event=>{if(event.source!==frame.contentWindow)return;const value=event.data;if(!value||typeof value!=='object')return;
-  if(value.type==='eis-demo-nav'&&(documents[value.path]||value.path==='/#cabinet'))show(value.path);
+  if(value.type==='eis-demo-nav'&&typeof value.path==='string')show(value.path);
   if(value.type==='eis-demo-view'&&['registry','cabinet'].includes(value.view)){
    current=value.view==='cabinet'?'/#cabinet':'/';routes.value=current;
   }
@@ -163,14 +186,29 @@ def export(output: Path):
     payload = (SHELL.replace('__DEMO_ORIGIN_PAYLOAD__', safe_json(ORIGIN))
                .replace('__DEMO_DOCS_PAYLOAD__', safe_json(documents))
                .replace('__DEMO_API_PAYLOAD__', safe_json(fixtures()))
+               .replace('__DEMO_SEARCH_ROWS_PAYLOAD__', safe_json(search_fixture_rows()))
                .replace('__DEMO_BOOTSTRAP_PAYLOAD__', safe_json(BOOTSTRAP)))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(payload)
     return output
 
 
+def package(output: Path, archive: Path | None = None):
+    """Put exactly the generated HTML and its Russian instructions in a ZIP."""
+    archive = archive or output.parent / 'interface-preview.zip'
+    readme = output.parent / 'README.txt'
+    readme.write_text(README)
+    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.write(output, arcname='preview.html')
+        bundle.write(readme, arcname='README.txt')
+    return archive
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('/workspace/eis223-panels-preview/preview.html'))
+    parser.add_argument('--package', action='store_true', help='Also write README.txt and interface-preview.zip')
     arguments = parser.parse_args()
     print(export(arguments.output))
+    if arguments.package:
+        print(package(arguments.output))
