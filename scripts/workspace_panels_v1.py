@@ -34,6 +34,9 @@ body.eis-shell-ready:has(>.eis223-workspace)>main{width:calc(100% - var(--shell-
  max-width:none!important;margin-left:var(--shell-nav)!important;padding:24px clamp(16px,2.6vw,36px) 48px!important}
 body.eis-shell-ready .eis223-workspace .eis223-personal{width:calc(100% - var(--shell-nav));
  margin-left:var(--shell-nav);padding-inline:clamp(16px,2.6vw,36px)}
+body.eis-shell-ready>main[hidden]{display:none!important}
+body.eis-shell-ready[data-eis-view=cabinet] .eis223-workspace .eis223-personal{min-height:calc(100dvh - var(--shell-bar));box-sizing:border-box}
+body.eis-shell-ready .eis223-cabinet-extra{scroll-margin-top:calc(var(--shell-bar) + 20px)}
 .eis-shell-nav{position:fixed;top:var(--shell-bar,64px);left:0;bottom:0;z-index:30;
  width:var(--shell-nav,220px);background:#f9f9fb;border-right:1px solid #dedee3;
  padding:20px 12px;overflow:auto;box-sizing:border-box;font:13px/1.45 var(--ui-font,system-ui);color:#1d1d1f}
@@ -53,6 +56,8 @@ body.eis-shell-ready .eis-shell-nav button{border-color:transparent!important}
 body.eis-shell-ready .eis-shell-nav a{color:#515154}
 body.eis-shell-ready .eis-shell-nav a[aria-current=page]{color:#0055ad}
 body.eis-shell-ready .eis-shell-nav button:hover{background:#ededf1!important}
+body.eis-shell-ready .eis-shell-nav button[aria-current=page],
+body.eis-shell-ready .eis-shell-nav button[aria-current=page]:hover{background:#eaf2ff!important;color:#0055ad!important}
 body.eis-shell-ready .eis-quicklook-tabs button[aria-selected=true]{background:#eaf2ff!important;color:#0055ad!important}
 body.eis-shell-ready .eis-quicklook-heading button{background:#fff!important}
 body.eis-shell-ready .eis-quicklook-error button{background:#0066cc!important;color:#fff!important}
@@ -167,6 +172,8 @@ menu.prepend(toggle);body.classList.add('eis-shell-ready');nav.hidden=false;
 try{body.classList.toggle('eis-shell-collapsed',localStorage.getItem('eis223.nav.collapsed.v1')==='1')}catch{}
 let navOpen=false,lastNavFocus=null,lastCardFocus=null,controller=null,request=0,card=null,activeTab='summary',cardUrl='',selectedRow=null;
 let inertBefore=new Map(),overflowBefore=null,toastTimer;
+let currentView='registry',viewSync=false,viewFrame=0;
+const viewScroll={registry:0,cabinet:0};
 function toast(message){clearTimeout(toastTimer);by('eis-shell-toast').textContent=message;toastTimer=setTimeout(()=>{by('eis-shell-toast').textContent=''},3500)}
 function restoreBackground(){for(const [node,value] of inertBefore)node.inert=value;inertBefore.clear();if(overflowBefore!==null){body.style.overflow=overflowBefore;overflowBefore=null}}
 function syncModal(){
@@ -189,12 +196,54 @@ toggle.addEventListener('click',()=>{
  else{body.classList.toggle('eis-shell-collapsed');try{localStorage.setItem('eis223.nav.collapsed.v1',body.classList.contains('eis-shell-collapsed')?'1':'0')}catch{}syncModal()}
 });
 by('eis-shell-nav-close').addEventListener('click',()=>closeNav());
+function viewFromUrl(){try{return new URL(document.baseURI).hash==='#cabinet'?'cabinet':'registry'}catch{return 'registry'}}
+function showView(view,{focus=true,historyMode='push',top=false}={}){
+ const main=document.querySelector('body>main'),cabinet=by('eis223-cabinet'),originalToggle=by('eis223-toggle-cabinet');
+ if(!main||!cabinet)return;
+ const next=view==='cabinet'?'cabinet':'registry',changed=next!==currentView;
+ if(changed)viewScroll[currentView]=window.scrollY;
+ if(!pane.hidden)closePane(false);
+ viewSync=true;
+ if(next==='cabinet'&&cabinet.hidden)originalToggle?.click();
+ cabinet.hidden=next!=='cabinet';main.hidden=next!=='registry';
+ originalToggle?.setAttribute('aria-expanded',String(!cabinet.hidden));
+ viewSync=false;currentView=next;body.dataset.eisView=next;
+ const registry=by('eis-shell-registry'),overview=by('eis-shell-overview');
+ if(next==='registry'){registry?.setAttribute('aria-current','page');overview.removeAttribute('aria-current')}
+ else{registry?.removeAttribute('aria-current');overview.setAttribute('aria-current','page')}
+ overview.setAttribute('aria-pressed',String(next==='cabinet'));
+ if(historyMode!=='none')try{
+  const url=new URL(document.baseURI),hash=next==='cabinet'?'#cabinet':'';
+  if(url.hash!==hash){url.hash=hash;history[historyMode==='replace'?'replaceState':'pushState'](null,'',url.pathname+url.search+url.hash)}
+ }catch{}
+ cancelAnimationFrame(viewFrame);viewFrame=requestAnimationFrame(()=>{
+  window.scrollTo({top:top?0:viewScroll[next],behavior:'instant'});
+  if(focus){const heading=next==='cabinet'?by('eis223-cabinet-title'):document.querySelector('#eis361-heading h2');
+   const visible=node=>{if(!node||!node.getClientRects().length)return false;const r=node.getBoundingClientRect();return r.top>=menu.getBoundingClientRect().bottom&&r.bottom<=innerHeight};
+   if(visible(heading)){heading.tabIndex=-1;heading.focus({preventScroll:true})}
+   else{const selected=next==='cabinet'?overview:registry;(visible(selected)?selected:toggle).focus({preventScroll:true})}}
+ });
+ document.dispatchEvent(new CustomEvent('eis:viewchange',{detail:{view:next}}));
+}
 function showCabinet(favorites=false){
- closeNav(false);const cabinet=by('eis223-cabinet');if(cabinet?.hidden)by('eis223-toggle-cabinet')?.click();
- const target=favorites?by('eis223-favorite-list')?.closest('details'):cabinet;
- if(target){if(favorites)target.open=true;target.scrollIntoView({block:'start',behavior:'instant'});const focus=target.querySelector('summary,button,a');focus?.focus({preventScroll:true})}
+ closeNav(false);showView('cabinet',{top:!favorites});
+ if(favorites){const target=by('eis223-favorite-list')?.closest('details');if(target){
+  target.open=true;requestAnimationFrame(()=>{target.scrollIntoView({block:'start',behavior:'instant'});target.querySelector('summary')?.focus({preventScroll:true})})}}
 }
 by('eis-shell-overview').addEventListener('click',()=>showCabinet());by('eis-shell-favorites').addEventListener('click',()=>showCabinet(true));
+by('eis-shell-registry')?.addEventListener('click',event=>{
+ if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
+ event.preventDefault();closeNav(false);showView('registry');
+});
+by('eis223-toggle-cabinet')?.addEventListener('click',()=>{
+ if(!viewSync)showView(by('eis223-cabinet').hidden?'registry':'cabinet',{top:true});
+});
+by('eis223-start-check')?.addEventListener('click',()=>{
+ const input=document.querySelector('#eis223-add-procurement input[name=reg]');
+ if(input){input.scrollIntoView({block:'center',behavior:'instant'});input.focus({preventScroll:true})}
+});
+function restoreView(){showView(viewFromUrl(),{focus:true,historyMode:'none'})}
+window.addEventListener('popstate',restoreView);window.addEventListener('hashchange',restoreView);
 function updateBar(){body.style.setProperty('--shell-bar',Math.ceil(menu.getBoundingClientRect().height)+'px')}
 if(window.ResizeObserver)new ResizeObserver(updateBar).observe(menu);updateBar();syncModal();
 function viewportChanged(){if(!mobileNav.matches)navOpen=false;syncModal();if(!pane.hidden&&mobilePane.matches&&!pane.contains(document.activeElement))by('eis-quicklook-close').focus();if(!mobileNav.matches&&document.activeElement===by('eis-shell-nav-close'))toggle.focus()}
@@ -307,22 +356,22 @@ function decorate(){
   }
  }
 }
-function observeRows(){decorate();const main=document.querySelector('body>main');if(main)new MutationObserver(decorate).observe(main,{childList:true,subtree:true})}
+function observeRows(){decorate();const main=document.querySelector('body>main');if(main)new MutationObserver(decorate).observe(main,{childList:true,subtree:true});showView(viewFromUrl(),{focus:false,historyMode:'none'})}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',observeRows,{once:true});else observeRows();
 })();
 </script>'''
 
 
 def workspace_panels(role='user'):
-    def link(url,label,symbol,current=False):
-        return '<a href="'+escape(url,quote=True)+'" title="'+escape(label,quote=True)+'" aria-label="'+escape(label,quote=True)+'"'+(' aria-current="page"' if current else '')+'>'+icon(symbol)+'<span class="eis-shell-label">'+escape(label)+'</span></a>'
+    def link(url,label,symbol,current=False,identifier=None):
+        return '<a '+('id="'+escape(identifier,quote=True)+'" ' if identifier else '')+'href="'+escape(url,quote=True)+'" title="'+escape(label,quote=True)+'" aria-label="'+escape(label,quote=True)+'"'+(' aria-current="page"' if current else '')+'>'+icon(symbol)+'<span class="eis-shell-label">'+escape(label)+'</span></a>'
     manager=link('/account/manager','Кабинет руководителя','people') if role in ('manager','admin') else ''
     admin=link('/account/admin','Заявки на регистрацию','people') if role=='admin' else ''
     nav='''<aside id="eis-shell-nav" class="eis-shell-nav" hidden aria-label="Главные разделы">
 <button id="eis-shell-nav-close" type="button" aria-label="Закрыть меню">'''+icon('close')+'''</button>
-<nav aria-label="Рабочая область"><div class="eis-shell-group"><p>Рабочая область</p>'''+link('/','Реестр закупок','list',True)+'''
-<button type="button" id="eis-shell-overview" title="Мой кабинет" aria-label="Мой кабинет">'''+icon('grid')+'''<span class="eis-shell-label">Мой кабинет</span></button></div>
-<div class="eis-shell-group"><p>Моя работа</p>'''+link('/account/workbench','Рабочее место','check')+link('/account/home','Мои проверки','list')+link('/account/thematic','Тематические','layers')+link('/account/memos','Служебные записки','file')+'''
+<nav aria-label="Рабочая область"><div class="eis-shell-group"><p>Рабочая область</p>'''+link('/','Реестр закупок','list',True,'eis-shell-registry')+'''
+<button type="button" id="eis-shell-overview" title="Мой кабинет" aria-label="Мой кабинет" aria-controls="eis223-cabinet" aria-pressed="false">'''+icon('grid')+'''<span class="eis-shell-label">Мой кабинет</span></button></div>
+<div class="eis-shell-group"><p>Моя работа</p>'''+link('/account/workbench','Задачи и поручения','check')+link('/account/home','Мои проверки','list')+link('/account/thematic','Тематические','layers')+link('/account/memos','Служебные записки','file')+'''
 <button type="button" id="eis-shell-favorites" title="Избранное" aria-label="Избранное">'''+icon('star')+'''<span class="eis-shell-label">Избранное</span></button></div>'''+('<div class="eis-shell-group"><p>Управление</p>'+manager+admin+'</div>' if manager or admin else '')+'''
 <div class="eis-shell-nav-footer">'''+link('/account/profile','Профиль','profile')+'</div></nav></aside>'
     panel='''<div id="eis-shell-shade" hidden></div>

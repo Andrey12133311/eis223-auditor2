@@ -5,7 +5,7 @@ Private data is fetched from owner-scoped APIs only after authentication.
 """
 from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
-from scripts.account_visual_polish_v1 import workspace_style, signin_style
+from scripts.account_visual_polish_v1 import workspace_style, signin_style, cabinet_clarity_style
 from scripts.workspace_panels_v1 import workspace_panels
 
 
@@ -267,11 +267,11 @@ def site_header(role="user"):
              if role == "admin" else "")
     director = ('<a class="eis223-manager-link" href="/account/manager">Кабинет руководителя</a>'
                 if role in ("manager", "admin") else "")
-    return (_STYLE + _COMPACT_STYLE + workspace_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
+    return (_STYLE + _COMPACT_STYLE + workspace_style() + cabinet_clarity_style() + (TEAM_SCRIPT if role == "admin" else "") + '''
 <div class="eis223-workspace eis223-compact-cabinet" data-eis223-account-nav="1">
 <nav class="eis223-menu" aria-label="Навигация ЕИС Аудитор">
 <span class="eis223-brand"><span class="eis223-brand-icon" aria-hidden="true">223</span><span class="eis223-brand-copy"><span class="eis223-brand-name">ЕИС Аудитор</span></span></span>
-<span class="eis223-auth-user" aria-label="Авторизованный пользователь"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></span>
+<span class="eis223-auth-user" aria-label="Авторизованный пользователь"><a class="eis223-identity-link" href="/account/profile" aria-label="Открыть мой профиль"><strong id="eis223-topbar-fullname">Загружаем ФИО…</strong><small id="eis223-topbar-role">Личная учётная запись</small></a></span>
 <button type="button" id="eis223-toggle-cabinet" aria-controls="eis223-cabinet" aria-expanded="false">Личный кабинет <span id="eis223-unread" class="eis223-notification-dot" hidden aria-label="Новые уведомления"></span></button>
 ''' + admin + director + '''
 <button type="button" id="eis223-logout">Выйти</button>
@@ -291,11 +291,13 @@ def site_header(role="user"):
   </div>
  </form>
 </div>
-<section class="eis223-personal" id="eis223-cabinet" aria-label="Мой личный кабинет" hidden>
+<section class="eis223-personal" id="eis223-cabinet" aria-labelledby="eis223-cabinet-title" hidden>
 <div class="eis223-cabinet-heading">
-<div><h2>Личный кабинет</h2>
+<div><h2 id="eis223-cabinet-title" tabindex="-1">Мой кабинет</h2>
+<p id="eis223-cabinet-note" class="eis223-cabinet-note">Продолжите проверку или добавьте закупку по номеру ЕИС.</p>
 <p class="eis223-subtle" id="eis223-owner-fullname">Загрузка ФИО…</p></div>
-<a class="eis223-all-checks" href="/account/profile">Профиль</a></div>
+<div class="eis223-cabinet-actions"><button id="eis223-start-check" type="button" aria-controls="eis223-add-procurement">Проверить закупку</button>
+<a class="eis223-all-checks eis223-cabinet-profile" href="/account/profile">Профиль</a></div></div>
 ''' + ('''
 <details class="eis223-feature eis223-cabinet-extra" id="eis223-admin-controls" aria-label="Управление пользователями">
 <summary>Администрирование пользователей</summary>
@@ -318,23 +320,23 @@ def site_header(role="user"):
 <div id="eis223-personal-summary" class="eis223-overview" role="status" aria-live="polite">
 <span>Загрузка сведений…</span></div>
 <div class="eis223-columns">
-<div class="eis223-tile"><div class="eis223-tile-head">
-<div><h3>Самостоятельные проверки</h3><p class="eis223-tile-sub">Закупки, которые вы запустили на проверку</p></div></div>
+<div class="eis223-tile eis223-tile-main"><div class="eis223-tile-head">
+<div><h3>Мои проверки</h3><p class="eis223-tile-sub">Добавленные вами закупки и сохранённые результаты</p></div></div>
 <ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
-<a class="eis223-all-checks" href="/account/home">Все самостоятельные проверки →</a>
-<form id="eis223-add-procurement">
+<a class="eis223-all-checks" href="/account/home">Все мои проверки →</a>
+<form id="eis223-add-procurement" aria-label="Проверить закупку по номеру ЕИС">
 <input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
-name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
-<button type="submit">Запустить проверку</button></form>
+name="reg" required inputmode="numeric" pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
+<button type="submit">Проверить</button></form>
 <p role="status" id="eis223-add-status"></p>
 </div>
-<div class="eis223-tile"><div class="eis223-tile-head">
+<div class="eis223-tile eis223-tile-thematic"><div class="eis223-tile-head">
 <div><h3>Тематические проверки</h3><p class="eis223-tile-sub">Запущенные под вашей учётной записью</p></div></div>
 <ul id="eis223-my-batches"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/thematic">Посмотреть все мои проверки →</a>
 <p role="status" id="eis223-batch-status"></p>
 </div>
-<div class="eis223-tile"><div class="eis223-tile-head">
+<div class="eis223-tile eis223-tile-memos"><div class="eis223-tile-head">
 <div><h3>Служебные записки</h3><p class="eis223-tile-sub">Сохранённые документы и проекты</p></div></div>
 <ul id="eis223-my-memos"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/memos">Посмотреть служебные записки →</a>
@@ -457,6 +459,11 @@ function legalStatus(item){
   'Юридическая проверка завершена':'Юридическая проверка не завершена: нет проверенных документов';
  return 'Юридическая проверка ещё не завершена';
 }
+function displayCount(value){
+ if(typeof value==='string'){const text=value.trim();if(!/^[0-9]+$/.test(text))return '—';value=Number(text)}
+ else if(typeof value!=='number')return '—';
+ return Number.isSafeInteger(value)&&value>=0?String(value):'—';
+}
 function retainedResults(item){
  return ['pending','queued','running','processing','failed','error'].includes(item.legal_review_state)&&
   (Number(item.documents_checked)>0||Number(item.violations)>0)?
@@ -475,7 +482,7 @@ const memos=memoResponse.status==='fulfilled'&&Array.isArray(memoResponse.value)
 const realBatches=Array.isArray(batches.batches)?batches.batches:[];
 const overview=q('eis223-personal-summary');overview.replaceChildren();
 const counters=[
- ['Самостоятельные',sumResponse.status==='fulfilled'?
+ ['Мои проверки',sumResponse.status==='fulfilled'?
   summary.manual_checks:(manualResponse.status==='fulfilled'?purchases.length:undefined)],
  ['Тематические проверки',batchResponse.status==='fulfilled'?realBatches.length:undefined],
  ['Служебные записки',sumResponse.status==='fulfilled'?
@@ -483,8 +490,7 @@ const counters=[
 for(const [label,value] of counters){
  const chip=document.createElement('span'),number=document.createElement('b');
  const caption=document.createElement('small');
- const numberValue=Number(value);
- number.textContent=Number.isFinite(numberValue)&&numberValue>=0?String(numberValue):'—';
+ number.textContent=displayCount(value);
  caption.textContent=label;chip.append(number,caption);overview.append(chip);
 }
 const pl=q('eis223-my-procurements');pl.replaceChildren();
@@ -505,21 +511,25 @@ for(const item of purchases.slice(0,8)){
  const meta=document.createElement('small');
  const stamp=Date.parse(item.started_at||'');
  const when=Number.isFinite(stamp)?new Date(stamp).toLocaleDateString('ru-RU')+' · ':'';
- const checked=Math.max(0,Number(item.documents_checked||0));
- const found=Math.max(0,Number(item.violations||0));
- meta.textContent=when+(statusLabels[item.job_status]||'Задание ЕИС')+
- ' · Документов: '+checked+' · Нарушений: '+found;
- const legal=document.createElement('small');legal.textContent=legalStatus(item);
- body.append(num,meta,legal);
+ const checked=displayCount(item.documents_checked),found=displayCount(item.violations);
+ meta.className='eis223-source-state';
+ meta.textContent=when+(statusLabels[item.job_status]||'Статус получения документов уточняется');
+ const results=document.createElement('small');results.className='eis223-result-line';
+ results.textContent='Документов проверено: '+checked+' · Нарушений: '+found;
+ const legal=document.createElement('small');legal.className='eis223-legal-state';legal.textContent=legalStatus(item);
+ legal.dataset.tone=item.legal_review_state==='completed'&&Number(item.legal_review_documents)>0?'complete':
+  ['failed','error'].includes(item.legal_review_state)?'attention':'pending';
+ body.append(num,meta,results,legal);
  const previous=retainedResults(item);
  if(previous){const note=document.createElement('small');note.textContent=previous;body.append(note)}
  li.append(body);
+ const actions=document.createElement('div');actions.className='eis223-row-actions';
  const open=document.createElement('a');open.href=item.card_available?
  '/check-new/'+encodeURIComponent(item.reg_number):'/account/home';
- open.textContent=item.card_available?'Карточка':'Подробности';li.append(open);
+ open.textContent=item.card_available?'Открыть карточку':'Подробности';open.className='eis223-open-card';actions.append(open);
  if(item.card_available){const dossier=document.createElement('a');
  dossier.href='/me/cases/'+encodeURIComponent(item.reg_number);
- dossier.textContent='Электронное дело';li.append(dossier);}
+ dossier.textContent='Электронное дело';actions.append(dossier);}
  const del=document.createElement('button');del.type='button';del.textContent='Убрать';
  del.title='Убрать из личного кабинета, не удаляя документы и результаты проверки';
  del.onclick=async()=>{
@@ -532,7 +542,7 @@ for(const item of purchases.slice(0,8)){
    await refresh();
   }catch{del.disabled=false;show('eis223-add-status','Не удалось убрать проверку')}
  };
- li.append(del);pl.append(li);
+ actions.append(del);li.append(actions);pl.append(li);
 }
 const bl=q('eis223-my-batches');bl.replaceChildren();
 if(!realBatches.length){const li=document.createElement('li');
@@ -556,7 +566,7 @@ for(const item of realBatches){
  const meta=document.createElement('small');
  const date=Date.parse(item.created_at);
  meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleDateString('ru-RU')+' · ':'')+
- 'Закупок: '+Number(item.purchases||0)+' · Нарушений: '+Number(item.violations||0)+
+ 'Закупок: '+displayCount(item.purchases)+' · Нарушений: '+displayCount(item.violations)+
  (item.status==='active'?' · Выполняется':' · Остановлена');
  const period=document.createElement('small');
  period.textContent='Дата размещения в ЕИС: '+thematicPeriod(item);

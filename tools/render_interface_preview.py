@@ -35,19 +35,19 @@ PERSON = {'id': 'preview-user', 'email': 'preview@example.test', 'last_name': '�
           'full_name': 'Иванов Александр Сергеевич', 'role': 'manager', 'status': 'approved', 'completed': True}
 PURCHASE = {'reg_number': REG, 'title': 'Поставка лабораторного оборудования для исследовательского центра',
             'customer': LONG_NAME, 'customer_inn': '7700000000', 'method': 'Электронный конкурс',
-            'price': '1 250 000,00 ₽', 'documents_checked': 8, 'documents_found': 8,
+            'price': '1 250 000,00 ₽', 'documents_checked': 3, 'documents_found': 3,
             'violations': 1, 'job_status': 'completed', 'card_available': True,
-            'legal_review_state': 'completed', 'legal_review_documents': 8,
+            'legal_review_state': 'completed', 'legal_review_documents': 3,
             'started_at': STAMP, 'published': '2026-11-05', 'submission_end': '2026-11-19',
             'url': 'https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=' + REG}
 PURCHASE2 = {**PURCHASE, 'reg_number': REG2, 'title': 'Обслуживание инженерных систем здания',
              'customer': 'Демонстрационный центр эксплуатации', 'price': '840 000,00 ₽',
              'documents_checked': 2, 'documents_found': 5, 'violations': 0,
-             'job_status': 'processing', 'legal_review_state': 'running',
+             'job_status': 'leased', 'legal_review_state': 'running', 'legal_review_documents': 2,
              'url': PURCHASE['url'].replace(REG, REG2)}
 PURCHASE3 = {**PURCHASE, 'reg_number': REG3, 'title': 'Поставка офисной мебели',
              'customer': 'Демонстрационное учреждение развития', 'price': '420 000,00 ₽',
-             'documents_checked': 1, 'documents_found': 1,
+             'documents_checked': 1, 'documents_found': 1, 'legal_review_documents': 1,
              'url': PURCHASE['url'].replace(REG, REG3)}
 TASK = {'id': 'preview-task', 'title': 'Проверить документацию и сроки размещения закупки',
         'reg_number': REG, 'status': 'in_progress', 'due_date': '2026-11-18',
@@ -92,7 +92,7 @@ def fixtures():
         '/me/assignments/memos': [],
         '/me/workbench/overview': {'checks_total': 12, 'reviews_completed': 8,
             'unique_confirmed_findings': 2, 'documents_checked': 48, 'attention_required': 1, 'memo_count': 1},
-        '/me/center/dashboard': {'task_active': 1, 'campaign_active': 0, 'unread_notifications': 1,
+        '/me/center/dashboard': {'task_active': 3, 'campaign_active': 0, 'unread_notifications': 1,
             'finding_decisions': {'confirmed': 2}, 'as_of': STAMP, 'tasks': [TASK, TASK_PENDING, TASK_OVERDUE],
             'campaigns': [], 'memo_reviews': {'submitted': 1}},
         '/me/center/progress': {'available': True, 'note': 'Локальный демонстрационный набор.',
@@ -131,8 +131,8 @@ def registry_markup():
         '.filters{display:flex;flex-wrap:wrap}input,select,button{padding:8px 11px;font:inherit}button{cursor:pointer}'
         '#v257-tabs{display:flex;gap:6px;margin:0 0 14px;flex-wrap:wrap}#v257-tabs a{border:1px solid;border-radius:8px;text-decoration:none}</style>'
         + home_shell().decode() + '</head><body>' + site_header('manager').decode()
-        + '<main><div class="stats"><div class="stat"><small>Закупок в реестре</small><b>128</b></div>'
-        '<div class="stat"><small>Документов проверено</small><b>864</b></div><div class="stat"><small>Требует внимания</small><b>12</b></div></div>'
+        + '<main><div class="stats"><div class="stat"><small>Закупок в реестре</small><b>3</b></div>'
+        '<div class="stat"><small>Документов проверено</small><b>6</b></div><div class="stat"><small>Требует внимания</small><b>2</b></div></div>'
         '<nav id="v257-tabs"><a href="/" aria-current="page">Все закупки</a><a href="/">С нарушениями</a></nav>'
         '<form class="filters"><label>Поиск<input placeholder="Номер закупки, заказчик или ИНН"></label>'
         '<label>Состояние<select id="preview-status"><option value="">Все состояния</option><option value="violations">С нарушениями</option><option value="pending">Проверка не завершена</option><option value="missing_docs">Документы не получены</option></select></label><label>Дата размещения<input type="date"></label>'
@@ -156,11 +156,18 @@ def pages():
             {'name': 'Проект договора.pdf', 'doc_type': 'Проект договора', 'status': 'Проверен', 'url': PURCHASE['url']},
             {'name': 'Изменения документации.pdf', 'doc_type': 'Изменение', 'status': 'Требует уточнения', 'url': PURCHASE['url']}]
     card = render_card(REG, (PURCHASE, [finding], [review], docs, 1, 1, 3),
-                       legal_review={'state': 'completed', 'documents_read': 8})
-    card2 = render_card(REG2, (PURCHASE2, [], [], docs[:1], 0, 0, 1),
+                       legal_review={'state': 'completed', 'documents_read': 3})
+    pending_docs = [
+        {'name': 'Документация на обслуживание инженерных систем.pdf', 'doc_type': 'Документация', 'status': 'Проверен', 'url': PURCHASE2['url']},
+        {'name': 'Проект договора на обслуживание.pdf', 'doc_type': 'Проект договора', 'status': 'Проверен', 'url': PURCHASE2['url']},
+    ]
+    card2 = render_card(REG2, (PURCHASE2, [], [], pending_docs, 0, 0, 2),
                         legal_review={'state': 'running', 'documents_read': 2})
-    incomplete = {**finding, 'code': 'PREVIEW-INCOMPLETE', 'title': 'Неполное доказательство условия оплаты', 'evidence': ''}
-    card3 = render_card(REG3, (PURCHASE3, [incomplete], [], docs[:1], 1, 0, 1),
+    incomplete = {**finding, 'code': 'PREVIEW-INCOMPLETE', 'title': 'Неполное доказательство условия оплаты', 'evidence': '',
+                  'document': 'Проект договора поставки мебели.pdf', 'source_url': PURCHASE3['url']}
+    office_docs = [{'name': 'Проект договора поставки мебели.pdf', 'doc_type': 'Проект договора',
+                    'status': 'Проверен', 'url': PURCHASE3['url']}]
+    card3 = render_card(REG3, (PURCHASE3, [incomplete], [], office_docs, 1, 0, 1),
                         legal_review={'state':'completed','documents_read':1})
     return {'/': ('registry', registry_markup()), '/account/login': ('login', login_portal()),
         '/account/register': ('register', login_portal('register')),
@@ -179,6 +186,118 @@ CONTRAST = r"""el => {
  const lum=c=>c.slice(0,3).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4}).reduce((v,x,i)=>v+x*[.2126,.7152,.0722][i],0);
  const a=lum(fg),b=lum(bg);return {color:s.color,background:bg,ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
 }"""
+
+
+def cabinet_view(page):
+    """Use the real navigation, including its mobile modal, to open My Cabinet."""
+    if not page.locator('#eis-shell-overview').is_visible():
+        page.locator('#eis-shell-nav-toggle').click()
+    page.locator('#eis-shell-overview').click()
+    page.wait_for_function("document.body.dataset.eisView==='cabinet'")
+    page.wait_for_function("document.getElementById('eis223-my-procurements').querySelector('a')!==null")
+
+
+def registry_view(page):
+    if not page.locator('#eis-shell-registry').is_visible():
+        page.locator('#eis-shell-nav-toggle').click()
+    page.locator('#eis-shell-registry').click()
+    page.wait_for_function("document.body.dataset.eisView==='registry'")
+
+
+def visible_focus(page):
+    return page.evaluate("""() => {
+      const e=document.activeElement;if(!e||e===document.body||e.closest('[hidden],[inert]'))return false;
+      const r=e.getBoundingClientRect();if(r.top<0||r.bottom>innerHeight||r.width<=0||r.height<=0)return false;
+      const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+      return hit===e||e.contains(hit);
+    }""")
+
+
+def clarity_checks(browser, handler, output, check, results):
+    """Prove that the workspace has one clear active view and a safe next action."""
+    context = browser.new_context(viewport={'width':1440,'height':700},locale='ru-RU',reduced_motion='reduce')
+    context.route('**/*',handler)
+    page=context.new_page()
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    page.goto(ORIGIN+'/')
+    page.wait_for_function("document.body.dataset.eisView==='registry'")
+    check('clarity-registry-only',page.locator('body>main').is_visible() and page.locator('#eis223-cabinet').is_hidden())
+    check('clarity-one-active-registry-item',page.locator('#eis-shell-nav [aria-current="page"]').count()==1
+          and page.locator('#eis-shell-registry').get_attribute('aria-current')=='page')
+    check('clarity-no-duplicate-header-navigation',page.locator('#eis223-toggle-cabinet').is_hidden()
+          and (not page.locator('.eis223-menu .eis223-manager-link').count() or page.locator('.eis223-menu .eis223-manager-link').is_hidden()))
+    page.locator('main .filters input').first.fill('лабораторное оборудование')
+    page.locator('#preview-status').select_option('pending')
+    page.evaluate('window.scrollTo(0,Math.min(140,document.documentElement.scrollHeight-innerHeight))')
+    scroll_before=page.evaluate('scrollY')
+    cabinet_view(page)
+    check('clarity-cabinet-only',page.locator('#eis223-cabinet').is_visible() and page.locator('body>main').is_hidden())
+    check('clarity-one-active-cabinet-item',page.locator('#eis-shell-nav [aria-current="page"]').count()==1
+          and page.locator('#eis-shell-overview').get_attribute('aria-current')=='page')
+    check('clarity-cabinet-label-consistent',page.locator('#eis223-cabinet-title').inner_text().strip()=='Мой кабинет')
+    check('clarity-cabinet-url-state',urlsplit(page.url).fragment=='cabinet')
+    check('clarity-cabinet-no-viewport-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+    # Keyboard operation uses the same genuine button and must not submit a job.
+    methods=[]
+    page.on('request',lambda request:methods.append(request.method))
+    page.locator('#eis223-start-check').focus()
+    page.keyboard.press('Enter')
+    input_focus=page.locator('#eis223-add-procurement input[name="reg"]').evaluate('el=>document.activeElement===el')
+    page.wait_for_timeout(80)
+    check('clarity-primary-action-focuses-check-input',input_focus)
+    check('clarity-primary-action-does-not-submit',not any(method not in ('GET','HEAD') for method in methods))
+    page.locator('#eis223-my-procurements a[href="/check-new/'+REG+'"]').first.click()
+    page.wait_for_function("document.getElementById('eis-quicklook-content').textContent.includes('Поставка')")
+    check('clarity-cabinet-opens-saved-inspector',page.locator('#eis-quicklook').is_visible() and page.locator('body>main').is_hidden())
+    registry_view(page)
+    check('clarity-view-switch-closes-inspector',page.locator('#eis-quicklook').is_hidden())
+    check('clarity-registry-keeps-filter-inputs',page.locator('main .filters input').first.input_value()=='лабораторное оборудование'
+          and page.locator('#preview-status').input_value()=='pending')
+    page.wait_for_timeout(60)
+    check('clarity-registry-keeps-scroll',abs(page.evaluate('scrollY')-scroll_before)<3,{'before':scroll_before,'after':page.evaluate('scrollY')})
+    # A fresh link to the cabinet restores the correct view without a fictitious route.
+    page.goto(ORIGIN+'/#cabinet')
+    page.wait_for_function("document.body.dataset.eisView==='cabinet'")
+    check('clarity-cabinet-hash-entry',page.locator('body>main').is_hidden() and page.locator('#eis223-cabinet').is_visible())
+    registry_view(page)
+    page.locator('#eis-shell-overview').focus();page.keyboard.press('Enter')
+    page.wait_for_function("document.body.dataset.eisView==='cabinet'")
+    check('clarity-keyboard-view-switch',page.locator('body>main').is_hidden())
+    page.go_back();page.wait_for_function("document.body.dataset.eisView==='registry'")
+    check('clarity-browser-back-restores-registry',page.locator('#eis223-cabinet').is_hidden())
+    page.go_forward();page.wait_for_function("document.body.dataset.eisView==='cabinet'")
+    check('clarity-browser-forward-restores-cabinet',page.locator('body>main').is_hidden())
+    registry_view(page)
+    page.locator('body>main').evaluate("e=>e.style.minHeight='3200px'")
+    page.evaluate('window.scrollTo(0,850)')
+    cabinet_view(page);registry_view(page);page.wait_for_timeout(60)
+    check('clarity-long-registry-restores-scroll',abs(page.evaluate('scrollY')-850)<3,{'scroll':page.evaluate('scrollY')})
+    check('clarity-long-registry-restores-visible-focus',visible_focus(page))
+    page.keyboard.press('Tab')
+    check('clarity-long-registry-next-tab-visible',visible_focus(page))
+    context.close()
+
+    mobile=browser.new_context(viewport={'width':390,'height':600},locale='ru-RU',has_touch=True,is_mobile=True,reduced_motion='reduce')
+    mobile.route('**/*',handler);page=mobile.new_page()
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    page.goto(ORIGIN+'/');cabinet_view(page)
+    check('clarity-mobile-cabinet-only',page.locator('body>main').is_hidden() and page.locator('#eis223-cabinet').is_visible())
+    check('clarity-mobile-menu-dismissed-on-selection',page.locator('#eis-shell-nav').is_hidden() and not page.locator('#eis223-cabinet').evaluate('e=>e.inert'))
+    check('clarity-mobile-cabinet-no-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+    page.locator('#eis223-start-check').click()
+    control=page.locator('#eis223-add-procurement input[name="reg"]')
+    check('clarity-mobile-primary-action-focus',control.evaluate('el=>document.activeElement===el'))
+    check('clarity-mobile-primary-action-reachable',control.evaluate("el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el}"))
+    registry_view(page)
+    check('clarity-mobile-return-registry',page.locator('body>main').is_visible() and page.locator('#eis223-cabinet').is_hidden())
+    page.locator('body>main').evaluate("e=>e.style.minHeight='3200px'")
+    page.evaluate('window.scrollTo(0,850)')
+    cabinet_view(page);registry_view(page);page.wait_for_timeout(60)
+    check('clarity-mobile-long-registry-restores-scroll',abs(page.evaluate('scrollY')-850)<3,{'scroll':page.evaluate('scrollY')})
+    check('clarity-mobile-long-registry-restores-visible-focus',visible_focus(page))
+    page.keyboard.press('Tab')
+    check('clarity-mobile-long-registry-next-tab-visible',visible_focus(page))
+    mobile.close()
 
 
 def panel_checks(browser, handler, output, check, results, control):
@@ -376,6 +495,11 @@ def capture_showcase(output: Path):
         desktop.route('**/*',handler);page=desktop.new_page();page.goto(ORIGIN+'/')
         page.locator('#eis-shell-nav').wait_for(state='visible')
         page.screenshot(path=str(output/'workspace-desktop.png'));saved.append('workspace-desktop.png')
+        cabinet_view(page)
+        page.wait_for_function("document.getElementById('eis223-my-memos').querySelector('a')!==null")
+        page.locator('#eis223-cabinet-title').click();page.evaluate('window.scrollTo(0,0)')
+        page.screenshot(path=str(output/'cabinet-1440.png'),full_page=True);saved.append('cabinet-1440.png')
+        registry_view(page)
         page.locator('main table a[href="/check-new/'+REG+'"]').first.click()
         page.wait_for_function("document.getElementById('eis-quicklook-content').textContent.includes('Поставка')")
         page.locator('#eis-quicklook-title').click()
@@ -396,6 +520,12 @@ def capture_showcase(output: Path):
         mobile.route('**/*',handler);page=mobile.new_page();page.goto(ORIGIN+'/')
         page.locator('#eis-shell-nav-toggle').click();page.screenshot(path=str(output/'workspace-mobile-menu.png'));saved.append('workspace-mobile-menu.png')
         page.locator('#eis-shell-nav-close').click()
+        cabinet_view(page)
+        page.wait_for_function("document.getElementById('eis223-my-memos').querySelector('a')!==null")
+        page.locator('#eis223-cabinet-title').click();page.evaluate('window.scrollTo(0,0)')
+        page.screenshot(path=str(output/'cabinet-390.png'),full_page=True);saved.append('cabinet-390.png')
+        page.screenshot(path=str(output/'cabinet-mobile.png'));saved.append('cabinet-mobile.png')
+        registry_view(page)
         page.locator('main table a[href="/check-new/'+REG+'"]').first.click()
         page.wait_for_function("document.getElementById('eis-quicklook-content').textContent.includes('Поставка')")
         page.screenshot(path=str(output/'workspace-mobile-summary.png'));saved.append('workspace-mobile-summary.png')
@@ -465,9 +595,9 @@ def run(output: Path):
                 page.goto(ORIGIN + path)
                 page.wait_for_timeout(150)
                 if name == 'registry':
-                    page.locator('#eis223-toggle-cabinet').click()
-                    page.wait_for_timeout(100)
+                    cabinet_view(page)
                     check(f'{name}-{width}-cabinet-toggle', page.locator('#eis223-cabinet').is_visible())
+                    registry_view(page)
                 if name == 'login':
                     page.locator('#tab-register').click()
                     check(f'login-{width}-registration-tab', page.locator('#registration-form').is_visible())
@@ -504,12 +634,13 @@ def run(output: Path):
                 page.screenshot(path=str(shot), full_page=True)
                 results['screenshots'].append(str(shot))
             context.close()
+        clarity_checks(browser, handler, output, check, results)
         panel_checks(browser, handler, output, check, results, control)
         touch = browser.new_context(viewport={'width': 390, 'height': 844}, has_touch=True,
                                     is_mobile=True, reduced_motion='reduce')
         touch.route('**/*', handler)
         page = touch.new_page()
-        touch_targets = {'/': ['#eis223-toggle-cabinet', '#eis223-logout'],
+        touch_targets = {'/': ['#eis-shell-nav-toggle', '#eis223-logout'],
             '/account/login': ['.submit', '#login-email', '#tab-login'],
             '/account/workbench': ['[data-staff-tab="overview"]', '#staff-refresh', 'header a', '#staff-global-search button'],
             '/account/manager': ['[data-tab="overview"]', 'header a'],

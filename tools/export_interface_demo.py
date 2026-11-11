@@ -26,6 +26,13 @@ BOOTSTRAP = r"""
  const origin=__ORIGIN__, documents=__DOCUMENTS__, api=__API__;
  const notify=text=>parent.postMessage({type:'eis-demo-note',text},'*');
  const resolve=input=>new URL(typeof input==='string'?input:input.url,document.baseURI);
+ // The real workspace announces an in-page switch. Keep the outer selector in
+ // step without rebuilding the iframe and losing its filters or scroll.
+ document.addEventListener('eis:viewchange',event=>{
+  const view=event.detail?.view;
+  if(new URL(document.baseURI).pathname==='/'&&['registry','cabinet'].includes(view))
+   parent.postMessage({type:'eis-demo-view',view},'*');
+ });
  function response(body,kind,path,status=200){
   const r=new Response(body,{status,headers:{'Content-Type':kind,'Cache-Control':'no-store'}});
   Object.defineProperty(r,'url',{value:origin+path});return r;
@@ -50,9 +57,15 @@ BOOTSTRAP = r"""
   if(event.defaultPrevented)return;
   const anchor=event.target.closest?.('a[href]');if(!anchor)return;
   let url;try{url=resolve(anchor.href)}catch{return}
-  if(url.origin===origin&&url.pathname===new URL(document.baseURI).pathname&&url.hash){event.preventDefault();document.querySelector(url.hash)?.scrollIntoView();return}
   event.preventDefault();
   if(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey){notify('В демонстрации страницы открываются в этом окне.');return}
+  if(url.origin===origin&&url.pathname==='/'&&url.hash==='#cabinet'){
+   parent.postMessage({type:'eis-demo-nav',path:'/#cabinet'},'*');return;
+  }
+  if(url.origin===origin&&url.pathname===new URL(document.baseURI).pathname&&url.hash){
+   try{document.querySelector(url.hash)?.scrollIntoView()}catch{}
+   return;
+  }
   if(url.origin===origin&&documents[url.pathname])parent.postMessage({type:'eis-demo-nav',path:url.pathname},'*');
   else notify('Это демонстрационный набор: оригиналы документов и дополнительные серверные действия здесь недоступны.');
  });
@@ -92,19 +105,24 @@ iframe{width:100%;height:100%;border:0;background:#f5f5f7;box-shadow:0 0 20px #1
 (()=>{
  const origin=__DEMO_ORIGIN_PAYLOAD__,documents=__DEMO_DOCS_PAYLOAD__,api=__DEMO_API_PAYLOAD__,bootstrap=__DEMO_BOOTSTRAP_PAYLOAD__;
  const frame=document.getElementById('demo-frame'),routes=document.getElementById('demo-route'),stage=document.getElementById('demo-stage');
- const names={registry:'Реестр закупок',login:'Вход',register:'Регистрация',staff:'Кабинет сотрудника',manager:'Кабинет руководителя',profile:'Профиль',manual:'Мои проверки',thematic:'Тематические проверки',memos:'Служебные записки',card:'Карточка закупки',card2:'Карточка другой закупки','card-pending':'Карточка: проверка выполняется','card-incomplete':'Карточка: неполные доказательства'};
+ const names={registry:'Реестр закупок',login:'Вход',register:'Регистрация',staff:'Задачи и поручения',manager:'Кабинет руководителя',profile:'Профиль',manual:'Мои проверки',thematic:'Тематические проверки',memos:'Служебные записки',card:'Карточка закупки',card2:'Карточка другой закупки','card-pending':'Карточка: проверка выполняется','card-incomplete':'Карточка: неполные доказательства'};
  const safe=value=>JSON.stringify(value).replace(/</g,'\\u003c');
- for(const [path,[name]] of Object.entries(documents)){const option=document.createElement('option');option.value=path;option.textContent=names[name]||name;routes.append(option)}
+ for(const [path,[name]] of Object.entries(documents)){
+  const option=document.createElement('option');option.value=path;option.textContent=names[name]||name;routes.append(option);
+  if(path==='/'){const cabinet=document.createElement('option');cabinet.value='/#cabinet';cabinet.textContent='Мой кабинет';routes.append(cabinet)}
+ }
  let current='/',timer;
  function note(text){clearTimeout(timer);document.getElementById('demo-note').textContent=text;timer=setTimeout(()=>document.getElementById('demo-note').textContent='',6500)}
  function show(path){
-  if(!documents[path])return;
-  current=path;routes.value=path;
-  let html=documents[path][1];
-  if(path==='/'&&!new DOMParser().parseFromString(html,'text/html').getElementById('eis361-heading'))html=html.replace(/(<main\b[^>]*>)/i,'$1<section class="eis361-heading" id="eis361-heading" aria-label="Общий реестр закупок"><div class="eis361-heading-text"><div><h2>Реестр закупок по 223-ФЗ</h2><p>Проверка документов и подтверждённые нарушения</p></div></div></section>');
+  let url;try{url=new URL(path,origin)}catch{return}
+  if(url.origin!==origin||!documents[url.pathname])return;
+  const key=url.pathname==='/'&&url.hash==='#cabinet'?'/#cabinet':url.pathname;
+  current=key;routes.value=key;
+  let html=documents[url.pathname][1];
+  if(url.pathname==='/'&&!new DOMParser().parseFromString(html,'text/html').getElementById('eis361-heading'))html=html.replace(/(<main\b[^>]*>)/i,'$1<section class="eis361-heading" id="eis361-heading" aria-label="Общий реестр закупок"><div class="eis361-heading-text"><div><h2>Реестр закупок по 223-ФЗ</h2><p>Проверка документов и подтверждённые нарушения</p></div></div></section>');
   const init=bootstrap.replace('__ORIGIN__',safe(origin)).replace('__DOCUMENTS__',safe(documents)).replace('__API__',safe(api));
   // The adapter is injected before every product script, into the artifact only.
-  const prefix='<base href="'+origin+path+'"><script>'+init+'<'+ '/script>';
+  const prefix='<base href="'+origin+key+'"><script>'+init+'<'+ '/script>';
   html=html.replace(/(<head\b[^>]*>)/i,'$1'+prefix);
   frame.srcdoc=html;
  }
@@ -112,7 +130,10 @@ iframe{width:100%;height:100%;border:0;background:#f5f5f7;box-shadow:0 0 20px #1
  function width(mobile){stage.classList.toggle('is-mobile',mobile);document.getElementById('demo-mobile').setAttribute('aria-pressed',String(mobile));document.getElementById('demo-desktop').setAttribute('aria-pressed',String(!mobile))}
  document.getElementById('demo-mobile').onclick=()=>width(true);document.getElementById('demo-desktop').onclick=()=>width(false);
  window.addEventListener('message',event=>{if(event.source!==frame.contentWindow)return;const value=event.data;if(!value||typeof value!=='object')return;
-  if(value.type==='eis-demo-nav'&&documents[value.path])show(value.path);
+  if(value.type==='eis-demo-nav'&&(documents[value.path]||value.path==='/#cabinet'))show(value.path);
+  if(value.type==='eis-demo-view'&&['registry','cabinet'].includes(value.view)){
+   current=value.view==='cabinet'?'/#cabinet':'/';routes.value=current;
+  }
   if(value.type==='eis-demo-note'&&typeof value.text==='string')note(value.text);
  });
  const bar=document.getElementById('demo-toolbar');new ResizeObserver(()=>document.documentElement.style.setProperty('--bar-height',bar.getBoundingClientRect().height+'px')).observe(bar);

@@ -30,6 +30,20 @@ class CompactCabinetShell(unittest.TestCase):
                 self.assertIsNone(details.get("open"))
                 self.assertTrue(details.xpath('./summary'))
 
+    def test_cabinet_has_one_named_entry_action_and_accessible_identity(self):
+        page = self.page()
+        title = page.get_element_by_id('eis223-cabinet-title')
+        self.assertEqual(title.text_content(), 'Мой кабинет')
+        action = page.get_element_by_id('eis223-start-check')
+        self.assertEqual(action.get('type'), 'button')
+        self.assertEqual(action.get('aria-controls'), 'eis223-add-procurement')
+        self.assertEqual(action.text_content(), 'Проверить закупку')
+        identity = page.xpath('//*[@class="eis223-auth-user"]//a[@href="/account/profile"]')
+        self.assertEqual(len(identity), 1)
+        for identifier in ('eis223-topbar-fullname', 'eis223-topbar-role'):
+            self.assertTrue(identity[0].xpath('.//*[@id="'+identifier+'"]'))
+        self.assertEqual(page.xpath('//*[@class="eis223-tile eis223-tile-main"]//form/@id'), ['eis223-add-procurement'])
+
     def test_admin_grouping_preserves_role_gates_and_opening_control(self):
         for role in ("user", "manager"):
             page = self.page(role)

@@ -83,7 +83,7 @@ class VisualPolishTests(unittest.TestCase):
                 self.assertIn('<a href="/account/workbench">Рабочее место сотрудника</a>', markup)
                 self.assertIn('href="/account/workbench">Все нарушения и тематические проверки →</a>', markup)
                 manual_actions = markup.split('id="eis223-my-procurements"', 1)[1].split(
-                    '<form id="eis223-add-procurement">', 1)[0]
+                    '<form id="eis223-add-procurement"', 1)[0]
                 self.assertIn('href="/account/home"', manual_actions)
                 self.assertNotIn('/account/workbench', manual_actions)
                 self.assertIn('id="eis223-add-procurement"', markup)

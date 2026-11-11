@@ -119,6 +119,95 @@ def workspace_style():
 """)
 
 
+def cabinet_clarity_style():
+    """Task-focused account view; duplicate navigation stays as the no-JS fallback."""
+    return _style('eis223-cabinet-clarity', r"""
+body.eis-shell-ready .eis223-menu :is(#eis223-toggle-cabinet,#eis223-admin-nav,.eis223-manager-link,a[href="/account/admin"]),
+body.eis-shell-ready .eis223-cabinet-shortcuts,
+body.eis-shell-ready .eis223-cabinet-profile{display:none!important}
+.eis223-workspace .eis223-identity-link{display:grid;gap:2px;text-decoration:none;
+ min-width:0;max-width:100%;text-align:left;line-height:1.35}
+.eis223-workspace .eis223-menu .eis223-identity-link{border:0!important;padding:0!important;
+ min-height:0;background:transparent!important}
+body.eis-shell-ready .eis223-workspace .eis223-auth-user{margin-left:auto;background:transparent;
+ border-color:transparent;max-width:min(44vw,360px);padding:2px 8px}
+body.eis-shell-ready .eis223-workspace .eis223-menu button#eis223-logout{border-color:transparent!important;
+ background:transparent!important;padding-inline:9px!important}
+body.eis-shell-ready .eis223-workspace .eis223-personal{padding-block:28px 38px}
+body.eis-shell-ready .eis223-workspace .eis223-cabinet-heading{align-items:flex-start;margin-bottom:0;gap:20px}
+body.eis-shell-ready .eis223-workspace .eis223-personal h2{font-size:28px!important;letter-spacing:-.04em;font-weight:650}
+.eis223-cabinet-note{font-size:13px;line-height:1.6;color:var(--ui-muted);margin:8px 0 3px}
+body.eis-shell-ready .eis223-workspace #eis223-owner-fullname{font-size:11px;color:var(--ui-muted);margin-top:3px}
+.eis223-cabinet-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+body.eis-shell-ready .eis223-workspace button#eis223-start-check{display:inline-flex;align-items:center;justify-content:center;
+ min-height:38px;background:var(--ui-accent)!important;border:1px solid var(--ui-accent)!important;
+ color:#fff!important;padding:9px 15px!important;border-radius:9px;font:500 13px var(--ui-font);cursor:pointer;white-space:nowrap}
+body.eis-shell-ready .eis223-workspace button#eis223-start-check:hover{background:var(--ui-hover)!important}
+body.eis-shell-ready .eis223-workspace .eis223-overview{display:flex;flex-wrap:wrap;gap:0;
+ padding:18px 0 17px;margin:0 0 22px;border-bottom:1px solid var(--ui-line)}
+body.eis-shell-ready .eis223-workspace .eis223-overview>span{display:inline-flex;align-items:baseline;gap:7px;
+ background:transparent;border:0;border-radius:0;box-shadow:none;padding:0 22px 0 0;margin-right:22px;
+ border-right:1px solid var(--ui-line)}
+body.eis-shell-ready .eis223-workspace .eis223-overview>span:last-child{border-right:0;margin-right:0;padding-right:0}
+body.eis-shell-ready .eis223-workspace .eis223-overview b{font-size:20px;line-height:1.2;font-weight:600}
+body.eis-shell-ready .eis223-workspace .eis223-overview small{font-size:12px;margin:0}
+body.eis-shell-ready .eis223-workspace .eis223-columns{grid-template-columns:minmax(0,1.6fr) minmax(280px,1fr);gap:16px;align-items:stretch}
+body.eis-shell-ready .eis223-workspace .eis223-tile{padding:19px;border-radius:12px;box-shadow:none}
+body.eis-shell-ready .eis223-workspace .eis223-tile-main{grid-row:span 2;display:flex;flex-direction:column}
+body.eis-shell-ready .eis223-workspace .eis223-tile h3{font-size:16px!important;font-weight:600}
+body.eis-shell-ready .eis223-workspace .eis223-tile-sub{font-size:12px;line-height:1.5;margin-top:4px}
+body.eis-shell-ready .eis223-workspace .eis223-tile-head{margin-bottom:12px;padding-bottom:0}
+body.eis-shell-ready .eis223-workspace .eis223-tile-main ul{max-height:360px;min-height:60px;margin:0 0 8px}
+body.eis-shell-ready .eis223-workspace .eis223-tile-main li{display:grid;grid-template-columns:minmax(0,1fr) auto;
+ gap:12px;padding:14px 0;align-items:center}
+body.eis-shell-ready .eis223-workspace .eis223-check-desc{gap:5px}
+body.eis-shell-ready .eis223-workspace .eis223-check-desc strong{font-size:13px;color:var(--ui-ink);font-weight:600}
+body.eis-shell-ready .eis223-workspace .eis223-check-desc small{font-size:11px;color:var(--ui-muted);line-height:1.5}
+.eis223-row-actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center;justify-content:flex-end;max-width:220px}
+body.eis-shell-ready .eis223-workspace .eis223-row-actions a{font-weight:500!important;font-size:12px}
+body.eis-shell-ready .eis223-workspace .eis223-row-actions .eis223-open-card{padding:7px 9px;border:1px solid var(--ui-line);
+ border-radius:7px;background:#fff;line-height:1.4;min-height:32px;display:inline-flex;align-items:center}
+body.eis-shell-ready .eis223-workspace .eis223-tile li .eis223-row-actions button{margin:0;padding:5px 7px!important;
+ border-color:transparent!important;min-height:30px!important;background:transparent!important;font-size:11px!important}
+.eis223-legal-state::before{content:"";display:inline-block;width:5px;height:5px;margin:0 6px 1px 0;border-radius:50%;background:#7b7b80}
+.eis223-legal-state[data-tone=complete]::before{background:#216e45}
+.eis223-legal-state[data-tone=attention]::before{background:#b42332}
+body.eis-shell-ready .eis223-workspace #eis223-add-procurement{border-top:1px solid var(--ui-line);padding-top:16px;margin-top:auto;gap:8px}
+body.eis-shell-ready .eis223-workspace #eis223-add-procurement button{background:#fff!important;
+ color:var(--ui-accent)!important;border-color:#bdcfe4!important;font-weight:500!important}
+body.eis-shell-ready .eis223-workspace #eis223-add-procurement button:hover{background:var(--ui-selected)!important}
+body.eis-shell-ready .eis223-workspace .eis223-more{display:block;margin-top:18px;background:#fff;
+ border:1px solid var(--ui-line);border-radius:12px;padding:0 18px}
+body.eis-shell-ready #eis223-cabinet .eis223-more>.eis223-cabinet-extra{border:0!important;border-bottom:1px solid var(--ui-line)!important;
+ border-radius:0!important;padding:0!important;box-shadow:none!important;background:transparent!important;margin:0}
+body.eis-shell-ready #eis223-cabinet .eis223-more>.eis223-cabinet-extra:last-child{border-bottom:0!important}
+body.eis-shell-ready .eis223-workspace .eis223-more summary{min-height:46px;padding:13px 0;font-size:13px;font-weight:500}
+body.eis-shell-ready #eis223-cabinet .eis223-more>.eis223-cabinet-extra[open]{padding-bottom:15px!important}
+@media(max-width:900px){body.eis-shell-ready .eis223-workspace .eis223-columns{grid-template-columns:minmax(0,1fr)}
+ body.eis-shell-ready .eis223-workspace .eis223-tile-main{grid-row:auto}}
+@media(max-width:660px){body.eis-shell-ready .eis223-workspace>.eis223-menu{display:grid;
+ grid-template-columns:44px minmax(0,1fr) auto;gap:6px 8px!important;align-items:center}
+ body.eis-shell-ready .eis223-workspace .eis223-menu #eis-shell-nav-toggle{grid-column:1;grid-row:1}
+ body.eis-shell-ready .eis223-workspace .eis223-menu .eis223-brand{grid-column:2;grid-row:1;min-width:0;margin-right:0}
+ body.eis-shell-ready .eis223-workspace .eis223-menu #eis223-logout{grid-column:3;grid-row:1}
+ body.eis-shell-ready .eis223-workspace .eis223-auth-user{grid-column:2/-1;grid-row:2;max-width:100%;width:auto;min-width:0;padding:0;margin-left:0}
+ body.eis-shell-ready .eis223-workspace .eis223-auth-user strong{font-size:12px}
+ body.eis-shell-ready .eis223-workspace .eis223-personal{padding:22px 14px 30px}
+ body.eis-shell-ready .eis223-workspace .eis223-personal h2{font-size:25px!important}
+ body.eis-shell-ready .eis223-workspace .eis223-cabinet-heading{gap:14px}
+ body.eis-shell-ready .eis223-workspace .eis223-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;padding-block:17px}
+ body.eis-shell-ready .eis223-workspace .eis223-overview>span{display:block;padding-right:12px;margin-right:12px}
+ body.eis-shell-ready .eis223-workspace .eis223-overview b{display:block}
+ body.eis-shell-ready .eis223-workspace .eis223-overview small{display:block;font-size:11px;line-height:1.4;margin-top:3px}
+ body.eis-shell-ready .eis223-workspace .eis223-tile{padding:16px}
+ body.eis-shell-ready .eis223-workspace .eis223-tile-main li{grid-template-columns:minmax(0,1fr);gap:10px}
+ body.eis-shell-ready .eis223-workspace .eis223-tile-main ul{max-height:none;overflow:visible}
+ .eis223-row-actions{max-width:none;justify-content:flex-start}
+ body.eis-shell-ready .eis223-workspace .eis223-more{padding-inline:15px}}
+@media(pointer:coarse){body.eis-shell-ready .eis223-workspace :is(button#eis223-start-check,.eis223-row-actions a,.eis223-row-actions button){min-height:44px!important}}
+""")
+
+
 def home_style():
     """Final visual layer over the existing authenticated registry layout."""
     return _style('eis223-home-polish', r"""

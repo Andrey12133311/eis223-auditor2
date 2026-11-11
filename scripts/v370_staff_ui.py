@@ -799,17 +799,17 @@ body.staff-compact p{margin:5px 0 10px}
 
 PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Рабочее место сотрудника — ЕИС Аудитор</title>__CSS__</head>
+<title>Задачи и поручения — ЕИС Аудитор</title>__CSS__</head>
 <body class="staff-compact"><header><div><strong>ЕИС Аудитор</strong>
 <div id="staff-user-name" style="font-size:12px;color:#d9e9f3">ФИО: загрузка…</div></div>
 <div class="action-row" id="staff-account-actions"><a href="/account/profile">Профиль</a>
 <a href="/">Главная</a></div></header>
 <main>
-<div class="staff-hero"><div><h1 id="staff-hello">Кабинет сотрудника</h1></div>
+<div class="staff-hero"><div><h1 id="staff-hello">Задачи и поручения</h1></div>
 <button id="staff-refresh" type="button" class="outline">↻ Обновить данные</button></div>
 <div class="staff-layout">
 <nav class="tabs" aria-label="Разделы рабочего места">
-<button type="button" data-staff-tab="overview" aria-selected="true">Моя работа</button>
+<button type="button" data-staff-tab="overview" aria-selected="true">Сводка</button>
 <button type="button" data-staff-tab="goals" aria-selected="false">Нарушения и поручения</button>
 <button type="button" data-staff-tab="bulk" aria-selected="false">Массовая проверка</button>
 <button type="button" data-staff-tab="case" aria-selected="false">Инструменты закупки</button>
