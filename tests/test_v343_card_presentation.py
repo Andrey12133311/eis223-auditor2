@@ -84,6 +84,42 @@ def data(findings=None, checks=None):
 
 
 class CardPresentationTests(unittest.TestCase):
+    def test_document_states_describe_retrieval_without_claiming_legal_review(self):
+        expected = {
+            "checked": "Текст получен",
+            "metadata": "Ожидается получение файла",
+            "downloaded_no_text": "Файл сохранён, текст не извлечён",
+            "waiting_for_originals": "Ожидается оригинал ЕИС",
+            "error": "Ошибка получения или обработки",
+        }
+        for state, label in expected.items():
+            with self.subTest(state=state):
+                self.assertEqual(card.document_state(state), label)
+                self.assertNotIn("Юридическая", card.document_state(state))
+        for state in (None, "", "new_internal_state", 4, False):
+            self.assertEqual(card.document_state(state), "Состояние не уточнено")
+        self.assertEqual(card.document_state("Проверен"), "Проверен")
+        original=data();before=copy.deepcopy(original)
+        dom=DOM(card.render(REG,original)).root
+        status=dom.find("td", **{"data-label":"Состояние"})[0]
+        self.assertEqual(status.content(),"Текст получен")
+        self.assertEqual(original,before)
+
+    def test_export_actions_have_document_names_formats_and_preserve_conditions(self):
+        dom=DOM(card.render(REG,data())).root
+        group=dom.find("section", **{"class":"card-output-actions"})
+        self.assertEqual(len(group),1)
+        inspection=group[0].find("a", href="/api/inspection/"+REG+".odt")
+        memo=group[0].find("a", href="/api/v304/memo/"+REG+".odt")
+        self.assertEqual(len(inspection),1)
+        self.assertEqual(len(memo),1)
+        self.assertIn("Лист внеплановой проверки",inspection[0].content())
+        self.assertIn("Сформировать служебную записку",memo[0].content())
+        self.assertEqual(len(group[0].find("span", **{"class":"card-format"})),2)
+        empty=DOM(card.render(REG,data([],[]))).root
+        self.assertFalse(empty.find("a", href="/api/v304/memo/"+REG+".odt"))
+        self.assertTrue(empty.find("a", href="/api/inspection/"+REG+".odt"))
+
     def test_compact_summary_exposes_saved_counts_and_separate_check_states(self):
         original = data()
         before = copy.deepcopy(original)
@@ -347,7 +383,8 @@ class CardPresentationTests(unittest.TestCase):
                 self.assertIn("Число подтверждённых нарушений в этой карточке: 0", markup)
                 self.assertIn("/api/v304/memo/" + REG + ".odt", markup)
                 self.assertIn("выгрузка ODT использует сохранённые результаты", markup)
-                self.assertIn("Скачать ODT сохранённых результатов · требуется сверка", markup)
+                self.assertIn("Скачать сохранённые результаты", markup)
+                self.assertIn("Требуется сверка перед подписанием", markup)
                 self.assertEqual(original, before)
 
     def test_missing_optional_source_link_does_not_reclassify_evidenced_finding(self):

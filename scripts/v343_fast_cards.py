@@ -114,6 +114,14 @@ CARD_EXPERIENCE_STYLE = r"""<style id="eis223-card-experience">
 .card-requisites .grid{gap:14px 22px}.card-requisites .grid>div{min-width:0;overflow-wrap:anywhere;font-size:13px}
 .card-documents{table-layout:auto}.card-documents td:first-child{font-weight:500}
 .card-documents td:last-child a{display:inline-flex;align-items:center;min-height:32px}
+.card-output-actions{display:flex;flex-wrap:wrap;align-items:start;gap:8px 14px;margin:16px 0}
+.card-output-actions .card-actions{margin:0;max-width:100%}
+.card-export-action{gap:12px;justify-content:space-between;text-align:left}
+.card-export-action .card-format{flex:none;padding:2px 6px;border:1px solid currentColor;
+ border-radius:5px;font-size:10px;font-weight:600;letter-spacing:.035em;line-height:1.5;opacity:.85}
+.card-export-note{display:block;font-size:11px;font-weight:400;line-height:1.5;margin-top:3px}
+.card-output-actions>.meta{flex-basis:100%;margin:2px 0 0}
+.source-fragment{background:#f6f6f8;border-left-width:2px;border-radius:0 8px 8px 0;padding:11px 14px;font-size:13px}
 @media(max-width:660px){
  .card-summary{padding:16px!important}.card-summary h2{font-size:19px}
  .card-summary-grid{gap:14px;margin-top:14px;padding-top:12px}
@@ -139,6 +147,8 @@ CARD_EXPERIENCE_STYLE = r"""<style id="eis223-card-experience">
  .card-documents td:last-child{display:flex;justify-content:space-between;align-items:center;gap:10px}
  .card-documents td:last-child:before{margin:0}
  .card-documents td:last-child a{min-height:40px;border:1px solid var(--edge);border-radius:8px;padding:7px 11px}
+ .card-output-actions{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+ .card-export-action{width:100%}
 }
 @media(pointer:coarse){.card-requisites>summary,.card-documents td:last-child a{min-height:44px}}
 @media(prefers-reduced-motion:reduce){.card-requisites>summary:before{transition:none}}
@@ -164,6 +174,25 @@ def source_link(url, title):
 
 def text(x):
     return esc(x) if x not in (None,"") else "Не указано"
+
+def document_state(value):
+    """Describe file retrieval/extraction, independently of legal conclusions."""
+    names={"checked":"Текст получен", "metadata":"Ожидается получение файла",
+           "downloaded_no_text":"Файл сохранён, текст не извлечён",
+           "waiting_for_originals":"Ожидается оригинал ЕИС",
+           "error":"Ошибка получения или обработки"}
+    if not isinstance(value,str):return "Состояние не уточнено"
+    saved=value.strip()
+    if saved in names:return names[saved]
+    # Older records may already contain human-readable Russian states.
+    return saved if re.search(r"[А-Яа-яЁё]",saved) else "Состояние не уточнено"
+
+
+def export_action(url,label,note=""):
+    return ('<p class="card-actions"><a class="action card-export-action" href="'+esc(url)+'">'
+            '<span>'+esc(label)+
+            ('<small class="card-export-note">'+esc(note)+'</small>' if note else '')+
+            '</span><span class="card-format">ODT</span></a></p>')
 
 def val(p,key):
     return p.get(key) if p is not None else None
@@ -498,8 +527,8 @@ def render_thematic_panel(reg,thematic,account_review=False):
         from scripts.account_memo_requisites_ui_v1 import render_memo_requisites_editor
         result.append(render_memo_requisites_editor(reg))
     if any(item.get("effective_status","confirmed")=="confirmed" for item in rows):
-        result.append('<p><a class="action" href="/api/v304/thematic-memo/'+esc(batch)+'/'+
-          esc(reg)+'.odt">Сформировать служебную записку ODT</a></p>')
+        result.append(export_action('/api/v304/thematic-memo/'+str(batch)+'/'+str(reg)+'.odt',
+                                    'Сформировать служебную записку'))
         result.append('<p class="meta">Проект формируется по сохранённым тематическим нарушениям; '+
           'перед подписанием необходима юридическая сверка с оригиналами ЕИС.</p>')
     else:
@@ -584,12 +613,16 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
         nav=('<nav><a href="/thematic#'+esc(thematic["batch"])+
              '">← К тематической очереди</a></nav>')
     thematic_html=render_thematic_panel(reg,thematic,account_review=account_review)
-    export_label=('Скачать ODT сохранённых результатов · требуется сверка' if incomplete
-                  else 'Сформировать служебную записку ODT')
-    actions='<p class="card-actions"><a class="action" href="/api/v304/memo/'+esc(reg)+'.odt">'+export_label+'</a></p>' if any(item.get("effective_status","confirmed")=="confirmed" for item in candidates) else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>'
+    export_label=('Скачать сохранённые результаты' if incomplete
+                  else 'Сформировать служебную записку')
+    actions=(export_action('/api/v304/memo/'+str(reg)+'.odt',export_label,
+                          'Требуется сверка перед подписанием' if incomplete else '')
+             if any(item.get("effective_status","confirmed")=="confirmed" for item in candidates)
+             else '<p class="meta">Служебная записка формируется при наличии подтверждённых нарушений.</p>')
     if thematic:actions=''
-    inspection_actions=('<p class="card-actions"><a class="action" href="/api/inspection/'+esc(reg)+
-                        '.odt">Лист внеплановой проверки ODT</a></p>')
+    output_actions=('<section class="card-output-actions" aria-label="Документы проверки">'+
+                    export_action('/api/inspection/'+str(reg)+'.odt','Лист внеплановой проверки')+
+                    actions+'</section>')
     checked='<p class="meta">'+str(len(reviews))+' вопросов требуют дополнительной юридической проверки.</p>'
     for x in reviews[:50]:
         checked+=detail_block(x,'review',x.get('item'),x.get('law'),x.get('evidence'),x.get('document'),x.get('source_url'),x.get('law_url'))
@@ -597,7 +630,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
     # Explicit native roles survive the mobile record-grid presentation.
     docs_html='<table class="card-documents" role="table" aria-label="Документы закупки"><thead role="rowgroup"><tr role="row"><th role="columnheader">Документ</th><th role="columnheader">Вид</th><th role="columnheader">Состояние</th><th role="columnheader">Источник</th></tr></thead><tbody role="rowgroup">'
     for d in docs:
-        docs_html+='<tr role="row"><td role="cell" data-label="Документ">'+text(d.get('name'))+'</td><td role="cell" data-label="Вид">'+text(d.get('doc_type'))+'</td><td role="cell" data-label="Состояние">'+text(d.get('status'))+'</td><td role="cell" data-label="Источник">'+source_link(d.get('url'),'Открыть в ЕИС')+'</td></tr>'
+        docs_html+='<tr role="row"><td role="cell" data-label="Документ">'+text(d.get('name'))+'</td><td role="cell" data-label="Вид">'+text(d.get('doc_type'))+'</td><td role="cell" data-label="Состояние">'+esc(document_state(d.get('status')))+'</td><td role="cell" data-label="Источник">'+source_link(d.get('url'),'Открыть в ЕИС')+'</td></tr>'
     docs_html+='</tbody></table>'
     if dtotal>len(docs):docs_html+='<p class="meta">Показаны последние '+str(len(docs))+' из '+str(dtotal)+' документов.</p>'
     if not docs:docs_html='<p>Оригиналы документов пока не сохранены.</p>'
@@ -616,7 +649,7 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
     # The thematic card is its own audit. Never append general findings or
     # general "review" cards underneath the thematic violations.
     if notes:notes='<section class="card-result-notices" data-eis-section="notices">'+notes+'</section>'
-    general_section=('' if thematic else actions+notes+
+    general_section=('' if thematic else notes+
         result_accordion('audit-violations','Нарушения',len(violation),
         '<p class="meta">'+esc(status)+'</p>'+(''.join(violation) if violation else
         '<p>Подтверждённых нарушений в сохранённых результатах пока нет. '
@@ -632,10 +665,10 @@ def render(reg,data,thematic=None,account_review=False,legal_review=None):
      '<header><h1>'+('Карточка тематической проверки № ' if thematic else 'Карточка проверки закупки № ')+esc(reg)+'</h1></header><main>'+nav
      +summary
      +'<section class="panel card-requisites-panel" data-eis-section="overview"><details class="card-requisites"><summary>Сведения о закупке</summary>'+basic+'</details></section>'
-     +inspection_actions
+     +output_actions
      +thematic_html
      +general_section+review_section
-     +'<section class="panel" data-eis-section="documents"><h2>Документы ЕИС ('+str(dtotal)+')</h2>'+docs_html+'</section>'
+     +'<section class="panel" data-eis-section="documents"><h2>Документы ЕИС ('+str(dtotal)+')</h2><p class="meta">Состояние показывает получение файла и извлечение текста. Юридические выводы — в результатах проверки.</p>'+docs_html+'</section>'
      +'</main>'+review_assets+'</body></html>')
 
 def read_and_render(ns, reg, account_review=False):

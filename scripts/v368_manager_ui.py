@@ -118,6 +118,7 @@ body>header.mgr-top{padding:10px clamp(14px,2.5vw,34px);border-bottom-width:2px}
 .mgr-tab-icon{font-size:14px;width:18px;height:18px}
 .mgr-work{padding:20px 24px}.mgr-head{margin-bottom:13px}.mgr-head h1{font-size:25px;margin-bottom:3px}
 .mgr-head p{font-size:12px}.mgr-head .mgr-row{margin:0}.mgr-role{padding:6px 9px}
+.mgr-work .mgr-refresh-status{font-size:12px;line-height:1.5;color:var(--muted);margin:-3px 0 12px}
 .mgr-shell .mgr-card,.mgr-shell .mgr-entry{padding:14px;box-shadow:none;border-radius:9px;margin-bottom:11px}
 .mgr-card h2{font-size:16px;margin-bottom:10px}.mgr-card p{margin-bottom:10px;line-height:1.5}
 .mgr-grid{gap:9px;margin-bottom:11px}.mgr-shell .mgr-kpi{padding:12px 14px;box-shadow:none;border-radius:9px}
@@ -164,7 +165,12 @@ let currentTab="overview",findingSequence=0;
 let findingQueueRequest=null,findingQueueQueued=false;
 const tag=(name,cls="",value="")=>{const x=document.createElement(name);if(cls)x.className=cls;if(value!==undefined)x.textContent=String(value);return x};
 const status=(s)=>{const text=labels[s]||s||"Неизвестно";const cls=["completed","approved"].includes(s)?"good":["returned","cancelled","rejected"].includes(s)?"bad":["submitted"].includes(s)?"warn":"";return tag("span","mgr-chip "+cls,text)};
-const fmt=d=>d?new Date(d).toLocaleDateString("ru-RU"):"—";
+// Preserve the saved calendar day instead of shifting it through a browser timezone.
+const fmt=value=>{
+ if(!value)return '—';
+ const raw=String(value),parts=/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(raw);
+ return parts?parts[3]+'.'+parts[2]+'.'+parts[1]:raw;
+};
 function thematicPeriod(check){
  const day=value=>String(value||'').slice(0,10).split('-').reverse().join('.');
  const from=day(check.date_from),to=day(check.date_to);
@@ -771,12 +777,18 @@ $("mgr-attach-self").onclick=async()=>{
  }catch(error){status.textContent=error.message}
  finally{selfAttachBusy=false;select.disabled=false;button.disabled=!select.value}
 };
-let reloadRequest=null,reloadQueued=false;
+let reloadRequest=null,reloadQueued=false,lastRefreshComplete=false;
 function reload(){
  if(reloadRequest){reloadQueued=true;return reloadRequest}
+ const status=$("mgr-refresh-status"),button=$("mgr-refresh"),label=button.textContent;
+ status.textContent="Обновляем основные списки…";status.setAttribute("aria-busy","true");
+ button.disabled=true;button.textContent="Обновляем…";
  reloadRequest=(async()=>{
   do{reloadQueued=false;await reloadData()}while(reloadQueued);
- })().finally(()=>{reloadRequest=null});
+ })().catch(error=>{
+  status.textContent="Не удалось обновить списки. Повторите обновление.";
+  throw error;
+ }).finally(()=>{reloadRequest=null;status.setAttribute("aria-busy","false");button.disabled=false;button.textContent=label});
  return reloadRequest;
 }
 async function reloadData(){
@@ -787,14 +799,16 @@ async function reloadData(){
  if(ROLE==="admin")paths.push(["users","/manager/admin/users"]);
  const mailStatus=renderMailStatus();
  const all=await Promise.allSettled(paths.map(async([key,url])=>[key,await api(url)]));
+ lastRefreshComplete=all.every(result=>result.status==="fulfilled");
  for(const a of all){
   if(a.status==="fulfilled")cache[a.value[0]]=a.value[1];
-  else toast("Некоторые данные временно недоступны");
  }
  if(cache.dashboard)metrics(cache.dashboard);
  alerts(cache.alerts||[]);
  renderSelfAttach();populateWorkers();renderTasks();renderMemos();renderTeam();renderAdmin();renderThematic();renderQuality();renderCampaigns();renderCampaignOptions();
  await Promise.all([mailStatus,loadFindingQueue(true)]);
+ $("mgr-refresh-status").textContent=lastRefreshComplete?"Основные списки обновлены.":
+  "Часть списков не обновлена. Показаны доступные данные; повторите обновление.";
 }
 if(ROLE==="admin"){
  const mailTest=$("mgr-mail-test");
@@ -814,13 +828,13 @@ const mgrToday=new Date();
 $("mgr-report-form").elements.namedItem("to").value=mgrToday.toISOString().slice(0,10);
 const mgrPast=new Date(mgrToday.getTime()-29*86400000);
 $("mgr-report-form").elements.namedItem("from").value=mgrPast.toISOString().slice(0,10);
-$("mgr-refresh").onclick=async()=>{const btn=$("mgr-refresh");btn.disabled=true;try{await reload();toast("Сведения обновлены")}finally{btn.disabled=false}};
+$("mgr-refresh").onclick=async()=>{try{await reload();if(lastRefreshComplete)toast("Основные списки обновлены")}catch(error){toast(error.message)}};
 $("mgr-history-refresh").onclick=async()=>{
  try{renderHistory(await api("/manager/history"));toast("Журнал актуален")}
  catch(e){toast(e.message)}
 };
 refreshOwnName();
-reload();
+reload().catch(error=>toast(error.message));
 })();
 </script>
 """
@@ -849,8 +863,8 @@ __STYLE__</head><body>
 <header class="mgr-top"><div class="mgr-brand"><div class="mgr-logo">223</div>
 <div><strong>ЕИС Аудитор</strong><small>Кабинет руководителя</small>
 <small id="mgr-my-name">ФИО: загрузка…</small></div></div>
-<div class="mgr-actions">__ADMIN_REGISTRATION_LINK__<a href="/account/profile">Моё ФИО</a>
-<a href="/">← Главная страница</a></div></header>
+<div class="mgr-actions">__ADMIN_REGISTRATION_LINK__<a href="/account/profile">Профиль</a>
+<a href="/#cabinet">Мой кабинет</a><a href="/">Реестр закупок</a></div></header>
 <div class="mgr-shell">
 <nav class="mgr-side" aria-label="Разделы руководителя">
 <span class="mgr-side-heading">УПРАВЛЕНИЕ</span>
@@ -869,7 +883,8 @@ __STYLE__</head><body>
 <main class="mgr-work"><div class="mgr-head"><div><h1 id="mgr-title" tabindex="-1">Панель управления</h1>
 <p>Поручения, согласования и сотрудники</p></div>
 <div class="mgr-row"><span class="mgr-role">__LABEL__</span>
-<button type="button" id="mgr-refresh" class="mgr-outline">Обновить ↻</button></div></div>
+<button type="button" id="mgr-refresh" class="mgr-outline">Обновить данные</button></div></div>
+<p id="mgr-refresh-status" class="mgr-refresh-status" role="status" aria-live="polite">Загружаем основные списки…</p>
 <details class="mgr-guidance"><summary>Как учитываются результаты</summary><p>Числа получены из сохранённых заданий и проверенных данных ЕИС.
 Выявленное программой нарушение и согласованное руководителем нарушение показываются отдельно.
 Поручение само по себе не запускает проверку ЕИС.</p></details>

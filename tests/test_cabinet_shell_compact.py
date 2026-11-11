@@ -35,14 +35,15 @@ class CompactCabinetShell(unittest.TestCase):
         title = page.get_element_by_id('eis223-cabinet-title')
         self.assertEqual(title.text_content(), 'Мой кабинет')
         action = page.get_element_by_id('eis223-start-check')
-        self.assertEqual(action.get('type'), 'button')
-        self.assertEqual(action.get('aria-controls'), 'eis223-add-procurement')
+        self.assertEqual(action.get('type'), 'submit')
+        self.assertEqual(action.xpath('ancestor::form/@id'), ['eis223-add-procurement'])
         self.assertEqual(action.text_content(), 'Проверить закупку')
         identity = page.xpath('//*[@class="eis223-auth-user"]//a[@href="/account/profile"]')
         self.assertEqual(len(identity), 1)
         for identifier in ('eis223-topbar-fullname', 'eis223-topbar-role'):
             self.assertTrue(identity[0].xpath('.//*[@id="'+identifier+'"]'))
-        self.assertEqual(page.xpath('//*[@class="eis223-tile eis223-tile-main"]//form/@id'), ['eis223-add-procurement'])
+        self.assertEqual(page.xpath('//*[contains(@class,"eis223-cabinet-heading")]//form/@id'), ['eis223-add-procurement'])
+        self.assertFalse(page.xpath('//*[contains(@class,"eis223-tile-main")]//form'))
 
     def test_admin_grouping_preserves_role_gates_and_opening_control(self):
         for role in ("user", "manager"):

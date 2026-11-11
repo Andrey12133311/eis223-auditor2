@@ -240,10 +240,6 @@ by('eis-shell-registry')?.addEventListener('click',event=>{
 by('eis223-toggle-cabinet')?.addEventListener('click',()=>{
  if(!viewSync)showView(by('eis223-cabinet').hidden?'registry':'cabinet',{top:true});
 });
-by('eis223-start-check')?.addEventListener('click',()=>{
- const input=document.querySelector('#eis223-add-procurement input[name=reg]');
- if(input){input.scrollIntoView({block:'center',behavior:'instant'});input.focus({preventScroll:true})}
-});
 function restoreView(){showView(viewFromUrl(),{focus:true,historyMode:'none'})}
 window.addEventListener('popstate',restoreView);window.addEventListener('hashchange',restoreView);
 function updateBar(){body.style.setProperty('--shell-bar',Math.ceil(menu.getBoundingClientRect().height)+'px')}

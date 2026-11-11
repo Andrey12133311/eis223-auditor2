@@ -296,8 +296,15 @@ def site_header(role="user"):
 <div><h2 id="eis223-cabinet-title" tabindex="-1">Мой кабинет</h2>
 <p id="eis223-cabinet-note" class="eis223-cabinet-note">Продолжите проверку или добавьте закупку по номеру ЕИС.</p>
 <p class="eis223-subtle" id="eis223-owner-fullname">Загрузка ФИО…</p></div>
-<div class="eis223-cabinet-actions"><button id="eis223-start-check" type="button" aria-controls="eis223-add-procurement">Проверить закупку</button>
-<a class="eis223-all-checks eis223-cabinet-profile" href="/account/profile">Профиль</a></div></div>
+<div class="eis223-cabinet-actions">
+<form id="eis223-add-procurement" class="eis223-start-form" aria-label="Проверить закупку по номеру ЕИС" aria-busy="false" novalidate>
+<label for="eis223-check-reg">Номер закупки ЕИС</label>
+<div class="eis223-start-controls"><input id="eis223-check-reg" aria-describedby="eis223-start-help eis223-add-status" placeholder="11 цифр, начинается с 3"
+name="reg" required inputmode="numeric" pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
+<button id="eis223-start-check" type="submit">Проверить закупку</button></div>
+<p id="eis223-start-help">Введите номер из карточки закупки в ЕИС.</p>
+<p role="status" aria-live="polite" id="eis223-add-status"></p>
+</form><a class="eis223-all-checks eis223-cabinet-profile" href="/account/profile">Профиль</a></div></div>
 ''' + ('''
 <details class="eis223-feature eis223-cabinet-extra" id="eis223-admin-controls" aria-label="Управление пользователями">
 <summary>Администрирование пользователей</summary>
@@ -324,11 +331,6 @@ def site_header(role="user"):
 <div><h3>Мои проверки</h3><p class="eis223-tile-sub">Добавленные вами закупки и сохранённые результаты</p></div></div>
 <ul id="eis223-my-procurements" aria-label="Мои самостоятельные проверки"><li>Загрузка…</li></ul>
 <a class="eis223-all-checks" href="/account/home">Все мои проверки →</a>
-<form id="eis223-add-procurement" aria-label="Проверить закупку по номеру ЕИС">
-<input aria-label="Номер ЕИС" placeholder="Номер закупки, 11 цифр"
-name="reg" required inputmode="numeric" pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
-<button type="submit">Проверить</button></form>
-<p role="status" id="eis223-add-status"></p>
 </div>
 <div class="eis223-tile eis223-tile-thematic"><div class="eis223-tile-head">
 <div><h3>Тематические проверки</h3><p class="eis223-tile-sub">Запущенные под вашей учётной записью</p></div></div>
@@ -567,7 +569,7 @@ for(const item of realBatches){
  const date=Date.parse(item.created_at);
  meta.textContent=(Number.isFinite(date)?new Date(date).toLocaleDateString('ru-RU')+' · ':'')+
  'Закупок: '+displayCount(item.purchases)+' · Нарушений: '+displayCount(item.violations)+
- (item.status==='active'?' · Выполняется':' · Остановлена');
+ ' · '+({active:'Выполняется',stopped:'Остановлена',completed:'Завершена'}[item.status]||'Состояние уточняется');
  const period=document.createElement('small');
  period.textContent='Дата размещения в ЕИС: '+thematicPeriod(item);
  summary.append(title,meta,period);li.append(summary);
@@ -841,17 +843,32 @@ location.replace('/account/login');
 }catch{button.disabled=false;show('eis223-logout-status','Не удалось выйти. Повторите попытку.')}
 });
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
-q('eis223-add-procurement').addEventListener('submit',async event=>{
+const startForm=q('eis223-add-procurement'),startInput=q('eis223-check-reg'),startStatus=q('eis223-add-status');
+function startMessage(message,kind){startStatus.textContent=message;startStatus.dataset.kind=kind}
+startInput.addEventListener('input',()=>{startInput.removeAttribute('aria-invalid');if(startStatus.dataset.kind==='invalid')startMessage('','')});
+startForm.addEventListener('submit',async event=>{
 event.preventDefault();const form=event.currentTarget;
+if(form.dataset.busy==='1')return;
 const reg=String(new FormData(form).get('reg')||'').trim();
-if(!/^3[0-9]{10}$/.test(reg))return show('eis223-add-status','Некорректный номер ЕИС');
-const btn=form.querySelector('button');btn.disabled=true;
+if(!/^3[0-9]{10}$/.test(reg)){
+ startInput.setAttribute('aria-invalid','true');startMessage('Введите 11 цифр номера закупки, начиная с 3.','invalid');startInput.focus();return;
+}
+startInput.removeAttribute('aria-invalid');
+const btn=q('eis223-start-check');form.dataset.busy='1';form.setAttribute('aria-busy','true');
+btn.disabled=true;btn.textContent='Запускаем…';startInput.readOnly=true;
+startMessage('Отправляем запрос на проверку № '+reg+'…','pending');
 try{
-const r=await fetch('/me/manual-checks/'+encodeURIComponent(reg),
-{method:'POST',credentials:'same-origin'});
-show('eis223-add-status',r.ok?'Самостоятельная проверка запущена':'Не удалось запустить проверку');
-if(r.ok){form.reset();await refresh()}
-}catch{show('eis223-add-status','Ошибка соединения')}finally{btn.disabled=false}
+ const r=await fetch('/me/manual-checks/'+encodeURIComponent(reg),{method:'POST',credentials:'same-origin'});
+ if(r.ok){form.reset();startMessage('Запрос на проверку № '+reg+' принят. Обновляем список…','pending');await refresh();
+  startMessage('Запрос на проверку № '+reg+' принят. Состояние доступно в списке «Мои проверки».','success');
+ }else{
+  const errors={401:'Войдите снова, затем повторите запуск.',403:'Нет доступа к запуску проверки.',
+   422:'Проверьте номер: 11 цифр, первая — 3.',429:'Слишком много запросов. Повторите позже.'};
+  startMessage(errors[r.status]||'Не удалось подтвердить запуск. Проверьте список и повторите попытку.','error');
+  if(r.status===401){const link=document.createElement('a');link.href='/account/login';link.textContent='Открыть вход';startStatus.append(' ',link)}
+ }
+}catch{startMessage('Ошибка соединения. Номер остался в поле — повторите попытку.','error')}
+finally{form.dataset.busy='0';form.setAttribute('aria-busy','false');btn.disabled=false;btn.textContent='Проверить закупку';startInput.readOnly=false}
 });
 
 // Defer expensive private dashboard requests until the user opens the cabinet.

@@ -82,10 +82,10 @@ class VisualPolishTests(unittest.TestCase):
                 self.assertEqual(len(workbench_links), 3)  # Two cabinet links plus the new main navigation.
                 self.assertIn('<a href="/account/workbench">Рабочее место сотрудника</a>', markup)
                 self.assertIn('href="/account/workbench">Все нарушения и тематические проверки →</a>', markup)
-                manual_actions = markup.split('id="eis223-my-procurements"', 1)[1].split(
-                    '<form id="eis223-add-procurement"', 1)[0]
-                self.assertIn('href="/account/home"', manual_actions)
-                self.assertNotIn('/account/workbench', manual_actions)
+                from lxml import html
+                tile = html.fromstring(markup).get_element_by_id('eis223-my-procurements').getparent()
+                self.assertIn('/account/home', tile.xpath('.//a/@href'))
+                self.assertNotIn('/account/workbench', tile.xpath('.//a/@href'))
                 self.assertIn('id="eis223-add-procurement"', markup)
 
     def test_narrow_layout_keyboard_motion_and_input_safety(self):

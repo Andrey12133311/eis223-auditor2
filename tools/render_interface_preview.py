@@ -152,21 +152,21 @@ def pages():
         'document': 'Проект договора.pdf', 'source_url': PURCHASE['url'], 'location': 'пункт 4.2',
         'effective_status': 'confirmed'}
     docs = [{'name': 'Документация о закупке лабораторного оборудования и техническое задание.pdf',
-             'doc_type': 'Документация', 'status': 'Проверен', 'url': PURCHASE['url']},
-            {'name': 'Проект договора.pdf', 'doc_type': 'Проект договора', 'status': 'Проверен', 'url': PURCHASE['url']},
-            {'name': 'Изменения документации.pdf', 'doc_type': 'Изменение', 'status': 'Требует уточнения', 'url': PURCHASE['url']}]
+             'doc_type': 'Документация', 'status': 'checked', 'url': PURCHASE['url']},
+            {'name': 'Проект договора.pdf', 'doc_type': 'Проект договора', 'status': 'checked', 'url': PURCHASE['url']},
+            {'name': 'Изменения документации.pdf', 'doc_type': 'Изменение', 'status': 'checked', 'url': PURCHASE['url']}]
     card = render_card(REG, (PURCHASE, [finding], [review], docs, 1, 1, 3),
                        legal_review={'state': 'completed', 'documents_read': 3})
     pending_docs = [
-        {'name': 'Документация на обслуживание инженерных систем.pdf', 'doc_type': 'Документация', 'status': 'Проверен', 'url': PURCHASE2['url']},
-        {'name': 'Проект договора на обслуживание.pdf', 'doc_type': 'Проект договора', 'status': 'Проверен', 'url': PURCHASE2['url']},
+        {'name': 'Документация на обслуживание инженерных систем.pdf', 'doc_type': 'Документация', 'status': 'checked', 'url': PURCHASE2['url']},
+        {'name': 'Проект договора на обслуживание.pdf', 'doc_type': 'Проект договора', 'status': 'checked', 'url': PURCHASE2['url']},
     ]
     card2 = render_card(REG2, (PURCHASE2, [], [], pending_docs, 0, 0, 2),
                         legal_review={'state': 'running', 'documents_read': 2})
     incomplete = {**finding, 'code': 'PREVIEW-INCOMPLETE', 'title': 'Неполное доказательство условия оплаты', 'evidence': '',
                   'document': 'Проект договора поставки мебели.pdf', 'source_url': PURCHASE3['url']}
     office_docs = [{'name': 'Проект договора поставки мебели.pdf', 'doc_type': 'Проект договора',
-                    'status': 'Проверен', 'url': PURCHASE3['url']}]
+                    'status': 'checked', 'url': PURCHASE3['url']}]
     card3 = render_card(REG3, (PURCHASE3, [incomplete], [], office_docs, 1, 0, 1),
                         legal_review={'state':'completed','documents_read':1})
     return {'/': ('registry', registry_markup()), '/account/login': ('login', login_portal()),
@@ -237,15 +237,15 @@ def clarity_checks(browser, handler, output, check, results):
     check('clarity-cabinet-label-consistent',page.locator('#eis223-cabinet-title').inner_text().strip()=='Мой кабинет')
     check('clarity-cabinet-url-state',urlsplit(page.url).fragment=='cabinet')
     check('clarity-cabinet-no-viewport-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
-    # Keyboard operation uses the same genuine button and must not submit a job.
+    # The one primary submit action validates an empty number before any request.
     methods=[]
     page.on('request',lambda request:methods.append(request.method))
     page.locator('#eis223-start-check').focus()
     page.keyboard.press('Enter')
-    input_focus=page.locator('#eis223-add-procurement input[name="reg"]').evaluate('el=>document.activeElement===el')
+    invalid_focus=page.locator('#eis223-add-procurement input[name="reg"]').evaluate('el=>document.activeElement===el&&!el.validity.valid')
     page.wait_for_timeout(80)
-    check('clarity-primary-action-focuses-check-input',input_focus)
-    check('clarity-primary-action-does-not-submit',not any(method not in ('GET','HEAD') for method in methods))
+    check('clarity-empty-submit-focuses-invalid-number',invalid_focus)
+    check('clarity-empty-submit-sends-no-job',not any(method not in ('GET','HEAD') for method in methods))
     page.locator('#eis223-my-procurements a[href="/check-new/'+REG+'"]').first.click()
     page.wait_for_function("document.getElementById('eis-quicklook-content').textContent.includes('Поставка')")
     check('clarity-cabinet-opens-saved-inspector',page.locator('#eis-quicklook').is_visible() and page.locator('body>main').is_hidden())
@@ -286,8 +286,8 @@ def clarity_checks(browser, handler, output, check, results):
     check('clarity-mobile-cabinet-no-overflow',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
     page.locator('#eis223-start-check').click()
     control=page.locator('#eis223-add-procurement input[name="reg"]')
-    check('clarity-mobile-primary-action-focus',control.evaluate('el=>document.activeElement===el'))
-    check('clarity-mobile-primary-action-reachable',control.evaluate("el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el}"))
+    check('clarity-mobile-empty-submit-focus',control.evaluate('el=>document.activeElement===el&&!el.validity.valid'))
+    check('clarity-mobile-number-input-reachable',control.evaluate("el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el}"))
     registry_view(page)
     check('clarity-mobile-return-registry',page.locator('body>main').is_visible() and page.locator('#eis223-cabinet').is_hidden())
     page.locator('body>main').evaluate("e=>e.style.minHeight='3200px'")
@@ -298,6 +298,124 @@ def clarity_checks(browser, handler, output, check, results):
     page.keyboard.press('Tab')
     check('clarity-mobile-long-registry-next-tab-visible',visible_focus(page))
     mobile.close()
+
+
+def submission_checks(browser, handler, output, check, results, control):
+    """Explicit submit sends one local fixture request; opening a view sends none."""
+    context=browser.new_context(viewport={'width':1440,'height':900},locale='ru-RU',reduced_motion='reduce')
+    context.route('**/*',handler)
+    page=context.new_page()
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    requests_before_view=len(control['submission_requests'])
+    page.goto(ORIGIN+'/');cabinet_view(page)
+    form=page.locator('#eis223-add-procurement')
+    number=form.locator('input[name="reg"]')
+    submit=page.locator('#eis223-start-check')
+    check('submit-one-form-and-action',form.count()==1 and submit.count()==1
+          and submit.get_attribute('type')=='submit' and form.locator('#eis223-start-check').count()==1)
+    check('submit-number-and-action-together',form.evaluate("e=>!!e.closest('.eis223-cabinet-heading')"))
+    check('submit-opening-cabinet-creates-no-job',len(control['submission_requests'])==requests_before_view)
+    descriptions=(number.get_attribute('aria-describedby') or '').split()
+    check('submit-number-has-visible-guidance',set(['eis223-start-help','eis223-add-status']).issubset(descriptions)
+          and page.locator('#eis223-start-help').is_visible())
+    before=len(control['submission_requests'])
+    submit.click();page.wait_for_timeout(60)
+    check('submit-empty-rejected-before-request',len(control['submission_requests'])==before
+          and number.evaluate('e=>!e.validity.valid&&document.activeElement===e')
+          and number.get_attribute('aria-invalid')=='true')
+    number.fill('123');number.press('Enter');page.wait_for_timeout(60)
+    check('submit-invalid-number-rejected',len(control['submission_requests'])==before
+          and number.evaluate('e=>!e.validity.valid') and bool(page.locator('#eis223-add-status').inner_text().strip()))
+    # Hold the genuine fetch call before the local route, so pending UI can be
+    # inspected without delaying or contacting any real endpoint.
+    page.evaluate("""() => {
+      const real=window.fetch.bind(window);window.__manualFetchCalls=0;window.__holdManual=true;
+      window.fetch=(input,options={})=>{
+        const url=new URL(typeof input==='string'?input:input.url,document.baseURI);
+        if(url.pathname.startsWith('/me/manual-checks/')&&String(options.method||'GET').toUpperCase()==='POST'){
+          window.__manualFetchCalls++;
+          if(window.__holdManual){window.__holdManual=false;return new Promise((resolve,reject)=>{
+            window.__releaseManual=()=>real(input,options).then(resolve,reject);
+          })}
+        }
+        return real(input,options);
+      };
+    }""")
+    number.fill(REG)
+    reads_before=control['manual_reads']
+    submit.click()
+    page.wait_for_function("document.getElementById('eis223-start-check').disabled")
+    check('submit-pending-disables-action',submit.is_disabled())
+    check('submit-pending-announces-busy',form.get_attribute('aria-busy')=='true')
+    check('submit-pending-keeps-number-stable',number.evaluate('e=>e.readOnly') and number.input_value()==REG)
+    pending_shot=output/'cabinet-submit-pending-1440.png'
+    page.screenshot(path=str(pending_shot));results['screenshots'].append(str(pending_shot))
+    submit.evaluate('e=>e.click()');page.keyboard.press('Enter')
+    form.evaluate("e=>e.requestSubmit(document.getElementById('eis223-start-check'))")
+    page.wait_for_timeout(50)
+    check('submit-pending-prevents-duplicate',page.evaluate('window.__manualFetchCalls')==1)
+    page.evaluate('window.__releaseManual()')
+    page.wait_for_function("!document.getElementById('eis223-start-check').disabled")
+    check('submit-valid-explicit-request-once',len(control['submission_requests'])==before+1
+          and control['submission_requests'][-1]=='/me/manual-checks/'+REG)
+    check('submit-success-clears-number-and-refreshes',number.input_value()=='' and control['manual_reads']>reads_before)
+    check('submit-success-status-visible',bool(page.locator('#eis223-add-status').inner_text().strip())
+          and form.get_attribute('aria-busy')!='true')
+    check('submit-success-restores-editing',not number.evaluate('e=>e.readOnly'))
+    success_shot=output/'cabinet-submit-success-1440.png'
+    page.screenshot(path=str(success_shot));results['screenshots'].append(str(success_shot))
+    control['submission_status']=503
+    number.fill(REG2);submit.click()
+    page.wait_for_function("!document.getElementById('eis223-start-check').disabled")
+    status=page.locator('#eis223-add-status').inner_text().strip()
+    check('submit-error-retains-number',number.input_value()==REG2)
+    check('submit-error-is-actionable',bool(status) and any(text in status.lower() for text in ['не удалось','ошибка','попробуйте','позже']))
+    check('submit-error-restores-action',submit.is_enabled() and form.get_attribute('aria-busy')!='true')
+    error_shot=output/'cabinet-submit-error-1440.png'
+    page.screenshot(path=str(error_shot));results['screenshots'].append(str(error_shot))
+    control['submission_status']=202
+    context.close()
+
+    mobile=browser.new_context(viewport={'width':390,'height':600},locale='ru-RU',has_touch=True,is_mobile=True,reduced_motion='reduce')
+    mobile.route('**/*',handler);page=mobile.new_page()
+    page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+    page.goto(ORIGIN+'/');cabinet_view(page)
+    form=page.locator('#eis223-add-procurement');number=form.locator('input[name="reg"]');submit=page.locator('#eis223-start-check')
+    check('submit-mobile-field-and-action-fit',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+          and form.bounding_box()['width']<=390)
+    check('submit-mobile-touch-targets',number.bounding_box()['height']>=44 and submit.bounding_box()['height']>=44)
+    before=len(control['submission_requests'])
+    number.fill(REG3);number.press('Enter')
+    page.wait_for_function("!document.getElementById('eis223-start-check').disabled&&document.querySelector('#eis223-add-procurement input[name=reg]').value===''")
+    check('submit-mobile-enter-explicitly-starts-once',len(control['submission_requests'])==before+1)
+    mobile.close()
+
+
+def account_archive_checks(browser, handler, check, results):
+    """The reset offered in an empty archive remains usable after input blur."""
+    for width in (1440,390):
+        context=browser.new_context(viewport={'width':width,'height':844},locale='ru-RU',
+            has_touch=width==390,is_mobile=width==390,reduced_motion='reduce')
+        context.route('**/*',handler);page=context.new_page()
+        page.on('pageerror',lambda error:results['page_errors'].append(str(error)))
+        methods=[]
+        page.on('request',lambda request:methods.append(request.method))
+        page.goto(ORIGIN+'/account/memos')
+        downloads=page.locator('#memo-rows a[download]')
+        page.wait_for_function("document.querySelectorAll('#memo-rows a[download]').length===2")
+        check(f'memo-{width}-create-form-collapsed',page.locator('#memo-create-panel').get_attribute('open') is None)
+        search=page.locator('#memo-search');search.fill('99999999999')
+        reset=page.locator('#memo-rows').get_by_role('button',name='Сбросить фильтры',exact=True)
+        reset.wait_for(state='visible')
+        check(f'memo-{width}-filtered-empty-offers-reset',downloads.count()==0 and reset.count()==1)
+        # A real click blurs the search input first. The product must retain this
+        # very button through that change event so its click handler still fires.
+        reset.click()
+        page.wait_for_function("document.getElementById('memo-search').value===''&&document.querySelectorAll('#memo-rows a[download]').length===2")
+        check(f'memo-{width}-empty-row-reset-restores-downloads',search.input_value()=='' and downloads.count()==2)
+        check(f'memo-{width}-reset-does-not-create-document',all(method in ('GET','HEAD') for method in methods))
+        check(f'memo-{width}-reset-keeps-viewport',page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
+        context.close()
 
 
 def panel_checks(browser, handler, output, check, results, control):
@@ -483,12 +601,32 @@ def capture_showcase(output: Path):
     documents, api = pages(), fixtures()
     for _, (name, markup) in documents.items():
         (output / (name + '.html')).write_text(markup)
+    unknown=[]
     def handler(route):
         parsed=urlsplit(route.request.url)
         if parsed.netloc!='preview.eis.test':route.abort();return
         if parsed.path in documents:route.fulfill(status=200,content_type='text/html',body=documents[parsed.path][1]);return
-        route.fulfill(status=200,content_type='application/json',body=json.dumps(api.get(parsed.path,[])))
+        if route.request.method not in ('GET','HEAD') or parsed.path not in api:
+            unknown.append(route.request.method+' '+parsed.path)
+            route.fulfill(status=404,content_type='application/json',body=json.dumps({'detail':'Missing explicit local preview fixture'}));return
+        route.fulfill(status=200,content_type='application/json',body=json.dumps(api[parsed.path]))
     saved=[]
+    def secondary_surfaces(page,width):
+        # These are the same real builders as the primary screens. Wait for the
+        # explicit fixture content so no screenshot records a transient spinner.
+        for path,name,ready in (
+            ('/account/home','manual',"document.querySelectorAll('#manual-rows tr').length===3"),
+            ('/account/thematic','thematic',"document.getElementById('real-thematic-list').children.length>0"),
+            ('/account/memos','memos',"document.getElementById('memo-rows').children.length>0"),
+            ('/account/workbench','staff',"document.getElementById('staff-active-tasks').textContent==='3'"),
+            ('/account/manager','manager',"document.getElementById('mgr-kpi-staff').textContent==='1'"),
+            ('/account/profile','profile',"document.getElementById('profile-email').textContent==='preview@example.test'"),
+            ('/account/login','login','document.readyState===\"complete\"'),
+        ):
+            page.goto(ORIGIN+path);page.wait_for_function(ready)
+            filename=name+'-'+str(width)+'.png'
+            page.screenshot(path=str(output/filename),full_page=True)
+            if filename not in saved:saved.append(filename)
     with sync_playwright() as p:
         browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True)
         desktop=browser.new_context(viewport={'width':1440,'height':1000},locale='ru-RU',reduced_motion='reduce')
@@ -499,6 +637,8 @@ def capture_showcase(output: Path):
         page.wait_for_function("document.getElementById('eis223-my-memos').querySelector('a')!==null")
         page.locator('#eis223-cabinet-title').click();page.evaluate('window.scrollTo(0,0)')
         page.screenshot(path=str(output/'cabinet-1440.png'),full_page=True);saved.append('cabinet-1440.png')
+        page.locator('#eis223-start-check').click()
+        page.screenshot(path=str(output/'cabinet-validation-1440.png'));saved.append('cabinet-validation-1440.png')
         registry_view(page)
         page.locator('main table a[href="/check-new/'+REG+'"]').first.click()
         page.wait_for_function("document.getElementById('eis-quicklook-content').textContent.includes('Поставка')")
@@ -515,6 +655,7 @@ def capture_showcase(output: Path):
         page.goto(ORIGIN+'/account/manager');page.wait_for_function("document.getElementById('mgr-kpi-staff').textContent==='1'")
         page.screenshot(path=str(output/'manager-1440.png'));saved.append('manager-1440.png')
         page.goto(ORIGIN+'/check-new/'+REG);page.screenshot(path=str(output/'card-1440.png'),full_page=True);saved.append('card-1440.png')
+        secondary_surfaces(page,1440)
         desktop.close()
         mobile=browser.new_context(viewport={'width':390,'height':844},locale='ru-RU',has_touch=True,is_mobile=True,reduced_motion='reduce')
         mobile.route('**/*',handler);page=mobile.new_page();page.goto(ORIGIN+'/')
@@ -535,10 +676,12 @@ def capture_showcase(output: Path):
         page.locator('#eis-quicklook-title').click()
         page.screenshot(path=str(output/'workspace-mobile-inspector.png'));saved.append('workspace-mobile-inspector.png')
         page.goto(ORIGIN+'/check-new/'+REG);page.screenshot(path=str(output/'card-390.png'),full_page=True);saved.append('card-390.png')
+        secondary_surfaces(page,390)
         mobile.close();browser.close()
-    (output/'showcase.json').write_text(json.dumps({'fixture_only':True,'source':'fresh local builders','screenshots':saved},ensure_ascii=False,indent=2))
+    (output/'showcase.json').write_text(json.dumps({'fixture_only':True,'source':'fresh local builders','screenshots':saved,'unknown_api_paths':unknown},ensure_ascii=False,indent=2))
     print('Captured',len(saved),'fresh showcase screenshots in',output)
-    return 0
+    if unknown:print('Missing explicit showcase fixtures:',unknown)
+    return 1 if unknown else 0
 
 
 
@@ -551,7 +694,7 @@ def run(output: Path):
         (output / (name + '.html')).write_text(markup)
     results = {'fixture_only': True, 'registry_is_structural_fixture': True,
                'checks': [], 'failures': [], 'screenshots': [], 'page_errors': [], 'unknown_api_paths': []}
-    control = {'failure': None, 'html': None, 'card_requests': []}
+    control = {'failure': None, 'html': None, 'card_requests': [], 'submission_status': 202, 'submission_requests': [], 'manual_reads': 0}
     def check(name, ok, detail=None):
         record = {'name': name, 'ok': bool(ok)}
         if detail is not None:
@@ -565,6 +708,15 @@ def run(output: Path):
         if parsed.netloc != 'preview.eis.test':
             route.abort()
             return
+        if parsed.path == '/me/manual-checks' and request.method == 'GET':
+            control['manual_reads'] += 1
+        if parsed.path.startswith('/me/manual-checks/') and request.method == 'POST':
+            control['submission_requests'].append(parsed.path)
+            status=control['submission_status']
+            route.fulfill(status=status,content_type='application/json',body=json.dumps(
+                {'ok': True, 'demo': True, 'reg_number': parsed.path.rsplit('/',1)[-1]}
+                if 200<=status<300 else {'detail':'Локальная демонстрационная ошибка'}))
+            return
         if parsed.path.startswith('/check-new/'):
             control['card_requests'].append(parsed.path)
             if control.get('html') is not None:
@@ -577,11 +729,13 @@ def run(output: Path):
             route.fulfill(status=200, content_type='text/html', body=documents[parsed.path][1])
             return
         payload = api.get(parsed.path)
-        if payload is None:
-            if parsed.path not in results['unknown_api_paths']:
-                results['unknown_api_paths'].append(parsed.path)
-            payload = []
-        # Every request, including a hypothetical action, is fulfilled locally.
+        if payload is None or request.method not in ('GET','HEAD'):
+            missing=parsed.path if request.method in ('GET','HEAD') else request.method+' '+parsed.path
+            if missing not in results['unknown_api_paths']:
+                results['unknown_api_paths'].append(missing)
+            route.fulfill(status=404,content_type='application/json',body=json.dumps({'detail':'Missing explicit local preview fixture'}))
+            return
+        # Reads and the explicit submit fixture above are fulfilled locally.
         route.fulfill(status=200, content_type='application/json', body=json.dumps(payload))
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True)
@@ -635,6 +789,8 @@ def run(output: Path):
                 results['screenshots'].append(str(shot))
             context.close()
         clarity_checks(browser, handler, output, check, results)
+        submission_checks(browser, handler, output, check, results, control)
+        account_archive_checks(browser, handler, check, results)
         panel_checks(browser, handler, output, check, results, control)
         touch = browser.new_context(viewport={'width': 390, 'height': 844}, has_touch=True,
                                     is_mobile=True, reduced_motion='reduce')

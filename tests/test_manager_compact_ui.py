@@ -86,6 +86,15 @@ class CompactManager(unittest.TestCase):
         for identifier in ('mgr-task-reset', 'mgr-task-empty-reset', 'mgr-memo-empty-reset'):
             self.assertEqual(page.get_element_by_id(identifier).get('type'), 'button')
 
+    def test_header_and_refresh_state_keep_context_visible(self):
+        page = self.page()
+        self.assertTrue(page.xpath('//header//a[@href="/#cabinet" and normalize-space()="Мой кабинет"]'))
+        self.assertTrue(page.xpath('//header//a[@href="/" and normalize-space()="Реестр закупок"]'))
+        self.assertTrue(page.xpath('//header//a[@href="/account/profile" and normalize-space()="Профиль"]'))
+        state = page.get_element_by_id('mgr-refresh-status')
+        self.assertEqual(state.get('role'), 'status')
+        self.assertEqual(state.get('aria-live'), 'polite')
+
     def test_navigation_icons_are_decorative_local_vectors(self):
         page = self.page()
         icons = page.xpath('//nav[@aria-label="Разделы руководителя"]//span[@class="mgr-tab-icon"]')

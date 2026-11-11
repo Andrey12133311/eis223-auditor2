@@ -43,14 +43,28 @@ BOOTSTRAP = r"""
   if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
   const page=documents[url.pathname];
   if(page&&method==='GET')return response(page[1],'text/html; charset=utf-8',url.pathname);
+  if(url.pathname.startsWith('/me/manual-checks/')&&method==='POST'){
+   const reg=url.pathname.slice('/me/manual-checks/'.length);
+   if(!/^3[0-9]{10}$/.test(reg))return response(JSON.stringify({detail:'Укажите номер ЕИС из 11 цифр.'}),'application/json',url.pathname,422);
+   // A short local wait exposes the real form's pending state without making
+   // a network request or inventing a new saved audit result.
+   await new Promise(resolve=>setTimeout(resolve,300));
+   notify('Демонстрация: запрос на проверку обработан локально. Ниже остаются вымышленные сохранённые результаты.');
+   return response(JSON.stringify({ok:true,demo:true,reg_number:reg}),'application/json',url.pathname,202);
+  }
   if(url.pathname==='/me/profile'&&method==='PUT'){
    let value={};try{value=JSON.parse(options.body||'{}')}catch{}
    const p=api['/me/profile'];for(const key of ['first_name','last_name','patronymic'])if(key in value)p[key]=String(value[key]);
    p.full_name=[p.last_name,p.first_name,p.patronymic].filter(Boolean).join(' ');
    return response(JSON.stringify(p),'application/json',url.pathname);
   }
-  // Actions are simulated against the same static, explicitly fictional data.
-  return response(JSON.stringify(api[url.pathname]??[]),'application/json',url.pathname);
+  if(!['GET','HEAD'].includes(method)){
+   notify('Это предпросмотр: данное действие требует рабочего сервера и здесь не выполняется.');
+   return response(JSON.stringify({detail:'В предпросмотре это действие не выполняется. Откройте рабочий сайт после публикации.'}),'application/json',url.pathname,409);
+  }
+  // Reads use the same static, explicitly fictional data as screenshots.
+  if(Object.hasOwn(api,url.pathname))return response(JSON.stringify(api[url.pathname]),'application/json',url.pathname);
+  return response(JSON.stringify({detail:'Для этого запроса нет данных в автономном предпросмотре.'}),'application/json',url.pathname,404);
  };
  window.open=()=>{notify('Ссылки на внешние источники и скачивание файлов отключены в демонстрации.');return null};
  window.addEventListener('click',event=>{
@@ -70,8 +84,10 @@ BOOTSTRAP = r"""
   else notify('Это демонстрационный набор: оригиналы документов и дополнительные серверные действия здесь недоступны.');
  });
  document.addEventListener('submit',event=>{
+  // Let product form listeners run, while every native navigation stays local.
+  event.preventDefault();
   if(!['login-form','registration-form','login','registration'].includes(event.target.id))return;
-  event.preventDefault();event.stopImmediatePropagation();
+  event.stopImmediatePropagation();
   const status=document.getElementById('auth-status')||document.getElementById('message');
   if(status)status.textContent='Демонстрация: вводить настоящий пароль не требуется. Выберите рабочий экран в верхней панели.';
  },true);
@@ -99,7 +115,7 @@ iframe{width:100%;height:100%;border:0;background:#f5f5f7;box-shadow:0 0 20px #1
 <div class="demo-title">ЕИС Аудитор · Предпросмотр<small>Данные вымышлены. Рабочий сайт не изменяется.</small></div>
 <div class="demo-controls"><select id="demo-route" aria-label="Экран предпросмотра"></select>
 <button id="demo-desktop" type="button" aria-pressed="true">Компьютер</button><button id="demo-mobile" type="button" aria-pressed="false">Телефон</button></div></header>
-<main class="demo-stage" id="demo-stage"><iframe id="demo-frame" title="Интерактивный макет ЕИС Аудитора" sandbox="allow-scripts allow-same-origin"></iframe></main>
+<main class="demo-stage" id="demo-stage"><iframe id="demo-frame" title="Интерактивный макет ЕИС Аудитора" sandbox="allow-scripts allow-same-origin allow-forms"></iframe></main>
 <p id="demo-note" role="status" aria-live="polite"></p>
 <script>
 (()=>{

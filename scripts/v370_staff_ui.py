@@ -90,6 +90,17 @@ JS=r"""
 (()=>{
 const el=id=>document.getElementById(id),msg=text=>{el('staff-status').textContent=text};
 const regOK=x=>/^3[0-9]{10}$/.test(x);
+// A saved deadline is a calendar day, so display its parts without timezone conversion.
+const savedDay=value=>{
+ if(!value)return '—';
+ const raw=String(value),parts=/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(raw);
+ return parts?parts[3]+'.'+parts[2]+'.'+parts[1]:raw;
+};
+const countText=value=>(typeof value==='number'&&Number.isSafeInteger(value)&&value>=0)||
+ (typeof value==='string'&&/^\d+$/.test(value)&&Number.isSafeInteger(Number(value)))?
+ Number(value).toLocaleString('ru-RU'):'—';
+const groupedCount=(group,key)=>group&&typeof group==='object'&&!Array.isArray(group)?
+ (Object.prototype.hasOwnProperty.call(group,key)?group[key]:0):undefined;
 async function showName(){
  try{
   const r=await api('/me/profile');
@@ -133,7 +144,7 @@ function section(tab){
 }
 document.querySelectorAll('[data-staff-tab]').forEach(x=>x.onclick=()=>section(x.dataset.staffTab));
 el('staff-refresh').addEventListener('click',async()=>{
- const button=el('staff-refresh');button.disabled=true;
+ const button=el('staff-refresh'),label=button.textContent;button.disabled=true;button.textContent='Обновляем…';
  const current=document.querySelector('[data-staff-tab][aria-selected="true"]');
  const tab=current?.dataset.staffTab||'overview';
  try{
@@ -141,11 +152,19 @@ el('staff-refresh').addEventListener('click',async()=>{
   if(tab==='overview')updates.push(loadProgress(),loadNotifications(),loadSavedSearches());
   if(tab==='case')updates.push(loadCase());
   await Promise.all(updates);
- }finally{button.disabled=false}
+ }finally{button.disabled=false;button.textContent=label}
 });
+const emptyListText={
+ 'staff-task-list':'Активных поручений нет. Новые поручения руководителя появятся здесь.',
+ 'staff-goal-summary':'Активных тематических поручений нет. Назначенные темы появятся здесь.',
+ 'staff-progress-list':'Проверок в работе нет. Добавьте закупку в «Моём кабинете», чтобы начать проверку.',
+ 'staff-notification-list':'Уведомлений пока нет. Здесь появятся сообщения о поручениях и результатах проверок.',
+ 'staff-global-results':'Ничего не найдено. Уточните номер закупки или поисковую фразу.',
+ 'staff-saved-searches':'Сохранённых запросов нет. Введите фразу выше и нажмите «Сохранить запрос».'
+};
 function list(root,items,build){
  const node=el(root);node.replaceChildren();
- if(!items.length)node.append(make("p","Записей пока нет"));
+ if(!items.length){const empty=make('p',emptyListText[root]||'Здесь пока нет записей.');empty.className='staff-empty-state';node.append(empty)}
  for(const item of items)node.append(build(item));
 }
 async function reloadOverview(){
@@ -155,7 +174,7 @@ async function reloadOverview(){
    checks:r.checks_total,complete:r.reviews_completed,found:r.unique_confirmed_findings,
    documents:r.documents_checked,waiting:r.attention_required,
    memos:r.memo_count
-  }))el('staff-'+id).textContent=Number(number||0).toLocaleString("ru-RU");
+  }))el('staff-'+id).textContent=countText(number);
  }catch(e){msg(e.message)}
 }
 const taskNames={assigned:'Назначено',in_progress:'В работе',submitted:'Передано руководителю',
@@ -170,14 +189,16 @@ async function loadDashboard(force=false){
   const data=await dashboardData(force);
   for(const [id,count] of Object.entries({
    'active-tasks':data.task_active,'active-campaigns':data.campaign_active,
-   'unread':data.unread_notifications,'reviewed':data.finding_decisions?.confirmed||0
-  }))if(el('staff-'+id))el('staff-'+id).textContent=Number(count).toLocaleString('ru-RU');
-  el('staff-updated').textContent='Данные обновлены: '+new Date(data.as_of).toLocaleTimeString('ru-RU');
+   'unread':data.unread_notifications,'reviewed':groupedCount(data.finding_decisions,'confirmed')
+  }))if(el('staff-'+id))el('staff-'+id).textContent=countText(count);
+  const updated=new Date(data.as_of);
+  el('staff-updated').textContent=data.as_of&&!Number.isNaN(updated.getTime())?
+   'Данные обновлены: '+updated.toLocaleTimeString('ru-RU'):'Данные загружены';
   list('staff-task-list',data.tasks.filter(x=>!['completed','cancelled'].includes(x.status)),x=>{
    const row=make('div');row.className='staff-smallrow';
    const body=make('div');body.className='staff-rowbody';
    body.append(make('strong',x.title),make('small','Закупка № '+x.reg_number+
-    (x.due_date?' · до '+x.due_date:'')+' · '+(taskNames[x.status]||x.status)));
+    (x.due_date?' · до '+savedDay(x.due_date):'')+' · '+(taskNames[x.status]||x.status)));
    const actions=make('div');actions.className='staff-tools';
    const go=link('/check-new/'+x.reg_number,'Карточка ЕИС');actions.append(go);
    if(x.status==='assigned'||x.status==='returned')
@@ -197,9 +218,9 @@ async function loadDashboard(force=false){
    box.append(body,createAction('Нарушения',async()=>section('goals')));
    return box;
   });
-  const statuses=data.memo_reviews||{};
-  el('staff-memo-reviews').textContent='На рассмотрении: '+(statuses.submitted||0)+
-   ' · Согласовано: '+(statuses.approved||0)+' · На доработке: '+(statuses.returned||0);
+  const statuses=data.memo_reviews;
+  el('staff-memo-reviews').textContent='На рассмотрении: '+countText(groupedCount(statuses,'submitted'))+
+   ' · Согласовано: '+countText(groupedCount(statuses,'approved'))+' · На доработке: '+countText(groupedCount(statuses,'returned'));
  }catch(error){msg('Обзор сотрудника: '+error.message)}
 }
 async function loadProgress(){
@@ -348,7 +369,7 @@ async function campaigns(){
     make("p","Найдено "+item.actual_violations+" / план "+item.target_violations+
       " · закупок: "+item.verified_procurements));
    const pr=make("progress");pr.className="progress";pr.max=100;pr.value=item.progress_percent;
-   box.append(pr,make("small","Срок: "+(item.due_date||"не установлен")+
+   box.append(pr,make("small","Срок: "+(item.due_date?savedDay(item.due_date):"не установлен")+
     " · статус проверки ЕИС: "+item.engine_status));
    if(item.status==="active"){
     const send=make("button","Передать фактические результаты руководителю");
@@ -746,6 +767,7 @@ body.staff-compact p{margin:5px 0 10px}
 .staff-compact .staff-tools{gap:6px;margin-top:5px}
 .staff-compact .staff-tools button,.staff-compact .staff-tools a{min-height:32px;padding:6px 8px}
 .staff-compact .staff-live-note{font-size:11px;color:#627b8c;margin:9px 0}
+.staff-compact p.staff-empty-state{font-size:12px;color:var(--muted,#627b8c);line-height:1.6;margin:8px 0;padding:8px 0}
 .staff-compact .notice{margin:10px 0;padding:9px 11px}
 .staff-compact .action-row{margin:9px 0;gap:7px}
 .staff-compact input,.staff-compact select,.staff-compact textarea{padding:9px 10px}
@@ -803,10 +825,10 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <body class="staff-compact"><header><div><strong>ЕИС Аудитор</strong>
 <div id="staff-user-name" style="font-size:12px;color:#d9e9f3">ФИО: загрузка…</div></div>
 <div class="action-row" id="staff-account-actions"><a href="/account/profile">Профиль</a>
-<a href="/">Главная</a></div></header>
+<a href="/#cabinet">Мой кабинет</a><a href="/">Реестр закупок</a></div></header>
 <main>
 <div class="staff-hero"><div><h1 id="staff-hello">Задачи и поручения</h1></div>
-<button id="staff-refresh" type="button" class="outline">↻ Обновить данные</button></div>
+<button id="staff-refresh" type="button" class="outline">Обновить данные</button></div>
 <div class="staff-layout">
 <nav class="tabs" aria-label="Разделы рабочего места">
 <button type="button" data-staff-tab="overview" aria-selected="true">Сводка</button>
@@ -821,7 +843,7 @@ PAGE=r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 </nav>
 <div class="staff-panels">
 <section class="panel" data-staff-section="overview">
-<div class="staff-section-heading"><h2>Рабочая панель</h2><small id="staff-updated" class="staff-statline">Получение актуальных данных</small></div>
+<div class="staff-section-heading"><h2>Поручения и ход проверок</h2><small id="staff-updated" class="staff-statline">Получение актуальных данных</small></div>
 <div class="staff-search-box">
 <form id="staff-global-search" class="staff-search-toolbar"><label class="wide">Поиск по моим материалам
 <input id="staff-global-query" type="search" minlength="2" maxlength="80" placeholder="32616412317 или срок подачи заявок" required></label>

@@ -139,8 +139,20 @@ body.eis-shell-ready .eis223-workspace .eis223-personal h2{font-size:28px!import
 .eis223-cabinet-note{font-size:13px;line-height:1.6;color:var(--ui-muted);margin:8px 0 3px}
 body.eis-shell-ready .eis223-workspace #eis223-owner-fullname{font-size:11px;color:var(--ui-muted);margin-top:3px}
 .eis223-cabinet-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+body.eis-shell-ready .eis223-workspace .eis223-cabinet-actions{width:min(470px,100%);flex:none}
+body.eis-shell-ready .eis223-workspace .eis223-cabinet-heading #eis223-add-procurement{display:block;width:100%;border:0;padding:0;margin:0}
+body.eis-shell-ready .eis223-workspace .eis223-start-form>label{display:block;font-size:12px;font-weight:500;color:var(--ui-ink);margin:0 0 7px}
+.eis223-start-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}
+body.eis-shell-ready .eis223-workspace .eis223-start-controls input{width:100%;min-width:0;min-height:40px;margin:0;padding:10px 12px;border-radius:8px;font-size:13px}
+body.eis-shell-ready .eis223-workspace .eis223-start-controls input[aria-invalid=true]{border-color:var(--ui-danger)!important}
+body.eis-shell-ready .eis223-workspace .eis223-start-controls input[readonly]{background:#f5f5f7}
+body.eis-shell-ready .eis223-workspace #eis223-start-help{font-size:11px;color:var(--ui-muted);line-height:1.45;margin:7px 0 0}
+body.eis-shell-ready .eis223-workspace #eis223-add-status{font-size:12px;line-height:1.5;margin:7px 0 0;min-height:0}
+body.eis-shell-ready .eis223-workspace #eis223-add-status:empty{display:none}
+body.eis-shell-ready .eis223-workspace #eis223-add-status[data-kind=invalid],body.eis-shell-ready .eis223-workspace #eis223-add-status[data-kind=error]{color:var(--ui-danger)}
+body.eis-shell-ready .eis223-workspace #eis223-add-status[data-kind=success]{color:var(--ui-success)}
 body.eis-shell-ready .eis223-workspace button#eis223-start-check{display:inline-flex;align-items:center;justify-content:center;
- min-height:38px;background:var(--ui-accent)!important;border:1px solid var(--ui-accent)!important;
+ min-height:40px;min-width:151px;background:var(--ui-accent)!important;border:1px solid var(--ui-accent)!important;
  color:#fff!important;padding:9px 15px!important;border-radius:9px;font:500 13px var(--ui-font);cursor:pointer;white-space:nowrap}
 body.eis-shell-ready .eis223-workspace button#eis223-start-check:hover{background:var(--ui-hover)!important}
 body.eis-shell-ready .eis223-workspace .eis223-overview{display:flex;flex-wrap:wrap;gap:0;
@@ -172,10 +184,6 @@ body.eis-shell-ready .eis223-workspace .eis223-tile li .eis223-row-actions butto
 .eis223-legal-state::before{content:"";display:inline-block;width:5px;height:5px;margin:0 6px 1px 0;border-radius:50%;background:#7b7b80}
 .eis223-legal-state[data-tone=complete]::before{background:#216e45}
 .eis223-legal-state[data-tone=attention]::before{background:#b42332}
-body.eis-shell-ready .eis223-workspace #eis223-add-procurement{border-top:1px solid var(--ui-line);padding-top:16px;margin-top:auto;gap:8px}
-body.eis-shell-ready .eis223-workspace #eis223-add-procurement button{background:#fff!important;
- color:var(--ui-accent)!important;border-color:#bdcfe4!important;font-weight:500!important}
-body.eis-shell-ready .eis223-workspace #eis223-add-procurement button:hover{background:var(--ui-selected)!important}
 body.eis-shell-ready .eis223-workspace .eis223-more{display:block;margin-top:18px;background:#fff;
  border:1px solid var(--ui-line);border-radius:12px;padding:0 18px}
 body.eis-shell-ready #eis223-cabinet .eis223-more>.eis223-cabinet-extra{border:0!important;border-bottom:1px solid var(--ui-line)!important;

@@ -13,7 +13,9 @@ const embedded = (file, assignment) => {
   const source = read(file);
   const start = source.indexOf(assignment);
   assert.ok(start >= 0, assignment);
-  return source.slice(start).split('<script>')[1].split('</script>')[0];
+  const script = source.slice(start).match(/<script\b[^>]*>([\s\S]*?)<\/script>/);
+  assert.ok(script, assignment + ' must contain a script');
+  return script[1];
 };
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
@@ -477,6 +479,34 @@ async function testLegalStatusSeparateFromCompletedDownload() {
   }
 }
 
+async function testThematicLifecycleLabelsAgreeAcrossLists() {
+  for (const [file, assignment, target] of [
+    ['account_pages_v1.py', 'THEMATIC =', 'real-thematic-list'],
+    ['account_site_ui_v1.py', 'def site_header(', 'eis223-my-batches'],
+  ]) {
+    let state = 'completed';
+    const ui = harness(embedded(file, assignment), 'refresh', async call => {
+      if (call.url === '/api/thematic/history') return {batches: [{
+        id: 'preview', categories: ['docs'], status: state, purchases: 3, violations: 0,
+      }]};
+      if (call.url === '/me/profile') return {completed: true, full_name: 'Employee'};
+      if (call.url === '/me/summary') return {};
+      return [];
+    });
+    await flush();
+    for (const [value, label] of [['active', 'Выполняется'], ['stopped', 'Остановлена'],
+      ['completed', 'Завершена'], ['future_state', 'Состояние уточняется']]) {
+      state = value;
+      await ui.api.refresh();
+      const rendered = words(ui.get(target));
+      assert.ok(rendered.includes(label), file + ': ' + value);
+      if (value === 'completed') assert.ok(!rendered.includes('Остановлена'));
+      assert.ok(!rendered.includes('future_state'));
+    }
+    assert.ok(ui.calls.every(call => call.method === 'GET'));
+  }
+}
+
 async function testCaseLegalQueueKeepsFindingsAndUsesReadOnlyRefresh() {
   let data = {audit: {state: 'pending', documents_read: 2}, findings_count: 1,
     findings: [{title: 'Сохранённое нарушение', evidence: 'Сохранённое доказательство'}]};
@@ -799,7 +829,8 @@ async function testCompactCabinetAdminShortcutOpensItsFoldout() {
     testCaseSwitchDisablesOldDraftAndControls, testDirtyDraftSurvivesRefreshAndCaseSwitch,
     testOldSubmissionCannotResetNewCaseForm, testAutosavesStayOrdered, testOlderCaseSearchesCannotRenderIntoNewCase,
     testDashboardSharingAndMutationRefresh, testManagerSearchAndReloadQueue,
-    testLegalStatusSeparateFromCompletedDownload, testCaseLegalQueueKeepsFindingsAndUsesReadOnlyRefresh,
+    testLegalStatusSeparateFromCompletedDownload, testThematicLifecycleLabelsAgreeAcrossLists,
+    testCaseLegalQueueKeepsFindingsAndUsesReadOnlyRefresh,
     testWorkbenchAutomaticReviewHasNoManualMutation,
     testFindingSubmissionLifecycleAndNoDuplicate, testFindingMissingManagerStaleAndErrors,
     testFindingMutationOutranksInFlightRead, testThematicFindingContextAndNoDuplicate,
@@ -809,5 +840,5 @@ async function testCompactCabinetAdminShortcutOpensItsFoldout() {
     testCompactCabinetAdminShortcutOpensItsFoldout]) {
     await test(); console.log('PASS', test.name);
   }
-  console.log('Account frontend request/race regressions: 25 scenarios passed');
+  console.log('Account frontend request/race regressions: 26 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
