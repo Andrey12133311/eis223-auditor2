@@ -58,6 +58,7 @@ import v347_text_cache
 import v348_cross_document_legal
 import v372_auto_regulation_protocols
 import vp_sme_application
+import contract_conclusion_terms
 import vp_inspection_engine
 import vp_inspection_export
 import v342_thematic_queue
@@ -247,6 +248,7 @@ def main():
     # these same automatic regulation/protocol legal validators.
     v372_auto_regulation_protocols.install(vars(entry))
     vp_sme_application.install(vars(entry))
+    contract_conclusion_terms.install(vars(entry))
     vp_inspection_engine.install(vars(entry))
     vp_inspection_export.install(vars(entry))
     v342_thematic_queue.install(vars(entry))

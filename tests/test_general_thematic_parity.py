@@ -41,7 +41,7 @@ def compare(originals):
       s.enter_context(patch.object(precise,'enrich',side_effect=lambda ns,p,d,*a,**kw:p))
       s.enter_context(patch.object(precise,'persist_facts',return_value=None))
       first=asyncio.run(general.inspect_one(ns,REG)); second=asyncio.run(general.inspect_one(ns,REG)); thematic=asyncio.run(theme.independent_review(ns,REG,['protocols','dates']))
-     c=conn();found=[dict(r) for r in c.execute('SELECT code,document,source_url,evidence FROM findings')];counts=dict(c.execute('SELECT * FROM purchases').fetchone());c.close()
+     c=conn();found=[dict(r) for r in c.execute('SELECT code,law,document,source_url,evidence FROM findings')];counts=dict(c.execute('SELECT * FROM purchases').fetchone());c.close()
      return first,second,thematic,found,counts
 
 

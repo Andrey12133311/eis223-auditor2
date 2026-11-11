@@ -23,7 +23,7 @@ from scripts.account_schema_v1 import SCHEMA
 from scripts.account_migrations_v1 import initialize_schema
 from scripts.account_production_v1 import install
 from scripts.account_page_routes_v1 import profile_page
-from scripts.v370_manager_campaigns import staff_campaign_violations
+from scripts.v370_manager_campaigns import staff_campaign_violations, _staff_source_window
 from scripts.v368_manager_workflow import admin_users, team
 from scripts.account_repository_v1 import create_pending_user
 
@@ -159,7 +159,13 @@ def user_only_violations():
     assert "WHERE user_id=%s" in src
     assert "FROM account_manager_campaign_targets" in src
     assert "canonical_item" in src and "apply_reassessments" in src
-    assert "ORDER BY rowid DESC LIMIT 1200" in src
+    window=inspect.getsource(_staff_source_window)
+    assert "_staff_source_window(con,selected)" in src
+    assert "f.batch_id=? AND f.category IN" in window
+    assert "ORDER BY f._source_rowid DESC LIMIT 1200" in window
+    assert 'for storage in ("legacy","variant")' in window
+    assert "while active and len(result)<1200" in window
+    assert "cursor.fetchone()" in window and "cursor.close()" in window
     assert 'effective_status' in src and 'confirmed' in src
     assert "collapse_legal_events" in src
     assert "SELECT batch_id,title" in src

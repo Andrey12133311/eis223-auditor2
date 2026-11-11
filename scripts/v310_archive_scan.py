@@ -35,7 +35,7 @@ MAX_DEPTH=2
 # Repeated legal checks must not repeatedly decompress the same solid archive.
 # Only immutable expansion descriptors are retained here, never source bytes,
 # text, legal findings, provenance or successful-completion flags.
-_EXPANSION_VERSION="eis223-archive-expansion-20261110-reader"
+_EXPANSION_VERSION="eis223-archive-expansion-20261111-budget"
 _EXPANSION_CACHE_LIMIT=64
 _EXPANSION_CACHE_METADATA_LIMIT=128*1024
 _expansion_cache=OrderedDict()
@@ -175,7 +175,7 @@ def _archive_reader(path):
         yield None
 
 
-def _list(path,reader=None):
+def _list(path,reader=None,*,inventory=None):
     kind=archive_kind(path)
     if isinstance(reader,zipfile.ZipFile) or kind==".zip":
         with (nullcontext(reader) if reader is not None else zipfile.ZipFile(path)) as z:
@@ -188,10 +188,24 @@ def _list(path,reader=None):
             # Stop metadata enumeration as soon as the archive is ineligible;
             # getmembers() otherwise retains an unbounded inventory first.
             m=[]
+            notes=[]
+            if inventory is None:inventory={"bytes":0}
             for member in t:
                 m.append(member)
                 if len(m)>MAX_MEMBERS:return [],["Слишком много файлов в TAR"]
-            return [(i.name,i.size,index) for index,i in enumerate(m) if i.isfile()],[]
+                # Advancing a compressed TAR seeks over the preceding payload
+                # by decompressing it, even when extraction would later skip
+                # that member. Reject ineligible inventories before next().
+                if member.size>MAX_MEMBER:
+                    m.pop();notes.append("Слишком крупный вложенный документ");break
+                size=max(0,member.size)
+                if inventory["bytes"]+size>MAX_EXPANDED:
+                    m.pop();notes.append("Превышен допустимый объём распаковки");break
+                # Share this separate work budget across nested TARs, including
+                # unsupported members. It bounds listing work without charging
+                # retained evidence bytes twice against the extraction budget.
+                inventory["bytes"]+=size
+            return [(i.name,i.size,index) for index,i in enumerate(m) if i.isfile()],notes
     # RAR/7z/CAB handled by libarchive's audited bsdtar utility.
     if kind in (".gz",".bz2",".xz") and not tarfile.is_tarfile(path):
         return [(path.stem,MAX_MEMBER,None)],[]
@@ -243,7 +257,10 @@ def _read_member(path,name,entry_index=None,reader=None):
             with z.open(info) as inp:return _read_stream(inp)
     if isinstance(reader,tarfile.TarFile) or tarfile.is_tarfile(path):
         with (nullcontext(reader) if reader is not None else tarfile.open(path,"r:*")) as t:
-            member=t.getmembers()[entry_index] if entry_index is not None else t.getmember(name)
+            # A bounded inventory can stop before an oversized tail. Resolving
+            # an already enumerated occurrence must not resume that inventory.
+            members=t.members if reader is not None else t.getmembers()
+            member=members[entry_index] if entry_index is not None else t.getmember(name)
             if member.name!=name:raise ValueError("Запись TAR изменилась после перечисления")
             if not member.isfile() or member.size>MAX_MEMBER:raise ValueError("Небезопасный TAR")
             with t.extractfile(member) as inp:return _read_stream(inp)
@@ -261,6 +278,7 @@ def _expand_members(path,root):
     events=[]
     cacheable=True
     stats={"files":0,"bytes":0}
+    inventory={"bytes":0}
     seen=set()
 
     def warn(message):
@@ -280,7 +298,7 @@ def _expand_members(path,root):
 
     def visit_open(current,prefix,depth,ancestry,reader):
         nonlocal cacheable
-        members,notes=_list(current,reader)
+        members,notes=_list(current,reader,inventory=inventory)
         for note in notes:
             warn(note)
             if note=="Архив libarchive не прочитан":cacheable=False
@@ -289,6 +307,9 @@ def _expand_members(path,root):
         for name,size,entry_index in members:
             if stats["files"]>=MAX_MEMBERS:
                 warn("Лимит числа вложений исчерпан");break
+            remaining=MAX_EXPANDED-stats["bytes"]
+            if remaining<=0:
+                warn("Превышен допустимый объём распаковки");break
             if not safe_member(name):
                 warn("Пропущен небезопасный путь внутри архива");continue
             extension=Path(name).suffix.lower()
@@ -305,12 +326,28 @@ def _expand_members(path,root):
                 # a warning would incorrectly force endless collection retry.
             if size>MAX_MEMBER:
                 warn("Слишком крупный вложенный документ");continue
+            # ZIP/TAR metadata authenticates this occurrence's actual size.
+            # The libarchive/raw-compression path uses a placeholder instead;
+            # it must still be read before its true size can be established.
+            if entry_index is not None and size>remaining:
+                warn("Превышен допустимый объём распаковки");continue
+            # Failed decompression can consume the full bounded read too.
+            # Reserve before entering a parser and keep that work charged on
+            # failure; successful unknown-size reads refund their unused part.
+            reserved=size if entry_index is not None else min(MAX_MEMBER,remaining)
+            stats["bytes"]+=reserved
             try:
                 data=_read_member(current,name,entry_index,reader)
-                if not data or stats["bytes"]+len(data)>MAX_EXPANDED:
+                if len(data)>remaining:
+                    # An unknown-size member may cross the budget once, by at
+                    # most MAX_MEMBER bytes. Do not decompress every remaining
+                    # sibling (or resume the parent) after discovering that.
+                    stats["bytes"]=MAX_EXPANDED
+                    warn("Превышен допустимый объём распаковки");break
+                stats["bytes"]+=len(data)-reserved
+                if not data:
                     warn("Превышен допустимый объём распаковки");continue
                 stats["files"]+=1
-                stats["bytes"]+=len(data)
                 sha=hashlib.sha256(data).hexdigest()
                 # Byte-identical copies at the same source path remain one
                 # evidence item. Keep archive boundaries/indexes separate from

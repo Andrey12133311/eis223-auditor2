@@ -53,7 +53,7 @@ _RECEIPT_ACTION = (r"(?:поступления|получения|регистр
 _PUBLICATION_ACTION = (r"(?:размещения|публикации)"
                        r"(?:\s*\(\s*(?:размещения|публикации)\s*\))?")
 REQUEST = (r"(?:дата\s+(?:и\s+время\s+)?" + _RECEIPT_ACTION + r"\s+"
-           r"(?:заказчиком\s+)?запроса(?:" + _REQUEST_SUBJECT + r")?|"
+           r"(?:(?:заказчиком|заказчику)\s+)?запроса(?:" + _REQUEST_SUBJECT + r")?|"
            r"запрос" + _REQUEST_SUBJECT + r"\s+(?:поступил|получен|зарегистрирован))")
 _ANSWER_OBJECT = (r"(?:ответа(?:\s+на\s+запрос(?:" + _REQUEST_SUBJECT + r")?)?|"
                   r"разъяснени[яй]" + _CLARIFICATION_SUBJECT + r"(?:\s+на\s+запрос)?)")
@@ -66,7 +66,7 @@ ANSWER = (r"(?:дата\s+(?:и\s+время\s+)?" + _PUBLICATION_ACTION + r"\s+
 # A protocol's ordinary event-kind suffix is part of its field label. Keep
 # the vocabulary closed: arbitrary prose between the field and its date
 # must not become a signing or EIS-publication event.
-_PROTOCOL_DATE_KIND = (r"(?:подведения\s+итогов|рассмотрения(?:\s+и\s+оценки)?"
+_PROTOCOL_DATE_KIND = (r"(?:подведения\s+итогов(?:\s+закупки)?|рассмотрения(?:\s+и\s+оценки)?"
                        r"(?:\s+заявок)?|оценки(?:\s+заявок)?|допуска(?:\s+к\s+участию)?)")
 _PROTOCOL_DATE_GENITIVE = (r"(?:итогового\s+протокола|протокола"
                            r"(?:\s+" + _PROTOCOL_DATE_KIND + r")?)")
@@ -81,17 +81,18 @@ PROTOCOL_PUBLISHED = (
     + _PROTOCOL_DATE_NOMINATIVE + r"\s+(?:размещ[её]н|опубликован)\s+в\s+"
     + _EIS_LABEL + r")")
 COMPETITIVE = re.compile(r"конкурс|аукцион|запрос\s+(?:котировок|предложений)", re.I)
-CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+закупки|решение\s+об\s+отмене\s+закупки\s+принято)"
-CANCEL_POSTED = (r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+закупки"
-                 r"(?:\s+в\s+" + _EIS_LABEL + r")?|(?:извещение|решение)\s+об\s+отмене\s+закупки\s+"
+CANCEL_DECISION = r"(?:дата\s+(?:принятия\s+)?решения\s+об\s+отмене\s+(?:конкурентной\s+)?закупки|решение\s+об\s+отмене\s+(?:конкурентной\s+)?закупки\s+принято)"
+CANCEL_POSTED = (r"(?:дата\s+(?:размещения|публикации)\s+(?:извещения|решения)\s+об\s+отмене\s+(?:конкурентной\s+)?закупки"
+                 r"(?:\s+в\s+" + _EIS_LABEL + r")?|(?:извещение|решение)\s+об\s+отмене\s+(?:конкурентной\s+)?закупки\s+"
                  r"(?:размещено|опубликовано)(?:\s+в\s+" + _EIS_LABEL + r")?)")
 SME_EXCLUSIVE = re.compile(r"(?:только|исключительно)\s+субъект[ыа-я\s]{0,35}малого\s+и\s+среднего\s+предпринимательства|участниками\s+которо[йго]+\s+могут\s+быть\s+только\s+субъект",re.I)
 _PAYMENT_SUBJECT = r"\b(?:срок\s+оплаты|оплата|расч[её]т[ыа]?|оплат[уы])\b"
 PAYMENT_DAYS = re.compile(
-    r"(?:\bсрок\s+оплаты\s*(?P<label>составляет|[:：])|"
+    r"(?:\bсрок\s+оплаты\s*(?P<label>составляет|не\s+превышает|"
+    r"(?:составляет\s+)?не\s+более|[:：])|"
     r"\b(?:оплата|расч[её]т[ыа]?|оплат[уы])\b"
     r"(?:(?!" + _PAYMENT_SUBJECT + r")[^.;!?]){0,280}?"
-    r"(?P<period>в\s+течение|не\s+позднее(?:\s+чем)?))"
+    r"(?P<period>в\s+течение|не\s+позднее(?:\s+чем)?|не\s+более))"
     r"\s*(?P<days>\d{1,3})\s*(?:\((?P<spelling>[^)]{0,40})\)\s*)?"
     r"рабоч(?:их|его)\s+(?:дней|дня|дн\.?)(?!\w)", re.I)
 _PAYMENT_ACCEPTANCE = re.compile(
@@ -334,6 +335,41 @@ def clarification_deadline_review(doc, request, assessment, evidence, *, cross_o
     return item
 
 
+def clarification_event_scope(p, request_doc, request, response_doc, response):
+    """Veto contradictory source scopes at the two actual event positions.
+
+    A request number and nearby dates do not establish a common lot. Missing
+    labels remain unspecified; explicit conflicting identities cannot be joined.
+    """
+    from legal_document_context import source_scope_context
+    request_scope = source_scope_context(p, request_doc, request.start())
+    response_scope = source_scope_context(p, response_doc, response.start())
+    compatible = (request_scope["eligible_actual"] and response_scope["eligible_actual"] and
+        all(not request_scope[key] or not response_scope[key] or request_scope[key] == response_scope[key]
+            for key in ("purchase_ids", "lots", "lot_ids")))
+    evidence = []
+    for doc, match in ((request_doc, request), (response_doc, response)):
+        source = str((doc.get("meta") or {}).get("source_url") or doc.get("url") or "")
+        evidence.append(match[0] + ". Источник: " + source)
+    return {"state": "confirmed" if compatible else "requires_review",
+            "reason_code": "" if compatible else "clarification_event_scope_mismatch",
+            "reason": "" if compatible else
+                "Запрос и публикация разъяснения относятся к разным или неоднозначным закупкам/лотам; общий номер запроса не подтверждает одну цепочку событий.",
+            "request_scope": request_scope, "response_scope": response_scope,
+            "evidence_text": "; ".join(evidence)}
+
+
+def clarification_scope_review(doc, request, assessment, *, cross_original=False):
+    code = "v341-clarification-cross-doc-scope" if cross_original else "v341-clarification-event-scope"
+    item = review(doc, code, "Сверить закупку и лот запроса и публикации разъяснения",
+                  assessment["evidence_text"], "223-ФЗ, ст. 3.2 ч. 3", request)
+    item.update(match_text=request[0], source_excerpt=request[0], source_position=request.start(),
+        decision_kind="actual_event", clarification_scope_assessment=assessment,
+        methodology_reason_codes=[assessment["reason_code"]], methodology_reasons=[assessment["reason"]],
+        note=assessment["reason"])
+    return item
+
+
 def _distinct_numbered_events(left, right):
     """Only independently established, different event numbers defeat dedup.
 
@@ -469,6 +505,11 @@ def evaluate(p, docs):
                 checks.append(review(doc, "v341-clarification-applicability", "Проверить обязанность и срок ответа на запрос разъяснений",
                                      snippet, "223-ФЗ, ст. 3.2 ч. 3", request))
                 continue
+            if not xml_reply:
+                scope_proof = clarification_event_scope(p, doc, request, doc, peers[0])
+                if scope_proof["state"] != "confirmed":
+                    checks.append(clarification_scope_review(doc, request, scope_proof))
+                    continue
             deadline_proof = clarification_deadline(p, doc, request, received)
             if deadline_proof.get("evidence_text"):
                 snippet += " " + deadline_proof["evidence_text"]

@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import httpx
 from fastapi import FastAPI
@@ -35,9 +36,27 @@ class FeatureTests(unittest.TestCase):
             c.execute("INSERT INTO findings(reg_number,kind,code,title) VALUES('32610000001','violation','CLAR-LATE','Нарушение срока разъяснения')")
             c.execute("INSERT INTO requests_v233 VALUES('32610000002','manual','pending','2026-10-10')")
         self.app=FastAPI()
-        features.install({'app':self.app,'conn':conn,'_verified_set235':lambda:{'32610000001','32610000002'}})
+        self.dashboard_reads=[]
+        coordinator=features.DashboardReadCoordinator
+        def owned_coordinator(*args,**kwargs):
+            cache=coordinator(*args,**kwargs)
+            self.dashboard_reads.append(cache)
+            return cache
+        with patch.object(features,'DashboardReadCoordinator',owned_coordinator):
+            features.install({'app':self.app,'conn':conn,'_verified_set235':lambda:{'32610000001','32610000002'}})
         for fn in self.app.router.on_startup:asyncio.run(fn())
-    def tearDown(self):self.temp.cleanup()
+        # These route smoke tests begin from an actually prepared snapshot;
+        # asynchronous warming/visibility transitions have dedicated tests.
+        self._settle_dashboard_reads()
+    def _settle_dashboard_reads(self):
+        for cache in self.dashboard_reads:
+            with cache._lock:
+                pending=tuple(cache._running.values())
+            for future in pending:future.result(timeout=5)
+    def tearDown(self):
+        # A pending sqlite3.connect can recreate the DB during rmtree.
+        self._settle_dashboard_reads()
+        self.temp.cleanup()
     def test_dashboard_manual_isolation_and_findings(self):
         async def task():
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url="http://test") as c:

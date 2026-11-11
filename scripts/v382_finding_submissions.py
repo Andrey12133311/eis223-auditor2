@@ -4,7 +4,7 @@ from scripts.account_api_v1 import connect, current_account, require_origin
 from scripts.account_session_policy_v1 import no_store_headers
 from scripts.v368_manager_workflow import supervisor, _audit, REG
 from scripts.v368_manager_evidence import _legal_items, _db_state
-from scripts.v384_thematic_findings import require_batch_owner, thematic_items
+from scripts.v384_thematic_findings import require_batch_owner, thematic_items, thematic_exact_items
 import sqlite3
 
 router = APIRouter(tags=['finding-submissions'])
@@ -21,6 +21,16 @@ def _items(request, reg, batch=""):
     try:
         return (thematic_items(_db_state(request), batch, reg) if batch
                 else _legal_items(_db_state(request), reg))
+    except sqlite3.Error as exc:
+        raise HTTPException(503, 'Не удалось открыть доказательства ЕИС') from exc
+
+
+def _exact_item(request, reg, finding_key, batch=""):
+    """Resolve the requested source key without choosing another representation."""
+    if not batch:
+        return next((item for item in _items(request, reg) if item['finding_key'] == finding_key), None)
+    try:
+        return next(iter(thematic_exact_items(_db_state(request), batch, reg, [finding_key])), None)
     except sqlite3.Error as exc:
         raise HTTPException(503, 'Не удалось открыть доказательства ЕИС') from exc
 
@@ -59,7 +69,7 @@ def submit_finding(reg: str, finding_key: str, request: Request, batch: str = ""
         manager = db.execute("SELECT t.manager_id FROM account_manager_teams t JOIN account_users m ON m.id=t.manager_id WHERE t.user_id=%s AND m.role='manager' AND m.status='approved'", (user,)).fetchone()
         if not manager:
             raise HTTPException(409, 'Ваш руководитель не назначен. Обратитесь к администратору.')
-        item = next((x for x in _items(request, reg, batch) if x['finding_key'] == finding_key), None)
+        item = _exact_item(request, reg, finding_key, batch)
         if item is None:
             raise HTTPException(409, 'Доказательство изменилось; обновите карточку')
         if item.get('effective_status', 'confirmed') != 'confirmed':
@@ -104,7 +114,7 @@ def manager_submissions(request: Request, response: Response):
                 if context not in loaded:
                     try:
                         require_batch_owner(db,r[0],r[9])
-                        loaded[context]=thematic_items(_db_state(request),r[9],r[1])
+                        loaded[context]=thematic_exact_items(_db_state(request),r[9],r[1])
                     except HTTPException as exc:
                         if exc.status_code not in (404,409,422):raise
                         loaded[context]=[]

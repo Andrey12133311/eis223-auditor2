@@ -233,6 +233,11 @@ def _appendix(snapshot):
                 lines.append(prefix + str(event["law"]))
             if event.get("decision_kind") == "document_requirement":
                 lines.append("Проверено условие документа. Фактическое отклонение заявки этим выводом не устанавливается.")
+            if event.get("decision_kind") == "contract_condition":
+                if row.get("key") == "contract_signing":
+                    lines.append("Проверено условие о сроке заключения договора. Фактическая дата заключения требует отдельных подтверждённых документов.")
+                elif row.get("key") in {"payment_223", "sme_payment"}:
+                    lines.append("Проверено условие оплаты. Приёмка и фактические платежи требуют отдельных подтверждённых документов.")
             for reason in dict.fromkeys(event.get("methodology_reasons") or []):
                 lines.append("Проверка обоснованности: " + str(reason))
             if event.get("reason"):

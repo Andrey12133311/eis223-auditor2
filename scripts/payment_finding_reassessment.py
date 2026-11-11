@@ -15,7 +15,7 @@ import json
 import sqlite3
 
 
-REVISION = "registered-legal-evidence-reassessment-2"
+REVISION = "registered-legal-evidence-reassessment-3"
 # Retain the deployed append-only table and old field aliases. Expanding the
 # assessed rule set must not rebuild history or invalidate manager record keys.
 TABLE = "payment_finding_assessments"
@@ -52,12 +52,25 @@ def is_payment_finding(item):
 
 
 def is_reassessable_finding(item):
-    """Registered decisions in the shared 19-criterion legal pipeline.
+    """Registered decisions and historical sheet labels need current review.
 
     Keep unrelated/unregistered findings outside this overlay; a new legal
     classification must not be inferred from a similar title or article.
     """
     if not isinstance(item, dict):
+        return False
+    from vp_inspection_criteria import BY_KEY
+    code = str(item.get("code") or item.get("field_path") or "").strip().lower()
+    return code in BY_KEY or _can_confirm_finding(item)
+
+
+def _can_confirm_finding(item):
+    """A retained row label cannot register a substantive rule via a journal."""
+    if not isinstance(item, dict):
+        return False
+    from vp_inspection_criteria import BY_KEY
+    code = str(item.get("code") or item.get("field_path") or "").strip().lower()
+    if code in BY_KEY:
         return False
     if is_payment_finding(item):
         return True
@@ -76,11 +89,12 @@ def evidence_key(item):
     """Exact source and quotation, independent of a rewritten display heading.
 
     A shared URL, a similar title or another clause with the same duration is
-    insufficient.  Different rule codes and different source evidence retain
-    independent classifications.
+    insufficient. Different cited legal grounds, rule codes and source
+    evidence retain independent classifications. Citation text is deliberately
+    exact: a current proof cannot repair a retained wrong or missing provision.
     """
     item = _record(item)
-    return _digest([item[key] for key in ("code", "evidence", "document", "source_url")])
+    return _digest([item[key] for key in ("code", "law", "evidence", "document", "source_url")])
 
 
 def initialize(db):
@@ -169,7 +183,7 @@ def prepare_assessment(reg, findings, *, scope="general", batch="", engine_signa
     if complete:
         seen = set()
         for item in findings:
-            if not is_reassessable_finding(item):
+            if not _can_confirm_finding(item):
                 continue
             if item.get("kind", "violation") != "violation" or item.get("status", "violation") != "violation":
                 continue
@@ -276,7 +290,7 @@ def _assessment(db, scope, batch, reg, current_engine=None):
         records = json.loads(event["confirmed_json"])
         if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
             raise ValueError("Invalid payment assessment")
-        result["confirmed_keys"] = {evidence_key(item) for item in records if is_reassessable_finding(item)}
+        result["confirmed_keys"] = {evidence_key(item) for item in records if _can_confirm_finding(item)}
         result["stale"] = False
     except (TypeError, ValueError):
         result["reason"] = "Сохранённая юридическая перепроверка недоступна. Требуется повторная проверка."
@@ -293,7 +307,8 @@ def _apply(db, scope, batch, reg, items):
         if not is_reassessable_finding(item):
             result.append(item)
             continue
-        confirmed = evidence_key(item) in assessment["confirmed_keys"] and not assessment["stale"]
+        confirmed = (_can_confirm_finding(item) and
+                     evidence_key(item) in assessment["confirmed_keys"] and not assessment["stale"])
         status = "confirmed" if confirmed else "requires_review"
         # A different applicable overlay may already have rejected this row.
         if item.get("effective_status", "confirmed") != "confirmed":
@@ -323,7 +338,8 @@ def apply_thematic_reassessments(db, batch, reg, items):
 
 def revision(db, batch):
     """Saved-view cache stamp, including SQL source edits without added rows."""
-    regs = sorted({row[0] for row in db.execute("SELECT DISTINCT reg,code FROM thematic_findings "
+    from thematic_proof_variants import source_sql, revision as proof_revision
+    regs = sorted({row[0] for row in db.execute("SELECT DISTINCT reg,code FROM " + source_sql(db) + " "
             "WHERE batch_id=? AND code IS NOT NULL", (batch,))
             if is_reassessable_finding({"code": row[1]})})
     if not regs:
@@ -337,4 +353,4 @@ def revision(db, batch):
         except (sqlite3.Error, ValueError):
             token = ""
         tokens.append((reg, token, _thematic_marker(db, batch, reg)))
-    return (int(latest), _digest([REVISION, _engine(), tokens]))
+    return (int(latest), _digest([REVISION, _engine(), tokens, proof_revision(db, batch)]))

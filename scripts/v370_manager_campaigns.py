@@ -200,6 +200,55 @@ def manager_list(request:Request,response:Response):
                             () if role=="admin" else (actor,))
     return _read(rows,request)
 
+def _staff_source_window(con, selected):
+    """Fair, bounded streams across independent source-id domains.
+
+    The caller has already restricted ``selected`` to authenticated campaign
+    ids. Both ownership/category filters and membership apply before each
+    store's LIMIT; fetch only the combined 1,200 rows, refilling from one store
+    when the other is absent or exhausted. No source table is initialized here.
+    """
+    clauses, args = [], []
+    for batch, categories in selected.items():
+        if not isinstance(categories, list) or not all(isinstance(value, str) for value in categories):
+            raise HTTPException(409,"Направления тематической проверки повреждены")
+        if categories:
+            clauses.append("(f.batch_id=? AND f.category IN ("+
+                           ",".join("?" for _ in categories)+"))")
+            args.extend((batch,*categories))
+    if not clauses:
+        return []
+    from thematic_proof_variants import source_sql
+    relation=source_sql(con)
+    query=("SELECT f.*,COALESCE(i.updated_at,'') AS _source_updated_at FROM "+
+        relation+" AS f JOIN thematic_items i ON i.batch_id=f.batch_id AND i.reg=f.reg "
+        "WHERE f._source_storage=? AND ("+" OR ".join(clauses)+") "
+        "ORDER BY f._source_rowid DESC LIMIT 1200")
+    cursors=[]
+    result=[]
+    try:
+        for storage in ("legacy","variant"):
+            cursor=con.execute(query,(storage,*args))
+            cursors.append((cursor,[field[0] for field in cursor.description]))
+        active=list(cursors)
+        while active and len(result)<1200:
+            for entry in list(active):
+                cursor,names=entry
+                row=cursor.fetchone()
+                if row is None:
+                    active.remove(entry)
+                    continue
+                item=dict(row) if hasattr(row,"keys") else dict(zip(names,row))
+                item["_source_window_position"]=len(result)
+                result.append(item)
+                if len(result)>=1200:
+                    break
+    finally:
+        for cursor,_ in cursors:
+            cursor.close()
+    return result
+
+
 @staff_router.get("/violations")
 def staff_campaign_violations(request:Request,response:Response):
     """Present real thematic findings as ordinary violation cards, not tasks.
@@ -227,13 +276,10 @@ def staff_campaign_violations(request:Request,response:Response):
         con.execute("PRAGMA query_only=ON")
         ids=[r[0] for r in rows]
         placeholders=",".join("?" for _ in ids)
-        recent=[dict(row) for row in con.execute(
-            "SELECT rowid AS source_rowid,batch_id,reg,category,title,law,evidence,code,"
-            "document,source_url,law_url FROM thematic_findings WHERE batch_id IN ("+
-            placeholders+") ORDER BY rowid DESC LIMIT 1200",ids)]
         selected={row[0]:json.loads(row[1]) for row in con.execute(
             "SELECT id,categories FROM thematic_batches WHERE id IN ("+placeholders+")",ids)}
-        from scripts.v384_thematic_findings import canonical_item
+        recent=_staff_source_window(con,selected)
+        from scripts.v384_thematic_findings import canonical_item, collapse_exact_claims
         from scripts.v385_msp_reassessment import apply_reassessments
         from payment_finding_reassessment import apply_thematic_reassessments
         contexts={}
@@ -242,19 +288,32 @@ def staff_campaign_violations(request:Request,response:Response):
                 contexts.setdefault((item["batch_id"],item["reg"]),[]).append(item)
         canonical=[]
         for (batch,reg),raw in contexts.items():
-            # Classify each exact payment source before episode collapse. An
-            # old unsupported template must not absorb a current confirmed
-            # contract merely because their titles/quotations are similar.
+            # Classify both legal and SME status for each exact source before
+            # grouping. A historical premise must not choose the public
+            # representative before the current source has been considered.
             raw=apply_thematic_reassessments(con,batch,reg,raw)
-            limited=[{**canonical_item(reg,item),"source_rowid":item["source_rowid"]}
-                     for item in collapse_legal_events(raw)]
+            limited=[{**canonical_item(reg,item),
+                "source_rowid":item["_source_rowid"],
+                **{field:item[field] for field in
+                   ("_source_storage","_source_rowid","_source_updated_at","_source_window_position")}}
+                for item in raw]
             classified=apply_reassessments(con,batch,reg,limited,same_incident=True)
             # The SME overlay defaults unrelated rules to confirmed. Restore
             # the exact payment assessment after it, preserving both histories.
             classified=apply_thematic_reassessments(con,batch,reg,classified)
-            canonical.extend({**item,"batch_id":batch,"reg":reg} for item in
-                classified)
-        canonical.sort(key=lambda item:item["source_rowid"],reverse=True)
+            classified=collapse_exact_claims(classified)
+            canonical.extend({**item,"batch_id":batch,"reg":reg,
+                "source_representations":int(item.get("raw_count",1))}
+                for item in collapse_legal_events(classified))
+        # Keep the fair stream order through the 500-card display limit too;
+        # sorting by storage again would recreate the same starvation there.
+        canonical.sort(key=lambda item:item["_source_window_position"])
+        canonical=[{key:value for key,value in item.items()
+                    if not key.startswith("_source_")} for item in canonical]
+        # The public key intentionally ignores detector aliases. Resolve one
+        # exact claim across owned contexts before a legacy default can
+        # restore a separately reviewed representation of that same material.
+        canonical=collapse_exact_claims(canonical)
         revised=[item for item in canonical if item["effective_status"]!="confirmed"]
         # Overlay per batch BEFORE cross-batch deduplication; one correction
         # must not hide a different campaign's still-active incident.

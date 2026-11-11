@@ -111,6 +111,14 @@ COPY tests/test_archive_expansion_cache.py tests/test_checklist_document_identit
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_expansion_cache test_checklist_document_identity test_bid_security_requirement_recall test_collective_agreement_application_duty
 COPY tests/test_archive_first_pass.py tests/test_security_field_boundaries.py tests/test_thematic_analysis_cancellation.py tests/
 RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_first_pass test_security_field_boundaries test_thematic_analysis_cancellation
+COPY tests/test_archive_expansion_budget.py tests/test_security_formula_continuations.py tests/test_text_cache_source_stability.py tests/test_clarification_event_scope.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_archive_expansion_budget test_security_formula_continuations test_text_cache_source_stability test_clarification_event_scope
+COPY tests/test_confirmed_event_recall.py tests/test_confirmed_amount_recall.py tests/test_verified_source_recall.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_confirmed_event_recall test_confirmed_amount_recall test_verified_source_recall
+COPY tests/test_contract_conclusion_terms.py tests/test_contract_conclusion_pipeline.py tests/test_contract_lot_episode_identity.py tests/test_inspection_control_methodology.py tests/test_legacy_criterion_reassessment.py tests/test_security_distinct_lots.py tests/test_security_lot_episode_identity.py tests/test_sme_methodology_reassessment.py tests/test_thematic_source_exact_output.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_contract_conclusion_terms test_contract_conclusion_pipeline test_contract_lot_episode_identity test_inspection_control_methodology test_legacy_criterion_reassessment test_security_distinct_lots test_security_lot_episode_identity test_sme_methodology_reassessment test_thematic_source_exact_output test_vp_inspection_criteria
+COPY tests/test_criterion_completion_proof.py tests/test_legal_basis_proof_identity.py tests/test_proof_retention_signature.py tests/test_thematic_proof_variants.py tests/test_thematic_variant_readers.py tests/test_thematic_variant_staff_mail.py tests/
+RUN PYTHONPATH=/app:/app/scripts:/app/tests python -m unittest test_criterion_completion_proof test_legal_basis_proof_identity test_proof_retention_signature test_thematic_proof_variants test_thematic_variant_readers test_thematic_variant_staff_mail
 EXPOSE 8080
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
 

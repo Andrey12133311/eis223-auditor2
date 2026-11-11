@@ -96,6 +96,8 @@ def init(ns):
    if col not in evidence_cols:
     c.execute("ALTER TABLE thematic_findings ADD COLUMN "+col+" TEXT NOT NULL DEFAULT ''")
   c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_evidence_by_purchase ON thematic_findings(batch_id,reg)")
+  from thematic_proof_variants import initialize as initialize_proof_variants
+  initialize_proof_variants(c)
   # Early Docker selftests expose scripts/ alone; account routes use the package.
   try:
    from scripts.v385_msp_reassessment import initialize as initialize_reassessments
@@ -172,7 +174,8 @@ def match_legal_category(f,categories):
  return None
 
 async def independent_review(ns,reg,categories):
- from v332_all_procurements_audit import existing,as_procurement,collect_saved_evidence,is_official,thread_call
+ from v332_all_procurements_audit import (existing,as_procurement,collect_saved_evidence,
+                                         is_official,thread_call,merge_acquired_purchase)
  # The outer item timeout cancels this coroutine, not a running executor
  # thread. Keep its reservation/capacity until that physical stage settles,
  # including report writes, so a retry cannot overlap abandoned legal work.
@@ -184,10 +187,7 @@ async def independent_review(ns,reg,categories):
  source=await collect_saved_evidence(ns,reg,rows)
  docs,unreadable=source["docs"],source["unreadable"]
  incomplete=bool(unreadable or source["source_incomplete"])
- for key,value in source["p"].items():
-    if value is not None and value != "" and (not p.get(key) or key in ("method","published","submission_end","submission_start",
-                                                   "deadline","price","price_num","price_kind")):
-       p[key]=value
+ p=merge_acquired_purchase(p,source["p"])
  # Preserve collection coverage before filtering out unreadable originals.
  # Otherwise the legal engine sees a deceptively complete, readable subset.
  p.update(source_incomplete=bool(source["source_incomplete"]),
@@ -290,11 +290,13 @@ async def independent_review(ns,reg,categories):
     selected.append({
       "title":str(f.get("title") or "")[:500],
       "law":str(f.get("law") or "")[:500],
-      "evidence":str(f.get("evidence") or "")[:3000],
+      # These fields form the registered evidence key. Display limits must
+      # not replace the source or quotation before persistence/reassessment.
+      "evidence":str(f.get("evidence") or ""),
       "category":category,
       "code":str(f.get("code") or "")[:150],
-      "document":str(f.get("document") or "")[:255],
-      "source_url":str(f.get("source_url") or "")[:2000],
+      "document":str(f.get("document") or ""),
+      "source_url":str(f.get("source_url") or ""),
       "law_url":str(f.get("law_url") or "")[:1000],
       "note":str(f.get("note") or "")[:3000],
       "decision_kind":str(f.get("decision_kind") or "")[:100],
@@ -445,14 +447,16 @@ def _thematic_history_records(ns, permitted_ids=None):
    try:item["categories"]=json.loads(item["categories"] or "[]")
    except (ValueError,TypeError):item["categories"]=[]
    batch=item["id"]
-   rev=c.execute("SELECT COALESCE(MAX(rowid),0) FROM thematic_findings WHERE batch_id=?",(batch,)).fetchone()[0]
+   from thematic_proof_variants import revision as proof_revision
+   proof_stamp=proof_revision(c,batch)
+   item["stored_rows"]=proof_stamp[0]+proof_stamp[2]
    try:
     from scripts.v385_msp_reassessment import revision as reassessment_revision
    except ModuleNotFoundError as exc:
     if exc.name != "scripts":raise
     from v385_msp_reassessment import revision as reassessment_revision
    from payment_finding_reassessment import revision as payment_revision
-   stamp=(int(item["stored_rows"]),int(rev),reassessment_revision(c,batch),payment_revision(c,batch))
+   stamp=(proof_stamp,reassessment_revision(c,batch),payment_revision(c,batch))
    cached=_HISTORY_COUNT_CACHE.get(batch)
    if cached and cached[0]==stamp:
     unique,titles,revised_count=cached[1:]
@@ -743,6 +747,8 @@ def install(ns):
    row=c.execute("SELECT id FROM thematic_batches WHERE id=?",(batch,)).fetchone()
    if not row:raise HTTPException(404,"Очередь не найдена")
    c.execute("UPDATE thematic_batches SET status='stopped' WHERE id=?",(batch,))
+   from thematic_proof_variants import delete_batch_variants
+   delete_batch_variants(c,batch)
    c.execute("DELETE FROM thematic_findings WHERE batch_id=?",(batch,))
    c.execute("DELETE FROM thematic_items WHERE batch_id=?",(batch,))
    c.execute("DELETE FROM thematic_batches WHERE id=?",(batch,))

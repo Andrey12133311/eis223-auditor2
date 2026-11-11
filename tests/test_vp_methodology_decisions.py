@@ -83,8 +83,14 @@ def test_conflicting_status_classes_cannot_confirm_violation_or_compliance():
         assert "reported_status_conflict" in decision["methodology_reason_codes"]
         target = row(evaluate(purchase(), [doc()], [item]), "bid_security")
         assert not target["has_violation"] and not target["no_violation"]
-    # A checklist container may carry an explicitly complete positive result.
-    assert row(evaluate(purchase(), [doc()], [], [finding(kind="check", status="compliant", criterion_complete=True)]), "bid_security")["no_violation"]
+    # This positive status is internally consistent, but the completeness flag
+    # cannot turn a narrow amount rule into a whole-criterion validator.
+    positive = finding(kind="check", status="compliant", criterion_complete=True)
+    decision = decision_qualification(positive, "bid_security")
+    assert "reported_status_conflict" not in decision["methodology_reason_codes"]
+    assert "criterion_completion_unverified" in decision["methodology_reason_codes"]
+    target = row(evaluate(purchase(), [doc()], [], [positive]), "bid_security")
+    assert target["status"] == "unknown" and not target["no_violation"]
 
 
 def test_registered_rule_wins_over_wrong_criterion_tag_without_losing_conflict():

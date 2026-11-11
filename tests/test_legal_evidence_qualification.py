@@ -203,11 +203,17 @@ class LegalEvidenceQualification(unittest.TestCase):
         self.assertEqual(row["status"], "unknown")
         self.assertFalse(row["no_violation"])
 
-    def test_empty_results_stay_unknown_while_complete_supported_positive_is_retained(self):
+    def test_empty_results_and_narrow_positive_flags_stay_unknown(self):
         self.assertEqual(criterion(engine.evaluate(P, [original()]))["status"], "unknown")
         positive = claim(kind="check", status="ok", criterion_complete=True)
         row = criterion(engine.evaluate(P, [original()], [], [positive]))
-        self.assertEqual(row["status"], "compliant")
+        self.assertEqual(row["status"], "unknown")
+        self.assertFalse(row["no_violation"])
+        self.assertTrue(row["review_required"])
+        self.assertTrue(row["legal_basis_verified"])
+        self.assertIn("criterion_completion_unverified", row["methodology_reason_codes"])
+        self.assertEqual(row["unresolved"][0]["reported_status"], "ok")
+        self.assertEqual(row["unresolved"][0]["evidence"], CLAUSE)
 
     def test_real_cross_original_clarification_chain_survives_common_qualification(self):
         docs = clarification_pair()

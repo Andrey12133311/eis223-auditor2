@@ -6,6 +6,7 @@ are NOT the same infringement merely because their rule code is identical.
 No destructive SQL cleanup is performed.
 """
 import re
+from security_episode_identity import distinct_condition_lots, condition_evidence_text, condition_scope_key
 from v333_dedup_ui import issue_key,_different_fact,_proof
 from v352_dashboard_truth import _common_event
 from v341_eis_facts import DATE_TOKEN,parse_day
@@ -26,6 +27,7 @@ def event_dates(evidence):
 def same_episode(old,new):
     """Only suppress a stored row when both represent the same legal act."""
     if not isinstance(old,dict) or not isinstance(new,dict):return False
+    if distinct_condition_lots(old,new):return False
     old_status=old.get("status") or old.get("kind")
     new_status=new.get("status") or new.get("kind")
     if old_status and new_status and old_status!=new_status:return False
@@ -53,7 +55,8 @@ def same_episode(old,new):
     la=str(old.get("law") or "").strip().casefold()
     lb=str(new.get("law") or "").strip().casefold()
     if la and lb and la!=lb:return False
-    ea,eb=_proof(event_occurrence_text(old)),_proof(event_occurrence_text(new))
+    ea=_proof(condition_evidence_text(old,event_occurrence_text(old)))
+    eb=_proof(condition_evidence_text(new,event_occurrence_text(new)))
     if _different_fact(ea,eb):
         # Date spelling (2026-10-01 vs 01.10.2026) is not a new event.
         old_dates,new_dates=event_dates(ea),event_dates(eb)
@@ -76,7 +79,9 @@ def distinct_new(candidate,existing):
                  (("PROTOCOL-",finding_protocol_number),("CLARIFICATION-",finding_clarification_number))
                  if family in code),None)
     identified=bool(reader and reader(candidate))
+    scoped=bool(condition_scope_key(candidate))
     return not any(same_episode(previous,candidate) for previous in existing
                    if not local_event_refines(candidate,previous)
+                   and (not scoped or condition_scope_key(previous))
                    and (not identified or reader(previous) or same_original_identity(previous,candidate)))
 
