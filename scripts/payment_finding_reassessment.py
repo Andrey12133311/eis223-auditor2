@@ -15,7 +15,7 @@ import json
 import sqlite3
 
 
-REVISION = "registered-legal-evidence-reassessment-2"
+REVISION = "registered-legal-evidence-reassessment-3"
 # Retain the deployed append-only table and old field aliases. Expanding the
 # assessed rule set must not rebuild history or invalidate manager record keys.
 TABLE = "payment_finding_assessments"
@@ -89,11 +89,12 @@ def evidence_key(item):
     """Exact source and quotation, independent of a rewritten display heading.
 
     A shared URL, a similar title or another clause with the same duration is
-    insufficient.  Different rule codes and different source evidence retain
-    independent classifications.
+    insufficient. Different cited legal grounds, rule codes and source
+    evidence retain independent classifications. Citation text is deliberately
+    exact: a current proof cannot repair a retained wrong or missing provision.
     """
     item = _record(item)
-    return _digest([item[key] for key in ("code", "evidence", "document", "source_url")])
+    return _digest([item[key] for key in ("code", "law", "evidence", "document", "source_url")])
 
 
 def initialize(db):
@@ -337,7 +338,8 @@ def apply_thematic_reassessments(db, batch, reg, items):
 
 def revision(db, batch):
     """Saved-view cache stamp, including SQL source edits without added rows."""
-    regs = sorted({row[0] for row in db.execute("SELECT DISTINCT reg,code FROM thematic_findings "
+    from thematic_proof_variants import source_sql, revision as proof_revision
+    regs = sorted({row[0] for row in db.execute("SELECT DISTINCT reg,code FROM " + source_sql(db) + " "
             "WHERE batch_id=? AND code IS NOT NULL", (batch,))
             if is_reassessable_finding({"code": row[1]})})
     if not regs:
@@ -351,4 +353,4 @@ def revision(db, batch):
         except (sqlite3.Error, ValueError):
             token = ""
         tokens.append((reg, token, _thematic_marker(db, batch, reg)))
-    return (int(latest), _digest([REVISION, _engine(), tokens]))
+    return (int(latest), _digest([REVISION, _engine(), tokens, proof_revision(db, batch)]))

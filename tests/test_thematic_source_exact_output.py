@@ -19,6 +19,7 @@ import test_general_thematic_parity as pipeline
 
 REG = pipeline.REG
 CODE = "v372-protocol-rejected-bid-no-reasons"
+LAW = "223-ФЗ, ст. 3.2 ч. 13 п. 3 пп. «б»"
 LONG_NAME = ("Пакет сохранённых оригиналов — " + "документы_закупки_" * 24 +
              " / Протокол рассмотрения заявок.pdf")
 
@@ -95,7 +96,7 @@ class ThematicSourceExactOutput(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state, "completed")
         self.assertEqual(len(findings), 1)
         actual = findings[0]
-        expected = {"code": CODE, "document": original["name"],
+        expected = {"code": CODE, "law": LAW, "document": original["name"],
                     "source_url": original["meta"]["source_url"], "evidence": original["text"]}
         self.assertEqual(actual["document"], expected["document"])
         self.assertEqual(actual["evidence"], expected["evidence"])

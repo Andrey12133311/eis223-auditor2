@@ -20,6 +20,12 @@ from legal_applicability import competitive_rule_scope
 
 REVISION = "inspection-sheet-19-v4"
 
+# Complete-criterion verdicts require an independently implemented validator,
+# not a flag on a narrow detector's output. No installed rule currently proves
+# every obligation of an entire sheet row. Register a future full validator by
+# criterion and exact rule code only alongside its full-scope evidence checks.
+COMPLETE_CRITERION_VALIDATORS = {}
+
 # Exact rule identities take precedence over titles. In particular, a mention
 # of "documentation" in a payment finding cannot become a documentation defect.
 _RULE_KEYS = {
@@ -376,6 +382,9 @@ def decision_qualification(item, key):
         add("review_rule_cannot_confirm", "Это правило выявляет обстоятельство для проверки и не устанавливает нарушение или соблюдение критерия.")
     if status in positive and item.get("criterion_complete") is not True:
         add("criterion_not_fully_checked", "Положительный результат отдельного поля не подтверждает проверку всего критерия.")
+    completion_registered = code in COMPLETE_CRITERION_VALIDATORS.get(key, ())
+    if requested == "compliant" and not completion_registered:
+        add("criterion_completion_unverified", "Правило проверяет отдельное обстоятельство; самостоятельная полная проверка всех требований этого пункта не подтверждена.")
     if (code == "223-4-11-change-after-bid-deadline" and requested == "unknown" and
             (kind == "violation" or status == "violation")):
         add("post_deadline_breach_unproven", "Сам перенос после окончания подачи заявок не подтверждает самостоятельное нарушение закона.")
@@ -389,6 +398,7 @@ def decision_qualification(item, key):
         "decision_basis": {"rule_code": code, "criterion_keys": list(inferred or explicit),
             "rule_known": rule_known, "norm_verified": norm_verified,
             "status_consistent": status_consistent, "criterion_consistent": criterion_consistent,
+            "criterion_completion_rule_registered": completion_registered,
             "requested_status": requested, "legal_verification_scope": "citation_consistency"},
     }
 

@@ -121,7 +121,8 @@ def apply_reassessments(db, batch, reg, items, *, same_incident=False):
             # exact rule, batch and procurement; never match by category alone.
             from v352_dashboard_truth import _common_event
             equivalent = [latest[key] for key, old in snapshots.items()
-                          if old.get("code") == ELIGIBLE_CODE and _common_event(old, item)]
+                          if old.get("code") == ELIGIBLE_CODE and _common_event(old, item)
+                          and (not latest[key].get("stale") or _same_source_claim(old, item))]
             if equivalent:
                 event = max(equivalent, key=lambda value: value["id"])
         status = event["effective_status"] if event else ACTIVE
@@ -131,6 +132,21 @@ def apply_reassessments(db, batch, reg, items, *, same_incident=False):
         result.append({**item, "effective_status": status,
                        "reassessment": event, "warnings": warnings})
     return result
+
+
+def _same_source_claim(left, right):
+    """Only whitespace aliases of the same full proof may inherit stale review.
+
+    The event deduper deliberately ignores some source-identity annotations.
+    That is too permissive for carrying an obsolete assessment onto another
+    current source: material hashes, lots and quoted versions remain relevant.
+    """
+    exact = ("document", "source_url")
+    if any(str(left.get(key) or "").strip() != str(right.get(key) or "").strip() for key in exact):
+        return False
+    def normalized(value):
+        return " ".join(str(value or "").replace("\xa0", " ").split())
+    return all(normalized(left.get(key)) == normalized(right.get(key)) for key in ("law", "evidence"))
 
 
 def revision(db, batch):
@@ -209,8 +225,8 @@ async def collect_sources(ns, reg):
 
 
 def _target(db, batch, reg, key):
-    from scripts.v384_thematic_findings import read_thematic_items
-    item = next((item for item in read_thematic_items(db, batch, reg)
+    from scripts.v384_thematic_findings import read_thematic_exact_items
+    item = next((item for item in read_thematic_exact_items(db, batch, reg, [key])
                  if item["finding_key"] == key), None)
     if item is None:
         raise HTTPException(409, "Доказательство изменилось; обновите тематическую карточку")
@@ -289,11 +305,11 @@ def _engine(request):
 
 
 def authorize_target(request, batch, reg, key):
-    from scripts.v384_thematic_findings import require_batch_owner, thematic_items
+    from scripts.v384_thematic_findings import require_batch_owner, thematic_exact_items
     owner = current_account(request)[0]
     with connect() as db:
         require_batch_owner(db, owner, batch)
-    item = next((item for item in thematic_items(_engine(request), batch, reg)
+    item = next((item for item in thematic_exact_items(_engine(request), batch, reg, [key])
                  if item["finding_key"] == key), None)
     if item is None:
         raise HTTPException(409, "Доказательство изменилось; обновите тематическую карточку")

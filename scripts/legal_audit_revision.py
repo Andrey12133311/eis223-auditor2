@@ -30,6 +30,9 @@ ANALYZER_REGISTRY = {
     "vp_inspection_engine": ("install", "evaluate", "criterion_keys"),
 }
 DEPENDENCY_REGISTRY = {
+    "thematic_proof_variants": ("storage_key", "source_sql", "raw_rows"),
+    "v384_thematic_findings": ("canonical_item", "collapse_exact_claims", "_classify_sources"),
+    "v385_msp_reassessment": ("apply_reassessments",),
     "contract_conclusion_terms": ("prepare_assessment", "assess_finding", "finding_excerpt"),
     "security_episode_identity": ("security_scope_evidence", "contract_scope_evidence",
         "finding_security_scope", "finding_contract_scope", "finding_condition_scope",

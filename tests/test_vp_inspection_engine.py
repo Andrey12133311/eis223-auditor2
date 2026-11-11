@@ -83,6 +83,11 @@ def test_multiple_findings_are_preserved_and_violation_wins():
     target = row(result, "bid_security")
     assert target["has_violation"] == "✓" and not target["no_violation"]
     assert len(target["results"]) == 3
+    assert sum(item["status"] == "violation" for item in target["results"]) == 2
+    assert sum(item["status"] == "unknown" for item in target["results"]) == 1
+    assert len(target["unresolved"]) == 1
+    assert target["unresolved"][0]["reported_status"] == "compliant"
+    assert target["review_required"]
 
 
 def test_subfield_ok_does_not_mean_entire_criterion_compliant():
@@ -90,7 +95,9 @@ def test_subfield_ok_does_not_mean_entire_criterion_compliant():
     result = evaluate(purchase(), [doc()], [], [item])
     assert row(result, "bid_security")["status"] == "unknown"
     item["criterion_complete"] = True
-    assert row(evaluate(purchase(), [doc()], [], [item]), "bid_security")["no_violation"] == "✓"
+    target = row(evaluate(purchase(), [doc()], [], [item]), "bid_security")
+    assert target["status"] == "unknown" and not target["no_violation"]
+    assert "criterion_completion_unverified" in target["methodology_reason_codes"]
 
 
 def test_unknown_noncompetitive_and_sme_scopes_remain_distinct():

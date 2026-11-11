@@ -509,15 +509,15 @@ def _retain_pending_result(pending,result):
                   "expires_at":time.monotonic()+PENDING_RESULT_SECONDS}
 
 def _thematic_result_snapshot(c,batch,reg):
-    return [dict(row) for row in c.execute("""SELECT title,law,evidence,category,
-        code,document,source_url,law_url FROM thematic_findings
-        WHERE batch_id=? AND reg=? ORDER BY rowid""",(batch,reg)).fetchall()]
+    from thematic_proof_variants import raw_rows
+    return raw_rows(c,batch,reg)
 
 
 def _plan_thematic_results(results,snapshots,diagnostic_events=None):
     from v333_dedup_ui import _same_finding
     from v348_cross_document_legal import local_event_refines
-    from payment_finding_reassessment import is_reassessable_finding,prepare_assessment,evidence_key
+    from payment_finding_reassessment import is_reassessable_finding,prepare_assessment
+    from thematic_proof_variants import storage_key
     previous_by_key={key:list(rows) for key,rows in snapshots.items()}
     planned=[]
     for item,state,findings,detail in results:
@@ -541,45 +541,51 @@ def _plan_thematic_results(results,snapshots,diagnostic_events=None):
             # sole SQLite writer is reserved. A full archive can yield many
             # checks without blocking other audits or incoming EIS reports.
             unique_keys={(f.get("category"),f.get("title"),f.get("evidence")) for f in previous
-                         if all(f.get(k) is not None for k in ("category","title","evidence"))}
-            exact_keys={evidence_key(f) for f in previous if is_reassessable_finding(f)}
+                         if f.get("_source_storage","legacy")=="legacy" and
+                         all(f.get(k) is not None for k in ("category","title","evidence"))}
+            exact_keys={storage_key(f) for f in previous if is_reassessable_finding(f)}
             for f in findings:
                 registered=is_reassessable_finding(f)
-                duplicate=(evidence_key(f) in exact_keys if registered else
+                duplicate=(storage_key(f) in exact_keys if registered else
                            any(not local_event_refines(f,old) and _same_finding(old,f,"title")
                                for old in previous))
                 if duplicate:
                     audit_funnel.increment(diagnostic,"reasons","duplicate")
                     continue
                 key=(f["category"],f["title"],f.get("evidence"))
-                # Match the table's historical UNIQUE constraint too. SQLite
-                # allows repeated NULLs; all non-NULL keys are binary strings.
-                if all(value is not None for value in key) and key in unique_keys:
+                # The historical display tuple omits exact source identity.
+                # Preserve a new registered representation beside that table
+                # instead of rewriting old evidence or silently dropping it.
+                collision=all(value is not None for value in key) and key in unique_keys
+                if collision and not registered:
                     audit_funnel.increment(diagnostic,"reasons","duplicate")
                     continue
-                inserted.append(f)
-                previous.append(f)
-                if registered:exact_keys.add(evidence_key(f))
-                if all(value is not None for value in key):unique_keys.add(key)
+                retained={k:v for k,v in f.items() if k not in {"_source_storage","_source_rowid"}}
+                if collision:retained["_source_storage"]="variant"
+                inserted.append(retained)
+                previous.append(retained)
+                if registered:exact_keys.add(storage_key(f))
+                if not collision and all(value is not None for value in key):unique_keys.add(key)
         planned.append((planned_item,state,inserted,detail,before,list(previous),diagnostic))
     return planned
 
 
 def _persistence_findings(findings):
-    """Retain every fresh registered proof key before journal preparation.
+    """Retain every fresh registered representation before journal preparation.
 
     Display may group two confirmed representations of one act. Persistence
     must first retain both source proofs; exact repeats remain idempotent.
     Unknown rules keep their established semantic deduplication.
     """
     from v333_dedup_ui import collapse
-    from payment_finding_reassessment import is_reassessable_finding,evidence_key
+    from payment_finding_reassessment import is_reassessable_finding
+    from thematic_proof_variants import storage_key
     registered,legacy,seen=[],[],set()
     for item in findings:
         if not is_reassessable_finding(item):
             legacy.append(item)
             continue
-        key=evidence_key(item)
+        key=storage_key(item)
         if key not in seen:
             seen.add(key)
             registered.append(item)
@@ -653,6 +659,10 @@ def _persist(ns,results):
             if state in ("completed","retry"):
                 added=0
                 for f in findings:
+                    if f.get("_source_storage")=="variant":
+                        from thematic_proof_variants import insert_variant
+                        added+=int(insert_variant(c,batch,reg,f))
+                        continue
                     inserted=c.execute("""INSERT OR IGNORE INTO thematic_findings
                       (batch_id,reg,category,title,law,evidence,
                        code,document,source_url,law_url)

@@ -722,8 +722,12 @@ class MspReassessmentTests(unittest.TestCase):
         self.assertEqual(len(active_msp), 1)
         self.assertEqual(active_msp[0]["batch_id"], BATCH_C,
                          "The still-confirmed campaign must supply the active evidence link")
-        self.assertEqual(len(corrected["reassessed_findings"]), 1)
-        revised = corrected["reassessed_findings"][0]
+        # The identical material claim has one staff representative: current C
+        # wins over reviewed A. Its exact batch-A history stays independently
+        # addressable and must not be rewritten or silently upgraded.
+        self.assertEqual(corrected["reassessed_findings"], [])
+        from scripts.v384_thematic_findings import thematic_exact_items
+        revised = thematic_exact_items(self.ns, BATCH_A, fixture.REG_A, [self.key])[0]
         self.assertEqual((revised["batch_id"], revised["finding_key"], revised["effective_status"]),
                          (BATCH_A, self.key, "superseded"))
         self.assertEqual(revised["evidence"], self.initial["evidence"])

@@ -41,9 +41,14 @@ def install_capture(ns):
                 evidence TEXT NOT NULL
             )"""
         )
-        db.execute(
-            """CREATE TRIGGER IF NOT EXISTS thematic_mail_on_finding
-               AFTER INSERT ON thematic_findings BEGIN
+        targets=[("thematic_findings","thematic_mail_on_finding")]
+        from thematic_proof_variants import TABLE
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone():
+            targets.append((TABLE,"thematic_mail_on_proof_variant"))
+        for table,trigger in targets:
+            db.execute(
+            "CREATE TRIGGER IF NOT EXISTS "+trigger+" AFTER INSERT ON "+table+" BEGIN " +
+            """
                  INSERT INTO thematic_mail_events
                    (batch_id,reg,category,title,law,evidence)
                  VALUES (NEW.batch_id,NEW.reg,
@@ -52,7 +57,7 @@ def install_capture(ns):
                          substr(COALESCE(NEW.law,''),1,250),
                          substr(COALESCE(NEW.evidence,''),1,350));
                END"""
-        )
+            )
         db.commit()
     finally:
         db.close()

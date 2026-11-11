@@ -96,6 +96,8 @@ def init(ns):
    if col not in evidence_cols:
     c.execute("ALTER TABLE thematic_findings ADD COLUMN "+col+" TEXT NOT NULL DEFAULT ''")
   c.execute("CREATE INDEX IF NOT EXISTS idx_thematic_evidence_by_purchase ON thematic_findings(batch_id,reg)")
+  from thematic_proof_variants import initialize as initialize_proof_variants
+  initialize_proof_variants(c)
   # Early Docker selftests expose scripts/ alone; account routes use the package.
   try:
    from scripts.v385_msp_reassessment import initialize as initialize_reassessments
@@ -445,14 +447,16 @@ def _thematic_history_records(ns, permitted_ids=None):
    try:item["categories"]=json.loads(item["categories"] or "[]")
    except (ValueError,TypeError):item["categories"]=[]
    batch=item["id"]
-   rev=c.execute("SELECT COALESCE(MAX(rowid),0) FROM thematic_findings WHERE batch_id=?",(batch,)).fetchone()[0]
+   from thematic_proof_variants import revision as proof_revision
+   proof_stamp=proof_revision(c,batch)
+   item["stored_rows"]=proof_stamp[0]+proof_stamp[2]
    try:
     from scripts.v385_msp_reassessment import revision as reassessment_revision
    except ModuleNotFoundError as exc:
     if exc.name != "scripts":raise
     from v385_msp_reassessment import revision as reassessment_revision
    from payment_finding_reassessment import revision as payment_revision
-   stamp=(int(item["stored_rows"]),int(rev),reassessment_revision(c,batch),payment_revision(c,batch))
+   stamp=(proof_stamp,reassessment_revision(c,batch),payment_revision(c,batch))
    cached=_HISTORY_COUNT_CACHE.get(batch)
    if cached and cached[0]==stamp:
     unique,titles,revised_count=cached[1:]
@@ -743,6 +747,8 @@ def install(ns):
    row=c.execute("SELECT id FROM thematic_batches WHERE id=?",(batch,)).fetchone()
    if not row:raise HTTPException(404,"Очередь не найдена")
    c.execute("UPDATE thematic_batches SET status='stopped' WHERE id=?",(batch,))
+   from thematic_proof_variants import delete_batch_variants
+   delete_batch_variants(c,batch)
    c.execute("DELETE FROM thematic_findings WHERE batch_id=?",(batch,))
    c.execute("DELETE FROM thematic_items WHERE batch_id=?",(batch,))
    c.execute("DELETE FROM thematic_batches WHERE id=?",(batch,))
