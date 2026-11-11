@@ -423,6 +423,7 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
     xml_price=verified_xml_price(notice)
     try:saved_card=json.loads(previous.get("card_fields_json") or "{}")
     except (ValueError,TypeError):saved_card={}
+    if not isinstance(saved_card,dict):saved_card={}
     summary=(saved_card.get("summary") or {}) if isinstance(saved_card,dict) else {}
     if not isinstance(summary,dict):summary={}
     from v341_eis_facts import saved_price_kind
@@ -463,6 +464,23 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
         p["_current_soap_context"]={"record":notice_record,
             "fields":{key:value for key,value in fields.items() if value},
             "price":xml_price}
+        # Scope consumers read the existing card adapter, not arbitrary
+        # _current_soap_context dictionaries. Carry the exact freshly verified
+        # current notice through that adapter before either analyzer runs.
+        # An old SOAP-derived flag belongs to its old edition; independent
+        # official-card facts remain available to expose contradictions.
+        retained_facts=saved_card.get("fact_evidence")
+        current_facts=dict(retained_facts) if isinstance(retained_facts,dict) else {}
+        previous_sme=current_facts.get("sme_only")
+        if isinstance(previous_sme,dict) and previous_sme.get("source")=="official_eis_getDocsIP":
+            current_facts.pop("sme_only",None)
+        soap_metadata={key:notice_record.get(key) for key in (
+            "reg_number","xml_type","xml_family","xml_sha256","xml_filename","xml_guid",
+            "archive_sha256","version","publication","created","modified")}
+        soap_metadata["source"]="official_eis_getDocsIP"
+        p["card_fields_json"]={**saved_card,"soap_metadata":soap_metadata,
+                               "fact_evidence":current_facts}
+        p["fact_evidence"]=current_facts
 
     extractor=ns.get("extract_text")
     if extractor is None and _collected_docs is None:
@@ -604,6 +622,8 @@ async def offline_audit(ns,reg,collect_only=False,*,_collected_docs=None):
                   "price_num":p["price_num"],"price_kind":p.get("price_kind")},
        "discovery":"getDocsIP, RI223, official-browser-bridge",
     }
+    if notice_record is not None:
+        card.update(soap_metadata=soap_metadata,fact_evidence=current_facts)
     if metadata:card["metadata_evidence"]={"source":"official_eis_document",**metadata}
     detail={
        "registrationNumber":reg,

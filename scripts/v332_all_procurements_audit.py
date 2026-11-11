@@ -810,6 +810,23 @@ def existing(ns,reg):
         return dict(p),rows
     finally:c.close()
 
+def merge_acquired_purchase(purchase,source_purchase):
+    """Return legal input with freshly acquired official context precedence.
+
+    Source collection already authenticates this context. This adapter has no
+    I/O and leaves both input snapshots intact, including independent card
+    evidence retained by collection for contradiction checks.
+    """
+    merged=dict(purchase)
+    for key,value in source_purchase.items():
+        if value is not None and value != "" and (not merged.get(key) or key in (
+                "method","published","submission_end","submission_start",
+                "deadline","price","price_num","price_kind",
+                "card_fields_json","fact_evidence")):
+            merged[key]=value
+    return merged
+
+
 def as_procurement(row):
     reg=str(row["reg_number"])
     out={
@@ -1470,10 +1487,7 @@ async def _inspect_one(ns,reg):
     docs,unreadable=source["docs"],source["unreadable"]
     expected,received=source["original_expected"],source["original_received"]
     source_incomplete=source["source_incomplete"]
-    for key,value in source["p"].items():
-        if value is not None and value != "" and (not purchase.get(key) or key in ("method","published","submission_end","submission_start",
-                                                                "deadline","price","price_num","price_kind")):
-            purchase[key]=value
+    purchase=merge_acquired_purchase(purchase,source["p"])
     # Source coverage belongs to the legal input snapshot. In particular, a
     # payment clause cannot be confirmed while an unread original may contain
     # its selected revision, SME exception or executed contract.

@@ -49,7 +49,7 @@ DEPENDENCY_REGISTRY = {
     "v311_verified_customer": ("_official_source", "_verified_money", "read_verified_price"),
     "v314_eis_metadata": ("document_text", "table_pairs", "from_documents"),
     "v324_official_price": ("prices_in_text", "verified_nmcd"),
-    "v332_all_procurements_audit": ("as_procurement", "source_verified", "stored_docs.read_one", "merge_docs", "is_official",
+    "v332_all_procurements_audit": ("as_procurement", "merge_acquired_purchase", "source_verified", "stored_docs.read_one", "merge_docs", "is_official",
                                    "collect_saved_evidence", "_require_reconciled_rows", "_plan_audit_results"),
     "v335_price_recovery": ("money",),
     "v341_eis_facts": ("enrich", "persist_facts", "card_predates_notice", "reconcile_notice_context", "saved_price_kind"),

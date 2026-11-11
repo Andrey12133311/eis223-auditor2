@@ -172,7 +172,8 @@ def match_legal_category(f,categories):
  return None
 
 async def independent_review(ns,reg,categories):
- from v332_all_procurements_audit import existing,as_procurement,collect_saved_evidence,is_official,thread_call
+ from v332_all_procurements_audit import (existing,as_procurement,collect_saved_evidence,
+                                         is_official,thread_call,merge_acquired_purchase)
  # The outer item timeout cancels this coroutine, not a running executor
  # thread. Keep its reservation/capacity until that physical stage settles,
  # including report writes, so a retry cannot overlap abandoned legal work.
@@ -184,10 +185,7 @@ async def independent_review(ns,reg,categories):
  source=await collect_saved_evidence(ns,reg,rows)
  docs,unreadable=source["docs"],source["unreadable"]
  incomplete=bool(unreadable or source["source_incomplete"])
- for key,value in source["p"].items():
-    if value is not None and value != "" and (not p.get(key) or key in ("method","published","submission_end","submission_start",
-                                                   "deadline","price","price_num","price_kind")):
-       p[key]=value
+ p=merge_acquired_purchase(p,source["p"])
  # Preserve collection coverage before filtering out unreadable originals.
  # Otherwise the legal engine sees a deceptively complete, readable subset.
  p.update(source_incomplete=bool(source["source_incomplete"]),
