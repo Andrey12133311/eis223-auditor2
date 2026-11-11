@@ -69,6 +69,34 @@ class CompactManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             render_manager("user")
 
+    def test_action_metrics_are_native_keyboard_controls_with_existing_destinations(self):
+        page = self.page()
+        shortcuts = page.xpath('//*[@data-mgr-shortcut]')
+        self.assertEqual([node.get('data-mgr-shortcut') for node in shortcuts],
+                         ['pending', 'overdue', 'memos', 'team'])
+        self.assertTrue(all(node.tag == 'button' and node.get('type') == 'button'
+                            for node in shortcuts))
+        self.assertTrue(all(node.xpath('./strong[@id]') for node in shortcuts))
+        self.assertEqual(page.get_element_by_id('mgr-title').get('tabindex'), '-1')
+        statuses = page.get_element_by_id('mgr-task-status').xpath('./option/@value')
+        self.assertIn('overdue', statuses)
+        self.assertIn('submitted', statuses)
+        self.assertEqual(page.get_element_by_id('mgr-task-count').get('role'), 'status')
+        self.assertEqual(page.get_element_by_id('mgr-memo-count').get('role'), 'status')
+        for identifier in ('mgr-task-reset', 'mgr-task-empty-reset', 'mgr-memo-empty-reset'):
+            self.assertEqual(page.get_element_by_id(identifier).get('type'), 'button')
+
+    def test_navigation_icons_are_decorative_local_vectors(self):
+        page = self.page()
+        icons = page.xpath('//nav[@aria-label="Разделы руководителя"]//span[@class="mgr-tab-icon"]')
+        self.assertEqual(len(icons), 9)
+        for icon in icons:
+            self.assertEqual(icon.get('aria-hidden'), 'true')
+            self.assertEqual(len(icon.xpath('./svg')), 1)
+            self.assertEqual(icon.xpath('./svg/@focusable'), ['false'])
+            self.assertFalse(icon.text and icon.text.strip())
+        self.assertNotIn('__ICON_', render_manager('manager'))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,7 +79,7 @@ class VisualPolishTests(unittest.TestCase):
                 parser.feed(markup)
                 workbench_links = [attrs for tag, attrs in parser.items
                                    if tag == 'a' and attrs.get('href') == '/account/workbench']
-                self.assertEqual(len(workbench_links), 2)
+                self.assertEqual(len(workbench_links), 3)  # Two cabinet links plus the new main navigation.
                 self.assertIn('<a href="/account/workbench">Рабочее место сотрудника</a>', markup)
                 self.assertIn('href="/account/workbench">Все нарушения и тематические проверки →</a>', markup)
                 manual_actions = markup.split('id="eis223-my-procurements"', 1)[1].split(

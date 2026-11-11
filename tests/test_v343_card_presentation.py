@@ -84,6 +84,73 @@ def data(findings=None, checks=None):
 
 
 class CardPresentationTests(unittest.TestCase):
+    def test_compact_summary_exposes_saved_counts_and_separate_check_states(self):
+        original = data()
+        before = copy.deepcopy(original)
+        markup = card.render(REG, original, legal_review={"state": "running", "documents_read": 1})
+        dom = DOM(markup).root
+        summary = dom.find("section", **{"data-eis-section": "summary"})[0]
+        self.assertEqual(summary.attrs["data-eis-reg"], REG)
+        self.assertIn("Синтетическая закупка", summary.content())
+        self.assertIn("Подтверждено", summary.content())
+        self.assertEqual(summary.find("b", **{"data-eis-count": "confirmed"})[0].content(), "1")
+        self.assertEqual(summary.find("b", **{"data-eis-count": "review"})[0].content(), "0")
+        self.assertIn("Проверено 1 из 1", summary.content())
+        self.assertIn("Идёт юридическая проверка", summary.content())
+        self.assertIn("результаты предыдущей проверки", summary.content())
+        self.assertNotIn("нарушений нет", summary.content())
+        self.assertEqual(original, before)
+
+    def test_missing_document_progress_is_explicitly_unknown(self):
+        original = (None, [], [], [], 0, 0, 0)
+        summary = DOM(card.render(REG, original)).root.find(
+            "section", **{"data-eis-section": "summary"})[0]
+        self.assertIn("Число проверенных документов не указано", summary.content())
+        self.assertNotIn("Проверено 0 из 0", summary.content())
+        self.assertIn("Юридическая проверка ещё не завершена", summary.content())
+
+    def test_thematic_summary_never_inherits_general_findings_or_completion(self):
+        thematic = {"batch": "a" * 24, "state": "queued", "findings": []}
+        dom = DOM(card.render(REG, data(), thematic=thematic,
+                              legal_review={"state": "completed", "documents_read": 1})).root
+        summary = dom.find("section", **{"data-eis-section": "summary"})[0]
+        self.assertEqual(summary.find("b", **{"data-eis-count": "confirmed"})[0].content(), "0")
+        self.assertIn("Тематическая проверка: В очереди", summary.content())
+        self.assertNotIn("Юридическая проверка завершена", summary.content())
+        self.assertFalse(dom.find("details", id="audit-violations"))
+        self.assertFalse(dom.find("article", **{"class": "legal"}))
+
+    def test_card_has_semantic_sections_and_keeps_full_requisites_accessible(self):
+        dom = DOM(card.render(REG, data())).root
+        for key in ("summary", "overview", "findings", "review", "documents"):
+            self.assertEqual(len(dom.find(**{"data-eis-section": key})), 1, key)
+        overview = dom.find("section", **{"data-eis-section": "overview"})[0]
+        details = overview.find("details", **{"class": "card-requisites"})[0]
+        self.assertNotIn("open", details.attrs)
+        self.assertIn("Сведения о закупке", details.content())
+        self.assertIn("ИНН заказчика", details.content())
+        document = dom.find("table", **{"class": "card-documents"})[0]
+        self.assertEqual(document.attrs.get("role"), "table")
+        self.assertEqual(len(document.find("th", role="columnheader")), 4)
+        self.assertEqual(len(document.find("td", role="cell")), 4)
+        self.assertEqual([cell.attrs.get("data-label") for cell in document.find("td")],
+                         ["Документ", "Вид", "Состояние", "Источник"])
+        self.assertTrue(document.find("a", href=SOURCE))
+
+    def test_saved_iso_dates_are_displayed_in_russian_without_timezone_conversion(self):
+        self.assertEqual(card.display_date("2026-11-11"), "11.11.2026")
+        self.assertEqual(card.display_date("2026-11-11T23:30:00+03:00"),
+                         "11.11.2026 23:30:00+03:00")
+        self.assertEqual(card.display_date("2026-02-31"), "2026-02-31")
+        self.assertEqual(card.display_date("11.11.2026 МСК"), "11.11.2026 МСК")
+        self.assertEqual(card.display_date(None), None)
+        original = list(data())
+        original[0] = {**original[0], "submission_end": "2026-11-11T23:30:00+03:00"}
+        before = copy.deepcopy(original)
+        markup = card.render(REG, original)
+        self.assertIn("11.11.2026 23:30:00+03:00", markup)
+        self.assertEqual(original, before)
+
     def test_general_queue_status_keeps_previous_evidence_visible(self):
         for state, label in (("pending", "Юридическая проверка в очереди"),
                              ("running", "Идёт юридическая проверка"),
@@ -200,7 +267,7 @@ class CardPresentationTests(unittest.TestCase):
 
     def test_both_result_sections_are_native_collapsed_accordions(self):
         dom = DOM(card.render(REG, data())).root
-        groups = dom.find("details")
+        groups = dom.find("details", **{"class": "panel result-group"})
         self.assertEqual([x.attrs["id"] for x in groups], ["audit-violations", "audit-review"])
         self.assertEqual([x.children[0].find("h2")[0].content() for x in groups],
                          ["Нарушения", "Требует проверки"])

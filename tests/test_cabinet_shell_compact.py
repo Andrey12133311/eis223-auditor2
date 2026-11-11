@@ -51,7 +51,7 @@ class CompactCabinetShell(unittest.TestCase):
             page = self.page(role)
             ids = page.xpath('//*[@id]/@id')
             self.assertEqual(len(ids), len(set(ids)))
-            script = page.xpath('//script/text()')[-1]
+            script = page.xpath('//script[@id="eis223-account-runtime"]/text()')[0]
             targets = set(re.findall(r"q\(['\"](eis223-[^'\"]+)['\"]\)", script))
             self.assertFalse(targets - set(ids) - (admin_ids if role != "admin" else set()))
             markup = site_header(role).decode()

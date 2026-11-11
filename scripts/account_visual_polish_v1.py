@@ -227,6 +227,9 @@ body .staff-layout>.tabs button{background:transparent;color:var(--ui-muted);fon
 body .staff-layout>.tabs button:hover{background:#f5f5f7}
 body .staff-layout>.tabs button[aria-selected=true]{background:var(--ui-selected);color:var(--ui-hover);box-shadow:none;border-color:transparent}
 body .staff-subpanel{background:#fff;border-color:var(--ui-line)}
+.staff-compact .staff-columns .staff-subpanel{border:0;border-bottom:1px solid var(--ui-line);
+ border-radius:0;padding:4px 0 15px;box-shadow:none;background:transparent;margin-bottom:15px}
+.staff-compact .staff-columns .staff-subpanel:last-child{border-bottom:0;margin-bottom:0}
 body .staff-tools :is(button,a){line-height:1.4}
 body .staff-rowbody strong{overflow-wrap:anywhere}
 .staff-compact .staff-smallrow .staff-rowbody strong{color:var(--ui-ink);font-weight:600}

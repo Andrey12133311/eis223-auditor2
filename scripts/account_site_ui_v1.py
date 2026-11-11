@@ -6,6 +6,7 @@ Private data is fetched from owner-scoped APIs only after authentication.
 from html import escape
 from scripts.account_admin_team_ui import TEAM_SCRIPT
 from scripts.account_visual_polish_v1 import workspace_style, signin_style
+from scripts.workspace_panels_v1 import workspace_panels
 
 
 _STYLE = """
@@ -372,7 +373,7 @@ name="reg" required pattern="3[0-9]{10}" maxlength="11" autocomplete="off">
 <p id="eis223-thematic-status" role="status"></p>
 </details>
 </div></section></div>
-<script>
+<script id="eis223-account-runtime">
 (()=>{
 const q=id=>document.getElementById(id);
 const navAdmin=q('eis223-admin-nav');
@@ -847,7 +848,7 @@ if(r.ok){form.reset();await refresh()}
 refreshMyName();
 })();
 </script>
-''').encode("utf-8")
+''' + workspace_panels(role)).encode("utf-8")
 
 
 _GATEWAY_STYLE = signin_style()
